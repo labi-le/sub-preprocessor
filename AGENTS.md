@@ -15,6 +15,16 @@ nix-shell --run "make race"
 nix-shell --run "make bench"
 ```
 
+## Project overview for LLM agents
+
+Before making any changes, read `./routes.md` — it describes every package in the
+project, its key types/functions, tags, and the dependency graph. This gives an
+LLM a complete orientation without browsing the full source.
+
+After adding, removing, or significantly restructuring a package — or changing
+a package's public API (key types, constructors, interfaces) — update
+`./routes.md` to reflect the new state.
+
 ## What this project is
 
 This is a small HTTP preprocessor for Mihomo-compatible subscription content.
