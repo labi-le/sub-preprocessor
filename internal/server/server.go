@@ -11,13 +11,15 @@ import (
 )
 
 type Filterer interface {
-	Filter(ctx context.Context, subscriptionURL string, countries []string) ([]string, preprocess.Stats, error)
+	Filter(ctx context.Context, b *strings.Builder, subscriptionURL string, countries []string) (preprocess.Stats, error)
 }
 
 type Server struct {
 	listen string
 	app    *fiber.App
 }
+
+const defaultBuilderCapacity = 4096
 
 func New(listen string, svc Filterer) *Server {
 	app := fiber.New()
@@ -40,7 +42,10 @@ func New(listen string, svc Filterer) *Server {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
-		lines, stats, err := svc.Filter(c.Context(), subscriptionURL, countries)
+		var sb strings.Builder
+		// Pre-allocate some reasonable capacity to avoid reallocations
+		sb.Grow(defaultBuilderCapacity)
+		stats, err := svc.Filter(c.Context(), &sb, subscriptionURL, countries)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "failed to preprocess subscription")
 		}
@@ -48,7 +53,8 @@ func New(listen string, svc Filterer) *Server {
 		c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
 		c.Set("X-Preprocessor-Stats", preprocess.FormatStats(stats))
 
-		return c.SendString(strings.Join(lines, "\n") + "\n")
+		sb.WriteByte('\n')
+		return c.SendString(sb.String())
 	})
 
 	return &Server{listen: listen, app: app}

@@ -39,10 +39,13 @@ func BenchmarkRewriteNodeName(b *testing.B) {
 	node := nodes[0]
 	ip := netip.MustParseAddr("198.51.100.10")
 	country := "NL"
+	var sb strings.Builder
+	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = preprocess.RewriteNodeName(node, country, ip)
+		sb.Reset()
+		preprocess.RewriteNodeName(&sb, node, country, ip)
 	}
 }
 
@@ -54,10 +57,13 @@ func BenchmarkRewriteNodeName_EmptyName(b *testing.B) {
 	node := nodes[0]
 	ip := netip.MustParseAddr("203.0.113.5")
 	country := "US"
+	var sb strings.Builder
+	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = preprocess.RewriteNodeName(node, country, ip)
+		sb.Reset()
+		preprocess.RewriteNodeName(&sb, node, country, ip)
 	}
 }
 
@@ -199,14 +205,20 @@ func BenchmarkFilterCore(b *testing.B) {
 			netip.MustParseAddr("198.51.100.42"),
 			netip.MustParseAddr("203.0.113.10"),
 		}
-		var output []string
+		var output strings.Builder
+		output.Grow(4096)
+		first := true
 		for _, node := range nodes {
 			chosenIP, chosenCountry, ok := preprocess.FilterAndFirstAllowed(entries, syntheticIPs, allowed, false)
 			if !ok {
 				continue
 			}
-			output = append(output, preprocess.RewriteNodeName(node, chosenCountry, chosenIP))
+			if !first {
+				output.WriteByte('\n')
+			}
+			first = false
+			preprocess.RewriteNodeName(&output, node, chosenCountry, chosenIP)
 		}
-		_ = output
+		_ = output.String()
 	}
 }

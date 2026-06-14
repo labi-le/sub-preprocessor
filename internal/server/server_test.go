@@ -15,8 +15,9 @@ import (
 
 type stubService struct{}
 
-func (stubService) Filter(_ context.Context, _ string, _ []string) ([]string, preprocess.Stats, error) {
-	return []string{"vless://node#ok"}, preprocess.Stats{Total: 1, Kept: 1}, nil
+func (stubService) Filter(_ context.Context, b *strings.Builder, _ string, _ []string) (preprocess.Stats, error) {
+	b.WriteString("vless://test")
+	return preprocess.Stats{Total: 1, Kept: 1}, nil
 }
 
 type recordingService struct {
@@ -25,13 +26,14 @@ type recordingService struct {
 	err    error
 }
 
-func (s *recordingService) Filter(ctx context.Context, _ string, _ []string) ([]string, preprocess.Stats, error) {
+func (s *recordingService) Filter(ctx context.Context, b *strings.Builder, _ string, _ []string) (preprocess.Stats, error) {
 	s.called = true
 	s.ctx = ctx
 	if s.err != nil {
-		return nil, preprocess.Stats{}, s.err
+		return preprocess.Stats{}, s.err
 	}
-	return []string{"vless://node#ok"}, preprocess.Stats{Total: 1, Kept: 1}, nil
+	b.WriteString("vless://node#ok")
+	return preprocess.Stats{Total: 1, Kept: 1}, nil
 }
 
 func TestServerReturnsPlainText(t *testing.T) {
@@ -53,7 +55,7 @@ func TestServerReturnsPlainText(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "vless://node#ok") {
+	if !strings.Contains(string(body), "vless://test") {
 		t.Fatalf("unexpected body: %q", body)
 	}
 }

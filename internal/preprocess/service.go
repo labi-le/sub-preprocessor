@@ -15,6 +15,13 @@ import (
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
+const (
+	decimalBase = 10
+	hundred     = 100
+	maxSmallIPs = 4
+	mapInitSize = 32
+)
+
 type Service struct {
 	mu                sync.RWMutex
 	entries           []geofeed.Entry
@@ -26,6 +33,10 @@ type Service struct {
 	countriesCacheKey string
 	countriesCacheVal map[string]bool
 	countriesCacheMu  sync.Mutex
+
+	// Pools for reuse of short-lived maps in the filter hot path.
+	uniqueServersPool sync.Pool
+	resolvedPool      sync.Pool
 }
 
 type Stats struct {
@@ -50,11 +61,32 @@ func NewService(ctx context.Context, geofeedSources []geofeed.Source, refreshInt
 		RefreshInterval: refreshInterval,
 		dnsTimeout:      dnsTimeout,
 		strictDNS:       strictDNS,
+		uniqueServersPool: sync.Pool{
+			New: func() any { return make(map[string]struct{}, mapInitSize) },
+		},
+		resolvedPool: sync.Pool{
+			New: func() any { return make(map[string][]netip.Addr, mapInitSize) },
+		},
 	}, nil
 }
 
 func (s *Service) resolveServers(ctx context.Context, nodes []subscription.Node) map[string][]netip.Addr {
-	uniqueServers := make(map[string]struct{}, len(nodes))
+	// Acquire internal uniqueServers map from pool.
+	uniqueServers, _ := s.uniqueServersPool.Get().(map[string]struct{})
+	if uniqueServers == nil {
+		uniqueServers = make(map[string]struct{}, mapInitSize)
+	}
+	defer func() {
+		clear(uniqueServers)
+		s.uniqueServersPool.Put(uniqueServers)
+	}()
+
+	// Acquire resolved map from pool; Filter is responsible for returning it.
+	resolved, _ := s.resolvedPool.Get().(map[string][]netip.Addr)
+	if resolved == nil {
+		resolved = make(map[string][]netip.Addr, mapInitSize)
+	}
+
 	for _, node := range nodes {
 		if node.Server == "" || node.Port == "" {
 			continue
@@ -62,7 +94,6 @@ func (s *Service) resolveServers(ctx context.Context, nodes []subscription.Node)
 		uniqueServers[node.Server] = struct{}{}
 	}
 
-	resolved := make(map[string][]netip.Addr, len(uniqueServers))
 	for server := range uniqueServers {
 		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
 		ips, resolveErr := resolveIPv4(resolveCtx, server)
@@ -74,27 +105,33 @@ func (s *Service) resolveServers(ctx context.Context, nodes []subscription.Node)
 	return resolved
 }
 
-func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries []string) ([]string, Stats, error) {
+func (s *Service) Filter(ctx context.Context, b *strings.Builder, subscriptionURL string, countries []string) (Stats, error) {
 	entries, err := s.currentEntries(ctx)
 	if err != nil {
-		return nil, Stats{}, err
+		return Stats{}, err
 	}
 
 	allowed := s.getAllowedCountries(countries)
 	if len(allowed) == 0 {
-		return nil, Stats{}, errors.New("no allowed countries provided")
+		return Stats{}, errors.New("no allowed countries provided")
 	}
 
 	nodes, errLoad := subscription.Load(ctx, subscriptionURL)
 	if errLoad != nil {
-		return nil, Stats{}, fmt.Errorf("load subscription: %w", errLoad)
+		return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 	}
 
 	stats := Stats{}
-	output := make([]string, 0, len(nodes))
 
 	resolved := s.resolveServers(ctx, nodes)
 
+	// Return resolved map to pool after use.
+	defer func() {
+		clear(resolved)
+		s.resolvedPool.Put(resolved)
+	}()
+
+	first := true
 	for _, node := range nodes {
 		stats.Total++
 		if node.Server == "" || node.Port == "" {
@@ -118,11 +155,15 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 			continue
 		}
 
-		output = append(output, RewriteNodeName(node, chosenCountry, chosenIP))
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		RewriteNodeName(b, node, chosenCountry, chosenIP)
 		stats.Kept++
 	}
 
-	return output, stats, nil
+	return stats, nil
 }
 
 func (s *Service) currentEntries(ctx context.Context) ([]geofeed.Entry, error) {
@@ -164,7 +205,10 @@ func (s *Service) ShouldReloadGeofeed(now time.Time) bool {
 func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Is4() {
-			return []netip.Addr{addr}, nil
+			// Return a pre-sized slice to avoid the heap-allocated literal.
+			out := make([]netip.Addr, 1)
+			out[0] = addr
+			return out, nil
 		}
 		return nil, errors.New("not an IPv4 address")
 	}
@@ -174,7 +218,38 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 		return nil, fmt.Errorf("dns lookup: %w", err)
 	}
 
-	var out []netip.Addr
+	return dedupIPv4(ips), nil
+}
+
+// dedupIPv4 filters and deduplicates IPv4 addresses.
+// Uses a stack array for small result sets (≤maxSmallIPs) to avoid map allocation.
+func dedupIPv4(ips []netip.Addr) []netip.Addr {
+	if len(ips) <= maxSmallIPs {
+		var out []netip.Addr
+		var seen [maxSmallIPs]netip.Addr
+		var n int
+		for _, ip := range ips {
+			if !ip.Is4() {
+				continue
+			}
+			dup := false
+			for j := range n {
+				if seen[j] == ip {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				seen[n] = ip
+				n++
+				out = append(out, ip)
+			}
+		}
+		return out
+	}
+
+	// Fall back to map for larger result sets.
+	out := make([]netip.Addr, 0, len(ips))
 	seen := make(map[netip.Addr]bool, len(ips))
 	for _, ip := range ips {
 		if ip.Is4() && !seen[ip] {
@@ -182,7 +257,7 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 			seen[ip] = true
 		}
 	}
-	return out, nil
+	return out
 }
 
 // FilterAndFirstAllowed scans ips once, checking if all are allowed (strict)
@@ -212,12 +287,38 @@ func FilterAndFirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed ma
 func ParseAllowCountries(countries []string) map[string]bool {
 	out := make(map[string]bool, len(countries))
 	for _, country := range countries {
+		// Fast path: avoid ToUpper/TrimSpace allocations when the string
+		// is already uppercase and trimmed.
+		if len(country) > 0 && isUpperASCII(country) && !hasSpace(country) {
+			out[country] = true
+			continue
+		}
 		country = strings.ToUpper(strings.TrimSpace(country))
 		if country != "" {
 			out[country] = true
 		}
 	}
 	return out
+}
+
+// isUpperASCII returns true if all bytes in s are ASCII uppercase letters.
+func isUpperASCII(s string) bool {
+	for i := range s {
+		if s[i] < 'A' || s[i] > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// hasSpace returns true if s contains any whitespace character.
+func hasSpace(s string) bool {
+	for i := range s {
+		if s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // getAllowedCountries returns the parsed countries map, caching the result
@@ -235,20 +336,16 @@ func (s *Service) getAllowedCountries(countries []string) map[string]bool {
 	return out
 }
 
-func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) string {
+func RewriteNodeName(b *strings.Builder, node subscription.Node, country string, ip netip.Addr) {
 	if !supportsFragmentRewrite(node) {
-		return node.Raw
+		b.WriteString(node.Raw)
+		return
 	}
 
 	cleanName := StripKnownTags(node.Name)
 	if cleanName == "" {
 		cleanName = node.Server
 	}
-
-	// Use strings.Builder to avoid fmt.Sprintf allocations.
-	var b strings.Builder
-	const growExtra = 32 // rough upper bound: raw + tags overhead
-	b.Grow(len(node.Raw) + growExtra)
 
 	// Use node.FragmentIdx to avoid scanning Raw for '#'.
 	if node.FragmentIdx >= 0 {
@@ -261,22 +358,16 @@ func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 	b.WriteString("][IP:")
 	// Write IPv4 octets directly — avoids ip.String() allocation.
 	ip4 := ip.As4()
-	writeOctet(&b, ip4[0])
+	writeOctet(b, ip4[0])
 	b.WriteByte('.')
-	writeOctet(&b, ip4[1])
+	writeOctet(b, ip4[1])
 	b.WriteByte('.')
-	writeOctet(&b, ip4[2])
+	writeOctet(b, ip4[2])
 	b.WriteByte('.')
-	writeOctet(&b, ip4[3])
+	writeOctet(b, ip4[3])
 	b.WriteString("] ")
 	b.WriteString(cleanName)
-	return b.String()
 }
-
-const (
-	decimalBase = 10
-	hundred     = 100
-)
 
 func writeOctet(b *strings.Builder, n byte) {
 	switch {

@@ -19,7 +19,9 @@ func TestRewriteNodeName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := preprocess.RewriteNodeName(nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
+	var b strings.Builder
+	preprocess.RewriteNodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
+	got := b.String()
 	want := "vless://uuid@example.com:443?security=tls#[GEO:NL][IP:198.51.100.10] Old Name"
 	if got != want {
 		t.Fatalf("unexpected rewritten uri:\n got: %q\nwant: %q", got, want)
@@ -34,7 +36,9 @@ func TestRewriteNodeNameUnknownSchemeStillRewritesURIFragment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := preprocess.RewriteNodeName(nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
+	var b strings.Builder
+	preprocess.RewriteNodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
+	got := b.String()
 	want := "trojan://uuid@example.com:443#[GEO:NL][IP:198.51.100.10] Old Name"
 	if got != want {
 		t.Fatalf("unexpected rewritten uri:\n got: %q\nwant: %q", got, want)
