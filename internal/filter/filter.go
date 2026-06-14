@@ -50,19 +50,21 @@ func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet,
 	return netip.Addr{}, "", false
 }
 
+// AllAllowed returns all IPs from ips whose country is in the allowed set.
+func AllAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet) []netip.Addr {
+	result := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		country := geofeed.LookupCountry(entries, ip)
+		if allowed.Has(country) {
+			result = append(result, ip)
+		}
+	}
+	return result
+}
+
 func ParseAllowCountries(raw string) CountrySet {
 	var set CountrySet
-	for len(raw) > 0 {
-		idx := strings.IndexByte(raw, ',')
-		var part string
-		if idx >= 0 {
-			part = raw[:idx]
-			raw = raw[idx+1:]
-		} else {
-			part = raw
-			raw = ""
-		}
-
+	for part := range strings.SplitSeq(raw, ",") {
 		parseCountryPart(&set, part)
 	}
 	return set

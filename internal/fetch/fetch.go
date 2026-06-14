@@ -162,7 +162,7 @@ func MaybeDecode(resp *http.Response, fileType FileType) (io.ReadCloser, error) 
 	if errZip != nil {
 		return nil, fmt.Errorf("gzip reader: %w", errZip)
 	}
-	return &readCloser{Reader: zr, closeFn: zr.Close}, nil
+	return zr, nil
 }
 
 func isPublicIP(ip netip.Addr) bool {
@@ -185,12 +185,3 @@ var (
 	private6Prefix   = netip.MustParsePrefix("fc00::/7")
 	linkLocal6Prefix = netip.MustParsePrefix("fe80::/10")
 )
-
-type readCloser struct {
-	io.Reader
-	closeFn func() error
-}
-
-func (r *readCloser) Close() error {
-	return r.closeFn()
-}

@@ -73,7 +73,7 @@ func TestStripKnownTags(t *testing.T) {
 func TestFormatStats(t *testing.T) {
 	t.Parallel()
 
-	got := preprocess.FormatStats(preprocess.Stats{Total: 10, Kept: 3, DNSDrop: 1, GeoDrop: 6})
+	got := preprocess.FormatStats(preprocess.Stats{Total: 10, Kept: 3, DNSDrop: 1, GeoDrop: 6, ASNDrop: 1})
 	if !strings.Contains(got, "total=10") || !strings.Contains(got, "kept=3") {
 		t.Fatalf("unexpected stats: %q", got)
 	}

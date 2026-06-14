@@ -26,10 +26,13 @@ lint:
 	golangci-lint run
 
 dc-up:
-	docker compose up -d
+	docker compose up -d --build
 
 dc-ps:
 	docker compose ps
 
 dc-logs:
 	docker compose logs -f
+
+dc-down:
+	docker compose down

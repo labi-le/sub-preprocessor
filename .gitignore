@@ -34,5 +34,4 @@ result-*
 .DS_Store
 Thumbs.db
 
-# Local config (if any)
-# config.yaml # Uncomment if config.yaml should not be tracked
+benchmarks

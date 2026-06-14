@@ -6,9 +6,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
-	"unsafe"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
 const maxSubscriptionSize = 10 << 20
@@ -37,27 +37,18 @@ func Load(ctx context.Context, rawURL string) ([]byte, error) {
 // Non-URI lines are skipped. Only lines containing "://" are parsed.
 // It calls yield for each parsed node. If yield returns false, parsing stops.
 func Parse(body []byte, yield func(Node) bool) {
-	remain := body
+	it := ioutil.NewLines(body)
 	for {
-		idx := bytes.IndexByte(remain, '\n')
-		var line []byte
-		if idx < 0 {
-			line = bytes.TrimSpace(remain)
-		} else {
-			line = bytes.TrimSpace(remain[:idx])
-			remain = remain[idx+1:]
+		line := it.Next()
+		if line == nil {
+			return
 		}
-
-		if len(line) > 0 && line[0] != '#' && bytes.Contains(line, doubleSlash) {
-			if node, ok := parseNode(unsafe.String(unsafe.SliceData(line), len(line))); ok {
+		if bytes.Contains(line, doubleSlash) {
+			if node, ok := parseNode(ioutil.UnsafeString(line)); ok {
 				if !yield(node) {
 					return
 				}
 			}
-		}
-
-		if idx < 0 {
-			break
 		}
 	}
 }
@@ -151,7 +142,7 @@ func Normalize(body []byte) []byte {
 		return body
 	}
 
-	compact := unsafe.String(unsafe.SliceData(body), len(body))
+	compact := ioutil.UnsafeString(body)
 	compact = strings.ReplaceAll(compact, "\n", "")
 	compact = strings.ReplaceAll(compact, "\r", "")
 	compact = strings.ReplaceAll(compact, "\t", "")

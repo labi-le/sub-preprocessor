@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
-	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	serverpkg "domains.lst/sub-preprocessor/internal/server"
 )
@@ -20,12 +19,7 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	sources := make([]geofeed.Source, 0, len(cfg.Geofeed.Sources))
-	for _, source := range cfg.Geofeed.Sources {
-		sources = append(sources, geofeed.Source{URL: source.URL, Type: source.Type})
-	}
-
-	svc, err := preprocess.NewProcessor(ctx, sources, cfg.Geofeed.RefreshInterval, cfg.Resolver.Timeout, cfg.Resolver.StrictDNS)
+	svc, err := preprocess.NewProcessor(ctx, cfg.Geofeed.Sources, cfg.Geofeed.RefreshInterval, cfg.Resolver.Timeout, cfg.Resolver.Address, cfg.ASN.Timeout, cfg.ASN.DenyPatterns, cfg.Workflow.Stages, cfg.Workflow.Algorithm)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}

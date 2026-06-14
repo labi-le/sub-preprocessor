@@ -18,11 +18,20 @@ const (
 type Resolver struct {
 	timeout      time.Duration
 	resolvedPool sync.Pool
+	dialer       func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-func New(timeout time.Duration) *Resolver {
+func New(timeout time.Duration, address string) *Resolver {
+	var dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	if address != "" {
+		d := net.Dialer{Timeout: timeout}
+		dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, network, address)
+		}
+	}
 	return &Resolver{
 		timeout: timeout,
+		dialer:  dial,
 		resolvedPool: sync.Pool{
 			New: func() any { return make(map[string][]netip.Addr, mapInitSize) },
 		},
@@ -58,7 +67,12 @@ func (r *Resolver) ResolveIPv4(ctx context.Context, host string) ([]netip.Addr, 
 		return nil, errors.New("not an IPv4 address")
 	}
 
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+	resolver := net.DefaultResolver
+	if r.dialer != nil {
+		resolver = &net.Resolver{Dial: r.dialer}
+	}
+
+	ips, err := resolver.LookupNetIP(ctx, "ip4", host)
 	if err != nil {
 		return nil, fmt.Errorf("dns lookup: %w", err)
 	}

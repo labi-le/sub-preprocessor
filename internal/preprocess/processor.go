@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/resolver"
@@ -23,35 +26,53 @@ type Processor struct {
 	sources           []geofeed.Source
 	LoadedAt          time.Time
 	RefreshInterval   time.Duration
-	strictDNS         bool
 	countriesCacheKey string
 	countriesCacheVal filter.CountrySet
 	countriesCacheMu  sync.Mutex
 	resolver          *resolver.Resolver
+	filters           []Filter
+	workflowAlgorithm string
 }
 
 type Stats struct {
-	Total        int
-	Kept         int
-	DNSDrop      int
-	GeoDrop      int
-	StrictReject int
-	Unsupported  int
+	Total       int
+	Kept        int
+	DNSDrop     int
+	GeoDrop     int
+	ASNDrop     int
+	Unsupported int
 }
 
-func NewProcessor(ctx context.Context, geofeedSources []geofeed.Source, refreshInterval, dnsTimeout time.Duration, strictDNS bool) (*Processor, error) {
+func NewProcessor(ctx context.Context, geofeedSources []geofeed.Source, refreshInterval time.Duration, dnsTimeout time.Duration, dnsAddress string, asnTimeout time.Duration, asnDenyPatterns []string, workflowStages []string, workflowAlgorithm string) (*Processor, error) {
 	entries, err := geofeed.LoadAll(ctx, geofeedSources)
 	if err != nil {
 		return nil, fmt.Errorf("load geofeed: %w", err)
 	}
 
+	patterns := make([]*regexp.Regexp, 0, len(asnDenyPatterns))
+	for _, p := range asnDenyPatterns {
+		re, errCompile := regexp.Compile(p)
+		if errCompile != nil {
+			return nil, fmt.Errorf("compile asn deny pattern %q: %w", p, errCompile)
+		}
+		patterns = append(patterns, re)
+	}
+
+	var asnR *asn.Resolver
+	if len(patterns) > 0 {
+		asnR = asn.New(asnTimeout)
+	}
+
+	filters := buildFilters(workflowStages, asnR, patterns)
+
 	return &Processor{
-		entries:         entries,
-		sources:         append([]geofeed.Source(nil), geofeedSources...),
-		LoadedAt:        time.Now(),
-		RefreshInterval: refreshInterval,
-		strictDNS:       strictDNS,
-		resolver:        resolver.New(dnsTimeout),
+		entries:           entries,
+		sources:           append([]geofeed.Source(nil), geofeedSources...),
+		LoadedAt:          time.Now(),
+		RefreshInterval:   refreshInterval,
+		resolver:          resolver.New(dnsTimeout, dnsAddress),
+		filters:           filters,
+		workflowAlgorithm: workflowAlgorithm,
 	}, nil
 }
 
@@ -62,7 +83,6 @@ func (p *Processor) Filter(ctx context.Context, b *strings.Builder, subscription
 	}
 
 	allowed := p.getAllowedCountries(rawCountries)
-	// Check if the bitset is empty (all zeros)
 	isEmpty := true
 	for _, v := range allowed {
 		if v != 0 {
@@ -97,6 +117,20 @@ func (p *Processor) Filter(ctx context.Context, b *strings.Builder, subscription
 	return stats, nil
 }
 
+func (p *Processor) resolveNode(ctx context.Context, server string, resolved map[string][]netip.Addr) []netip.Addr {
+	ips, attempted := resolved[server]
+	if !attempted {
+		var resolveErr error
+		ips, resolveErr = p.resolver.Resolve(ctx, server)
+		if resolveErr != nil || len(ips) == 0 {
+			resolved[server] = []netip.Addr{}
+			return []netip.Addr{}
+		}
+		resolved[server] = ips
+	}
+	return ips
+}
+
 func (p *Processor) processNode(ctx context.Context, node subscription.Node, b *strings.Builder, entries []geofeed.Entry, allowed filter.CountrySet, resolved map[string][]netip.Addr, stats *Stats, first *bool) {
 	stats.Total++
 	if node.Server == "" || node.Port == "" {
@@ -104,30 +138,24 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, b *
 		return
 	}
 
-	ips, attempted := resolved[node.Server]
-	if !attempted {
-		var resolveErr error
-		ips, resolveErr = p.resolver.Resolve(ctx, node.Server)
-		if resolveErr != nil || len(ips) == 0 {
-			ips = []netip.Addr{} // empty slice means attempted and failed
-		}
-		resolved[node.Server] = ips
-	}
-
+	ips := p.resolveNode(ctx, node.Server, resolved)
 	if len(ips) == 0 {
 		stats.DNSDrop++
 		return
 	}
 
-	chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, ips, allowed, p.strictDNS)
-	if !ok {
-		if p.strictDNS {
-			stats.StrictReject++
-		} else {
-			stats.GeoDrop++
+	for _, f := range p.filters {
+		ips = f.Process(ctx, ips, entries, allowed, stats)
+		if len(ips) == 0 {
+			return
 		}
-		return
+		if p.workflowAlgorithm == config.WorkflowFailFirst {
+			ips = ips[:1]
+		}
 	}
+
+	chosenIP := ips[0]
+	chosenCountry := geofeed.LookupCountry(entries, chosenIP)
 
 	if !*first {
 		b.WriteByte('\n')
@@ -185,7 +213,7 @@ func (p *Processor) getAllowedCountries(rawCountries string) filter.CountrySet {
 
 func FormatStats(stats Stats) string {
 	var b strings.Builder
-	const growSize = 160
+	const growSize = 200
 	b.Grow(growSize)
 	b.WriteString("done: total=")
 	b.WriteString(strconv.Itoa(stats.Total))
@@ -195,8 +223,8 @@ func FormatStats(stats Stats) string {
 	b.WriteString(strconv.Itoa(stats.DNSDrop))
 	b.WriteString(" geo_drop=")
 	b.WriteString(strconv.Itoa(stats.GeoDrop))
-	b.WriteString(" strict_reject=")
-	b.WriteString(strconv.Itoa(stats.StrictReject))
+	b.WriteString(" asn_drop=")
+	b.WriteString(strconv.Itoa(stats.ASNDrop))
 	b.WriteString(" unsupported=")
 	b.WriteString(strconv.Itoa(stats.Unsupported))
 	return b.String()

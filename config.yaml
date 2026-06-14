@@ -10,5 +10,26 @@ geofeed:
       type: raw
 
 resolver:
+  # Optional: custom DNS server address (e.g. "8.8.8.8:53").
+  # If not set, uses the system resolver (router's DNS).
+  # address: "8.8.8.8:53"
   timeout: 5s
-  strict_dns: false
+
+# Filter workflow order. Known stages: geo, asn.
+# algorithm: fail_first (default) — pick first matching IP, stop on first stage failure.
+#            all              — filter all IPs through all stages, keep node if any IP survives.
+# If omitted, defaults to [geo, asn] with fail_first (backward compatible).
+# Uncomment to control order, algorithm, or disable specific filters:
+workflow:
+  stages:
+    - asn
+    - geo
+  algorithm: fail_first
+
+# Optional ASN filtering: drop nodes whose AS name matches deny patterns.
+# Uses Team Cymru DNS to resolve ASN by IP.
+asn:
+  deny_patterns:
+    - "(?i)OVH"
+    - "(?i)HETZNER"
+  timeout: 5s

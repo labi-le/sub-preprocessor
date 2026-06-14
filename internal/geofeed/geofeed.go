@@ -8,9 +8,9 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
-	"unsafe"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
 const maxGeofeedSize = 256 << 20
@@ -30,15 +30,15 @@ type Entry struct {
 	City    string
 }
 
+// Source defines a geofeed data source.
 type Source struct {
-	URL  string
-	Type fetch.FileType
+	URL  string         `yaml:"url"`
+	Type fetch.FileType `yaml:"type"`
 }
 
 func LoadAll(ctx context.Context, sources []Source) ([]Entry, error) {
 	var entries []Entry
 	for _, source := range sources {
-		source.URL = strings.TrimSpace(source.URL)
 		if source.URL == "" {
 			continue
 		}
@@ -81,25 +81,14 @@ func parseBody(body []byte) []Entry {
 	nlCount := bytes.Count(body, []byte{'\n'})
 	entries := make([]Entry, 0, nlCount)
 
-	remain := body
+	it := ioutil.NewLines(body)
 	for {
-		idx := bytes.IndexByte(remain, '\n')
-		var line []byte
-		if idx < 0 {
-			line = bytes.TrimSpace(remain)
-		} else {
-			line = bytes.TrimSpace(remain[:idx])
-			remain = remain[idx+1:]
-		}
-
-		if len(line) != 0 && line[0] != '#' {
-			if entry, ok := parseLine(line); ok {
-				entries = append(entries, entry)
-			}
-		}
-
-		if idx < 0 {
+		line := it.Next()
+		if line == nil {
 			break
+		}
+		if entry, ok := parseLine(line); ok {
+			entries = append(entries, entry)
 		}
 	}
 
@@ -111,7 +100,7 @@ func parseBody(body []byte) []Entry {
 // field substrings reference the same backing memory.
 func parseLine(line []byte) (Entry, bool) {
 	// Create batch string — one alloc for all fields.
-	s := unsafe.String(unsafe.SliceData(line), len(line))
+	s := ioutil.UnsafeString(line)
 
 	prefixStr, rest, ok := strings.Cut(s, ",")
 	if !ok {

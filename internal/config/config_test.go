@@ -38,6 +38,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Geofeed.RefreshInterval != 0 {
 		t.Fatalf("unexpected refresh interval default: %v", cfg.Geofeed.RefreshInterval)
 	}
+	if len(cfg.Workflow.Stages) != 2 || cfg.Workflow.Stages[0] != "geo" || cfg.Workflow.Stages[1] != "asn" {
+		t.Fatalf("unexpected default workflow stages: %v", cfg.Workflow.Stages)
+	}
+	if cfg.Workflow.Algorithm != "fail_first" {
+		t.Fatalf("unexpected default algorithm: %q", cfg.Workflow.Algorithm)
+	}
 }
 
 func TestLoadRejectsMissingGeofeedType(t *testing.T) {
