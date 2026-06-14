@@ -1,13 +1,11 @@
 package subscription
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
@@ -15,15 +13,9 @@ import (
 
 const maxSubscriptionSize = 10 << 20
 
-const (
-	scannerBufSize    = 1024
-	scannerMaxBufSize = 1024 * 1024
-)
-
 type Node struct {
 	Raw    string
 	Scheme string
-	URL    *url.URL
 	Name   string
 	Server string
 	Port   string
@@ -37,58 +29,131 @@ func Load(ctx context.Context, rawURL string) ([]Node, error) {
 	return Parse(Normalize(body))
 }
 
+// Parse parses subscription body lines as URI nodes.
+// Non-URI lines are skipped. Only lines containing "://" are parsed.
 func Parse(body []byte) ([]Node, error) {
 	nlCount := bytes.Count(body, []byte{'\n'})
 	nodes := make([]Node, 0, nlCount)
 
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(make([]byte, scannerBufSize), scannerMaxBufSize)
+	remain := body
+	for {
+		idx := bytes.IndexByte(remain, '\n')
+		var line []byte
+		if idx < 0 {
+			line = bytes.TrimSpace(remain)
+		} else {
+			line = bytes.TrimSpace(remain[:idx])
+			remain = remain[idx+1:]
+		}
 
-	uriDelimiter := "://"
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if len(line) == 0 || line[0] == '#' {
+			if idx < 0 {
+				break
+			}
 			continue
 		}
 
-		if !looksLikeURI(line, uriDelimiter) {
+		if !bytes.Contains(line, []byte("://")) {
+			if idx < 0 {
+				break
+			}
 			continue
 		}
 
-		u, err := url.Parse(line)
-		if err != nil {
-			continue
-		}
-		if u.Scheme == "" {
-			continue
+		if node, ok := parseNode(string(line)); ok {
+			nodes = append(nodes, node)
 		}
 
-		server := u.Hostname()
-		if server == "" {
-			continue
+		if idx < 0 {
+			break
 		}
-
-		port := u.Port()
-		if port == "" {
-			port = "443"
-		}
-
-		name := strings.TrimSpace(u.Fragment)
-		if name == "" {
-			name = server
-		}
-
-		nodes = append(nodes, Node{Raw: line, Scheme: u.Scheme, URL: u, Name: name, Server: server, Port: port})
 	}
 
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("scan lines: %w", err)
-	}
 	if len(nodes) == 0 {
 		return nil, errors.New("no supported URI nodes found")
 	}
-
 	return nodes, nil
+}
+
+// parseNode extracts node fields from a URI string using a lightweight parser.
+// It replaces url.Parse to avoid per-node heap allocations.
+// One string alloc per call (for Node.Raw, reused by all string fields via substrings).
+//
+// Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
+func parseNode(line string) (Node, bool) {
+	idx := strings.Index(line, "://")
+	if idx <= 0 {
+		return Node{}, false
+	}
+
+	scheme := line[:idx]
+	rest := line[idx+3:] // after "://"
+
+	// Find end of authority section: '/', '?', '#', or end of string.
+	authEnd := len(rest)
+	for _, sep := range []byte{'/', '?', '#'} {
+		if j := strings.IndexByte(rest, sep); j >= 0 && j < authEnd {
+			authEnd = j
+		}
+	}
+
+	authority := rest[:authEnd]
+	if authority == "" {
+		return Node{}, false
+	}
+
+	server, port := splitHostPort(authority)
+	if server == "" {
+		return Node{}, false
+	}
+	if port == "" {
+		port = "443"
+	}
+
+	// Extract fragment (node name) from the original line.
+	name := ""
+	if j := strings.LastIndexByte(line, '#'); j >= 0 {
+		name = strings.TrimSpace(line[j+1:])
+	}
+	if name == "" {
+		name = server
+	}
+
+	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port}, true
+}
+
+// splitHostPort separates host and port from an authority string.
+// Handles userinfo (user@host) and IPv6 ([::1]:port) formats.
+func splitHostPort(authority string) (host, port string) {
+	// Strip userinfo.
+	if j := strings.LastIndexByte(authority, '@'); j >= 0 {
+		authority = authority[j+1:]
+	}
+	if authority == "" {
+		return "", ""
+	}
+
+	// Handle IPv6: [::1]:port
+	if authority[0] == '[' {
+		if j := strings.IndexByte(authority, ']'); j >= 0 {
+			host = authority[:j+1]
+			if j+1 < len(authority) && authority[j+1] == ':' {
+				port = authority[j+2:]
+			}
+			return host, port
+		}
+		return "", "" // malformed IPv6
+	}
+
+	// Regular host:port. LastIndexByte is safe here because IPv6 with
+	// brackets was handled above.
+	if j := strings.LastIndexByte(authority, ':'); j >= 0 {
+		host = authority[:j]
+		port = authority[j+1:]
+		return host, port
+	}
+
+	return authority, ""
 }
 
 func Normalize(body []byte) []byte {
@@ -111,9 +176,4 @@ func Normalize(body []byte) []byte {
 	}
 
 	return body
-}
-
-func looksLikeURI(line, delimiter string) bool {
-	idx := strings.Index(line, delimiter)
-	return idx > 0 && idx < len(line)-len(delimiter)
 }

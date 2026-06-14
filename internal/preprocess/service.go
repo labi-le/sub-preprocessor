@@ -222,7 +222,7 @@ func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 }
 
 func supportsFragmentRewrite(node subscription.Node) bool {
-	return node.URL != nil && node.Scheme != ""
+	return node.Scheme != ""
 }
 
 func StripKnownTags(s string) string {

@@ -3,10 +3,8 @@ package geofeed
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"sort"
 	"strings"
@@ -67,82 +65,84 @@ func LoadAll(ctx context.Context, sources []Source) ([]Entry, error) {
 	return entries, nil
 }
 
+// Parse parses a geofeed CSV body (prefix, country, region, city per line).
+// Comments starting with '#' are skipped. Only lines with at least 2 fields
+// (prefix and country) are kept.
 func Parse(body []byte) ([]Entry, error) {
-	// Estimate entry count: count newlines, approximate one entry per line.
-	nlCount := bytes.Count(body, []byte{'\n'})
-	entries := make([]Entry, 0, nlCount)
-	buf := filterBody(body)
-
-	r := csv.NewReader(bytes.NewReader(buf))
-	r.FieldsPerRecord = -1
-	r.TrimLeadingSpace = true
-
-	for {
-		rec, errCSV := r.Read()
-		if errors.Is(errCSV, io.EOF) {
-			break
-		}
-		if errCSV != nil {
-			return nil, fmt.Errorf("csv read: %w", errCSV)
-		}
-		if len(rec) < minCSVFields {
-			continue
-		}
-
-		entry, ok := parseEntry(rec)
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
+	entries := parseBody(body)
+	if len(entries) == 0 {
+		return nil, errors.New("no valid geofeed entries found")
 	}
-
 	return entries, nil
 }
 
-func filterBody(body []byte) []byte {
-	buf := make([]byte, 0, len(body))
+func parseBody(body []byte) []Entry {
+	nlCount := bytes.Count(body, []byte{'\n'})
+	entries := make([]Entry, 0, nlCount)
+
 	remain := body
 	for {
 		idx := bytes.IndexByte(remain, '\n')
 		var line []byte
 		if idx < 0 {
-			line = remain
-			remain = nil
+			line = bytes.TrimSpace(remain)
 		} else {
-			line = remain[:idx]
+			line = bytes.TrimSpace(remain[:idx])
 			remain = remain[idx+1:]
 		}
 
-		line = bytes.TrimSpace(line)
 		if len(line) != 0 && line[0] != '#' {
-			buf = append(buf, line...)
-			buf = append(buf, '\n')
+			if entry, ok := parseLine(line); ok {
+				entries = append(entries, entry)
+			}
 		}
 
 		if idx < 0 {
-			return buf
+			break
 		}
 	}
+
+	return entries
 }
 
-func parseEntry(rec []string) (Entry, bool) {
-	prefix, errPrefix := parsePrefixOrAddr(strings.TrimSpace(rec[0]))
-	if errPrefix != nil {
+// parseLine parses a single geofeed CSV line.
+// Uses the batch-string technique: one string allocation per line, then
+// field substrings reference the same backing memory.
+func parseLine(line []byte) (Entry, bool) {
+	// Create batch string — one alloc for all fields.
+	s := string(line)
+
+	prefixStr, rest, ok := strings.Cut(s, ",")
+	if !ok {
 		return Entry{}, false
 	}
 
-	country := strings.ToUpper(strings.TrimSpace(rec[1]))
+	prefix, err := parsePrefixOrAddr(prefixStr)
+	if err != nil {
+		return Entry{}, false
+	}
+
+	countryStr, rest, hasMore := strings.Cut(rest, ",")
+	var country string
+	if !hasMore {
+		country = strings.ToUpper(rest)
+	} else {
+		country = strings.ToUpper(countryStr)
+	}
 	if country == "" {
 		return Entry{}, false
 	}
 
 	entry := Entry{Prefix: prefix, Country: country}
-	if len(rec) > idxRegion {
-		entry.Region = strings.TrimSpace(rec[idxRegion])
+
+	if hasMore {
+		regionStr, cityStr, hasCity := strings.Cut(rest, ",")
+		entry.Region = strings.TrimSpace(regionStr)
+		if hasCity {
+			entry.City = strings.TrimSpace(cityStr)
+		}
 	}
-	if len(rec) > idxCity {
-		entry.City = strings.TrimSpace(rec[idxCity])
-	}
+
 	return entry, true
 }
 
