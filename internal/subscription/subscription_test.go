@@ -11,15 +11,18 @@ import (
 func TestParseDefaultsPort(t *testing.T) {
 	t.Parallel()
 
-	nodes, err := subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\nvmess://ignored\n"))
+	nodes, err := subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\ntrojan://uuid@example.net#Other\nplain-text-node\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 1 {
+	if len(nodes) != 2 {
 		t.Fatalf("unexpected count: %d", len(nodes))
 	}
 	if nodes[0].Port != "443" {
 		t.Fatalf("unexpected port: %q", nodes[0].Port)
+	}
+	if nodes[1].Scheme != "trojan" {
+		t.Fatalf("unexpected scheme: %q", nodes[1].Scheme)
 	}
 }
 

@@ -169,7 +169,8 @@ func AllIPsAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string
 }
 
 func FirstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) (netip.Addr, string, bool) {
-	for _, ip := range ips {
+	for i := range ips {
+		ip := ips[i]
 		country := geofeed.LookupCountry(entries, ip)
 		if allowed[country] {
 			return ip, country, true
@@ -179,7 +180,7 @@ func FirstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[strin
 }
 
 func ParseAllowCountries(countries []string) map[string]bool {
-	out := map[string]bool{}
+	out := make(map[string]bool, len(countries))
 	for _, country := range countries {
 		country = strings.ToUpper(strings.TrimSpace(country))
 		if country != "" {
@@ -190,14 +191,38 @@ func ParseAllowCountries(countries []string) map[string]bool {
 }
 
 func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) string {
+	if !supportsFragmentRewrite(node) {
+		return node.Raw
+	}
+
 	cleanName := StripKnownTags(node.Name)
 	if cleanName == "" {
 		cleanName = node.Server
 	}
 
-	fragment := fmt.Sprintf("[GEO:%s][IP:%s] %s", country, ip.String(), cleanName)
-	base, _, _ := strings.Cut(node.Raw, "#")
-	return base + "#" + fragment
+	// Use strings.Builder to avoid fmt.Sprintf allocations.
+	var b strings.Builder
+	const growExtra = 32 // rough upper bound: raw + tags overhead
+	b.Grow(len(node.Raw) + growExtra)
+
+	// Find the '#' separator instead of strings.Cut to avoid extra string copy.
+	hashIdx := strings.IndexByte(node.Raw, '#')
+	if hashIdx >= 0 {
+		b.WriteString(node.Raw[:hashIdx])
+	} else {
+		b.WriteString(node.Raw)
+	}
+	b.WriteString("#[GEO:")
+	b.WriteString(country)
+	b.WriteString("][IP:")
+	b.WriteString(ip.String())
+	b.WriteString("] ")
+	b.WriteString(cleanName)
+	return b.String()
+}
+
+func supportsFragmentRewrite(node subscription.Node) bool {
+	return node.URL != nil && node.Scheme != ""
 }
 
 func StripKnownTags(s string) string {

@@ -1,7 +1,6 @@
 package geofeed
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -69,25 +68,15 @@ func LoadAll(ctx context.Context, sources []Source) ([]Entry, error) {
 }
 
 func Parse(body []byte) ([]Entry, error) {
-	var filtered bytes.Buffer
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		filtered.WriteString(line)
-		filtered.WriteByte('\n')
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("scan lines: %w", err)
-	}
+	// Estimate entry count: count newlines, approximate one entry per line.
+	nlCount := bytes.Count(body, []byte{'\n'})
+	entries := make([]Entry, 0, nlCount)
+	buf := filterBody(body)
 
-	r := csv.NewReader(bytes.NewReader(filtered.Bytes()))
+	r := csv.NewReader(bytes.NewReader(buf))
 	r.FieldsPerRecord = -1
 	r.TrimLeadingSpace = true
 
-	var entries []Entry
 	for {
 		rec, errCSV := r.Read()
 		if errors.Is(errCSV, io.EOF) {
@@ -100,26 +89,61 @@ func Parse(body []byte) ([]Entry, error) {
 			continue
 		}
 
-		prefix, errPrefix := parsePrefixOrAddr(strings.TrimSpace(rec[0]))
-		if errPrefix != nil {
+		entry, ok := parseEntry(rec)
+		if !ok {
 			continue
-		}
-		country := strings.ToUpper(strings.TrimSpace(rec[1]))
-		if country == "" {
-			continue
-		}
-
-		entry := Entry{Prefix: prefix, Country: country}
-		if len(rec) > idxRegion {
-			entry.Region = strings.TrimSpace(rec[idxRegion])
-		}
-		if len(rec) > idxCity {
-			entry.City = strings.TrimSpace(rec[idxCity])
 		}
 		entries = append(entries, entry)
 	}
 
 	return entries, nil
+}
+
+func filterBody(body []byte) []byte {
+	buf := make([]byte, 0, len(body))
+	remain := body
+	for {
+		idx := bytes.IndexByte(remain, '\n')
+		var line []byte
+		if idx < 0 {
+			line = remain
+			remain = nil
+		} else {
+			line = remain[:idx]
+			remain = remain[idx+1:]
+		}
+
+		line = bytes.TrimSpace(line)
+		if len(line) != 0 && line[0] != '#' {
+			buf = append(buf, line...)
+			buf = append(buf, '\n')
+		}
+
+		if idx < 0 {
+			return buf
+		}
+	}
+}
+
+func parseEntry(rec []string) (Entry, bool) {
+	prefix, errPrefix := parsePrefixOrAddr(strings.TrimSpace(rec[0]))
+	if errPrefix != nil {
+		return Entry{}, false
+	}
+
+	country := strings.ToUpper(strings.TrimSpace(rec[1]))
+	if country == "" {
+		return Entry{}, false
+	}
+
+	entry := Entry{Prefix: prefix, Country: country}
+	if len(rec) > idxRegion {
+		entry.Region = strings.TrimSpace(rec[idxRegion])
+	}
+	if len(rec) > idxCity {
+		entry.City = strings.TrimSpace(rec[idxCity])
+	}
+	return entry, true
 }
 
 func LookupCountry(entries []Entry, ip netip.Addr) string {

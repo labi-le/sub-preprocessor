@@ -22,6 +22,7 @@ const (
 
 type Node struct {
 	Raw    string
+	Scheme string
 	URL    *url.URL
 	Name   string
 	Server string
@@ -37,18 +38,28 @@ func Load(ctx context.Context, rawURL string) ([]Node, error) {
 }
 
 func Parse(body []byte) ([]Node, error) {
+	nlCount := bytes.Count(body, []byte{'\n'})
+	nodes := make([]Node, 0, nlCount)
+
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, scannerBufSize), scannerMaxBufSize)
 
-	var nodes []Node
+	uriDelimiter := "://"
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
+		if !looksLikeURI(line, uriDelimiter) {
+			continue
+		}
+
 		u, err := url.Parse(line)
-		if err != nil || strings.ToLower(u.Scheme) != "vless" {
+		if err != nil {
+			continue
+		}
+		if u.Scheme == "" {
 			continue
 		}
 
@@ -67,14 +78,14 @@ func Parse(body []byte) ([]Node, error) {
 			name = server
 		}
 
-		nodes = append(nodes, Node{Raw: line, URL: u, Name: name, Server: server, Port: port})
+		nodes = append(nodes, Node{Raw: line, Scheme: u.Scheme, URL: u, Name: name, Server: server, Port: port})
 	}
 
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("scan lines: %w", err)
 	}
 	if len(nodes) == 0 {
-		return nil, errors.New("no vless URI nodes found")
+		return nil, errors.New("no supported URI nodes found")
 	}
 
 	return nodes, nil
@@ -100,4 +111,9 @@ func Normalize(body []byte) []byte {
 	}
 
 	return body
+}
+
+func looksLikeURI(line, delimiter string) bool {
+	idx := strings.Index(line, delimiter)
+	return idx > 0 && idx < len(line)-len(delimiter)
 }

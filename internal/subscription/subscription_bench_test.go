@@ -1,0 +1,97 @@
+package subscription_test
+
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+
+	"domains.lst/sub-preprocessor/internal/subscription"
+)
+
+// largeNormalizeInput creates a large base64 input to stress Normalize allocations.
+func largeNormalizeInput() []byte {
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		sb.WriteString("vless://uuid@node")
+		sb.WriteByte(byte('A' + i%26))
+		sb.WriteString(".example.com:443?security=tls#Node ")
+		sb.WriteByte(byte('0' + i%10))
+		sb.WriteString("\n")
+	}
+	raw := sb.String()
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
+	base64.StdEncoding.Encode(encoded, []byte(raw))
+	return encoded
+}
+
+func BenchmarkNormalize_AlreadyParsed(b *testing.B) {
+	input := []byte("vless://uuid@example.com:443?security=tls#Example")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = subscription.Normalize(input)
+	}
+}
+
+func BenchmarkNormalize_Base64Small(b *testing.B) {
+	input := []byte(base64.StdEncoding.EncodeToString([]byte("vless://uuid@example.com:443?security=tls#Node 1\n")))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		subscription.Normalize(input)
+	}
+}
+
+func BenchmarkNormalize_Base64Large(b *testing.B) {
+	input := largeNormalizeInput()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		subscription.Normalize(input)
+	}
+}
+
+func BenchmarkParse_SingleNode(b *testing.B) {
+	input := []byte("vless://uuid@example.com:443?security=tls#Example")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, err := subscription.Parse(input)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParse_MultiNode(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		sb.WriteString("vless://uuid@node")
+		sb.WriteByte(byte('A' + i%26))
+		sb.WriteString(".example.com:443?security=tls#Node ")
+		sb.WriteByte(byte('0' + i%10))
+		sb.WriteString("\n")
+	}
+	input := []byte(sb.String())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, err := subscription.Parse(input)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParse_SkipsNonURILines(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		sb.WriteString("some-other-proto-node\n")
+	}
+	input := []byte(sb.String())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _ = subscription.Parse(input)
+	}
+}

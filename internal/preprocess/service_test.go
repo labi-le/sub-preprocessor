@@ -26,6 +26,21 @@ func TestRewriteNodeName(t *testing.T) {
 	}
 }
 
+func TestRewriteNodeNameUnknownSchemeStillRewritesURIFragment(t *testing.T) {
+	t.Parallel()
+
+	nodes, err := subscription.Parse([]byte("trojan://uuid@example.com:443#Old Name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := preprocess.RewriteNodeName(nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
+	want := "trojan://uuid@example.com:443#[GEO:NL][IP:198.51.100.10] Old Name"
+	if got != want {
+		t.Fatalf("unexpected rewritten uri:\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestFirstAllowedIP(t *testing.T) {
 	t.Parallel()
 
