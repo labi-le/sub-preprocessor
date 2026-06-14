@@ -16,10 +16,11 @@ import (
 func TestRewriteNodeName(t *testing.T) {
 	t.Parallel()
 
-	nodes, err := subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#Old Name"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var nodes []subscription.Node
+	subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#Old Name"), func(n subscription.Node) bool {
+		nodes = append(nodes, n)
+		return true
+	})
 
 	var b strings.Builder
 	rewrite.NodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
@@ -33,10 +34,11 @@ func TestRewriteNodeName(t *testing.T) {
 func TestRewriteNodeNameUnknownSchemeStillRewritesURIFragment(t *testing.T) {
 	t.Parallel()
 
-	nodes, err := subscription.Parse([]byte("trojan://uuid@example.com:443#Old Name"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var nodes []subscription.Node
+	subscription.Parse([]byte("trojan://uuid@example.com:443#Old Name"), func(n subscription.Node) bool {
+		nodes = append(nodes, n)
+		return true
+	})
 
 	var b strings.Builder
 	rewrite.NodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))

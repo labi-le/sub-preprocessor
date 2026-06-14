@@ -17,8 +17,8 @@ func BenchmarkParseAllowCountries(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		allowed := filter.ParseAllowCountries(countries)
-		if len(allowed) != 6 {
-			b.Fatalf("unexpected count: %d", len(allowed))
+		if !allowed.Has("DE") || !allowed.Has("NL") {
+			b.Fatalf("unexpected result")
 		}
 	}
 }
@@ -33,10 +33,11 @@ func BenchmarkParseAllowCountries_Single(b *testing.B) {
 }
 
 func BenchmarkRewriteNodeName(b *testing.B) {
-	nodes, err := subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#Old Name"))
-	if err != nil {
-		b.Fatal(err)
-	}
+	var nodes []subscription.Node
+	subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#Old Name"), func(n subscription.Node) bool {
+		nodes = append(nodes, n)
+		return true
+	})
 	node := nodes[0]
 	ip := netip.MustParseAddr("198.51.100.10")
 	country := "NL"
@@ -52,10 +53,11 @@ func BenchmarkRewriteNodeName(b *testing.B) {
 }
 
 func BenchmarkRewriteNodeName_EmptyName(b *testing.B) {
-	nodes, err := subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#"))
-	if err != nil {
-		b.Fatal(err)
-	}
+	var nodes []subscription.Node
+	subscription.Parse([]byte("vless://uuid@example.com:443?security=tls#"), func(n subscription.Node) bool {
+		nodes = append(nodes, n)
+		return true
+	})
 	node := nodes[0]
 	ip := netip.MustParseAddr("203.0.113.5")
 	country := "US"
@@ -194,10 +196,6 @@ func BenchmarkFilterCore(b *testing.B) {
 	body := []byte(sb.String())
 
 	allowed := filter.ParseAllowCountries("DE,US")
-	nodes, err := subscription.Parse(body)
-	if err != nil {
-		b.Fatal(err)
-	}
 	syntheticIPs := []netip.Addr{
 		netip.MustParseAddr("198.51.100.42"),
 		netip.MustParseAddr("203.0.113.10"),
@@ -210,17 +208,18 @@ func BenchmarkFilterCore(b *testing.B) {
 		var output strings.Builder
 		output.Grow(4096)
 		first := true
-		for _, node := range nodes {
+		subscription.Parse(body, func(node subscription.Node) bool {
 			chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, syntheticIPs, allowed, false)
 			if !ok {
-				continue
+				return true
 			}
 			if !first {
 				output.WriteByte('\n')
 			}
 			first = false
 			rewrite.NodeName(&output, node, chosenCountry, chosenIP)
-		}
+			return true
+		})
 		_ = output.String()
 	}
 }

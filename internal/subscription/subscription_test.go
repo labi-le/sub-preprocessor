@@ -11,10 +11,11 @@ import (
 func TestParseDefaultsPort(t *testing.T) {
 	t.Parallel()
 
-	nodes, err := subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\ntrojan://uuid@example.net#Other\nplain-text-node\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var nodes []subscription.Node
+	subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\ntrojan://uuid@example.net#Other\nplain-text-node\n"), func(n subscription.Node) bool {
+		nodes = append(nodes, n)
+		return true
+	})
 	if len(nodes) != 2 {
 		t.Fatalf("unexpected count: %d", len(nodes))
 	}

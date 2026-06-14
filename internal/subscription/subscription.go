@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strings"
 	"unsafe"
@@ -26,20 +25,18 @@ type Node struct {
 	FragmentIdx int // index of '#' in Raw, or -1 if not present
 }
 
-func Load(ctx context.Context, rawURL string) ([]Node, error) {
+func Load(ctx context.Context, rawURL string) ([]byte, error) {
 	body, err := fetch.BytesWithType(ctx, rawURL, maxSubscriptionSize, fetch.FileTypeRaw)
 	if err != nil {
 		return nil, fmt.Errorf("fetch subscription: %w", err)
 	}
-	return Parse(Normalize(body))
+	return Normalize(body), nil
 }
 
 // Parse parses subscription body lines as URI nodes.
 // Non-URI lines are skipped. Only lines containing "://" are parsed.
-func Parse(body []byte) ([]Node, error) {
-	nlCount := bytes.Count(body, []byte{'\n'})
-	nodes := make([]Node, 0, nlCount)
-
+// It calls yield for each parsed node. If yield returns false, parsing stops.
+func Parse(body []byte, yield func(Node) bool) {
 	remain := body
 	for {
 		idx := bytes.IndexByte(remain, '\n')
@@ -51,33 +48,18 @@ func Parse(body []byte) ([]Node, error) {
 			remain = remain[idx+1:]
 		}
 
-		if len(line) == 0 || line[0] == '#' {
-			if idx < 0 {
-				break
+		if len(line) > 0 && line[0] != '#' && bytes.Contains(line, doubleSlash) {
+			if node, ok := parseNode(unsafe.String(unsafe.SliceData(line), len(line))); ok {
+				if !yield(node) {
+					return
+				}
 			}
-			continue
-		}
-
-		if !bytes.Contains(line, doubleSlash) {
-			if idx < 0 {
-				break
-			}
-			continue
-		}
-
-		if node, ok := parseNode(unsafe.String(unsafe.SliceData(line), len(line))); ok {
-			nodes = append(nodes, node)
 		}
 
 		if idx < 0 {
 			break
 		}
 	}
-
-	if len(nodes) == 0 {
-		return nil, errors.New("no supported URI nodes found")
-	}
-	return nodes, nil
 }
 
 // parseNode extracts node fields from a URI string using a lightweight parser.

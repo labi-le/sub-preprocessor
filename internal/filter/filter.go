@@ -7,10 +7,33 @@ import (
 	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
-func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool, strict bool) (netip.Addr, string, bool) {
+const (
+	countryCodeLen = 2
+	alphabetSize   = 26
+	bitsPerUint64  = 64
+	toUpperOffset  = 32
+)
+
+// CountrySet is a bitset for 2-letter country codes (AA-ZZ).
+// 26 * 26 = 676 bits required. 11 * 64 = 704 bits.
+type CountrySet [11]uint64
+
+func (s *CountrySet) Has(country string) bool {
+	if len(country) != countryCodeLen {
+		return false
+	}
+	c1, c2 := country[0], country[1]
+	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
+		return false
+	}
+	idx := int(c1-'A')*alphabetSize + int(c2-'A')
+	return (s[idx/bitsPerUint64] & (1 << (idx % bitsPerUint64))) != 0
+}
+
+func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet, strict bool) (netip.Addr, string, bool) {
 	for _, ip := range ips {
 		country := geofeed.LookupCountry(entries, ip)
-		if allowed[country] {
+		if allowed.Has(country) {
 			if !strict {
 				return ip, country, true
 			}
@@ -27,15 +50,8 @@ func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]
 	return netip.Addr{}, "", false
 }
 
-func ParseAllowCountries(raw string) map[string]bool {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-
-	// Count commas to pre-size the map
-	commas := strings.Count(raw, ",")
-	out := make(map[string]bool, commas+1)
-
+func ParseAllowCountries(raw string) CountrySet {
+	var set CountrySet
 	for len(raw) > 0 {
 		idx := strings.IndexByte(raw, ',')
 		var part string
@@ -47,33 +63,33 @@ func ParseAllowCountries(raw string) map[string]bool {
 			raw = ""
 		}
 
-		if len(part) > 0 && isUpperASCII(part) && !hasSpace(part) {
-			out[part] = true
-			continue
-		}
-
-		part = strings.ToUpper(strings.TrimSpace(part))
-		if part != "" {
-			out[part] = true
-		}
+		parseCountryPart(&set, part)
 	}
-	return out
+	return set
 }
 
-func isUpperASCII(s string) bool {
-	for i := range s {
-		if s[i] < 'A' || s[i] > 'Z' {
-			return false
-		}
+func parseCountryPart(set *CountrySet, part string) {
+	start := 0
+	for start < len(part) && (part[start] == ' ' || part[start] == '\t' || part[start] == '\n' || part[start] == '\r') {
+		start++
 	}
-	return true
-}
+	end := len(part)
+	for end > start && (part[end-1] == ' ' || part[end-1] == '\t' || part[end-1] == '\n' || part[end-1] == '\r') {
+		end--
+	}
 
-func hasSpace(s string) bool {
-	for i := range s {
-		if s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' {
-			return true
+	if end-start == countryCodeLen {
+		c1 := part[start]
+		c2 := part[start+1]
+		if c1 >= 'a' && c1 <= 'z' {
+			c1 -= toUpperOffset
+		}
+		if c2 >= 'a' && c2 <= 'z' {
+			c2 -= toUpperOffset
+		}
+		if c1 >= 'A' && c1 <= 'Z' && c2 >= 'A' && c2 <= 'Z' {
+			i := int(c1-'A')*alphabetSize + int(c2-'A')
+			set[i/bitsPerUint64] |= 1 << (i % bitsPerUint64)
 		}
 	}
-	return false
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,7 @@ type Processor struct {
 	RefreshInterval   time.Duration
 	strictDNS         bool
 	countriesCacheKey string
-	countriesCacheVal map[string]bool
+	countriesCacheVal filter.CountrySet
 	countriesCacheMu  sync.Mutex
 	resolver          *resolver.Resolver
 }
@@ -61,53 +62,79 @@ func (p *Processor) Filter(ctx context.Context, b *strings.Builder, subscription
 	}
 
 	allowed := p.getAllowedCountries(rawCountries)
-	if len(allowed) == 0 {
+	// Check if the bitset is empty (all zeros)
+	isEmpty := true
+	for _, v := range allowed {
+		if v != 0 {
+			isEmpty = false
+			break
+		}
+	}
+	if isEmpty {
 		return Stats{}, errors.New("no allowed countries provided")
 	}
 
-	nodes, errLoad := subscription.Load(ctx, subscriptionURL)
+	body, errLoad := subscription.Load(ctx, subscriptionURL)
 	if errLoad != nil {
 		return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 	}
 
 	stats := Stats{}
 
-	resolved := p.resolver.ResolveServers(ctx, nodes)
-	defer p.resolver.ReturnResolved(resolved)
+	resolved := p.resolver.GetResolvedMap()
+	defer p.resolver.PutResolvedMap(resolved)
 
 	first := true
-	for _, node := range nodes {
-		stats.Total++
-		if node.Server == "" || node.Port == "" {
-			stats.Unsupported++
-			continue
-		}
+	subscription.Parse(body, func(node subscription.Node) bool {
+		p.processNode(ctx, node, b, entries, allowed, resolved, &stats, &first)
+		return true
+	})
 
-		ips, ok := resolved[node.Server]
-		if !ok {
-			stats.DNSDrop++
-			continue
-		}
-
-		chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, ips, allowed, p.strictDNS)
-		if !ok {
-			if p.strictDNS {
-				stats.StrictReject++
-			} else {
-				stats.GeoDrop++
-			}
-			continue
-		}
-
-		if !first {
-			b.WriteByte('\n')
-		}
-		first = false
-		rewrite.NodeName(b, node, chosenCountry, chosenIP)
-		stats.Kept++
+	if stats.Total == 0 {
+		return stats, errors.New("no supported URI nodes found")
 	}
 
 	return stats, nil
+}
+
+func (p *Processor) processNode(ctx context.Context, node subscription.Node, b *strings.Builder, entries []geofeed.Entry, allowed filter.CountrySet, resolved map[string][]netip.Addr, stats *Stats, first *bool) {
+	stats.Total++
+	if node.Server == "" || node.Port == "" {
+		stats.Unsupported++
+		return
+	}
+
+	ips, attempted := resolved[node.Server]
+	if !attempted {
+		var resolveErr error
+		ips, resolveErr = p.resolver.Resolve(ctx, node.Server)
+		if resolveErr != nil || len(ips) == 0 {
+			ips = []netip.Addr{} // empty slice means attempted and failed
+		}
+		resolved[node.Server] = ips
+	}
+
+	if len(ips) == 0 {
+		stats.DNSDrop++
+		return
+	}
+
+	chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, ips, allowed, p.strictDNS)
+	if !ok {
+		if p.strictDNS {
+			stats.StrictReject++
+		} else {
+			stats.GeoDrop++
+		}
+		return
+	}
+
+	if !*first {
+		b.WriteByte('\n')
+	}
+	*first = false
+	rewrite.NodeName(b, node, chosenCountry, chosenIP)
+	stats.Kept++
 }
 
 func (p *Processor) currentEntries(ctx context.Context) ([]geofeed.Entry, error) {
@@ -144,7 +171,7 @@ func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
 	return now.Sub(p.LoadedAt) >= p.RefreshInterval
 }
 
-func (p *Processor) getAllowedCountries(rawCountries string) map[string]bool {
+func (p *Processor) getAllowedCountries(rawCountries string) filter.CountrySet {
 	p.countriesCacheMu.Lock()
 	defer p.countriesCacheMu.Unlock()
 	if rawCountries == p.countriesCacheKey {

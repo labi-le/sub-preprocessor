@@ -56,10 +56,9 @@ func BenchmarkParse_SingleNode(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, err := subscription.Parse(input)
-		if err != nil {
-			b.Fatal(err)
-		}
+		subscription.Parse(input, func(_ subscription.Node) bool {
+			return true
+		})
 	}
 }
 
@@ -76,10 +75,9 @@ func BenchmarkParse_MultiNode(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, err := subscription.Parse(input)
-		if err != nil {
-			b.Fatal(err)
-		}
+		subscription.Parse(input, func(_ subscription.Node) bool {
+			return true
+		})
 	}
 }
 
@@ -92,6 +90,8 @@ func BenchmarkParse_SkipsNonURILines(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _ = subscription.Parse(input)
+		subscription.Parse(input, func(_ subscription.Node) bool {
+			return true
+		})
 	}
 }
