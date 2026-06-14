@@ -11,7 +11,7 @@ import (
 )
 
 type Filterer interface {
-	Filter(ctx context.Context, b *strings.Builder, subscriptionURL string, countries []string) (preprocess.Stats, error)
+	Filter(ctx context.Context, b *strings.Builder, subscriptionURL string, rawCountries string) (preprocess.Stats, error)
 }
 
 type Server struct {
@@ -30,12 +30,12 @@ func New(listen string, svc Filterer) *Server {
 
 	app.Get("/", func(c *fiber.Ctx) error {
 		subscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
-		countries := parseCountries(c.Query("countries"))
+		rawCountries := c.Query("countries")
 
 		if subscriptionURL == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "subscription_url is required")
 		}
-		if len(countries) == 0 {
+		if strings.TrimSpace(rawCountries) == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "countries is required")
 		}
 		if err := fetch.ValidatePublicHTTPSURL(subscriptionURL); err != nil {
@@ -45,7 +45,7 @@ func New(listen string, svc Filterer) *Server {
 		var sb strings.Builder
 		// Pre-allocate some reasonable capacity to avoid reallocations
 		sb.Grow(defaultBuilderCapacity)
-		stats, err := svc.Filter(c.Context(), &sb, subscriptionURL, countries)
+		stats, err := svc.Filter(c.Context(), &sb, subscriptionURL, rawCountries)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "failed to preprocess subscription")
 		}
@@ -83,20 +83,4 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // TestApp returns the underlying Fiber app for use in tests.
 func (s *Server) TestApp() *fiber.App {
 	return s.app
-}
-
-func parseCountries(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

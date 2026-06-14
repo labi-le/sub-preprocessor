@@ -15,7 +15,7 @@ import (
 
 type stubService struct{}
 
-func (stubService) Filter(_ context.Context, b *strings.Builder, _ string, _ []string) (preprocess.Stats, error) {
+func (stubService) Filter(_ context.Context, b *strings.Builder, _ string, _ string) (preprocess.Stats, error) {
 	b.WriteString("vless://test")
 	return preprocess.Stats{Total: 1, Kept: 1}, nil
 }
@@ -26,7 +26,7 @@ type recordingService struct {
 	err    error
 }
 
-func (s *recordingService) Filter(ctx context.Context, b *strings.Builder, _ string, _ []string) (preprocess.Stats, error) {
+func (s *recordingService) Filter(ctx context.Context, b *strings.Builder, _ string, _ string) (preprocess.Stats, error) {
 	s.called = true
 	s.ctx = ctx
 	if s.err != nil {

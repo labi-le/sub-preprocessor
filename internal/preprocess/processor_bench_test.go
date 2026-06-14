@@ -5,17 +5,18 @@ import (
 	"strings"
 	"testing"
 
+	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
-	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
 func BenchmarkParseAllowCountries(b *testing.B) {
-	countries := []string{"DE", "US", "JP", "GB", "FR", "  nl  "}
+	countries := "DE,US,JP,GB,FR,  nl  "
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		allowed := preprocess.ParseAllowCountries(countries)
+		allowed := filter.ParseAllowCountries(countries)
 		if len(allowed) != 6 {
 			b.Fatalf("unexpected count: %d", len(allowed))
 		}
@@ -23,11 +24,11 @@ func BenchmarkParseAllowCountries(b *testing.B) {
 }
 
 func BenchmarkParseAllowCountries_Single(b *testing.B) {
-	countries := []string{"DE"}
+	countries := "DE"
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		preprocess.ParseAllowCountries(countries)
+		filter.ParseAllowCountries(countries)
 	}
 }
 
@@ -45,7 +46,8 @@ func BenchmarkRewriteNodeName(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		preprocess.RewriteNodeName(&sb, node, country, ip)
+		sb.Grow(256)
+		rewrite.NodeName(&sb, node, country, ip)
 	}
 }
 
@@ -63,7 +65,8 @@ func BenchmarkRewriteNodeName_EmptyName(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		preprocess.RewriteNodeName(&sb, node, country, ip)
+		sb.Grow(256)
+		rewrite.NodeName(&sb, node, country, ip)
 	}
 }
 
@@ -78,12 +81,12 @@ func BenchmarkFirstAllowedIP_Hit(b *testing.B) {
 		netip.MustParseAddr("198.51.100.10"),
 		netip.MustParseAddr("203.0.113.10"),
 	}
-	allowed := preprocess.ParseAllowCountries([]string{"GB"})
+	allowed := filter.ParseAllowCountries("GB")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
-		if !ok || country != "GB" || ip.String() != "192.0.2.10" {
+		ip, country, ok := filter.FirstAllowed(entries, ips, allowed, false)
+		if !ok || country != "GB" || ip != ips[0] {
 			b.Fatalf("unexpected result: %v %q %v", ip, country, ok)
 		}
 	}
@@ -98,11 +101,11 @@ func BenchmarkFirstAllowedIP_Miss(b *testing.B) {
 		netip.MustParseAddr("10.0.0.1"),
 		netip.MustParseAddr("172.16.0.1"),
 	}
-	allowed := preprocess.ParseAllowCountries([]string{"GB"})
+	allowed := filter.ParseAllowCountries("GB")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
+		_, _, ok := filter.FirstAllowed(entries, ips, allowed, false)
 		if ok {
 			b.Fatal("expected miss")
 		}
@@ -121,12 +124,12 @@ func BenchmarkFirstAllowedIP_ManyIPs(b *testing.B) {
 		ips[i] = netip.MustParseAddr("10.0.0.1")
 	}
 	ips[9] = netip.MustParseAddr("192.0.2.10")
-	allowed := preprocess.ParseAllowCountries([]string{"GB"})
+	allowed := filter.ParseAllowCountries("GB")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
-		if !ok || country != "GB" || ip.String() != "192.0.2.10" {
+		ip, country, ok := filter.FirstAllowed(entries, ips, allowed, false)
+		if !ok || country != "GB" || ip != ips[9] {
 			b.Fatalf("unexpected result")
 		}
 	}
@@ -141,11 +144,11 @@ func BenchmarkAllIPsAllowed_AllMatch(b *testing.B) {
 		netip.MustParseAddr("198.51.100.1"),
 		netip.MustParseAddr("203.0.113.5"),
 	}
-	allowed := preprocess.ParseAllowCountries([]string{"DE", "US"})
+	allowed := filter.ParseAllowCountries("DE,US")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, true)
+		_, _, ok := filter.FirstAllowed(entries, ips, allowed, true)
 		if !ok {
 			b.Fatal("expected all allowed")
 		}
@@ -161,11 +164,11 @@ func BenchmarkAllIPsAllowed_OneFails(b *testing.B) {
 		netip.MustParseAddr("198.51.100.1"),
 		netip.MustParseAddr("10.0.0.1"),
 	}
-	allowed := preprocess.ParseAllowCountries([]string{"DE"})
+	allowed := filter.ParseAllowCountries("DE")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, true)
+		_, _, ok := filter.FirstAllowed(entries, ips, allowed, true)
 		if ok {
 			b.Fatal("expected not all allowed")
 		}
@@ -190,26 +193,25 @@ func BenchmarkFilterCore(b *testing.B) {
 	}
 	body := []byte(sb.String())
 
+	allowed := filter.ParseAllowCountries("DE,US")
+	nodes, err := subscription.Parse(body)
+	if err != nil {
+		b.Fatal(err)
+	}
+	syntheticIPs := []netip.Addr{
+		netip.MustParseAddr("198.51.100.42"),
+		netip.MustParseAddr("203.0.113.10"),
+	}
+
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for range b.N {
-		allowed := preprocess.ParseAllowCountries([]string{"DE", "US"})
-		nodes, err := subscription.Parse(body)
-		if err != nil {
-			b.Fatal(err)
-		}
-		// Simulate the inner filter loop with synthetic IPs (no DNS)
-		// Each node gets the same IPs as if resolveIPv4 returned them
-		syntheticIPs := []netip.Addr{
-			netip.MustParseAddr("198.51.100.42"),
-			netip.MustParseAddr("203.0.113.10"),
-		}
 		var output strings.Builder
 		output.Grow(4096)
 		first := true
 		for _, node := range nodes {
-			chosenIP, chosenCountry, ok := preprocess.FilterAndFirstAllowed(entries, syntheticIPs, allowed, false)
+			chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, syntheticIPs, allowed, false)
 			if !ok {
 				continue
 			}
@@ -217,7 +219,7 @@ func BenchmarkFilterCore(b *testing.B) {
 				output.WriteByte('\n')
 			}
 			first = false
-			preprocess.RewriteNodeName(&output, node, chosenCountry, chosenIP)
+			rewrite.NodeName(&output, node, chosenCountry, chosenIP)
 		}
 		_ = output.String()
 	}

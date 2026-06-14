@@ -25,7 +25,7 @@ func Run(ctx context.Context) error {
 		sources = append(sources, geofeed.Source{URL: source.URL, Type: source.Type})
 	}
 
-	svc, err := preprocess.NewService(ctx, sources, cfg.Geofeed.RefreshInterval, cfg.Resolver.Timeout, cfg.Resolver.StrictDNS)
+	svc, err := preprocess.NewProcessor(ctx, sources, cfg.Geofeed.RefreshInterval, cfg.Resolver.Timeout, cfg.Resolver.StrictDNS)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
