@@ -2,6 +2,7 @@ package preprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -17,8 +18,8 @@ type Service struct {
 	mu              sync.RWMutex
 	entries         []geofeed.Entry
 	sources         []geofeed.Source
-	loadedAt        time.Time
-	refreshInterval time.Duration
+	LoadedAt        time.Time
+	RefreshInterval time.Duration
 	dnsTimeout      time.Duration
 	strictDNS       bool
 }
@@ -35,14 +36,14 @@ type Stats struct {
 func NewService(ctx context.Context, geofeedSources []geofeed.Source, refreshInterval, dnsTimeout time.Duration, strictDNS bool) (*Service, error) {
 	entries, err := geofeed.LoadAll(ctx, geofeedSources)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load geofeed: %w", err)
 	}
 
 	return &Service{
 		entries:         entries,
 		sources:         append([]geofeed.Source(nil), geofeedSources...),
-		loadedAt:        time.Now(),
-		refreshInterval: refreshInterval,
+		LoadedAt:        time.Now(),
+		RefreshInterval: refreshInterval,
 		dnsTimeout:      dnsTimeout,
 		strictDNS:       strictDNS,
 	}, nil
@@ -54,14 +55,14 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 		return nil, Stats{}, err
 	}
 
-	allowed := parseAllowCountries(countries)
+	allowed := ParseAllowCountries(countries)
 	if len(allowed) == 0 {
-		return nil, Stats{}, fmt.Errorf("no allowed countries provided")
+		return nil, Stats{}, errors.New("no allowed countries provided")
 	}
 
-	nodes, err := subscription.Load(ctx, subscriptionURL)
-	if err != nil {
-		return nil, Stats{}, err
+	nodes, errLoad := subscription.Load(ctx, subscriptionURL)
+	if errLoad != nil {
+		return nil, Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 	}
 
 	stats := Stats{}
@@ -75,25 +76,25 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 		}
 
 		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
-		ips, err := resolveIPv4(resolveCtx, node.Server)
+		ips, errResolve := resolveIPv4(resolveCtx, node.Server)
 		cancel()
-		if err != nil || len(ips) == 0 {
+		if errResolve != nil || len(ips) == 0 {
 			stats.DNSDrop++
 			continue
 		}
 
-		if s.strictDNS && !allIPsAllowed(entries, ips, allowed) {
+		if s.strictDNS && !AllIPsAllowed(entries, ips, allowed) {
 			stats.StrictReject++
 			continue
 		}
 
-		chosenIP, chosenCountry, ok := firstAllowedIP(entries, ips, allowed)
+		chosenIP, chosenCountry, ok := FirstAllowedIP(entries, ips, allowed)
 		if !ok {
 			stats.GeoDrop++
 			continue
 		}
 
-		output = append(output, rewriteNodeName(node, chosenCountry, chosenIP))
+		output = append(output, RewriteNodeName(node, chosenCountry, chosenIP))
 		stats.Kept++
 	}
 
@@ -102,7 +103,7 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 
 func (s *Service) currentEntries(ctx context.Context) ([]geofeed.Entry, error) {
 	s.mu.RLock()
-	if !s.shouldReloadGeofeed(time.Now()) {
+	if !s.ShouldReloadGeofeed(time.Now()) {
 		entries := s.entries
 		s.mu.RUnlock()
 		return entries, nil
@@ -111,27 +112,27 @@ func (s *Service) currentEntries(ctx context.Context) ([]geofeed.Entry, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.shouldReloadGeofeed(time.Now()) {
+	if !s.ShouldReloadGeofeed(time.Now()) {
 		return s.entries, nil
 	}
 
 	entries, err := geofeed.LoadAll(ctx, s.sources)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load geofeed: %w", err)
 	}
 	s.entries = entries
-	s.loadedAt = time.Now()
+	s.LoadedAt = time.Now()
 	return s.entries, nil
 }
 
-func (s *Service) shouldReloadGeofeed(now time.Time) bool {
-	if s.refreshInterval <= 0 {
+func (s *Service) ShouldReloadGeofeed(now time.Time) bool {
+	if s.RefreshInterval <= 0 {
 		return false
 	}
-	if s.loadedAt.IsZero() {
+	if s.LoadedAt.IsZero() {
 		return true
 	}
-	return now.Sub(s.loadedAt) >= s.refreshInterval
+	return now.Sub(s.LoadedAt) >= s.RefreshInterval
 }
 
 func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
@@ -139,12 +140,12 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 		if addr.Is4() {
 			return []netip.Addr{addr}, nil
 		}
-		return nil, fmt.Errorf("not an IPv4 address")
+		return nil, errors.New("not an IPv4 address")
 	}
 
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dns lookup: %w", err)
 	}
 
 	var out []netip.Addr
@@ -158,7 +159,7 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	return out, nil
 }
 
-func allIPsAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) bool {
+func AllIPsAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) bool {
 	for _, ip := range ips {
 		if !allowed[geofeed.LookupCountry(entries, ip)] {
 			return false
@@ -167,7 +168,7 @@ func allIPsAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string
 	return true
 }
 
-func firstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) (netip.Addr, string, bool) {
+func FirstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) (netip.Addr, string, bool) {
 	for _, ip := range ips {
 		country := geofeed.LookupCountry(entries, ip)
 		if allowed[country] {
@@ -177,7 +178,7 @@ func firstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[strin
 	return netip.Addr{}, "", false
 }
 
-func parseAllowCountries(countries []string) map[string]bool {
+func ParseAllowCountries(countries []string) map[string]bool {
 	out := map[string]bool{}
 	for _, country := range countries {
 		country = strings.ToUpper(strings.TrimSpace(country))
@@ -188,8 +189,8 @@ func parseAllowCountries(countries []string) map[string]bool {
 	return out
 }
 
-func rewriteNodeName(node subscription.Node, country string, ip netip.Addr) string {
-	cleanName := stripKnownTags(node.Name)
+func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) string {
+	cleanName := StripKnownTags(node.Name)
 	if cleanName == "" {
 		cleanName = node.Server
 	}
@@ -199,7 +200,7 @@ func rewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 	return base + "#" + fragment
 }
 
-func stripKnownTags(s string) string {
+func StripKnownTags(s string) string {
 	s = strings.TrimSpace(s)
 	for {
 		if !strings.HasPrefix(s, "[") {

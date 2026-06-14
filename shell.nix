@@ -6,6 +6,7 @@ pkgs.mkShell {
     gcc
     gopls
     gnumake
+    golangci-lint
   ];
 
   shellHook = ''
@@ -15,6 +16,7 @@ pkgs.mkShell {
     echo "  run : make run"
     echo "  test: make test"
     echo "  fmt : make fmt"
+    echo "  lint: golangci-lint run"
     echo "  default: make"
     echo "  curl: curl \"http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries=FI,EE,LV,LT,SE,PL,DE,NL\""
   '';

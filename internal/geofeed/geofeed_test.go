@@ -1,10 +1,12 @@
-package geofeed
+package geofeed_test
 
 import (
 	"net/netip"
 	"sort"
 	"strings"
 	"testing"
+
+	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
 func TestParseAndLookupCountry(t *testing.T) {
@@ -16,7 +18,7 @@ func TestParseAndLookupCountry(t *testing.T) {
 		"198.51.100.10/32,NL,ZH,Amsterdam",
 	}, "\n"))
 
-	entries, err := Parse(body)
+	entries, err := geofeed.Parse(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +27,7 @@ func TestParseAndLookupCountry(t *testing.T) {
 		return entries[i].Prefix.Bits() > entries[j].Prefix.Bits()
 	})
 
-	if got := LookupCountry(entries, netip.MustParseAddr("198.51.100.10")); got != "NL" {
+	if got := geofeed.LookupCountry(entries, netip.MustParseAddr("198.51.100.10")); got != "NL" {
 		t.Fatalf("unexpected country: %q", got)
 	}
 }

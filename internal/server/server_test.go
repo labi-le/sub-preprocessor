@@ -1,4 +1,4 @@
-package server
+package server_test
 
 import (
 	"context"
@@ -10,11 +10,12 @@ import (
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/server"
 )
 
 type stubService struct{}
 
-func (stubService) Filter(_ context.Context, subscriptionURL string, countries []string) ([]string, preprocess.Stats, error) {
+func (stubService) Filter(_ context.Context, _ string, _ []string) ([]string, preprocess.Stats, error) {
 	return []string{"vless://node#ok"}, preprocess.Stats{Total: 1, Kept: 1}, nil
 }
 
@@ -24,7 +25,7 @@ type recordingService struct {
 	err    error
 }
 
-func (s *recordingService) Filter(ctx context.Context, subscriptionURL string, countries []string) ([]string, preprocess.Stats, error) {
+func (s *recordingService) Filter(ctx context.Context, _ string, _ []string) ([]string, preprocess.Stats, error) {
 	s.called = true
 	s.ctx = ctx
 	if s.err != nil {
@@ -36,9 +37,9 @@ func (s *recordingService) Filter(ctx context.Context, subscriptionURL string, c
 func TestServerReturnsPlainText(t *testing.T) {
 	t.Parallel()
 
-	srv := New(":8080", stubService{})
+	srv := server.New(":8080", stubService{})
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
-	resp, err := srv.app.Test(req)
+	resp, err := srv.TestApp().Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,9 +62,9 @@ func TestServerRejectsNonHTTPSSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := New(":8080", svc)
+	srv := server.New(":8080", svc)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=http://mifa.world/vless&countries=FI,EE", nil)
-	resp, err := srv.app.Test(req)
+	resp, err := srv.TestApp().Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +82,9 @@ func TestServerRejectsLocalSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := New(":8080", svc)
+	srv := server.New(":8080", svc)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://127.0.0.1/vless&countries=FI,EE", nil)
-	resp, err := srv.app.Test(req)
+	resp, err := srv.TestApp().Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +102,10 @@ func TestServerUsesRequestContext(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := New(":8080", svc)
+	srv := server.New(":8080", svc)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 
-	resp, err := srv.app.Test(req)
+	resp, err := srv.TestApp().Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,9 +123,9 @@ func TestServerHidesInternalErrors(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{err: errors.New("dial tcp 10.0.0.5:443: i/o timeout")}
-	srv := New(":8080", svc)
+	srv := server.New(":8080", svc)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
-	resp, err := srv.app.Test(req)
+	resp, err := srv.TestApp().Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}

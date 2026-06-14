@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
@@ -58,7 +59,15 @@ func New(listen string, svc Filterer) *Server {
 }
 
 func (s *Server) Listen() error {
-	return s.app.Listen(s.listen)
+	if err := s.app.Listen(s.listen); err != nil {
+		return fmt.Errorf("fiber listen: %w", err)
+	}
+	return nil
+}
+
+// TestApp returns the underlying Fiber app for use in tests.
+func (s *Server) TestApp() *fiber.App {
+	return s.app
 }
 
 func parseCountries(raw string) []string {

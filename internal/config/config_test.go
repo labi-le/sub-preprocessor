@@ -1,10 +1,12 @@
-package config
+package config_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"domains.lst/sub-preprocessor/internal/config"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -17,7 +19,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func TestLoadRejectsMissingGeofeedType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Load(path); err == nil {
+	if _, err := config.Load(path); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -63,7 +65,7 @@ func TestLoadGeofeedRefreshInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}

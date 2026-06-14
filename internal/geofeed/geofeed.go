@@ -17,6 +17,14 @@ import (
 
 const maxGeofeedSize = 256 << 20
 
+const (
+	minCSVFields = 2
+	idxRegion    = 2
+	idxCity      = 3
+	bitsV4       = 32
+	bitsV6       = 128
+)
+
 type Entry struct {
 	Prefix  netip.Prefix
 	Country string
@@ -72,7 +80,7 @@ func Parse(body []byte) ([]Entry, error) {
 		filtered.WriteByte('\n')
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan lines: %w", err)
 	}
 
 	r := csv.NewReader(bytes.NewReader(filtered.Bytes()))
@@ -81,19 +89,19 @@ func Parse(body []byte) ([]Entry, error) {
 
 	var entries []Entry
 	for {
-		rec, err := r.Read()
-		if errors.Is(err, io.EOF) {
+		rec, errCSV := r.Read()
+		if errors.Is(errCSV, io.EOF) {
 			break
 		}
-		if err != nil {
-			return nil, err
+		if errCSV != nil {
+			return nil, fmt.Errorf("csv read: %w", errCSV)
 		}
-		if len(rec) < 2 {
+		if len(rec) < minCSVFields {
 			continue
 		}
 
-		prefix, err := parsePrefixOrAddr(strings.TrimSpace(rec[0]))
-		if err != nil {
+		prefix, errPrefix := parsePrefixOrAddr(strings.TrimSpace(rec[0]))
+		if errPrefix != nil {
 			continue
 		}
 		country := strings.ToUpper(strings.TrimSpace(rec[1]))
@@ -102,11 +110,11 @@ func Parse(body []byte) ([]Entry, error) {
 		}
 
 		entry := Entry{Prefix: prefix, Country: country}
-		if len(rec) > 2 {
-			entry.Region = strings.TrimSpace(rec[2])
+		if len(rec) > idxRegion {
+			entry.Region = strings.TrimSpace(rec[idxRegion])
 		}
-		if len(rec) > 3 {
-			entry.City = strings.TrimSpace(rec[3])
+		if len(rec) > idxCity {
+			entry.City = strings.TrimSpace(rec[idxCity])
 		}
 		entries = append(entries, entry)
 	}
@@ -125,19 +133,19 @@ func LookupCountry(entries []Entry, ip netip.Addr) string {
 
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	if strings.Contains(s, "/") {
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			return netip.Prefix{}, err
+		p, errParse := netip.ParsePrefix(s)
+		if errParse != nil {
+			return netip.Prefix{}, fmt.Errorf("parse prefix: %w", errParse)
 		}
 		return p.Masked(), nil
 	}
 
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Prefix{}, err
+	addr, errAddr := netip.ParseAddr(s)
+	if errAddr != nil {
+		return netip.Prefix{}, fmt.Errorf("parse addr: %w", errAddr)
 	}
 	if addr.Is4() {
-		return netip.PrefixFrom(addr, 32), nil
+		return netip.PrefixFrom(addr, bitsV4), nil
 	}
-	return netip.PrefixFrom(addr, 128), nil
+	return netip.PrefixFrom(addr, bitsV6), nil
 }

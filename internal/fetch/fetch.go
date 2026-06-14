@@ -3,6 +3,7 @@ package fetch
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,19 @@ const (
 	FileTypeGzip FileType = "gzip"
 )
 
+const (
+	defaultHTTPTimeout    = 30 * time.Second
+	maxRedirects          = 10
+	defaultDialTimeout    = 30 * time.Second
+	errNonPublicTarget    = "non-public target is not allowed"
+	errStoppedRedirects   = "stopped after 10 redirects"
+	errOnlyHTTPS          = "only https URLs are allowed"
+	errURLHostRequired    = "url host is required"
+	errURLUserinfo        = "url userinfo is not allowed"
+	errNotIPv4            = "not an IPv4 address"
+	errNoAllowedCountries = "no allowed countries provided"
+)
+
 func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
 		return nil, err
@@ -30,17 +44,17 @@ func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType Fil
 		return nil, err
 	}
 
-	client := newSafeHTTPClient()
+	client := NewSafeHTTPClient()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if errReq != nil {
+		return nil, fmt.Errorf("create request: %w", errReq)
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	resp, errResp := client.Do(req)
+	if errResp != nil {
+		return nil, fmt.Errorf("do request: %w", errResp)
 	}
 	defer resp.Body.Close()
 
@@ -48,15 +62,15 @@ func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType Fil
 		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	reader, err := maybeDecode(rawURL, resp, fileType)
-	if err != nil {
-		return nil, err
+	reader, errDecode := MaybeDecode(rawURL, resp, fileType)
+	if errDecode != nil {
+		return nil, fmt.Errorf("decode response: %w", errDecode)
 	}
 	defer reader.Close()
 
-	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
+	body, errRead := io.ReadAll(io.LimitReader(reader, limit+1))
+	if errRead != nil {
+		return nil, fmt.Errorf("read response: %w", errRead)
 	}
 	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("response too large: over %d bytes", limit)
@@ -75,47 +89,51 @@ func ValidateFileType(fileType FileType) error {
 }
 
 func ValidatePublicHTTPSURL(rawURL string) error {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
+	u, errURL := url.Parse(rawURL)
+	if errURL != nil {
+		return fmt.Errorf("invalid url: %w", errURL)
 	}
 	if !strings.EqualFold(u.Scheme, "https") {
-		return fmt.Errorf("only https URLs are allowed")
+		return errors.New(errOnlyHTTPS)
 	}
 	if u.Hostname() == "" {
-		return fmt.Errorf("url host is required")
+		return errors.New(errURLHostRequired)
 	}
 	if u.User != nil {
-		return fmt.Errorf("url userinfo is not allowed")
+		return errors.New(errURLUserinfo)
 	}
-	if addr, err := netip.ParseAddr(u.Hostname()); err == nil && !isPublicIP(addr) {
-		return fmt.Errorf("non-public target is not allowed")
+	if addr, errAddr := netip.ParseAddr(u.Hostname()); errAddr == nil && !isPublicIP(addr) {
+		return errors.New(errNonPublicTarget)
 	}
 	return nil
 }
 
-func newSafeHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func NewSafeHTTPClient() *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		transport = &http.Transport{}
+	}
+	transport = transport.Clone()
 	transport.DisableCompression = true
 	transport.Proxy = nil
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: defaultDialTimeout}
 
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
+		host, port, errDial := net.SplitHostPort(addr)
+		if errDial != nil {
+			return nil, fmt.Errorf("split host port: %w", errDial)
 		}
 
-		if ip, err := netip.ParseAddr(host); err == nil {
+		if ip, errIP := netip.ParseAddr(host); errIP == nil {
 			if !isPublicIP(ip) {
-				return nil, fmt.Errorf("non-public target is not allowed")
+				return nil, errors.New(errNonPublicTarget)
 			}
 			return dialer.DialContext(ctx, network, addr)
 		}
 
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, err
+		ips, errIP := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if errIP != nil {
+			return nil, fmt.Errorf("lookup net ip: %w", errIP)
 		}
 
 		for _, ip := range ips {
@@ -125,28 +143,28 @@ func newSafeHTTPClient() *http.Client {
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		}
 
-		return nil, fmt.Errorf("non-public target is not allowed")
+		return nil, errors.New(errNonPublicTarget)
 	}
 
 	return &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   defaultHTTPTimeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("stopped after 10 redirects")
+			if len(via) >= maxRedirects {
+				return errors.New(errStoppedRedirects)
 			}
 			return ValidatePublicHTTPSURL(req.URL.String())
 		},
 	}
 }
 
-func maybeDecode(rawURL string, resp *http.Response, fileType FileType) (io.ReadCloser, error) {
+func MaybeDecode(_ string, resp *http.Response, fileType FileType) (io.ReadCloser, error) {
 	if fileType == FileTypeRaw {
 		return resp.Body, nil
 	}
-	zr, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return nil, err
+	zr, errZip := gzip.NewReader(resp.Body)
+	if errZip != nil {
+		return nil, fmt.Errorf("gzip reader: %w", errZip)
 	}
 	return &readCloser{Reader: zr, closeFn: zr.Close}, nil
 }

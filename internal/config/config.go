@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"gopkg.in/yaml.v3"
 )
+
+const defaultTimeout = 5 * time.Second
 
 type GeofeedSource struct {
 	URL  string         `yaml:"url"`
@@ -30,21 +33,21 @@ type Config struct {
 }
 
 func Load(path string) (Config, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, err
+	b, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return Config{}, fmt.Errorf("read config file: %w", errRead)
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return Config{}, err
+	if errUnmarshal := yaml.Unmarshal(b, &cfg); errUnmarshal != nil {
+		return Config{}, fmt.Errorf("unmarshal config: %w", errUnmarshal)
 	}
 
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
 	}
 	if cfg.Resolver.Timeout == 0 {
-		cfg.Resolver.Timeout = 5 * time.Second
+		cfg.Resolver.Timeout = defaultTimeout
 	}
 	if len(cfg.Geofeed.Sources) == 0 {
 		return Config{}, errors.New("geofeed.sources must contain at least one source")
@@ -58,8 +61,8 @@ func Load(path string) (Config, error) {
 		if source.Type == "" {
 			return Config{}, errors.New("geofeed.sources.type must not be empty")
 		}
-		if err := fetch.ValidateFileType(source.Type); err != nil {
-			return Config{}, err
+		if errValidate := fetch.ValidateFileType(source.Type); errValidate != nil {
+			return Config{}, fmt.Errorf("validate source type: %w", errValidate)
 		}
 	}
 

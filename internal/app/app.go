@@ -29,5 +29,8 @@ func Run(ctx context.Context) error {
 	}
 
 	app := serverpkg.New(cfg.Server.Listen, svc)
-	return app.Listen()
+	if listenErr := app.Listen(); listenErr != nil {
+		return fmt.Errorf("server listen: %w", listenErr)
+	}
+	return nil
 }

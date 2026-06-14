@@ -1,4 +1,4 @@
-package fetch
+package fetch_test
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"domains.lst/sub-preprocessor/internal/fetch"
 )
 
 func TestMaybeDecodeGzip(t *testing.T) {
@@ -22,7 +24,7 @@ func TestMaybeDecodeGzip(t *testing.T) {
 	}
 
 	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}
-	rc, err := maybeDecode("https://example.com/geofeed.csv.gz", resp, FileTypeGzip)
+	rc, err := fetch.MaybeDecode("https://example.com/geofeed.csv.gz", resp, fetch.FileTypeGzip)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +42,7 @@ func TestMaybeDecodeGzip(t *testing.T) {
 func TestValidateFileTypeRejectsAuto(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateFileType("auto")
+	err := fetch.ValidateFileType("auto")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -49,7 +51,7 @@ func TestValidateFileTypeRejectsAuto(t *testing.T) {
 func TestValidatePublicHTTPSURLRejectsHTTP(t *testing.T) {
 	t.Parallel()
 
-	err := ValidatePublicHTTPSURL("http://example.com/test")
+	err := fetch.ValidatePublicHTTPSURL("http://example.com/test")
 	if err == nil || !strings.Contains(err.Error(), "only https") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestValidatePublicHTTPSURLRejectsHTTP(t *testing.T) {
 func TestNewSafeHTTPClientDisablesProxy(t *testing.T) {
 	t.Parallel()
 
-	client := newSafeHTTPClient()
+	client := fetch.NewSafeHTTPClient()
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("unexpected transport type: %T", client.Transport)

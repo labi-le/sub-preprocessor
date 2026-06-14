@@ -1,15 +1,17 @@
-package subscription
+package subscription_test
 
 import (
 	"encoding/base64"
 	"strings"
 	"testing"
+
+	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
 func TestParseDefaultsPort(t *testing.T) {
 	t.Parallel()
 
-	nodes, err := Parse([]byte("vless://uuid@example.com?security=tls#Example\nvmess://ignored\n"))
+	nodes, err := subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\nvmess://ignored\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +28,7 @@ func TestNormalizeBase64(t *testing.T) {
 
 	raw := "vless://uuid@example.com:443?security=tls#Node 1\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(raw))
-	if got := string(normalize([]byte(encoded))); got != strings.TrimSpace(raw) {
+	if got := string(subscription.Normalize([]byte(encoded))); got != strings.TrimSpace(raw) {
 		t.Fatalf("unexpected normalize result: %q", got)
 	}
 }

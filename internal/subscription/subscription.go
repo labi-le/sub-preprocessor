@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 
@@ -13,6 +14,11 @@ import (
 )
 
 const maxSubscriptionSize = 10 << 20
+
+const (
+	scannerBufSize    = 1024
+	scannerMaxBufSize = 1024 * 1024
+)
 
 type Node struct {
 	Raw    string
@@ -25,14 +31,14 @@ type Node struct {
 func Load(ctx context.Context, rawURL string) ([]Node, error) {
 	body, err := fetch.BytesWithType(ctx, rawURL, maxSubscriptionSize, fetch.FileTypeRaw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch subscription: %w", err)
 	}
-	return Parse(normalize(body))
+	return Parse(Normalize(body))
 }
 
 func Parse(body []byte) ([]Node, error) {
 	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(make([]byte, 1024), 1024*1024)
+	sc.Buffer(make([]byte, scannerBufSize), scannerMaxBufSize)
 
 	var nodes []Node
 	for sc.Scan() {
@@ -65,7 +71,7 @@ func Parse(body []byte) ([]Node, error) {
 	}
 
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan lines: %w", err)
 	}
 	if len(nodes) == 0 {
 		return nil, errors.New("no vless URI nodes found")
@@ -74,7 +80,7 @@ func Parse(body []byte) ([]Node, error) {
 	return nodes, nil
 }
 
-func normalize(body []byte) []byte {
+func Normalize(body []byte) []byte {
 	body = bytes.TrimSpace(body)
 	if bytes.Contains(body, []byte("://")) {
 		return body
