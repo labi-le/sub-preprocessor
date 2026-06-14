@@ -15,11 +15,12 @@ import (
 const maxSubscriptionSize = 10 << 20
 
 type Node struct {
-	Raw    string
-	Scheme string
-	Name   string
-	Server string
-	Port   string
+	Raw         string
+	Scheme      string
+	Name        string
+	Server      string
+	Port        string
+	FragmentIdx int // index of '#' in Raw, or -1 if not present
 }
 
 func Load(ctx context.Context, rawURL string) ([]Node, error) {
@@ -61,7 +62,7 @@ func Parse(body []byte) ([]Node, error) {
 			continue
 		}
 
-		if node, ok := parseNode(string(line)); ok {
+		if node, ok := parseNode(unsafe.String(unsafe.SliceData(line), len(line))); ok {
 			nodes = append(nodes, node)
 		}
 
@@ -113,20 +114,22 @@ func parseNode(line string) (Node, bool) {
 
 	// Extract fragment (node name) from the original line.
 	name := ""
-	if j := strings.LastIndexByte(line, '#'); j >= 0 {
-		name = strings.TrimSpace(line[j+1:])
+	hashIdx := strings.LastIndexByte(line, '#')
+	if hashIdx >= 0 {
+		name = strings.TrimSpace(line[hashIdx+1:])
+	} else {
+		hashIdx = -1
 	}
 	if name == "" {
 		name = server
 	}
 
-	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port}, true
+	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port, FragmentIdx: hashIdx}, true
 }
 
 // splitHostPort separates host and port from an authority string.
 // Handles userinfo (user@host) and IPv6 ([::1]:port) formats.
 func splitHostPort(authority string) (host, port string) {
-	// Strip userinfo.
 	if j := strings.LastIndexByte(authority, '@'); j >= 0 {
 		authority = authority[j+1:]
 	}
@@ -169,12 +172,26 @@ func Normalize(body []byte) []byte {
 	compact = strings.ReplaceAll(compact, "\t", "")
 	compact = strings.ReplaceAll(compact, " ", "")
 
-	if decoded, err := base64.StdEncoding.DecodeString(compact); err == nil && bytes.Contains(decoded, []byte("://")) {
+	if decoded, err := base64.StdEncoding.DecodeString(compact); err == nil && hasSchemePrefix(decoded) {
 		return bytes.TrimSpace(decoded)
 	}
-	if decoded, err := base64.RawStdEncoding.DecodeString(compact); err == nil && bytes.Contains(decoded, []byte("://")) {
+	if decoded, err := base64.RawStdEncoding.DecodeString(compact); err == nil && hasSchemePrefix(decoded) {
 		return bytes.TrimSpace(decoded)
 	}
 
 	return body
+}
+
+// hasSchemePrefix checks if the body starts with a known URI scheme.
+func hasSchemePrefix(body []byte) bool {
+	return bytes.HasPrefix(body, []byte("vless://")) ||
+		bytes.HasPrefix(body, []byte("vmess://")) ||
+		bytes.HasPrefix(body, []byte("trojan://")) ||
+		bytes.HasPrefix(body, []byte("ss://")) ||
+		bytes.HasPrefix(body, []byte("ssr://")) ||
+		bytes.HasPrefix(body, []byte("tuic://")) ||
+		bytes.HasPrefix(body, []byte("hysteria2://")) ||
+		bytes.HasPrefix(body, []byte("hysteria://")) ||
+		bytes.HasPrefix(body, []byte("wireguard://")) ||
+		bytes.Contains(body, []byte("://"))
 }

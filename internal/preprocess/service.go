@@ -15,13 +15,16 @@ import (
 )
 
 type Service struct {
-	mu              sync.RWMutex
-	entries         []geofeed.Entry
-	sources         []geofeed.Source
-	LoadedAt        time.Time
-	RefreshInterval time.Duration
-	dnsTimeout      time.Duration
-	strictDNS       bool
+	mu                sync.RWMutex
+	entries           []geofeed.Entry
+	sources           []geofeed.Source
+	LoadedAt          time.Time
+	RefreshInterval   time.Duration
+	dnsTimeout        time.Duration
+	strictDNS         bool
+	countriesCacheKey string
+	countriesCacheVal map[string]bool
+	countriesCacheMu  sync.Mutex
 }
 
 type Stats struct {
@@ -55,7 +58,7 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 		return nil, Stats{}, err
 	}
 
-	allowed := ParseAllowCountries(countries)
+	allowed := s.getAllowedCountries(countries)
 	if len(allowed) == 0 {
 		return nil, Stats{}, errors.New("no allowed countries provided")
 	}
@@ -68,6 +71,27 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 	stats := Stats{}
 	var output []string
 
+	// Step 1: collect unique servers for batched DNS resolution
+	uniqueServers := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		if node.Server == "" || node.Port == "" {
+			continue
+		}
+		uniqueServers[node.Server] = struct{}{}
+	}
+
+	// Step 2: resolve all unique servers once and cache results
+	resolved := make(map[string][]netip.Addr, len(uniqueServers))
+	for server := range uniqueServers {
+		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
+		ips, resolveErr := resolveIPv4(resolveCtx, server)
+		cancel()
+		if resolveErr == nil && len(ips) > 0 {
+			resolved[server] = ips
+		}
+	}
+
+	// Step 3: filter loop — look up from resolved map
 	for _, node := range nodes {
 		stats.Total++
 		if node.Server == "" || node.Port == "" {
@@ -75,10 +99,8 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 			continue
 		}
 
-		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
-		ips, errResolve := resolveIPv4(resolveCtx, node.Server)
-		cancel()
-		if errResolve != nil || len(ips) == 0 {
+		ips, ok := resolved[node.Server]
+		if !ok {
 			stats.DNSDrop++
 			continue
 		}
@@ -135,6 +157,8 @@ func (s *Service) ShouldReloadGeofeed(now time.Time) bool {
 	return now.Sub(s.LoadedAt) >= s.RefreshInterval
 }
 
+// resolveIPv4 resolves a hostname to IPv4 addresses only.
+// IPv6 addresses are silently dropped (full IPv6 support is not yet implemented).
 func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Is4() {
@@ -190,6 +214,21 @@ func ParseAllowCountries(countries []string) map[string]bool {
 	return out
 }
 
+// getAllowedCountries returns the parsed countries map, caching the result
+// keyed by the joined countries string to avoid repeated allocations.
+func (s *Service) getAllowedCountries(countries []string) map[string]bool {
+	key := strings.Join(countries, ",")
+	s.countriesCacheMu.Lock()
+	defer s.countriesCacheMu.Unlock()
+	if key == s.countriesCacheKey {
+		return s.countriesCacheVal
+	}
+	out := ParseAllowCountries(countries)
+	s.countriesCacheKey = key
+	s.countriesCacheVal = out
+	return out
+}
+
 func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) string {
 	if !supportsFragmentRewrite(node) {
 		return node.Raw
@@ -205,10 +244,9 @@ func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 	const growExtra = 32 // rough upper bound: raw + tags overhead
 	b.Grow(len(node.Raw) + growExtra)
 
-	// Find the '#' separator instead of strings.Cut to avoid extra string copy.
-	hashIdx := strings.IndexByte(node.Raw, '#')
-	if hashIdx >= 0 {
-		b.WriteString(node.Raw[:hashIdx])
+	// Use node.FragmentIdx to avoid scanning Raw for '#'.
+	if node.FragmentIdx >= 0 {
+		b.WriteString(node.Raw[:node.FragmentIdx])
 	} else {
 		b.WriteString(node.Raw)
 	}
@@ -229,16 +267,21 @@ func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 	return b.String()
 }
 
-// writeOctet writes a uint8 (0-255) to a strings.Builder without allocating.
+const (
+	decimalBase = 10
+	hundred     = 100
+)
+
 func writeOctet(b *strings.Builder, n byte) {
-	if n >= 100 {
-		b.WriteByte('0' + n/100)
-		b.WriteByte('0' + (n/10)%10)
-		b.WriteByte('0' + n%10)
-	} else if n >= 10 {
-		b.WriteByte('0' + n/10)
-		b.WriteByte('0' + n%10)
-	} else {
+	switch {
+	case n >= hundred:
+		b.WriteByte('0' + n/hundred)
+		b.WriteByte('0' + (n/decimalBase)%decimalBase)
+		b.WriteByte('0' + n%decimalBase)
+	case n >= decimalBase:
+		b.WriteByte('0' + n/decimalBase)
+		b.WriteByte('0' + n%decimalBase)
+	default:
 		b.WriteByte('0' + n)
 	}
 }

@@ -28,13 +28,14 @@ const (
 	maxRedirects          = 10
 	defaultDialTimeout    = 30 * time.Second
 	errNonPublicTarget    = "non-public target is not allowed"
-	errStoppedRedirects   = "stopped after 10 redirects"
 	errOnlyHTTPS          = "only https URLs are allowed"
 	errURLHostRequired    = "url host is required"
 	errURLUserinfo        = "url userinfo is not allowed"
 	errNotIPv4            = "not an IPv4 address"
 	errNoAllowedCountries = "no allowed countries provided"
 )
+
+var errStoppedRedirects = fmt.Sprintf("stopped after %d redirects", maxRedirects)
 
 func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
@@ -62,7 +63,7 @@ func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType Fil
 		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	reader, errDecode := MaybeDecode(rawURL, resp, fileType)
+	reader, errDecode := MaybeDecode(resp, fileType)
 	if errDecode != nil {
 		return nil, fmt.Errorf("decode response: %w", errDecode)
 	}
@@ -109,41 +110,38 @@ func ValidatePublicHTTPSURL(rawURL string) error {
 }
 
 func NewSafeHTTPClient() *http.Client {
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		transport = &http.Transport{}
-	}
-	transport = transport.Clone()
-	transport.DisableCompression = true
-	transport.Proxy = nil
 	dialer := &net.Dialer{Timeout: defaultDialTimeout}
 
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, errDial := net.SplitHostPort(addr)
-		if errDial != nil {
-			return nil, fmt.Errorf("split host port: %w", errDial)
-		}
-
-		if ip, errIP := netip.ParseAddr(host); errIP == nil {
-			if !isPublicIP(ip) {
-				return nil, errors.New(errNonPublicTarget)
+	transport := &http.Transport{
+		DisableCompression: true,
+		Proxy:              nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, errDial := net.SplitHostPort(addr)
+			if errDial != nil {
+				return nil, fmt.Errorf("split host port: %w", errDial)
 			}
-			return dialer.DialContext(ctx, network, addr)
-		}
 
-		ips, errIP := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if errIP != nil {
-			return nil, fmt.Errorf("lookup net ip: %w", errIP)
-		}
-
-		for _, ip := range ips {
-			if !isPublicIP(ip) {
-				continue
+			if ip, errIP := netip.ParseAddr(host); errIP == nil {
+				if !isPublicIP(ip) {
+					return nil, errors.New(errNonPublicTarget)
+				}
+				return dialer.DialContext(ctx, network, addr)
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		}
 
-		return nil, errors.New(errNonPublicTarget)
+			ips, errIP := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			if errIP != nil {
+				return nil, fmt.Errorf("lookup net ip: %w", errIP)
+			}
+
+			for _, ip := range ips {
+				if !isPublicIP(ip) {
+					continue
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			}
+
+			return nil, errors.New(errNonPublicTarget)
+		},
 	}
 
 	return &http.Client{
@@ -158,7 +156,7 @@ func NewSafeHTTPClient() *http.Client {
 	}
 }
 
-func MaybeDecode(_ string, resp *http.Response, fileType FileType) (io.ReadCloser, error) {
+func MaybeDecode(resp *http.Response, fileType FileType) (io.ReadCloser, error) {
 	if fileType == FileTypeRaw {
 		return resp.Body, nil
 	}

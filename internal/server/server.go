@@ -48,10 +48,6 @@ func New(listen string, svc Filterer) *Server {
 		c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
 		c.Set("X-Preprocessor-Stats", preprocess.FormatStats(stats))
 
-		if len(lines) == 0 {
-			return c.SendString("")
-		}
-
 		return c.SendString(strings.Join(lines, "\n") + "\n")
 	})
 
@@ -63,6 +59,19 @@ func (s *Server) Listen() error {
 		return fmt.Errorf("fiber listen: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- s.app.Shutdown()
+	}()
+	select {
+	case err := <-shutdownDone:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("server shutdown timeout: %w", ctx.Err())
+	}
 }
 
 // TestApp returns the underlying Fiber app for use in tests.

@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"unsafe"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
 )
@@ -110,7 +111,7 @@ func parseBody(body []byte) []Entry {
 // field substrings reference the same backing memory.
 func parseLine(line []byte) (Entry, bool) {
 	// Create batch string — one alloc for all fields.
-	s := string(line)
+	s := unsafe.String(unsafe.SliceData(line), len(line))
 
 	prefixStr, rest, ok := strings.Cut(s, ",")
 	if !ok {

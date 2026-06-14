@@ -53,15 +53,14 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("geofeed.sources must contain at least one source")
 	}
 	for i := range cfg.Geofeed.Sources {
-		source := &cfg.Geofeed.Sources[i]
-		source.URL = strings.TrimSpace(source.URL)
-		if source.URL == "" {
+		cfg.Geofeed.Sources[i].URL = strings.TrimSpace(cfg.Geofeed.Sources[i].URL)
+		if cfg.Geofeed.Sources[i].URL == "" {
 			return Config{}, errors.New("geofeed.sources.url must not be empty")
 		}
-		if source.Type == "" {
+		if cfg.Geofeed.Sources[i].Type == "" {
 			return Config{}, errors.New("geofeed.sources.type must not be empty")
 		}
-		if errValidate := fetch.ValidateFileType(source.Type); errValidate != nil {
+		if errValidate := fetch.ValidateFileType(cfg.Geofeed.Sources[i].Type); errValidate != nil {
 			return Config{}, fmt.Errorf("validate source type: %w", errValidate)
 		}
 	}

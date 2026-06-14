@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -11,6 +12,7 @@ import (
 )
 
 const defaultConfigPath = "./config.yaml"
+const shutdownTimeout = 10 * time.Second
 
 func Run(ctx context.Context) error {
 	cfg, err := config.Load(defaultConfigPath)
@@ -28,9 +30,22 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	app := serverpkg.New(cfg.Server.Listen, svc)
-	if listenErr := app.Listen(); listenErr != nil {
-		return fmt.Errorf("server listen: %w", listenErr)
+	srv := serverpkg.New(cfg.Server.Listen, svc)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Listen()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil {
+			return fmt.Errorf("server shutdown: %w", shutdownErr)
+		}
+		return nil
+	case listenErr := <-errCh:
+		return listenErr
 	}
-	return nil
 }

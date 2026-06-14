@@ -24,7 +24,7 @@ func TestMaybeDecodeGzip(t *testing.T) {
 	}
 
 	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}
-	rc, err := fetch.MaybeDecode("https://example.com/geofeed.csv.gz", resp, fetch.FileTypeGzip)
+	rc, err := fetch.MaybeDecode(resp, fetch.FileTypeGzip)
 	if err != nil {
 		t.Fatal(err)
 	}
