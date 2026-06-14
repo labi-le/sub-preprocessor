@@ -1,0 +1,14 @@
+server:
+  listen: :8080
+
+geofeed:
+  refresh_interval: 24h
+  sources:
+    - url: https://github.com/ipanalytics/GeoFeed-Harvester/releases/latest/download/geofeed.csv.gz
+      type: gzip
+    - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
+      type: raw
+
+resolver:
+  timeout: 5s
+  strict_dns: false
