@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
 )
@@ -162,7 +163,7 @@ func Normalize(body []byte) []byte {
 		return body
 	}
 
-	compact := string(body)
+	compact := unsafe.String(unsafe.SliceData(body), len(body))
 	compact = strings.ReplaceAll(compact, "\n", "")
 	compact = strings.ReplaceAll(compact, "\r", "")
 	compact = strings.ReplaceAll(compact, "\t", "")

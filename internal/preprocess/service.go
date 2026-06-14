@@ -215,10 +215,32 @@ func RewriteNodeName(node subscription.Node, country string, ip netip.Addr) stri
 	b.WriteString("#[GEO:")
 	b.WriteString(country)
 	b.WriteString("][IP:")
-	b.WriteString(ip.String())
+	// Write IPv4 octets directly — avoids ip.String() allocation.
+	ip4 := ip.As4()
+	writeOctet(&b, ip4[0])
+	b.WriteByte('.')
+	writeOctet(&b, ip4[1])
+	b.WriteByte('.')
+	writeOctet(&b, ip4[2])
+	b.WriteByte('.')
+	writeOctet(&b, ip4[3])
 	b.WriteString("] ")
 	b.WriteString(cleanName)
 	return b.String()
+}
+
+// writeOctet writes a uint8 (0-255) to a strings.Builder without allocating.
+func writeOctet(b *strings.Builder, n byte) {
+	if n >= 100 {
+		b.WriteByte('0' + n/100)
+		b.WriteByte('0' + (n/10)%10)
+		b.WriteByte('0' + n%10)
+	} else if n >= 10 {
+		b.WriteByte('0' + n/10)
+		b.WriteByte('0' + n%10)
+	} else {
+		b.WriteByte('0' + n)
+	}
 }
 
 func supportsFragmentRewrite(node subscription.Node) bool {
