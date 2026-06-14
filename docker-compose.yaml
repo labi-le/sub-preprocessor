@@ -1,0 +1,12 @@
+services:
+  sub-preprocessor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sub-preprocessor:latest
+    container_name: sub-preprocessor
+    ports:
+      - "7008:8080"
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+    restart: always

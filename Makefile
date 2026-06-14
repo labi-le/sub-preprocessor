@@ -2,7 +2,7 @@
 
 BENCH_DIR := benchmarks
 
-.PHONY: run test fmt race bench
+.PHONY: run test fmt race bench lint dc-up
 
 run:
 	go run .
@@ -24,3 +24,12 @@ bench:
 
 lint:
 	golangci-lint run
+
+dc-up:
+	docker compose up -d
+
+dc-ps:
+	docker compose ps
+
+dc-logs:
+	docker compose logs -f
