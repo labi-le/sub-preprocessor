@@ -14,6 +14,9 @@ import (
 
 const maxSubscriptionSize = 10 << 20
 
+var doubleSlash = []byte("://")
+var authoritySeparators = []byte{'/', '?', '#'}
+
 type Node struct {
 	Raw         string
 	Scheme      string
@@ -55,7 +58,7 @@ func Parse(body []byte) ([]Node, error) {
 			continue
 		}
 
-		if !bytes.Contains(line, []byte("://")) {
+		if !bytes.Contains(line, doubleSlash) {
 			if idx < 0 {
 				break
 			}
@@ -93,7 +96,7 @@ func parseNode(line string) (Node, bool) {
 
 	// Find end of authority section: '/', '?', '#', or end of string.
 	authEnd := len(rest)
-	for _, sep := range []byte{'/', '?', '#'} {
+	for _, sep := range authoritySeparators {
 		if j := strings.IndexByte(rest, sep); j >= 0 && j < authEnd {
 			authEnd = j
 		}
@@ -162,7 +165,7 @@ func splitHostPort(authority string) (host, port string) {
 
 func Normalize(body []byte) []byte {
 	body = bytes.TrimSpace(body)
-	if bytes.Contains(body, []byte("://")) {
+	if bytes.Contains(body, doubleSlash) {
 		return body
 	}
 
@@ -193,5 +196,5 @@ func hasSchemePrefix(body []byte) bool {
 		bytes.HasPrefix(body, []byte("hysteria2://")) ||
 		bytes.HasPrefix(body, []byte("hysteria://")) ||
 		bytes.HasPrefix(body, []byte("wireguard://")) ||
-		bytes.Contains(body, []byte("://"))
+		bytes.Contains(body, doubleSlash)
 }

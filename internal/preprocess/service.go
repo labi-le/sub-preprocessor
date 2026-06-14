@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,7 +70,7 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 	}
 
 	stats := Stats{}
-	var output []string
+	output := make([]string, 0, len(nodes))
 
 	// Step 1: collect unique servers for batched DNS resolution
 	uniqueServers := make(map[string]struct{}, len(nodes))
@@ -105,14 +106,13 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 			continue
 		}
 
-		if s.strictDNS && !AllIPsAllowed(entries, ips, allowed) {
-			stats.StrictReject++
-			continue
-		}
-
-		chosenIP, chosenCountry, ok := FirstAllowedIP(entries, ips, allowed)
+		chosenIP, chosenCountry, ok := filterAndFirstAllowed(entries, ips, allowed, s.strictDNS)
 		if !ok {
-			stats.GeoDrop++
+			if s.strictDNS {
+				stats.StrictReject++
+			} else {
+				stats.GeoDrop++
+			}
 			continue
 		}
 
@@ -173,7 +173,7 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	}
 
 	var out []netip.Addr
-	seen := map[netip.Addr]bool{}
+	seen := make(map[netip.Addr]bool, len(ips))
 	for _, ip := range ips {
 		if ip.Is4() && !seen[ip] {
 			out = append(out, ip)
@@ -198,6 +198,30 @@ func FirstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[strin
 		country := geofeed.LookupCountry(entries, ip)
 		if allowed[country] {
 			return ip, country, true
+		}
+	}
+	return netip.Addr{}, "", false
+}
+
+// filterAndFirstAllowed scans ips once, checking if all are allowed (strict)
+// and finding the first allowed IP. strict=true requires ALL IPs to be allowed.
+func filterAndFirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool, strict bool) (netip.Addr, string, bool) {
+	for _, ip := range ips {
+		country := geofeed.LookupCountry(entries, ip)
+		if allowed[country] {
+			if !strict {
+				return ip, country, true
+			}
+			// strict mode: found an allowed one, keep checking others
+		} else if strict {
+			return netip.Addr{}, "", false
+		}
+	}
+	if strict {
+		// All IPs passed strict check, return first IP
+		if len(ips) > 0 {
+			country := geofeed.LookupCountry(entries, ips[0])
+			return ips[0], country, true
 		}
 	}
 	return netip.Addr{}, "", false
@@ -310,13 +334,19 @@ func StripKnownTags(s string) string {
 }
 
 func FormatStats(stats Stats) string {
-	parts := []string{
-		fmt.Sprintf("done: total=%d", stats.Total),
-		fmt.Sprintf("kept=%d", stats.Kept),
-		fmt.Sprintf("dns_drop=%d", stats.DNSDrop),
-		fmt.Sprintf("geo_drop=%d", stats.GeoDrop),
-		fmt.Sprintf("strict_reject=%d", stats.StrictReject),
-		fmt.Sprintf("unsupported=%d", stats.Unsupported),
-	}
-	return strings.Join(parts, " ")
+	var b strings.Builder
+	b.Grow(160) // rough upper bound for all stats
+	b.WriteString("done: total=")
+	b.WriteString(strconv.Itoa(stats.Total))
+	b.WriteString(" kept=")
+	b.WriteString(strconv.Itoa(stats.Kept))
+	b.WriteString(" dns_drop=")
+	b.WriteString(strconv.Itoa(stats.DNSDrop))
+	b.WriteString(" geo_drop=")
+	b.WriteString(strconv.Itoa(stats.GeoDrop))
+	b.WriteString(" strict_reject=")
+	b.WriteString(strconv.Itoa(stats.StrictReject))
+	b.WriteString(" unsupported=")
+	b.WriteString(strconv.Itoa(stats.Unsupported))
+	return b.String()
 }

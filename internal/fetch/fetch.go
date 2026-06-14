@@ -35,7 +35,7 @@ const (
 	errNoAllowedCountries = "no allowed countries provided"
 )
 
-var errStoppedRedirects = fmt.Sprintf("stopped after %d redirects", maxRedirects)
+var errStoppedRedirects = errors.New(fmt.Sprintf("stopped after %d redirects", maxRedirects))
 
 func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
@@ -149,7 +149,7 @@ func NewSafeHTTPClient() *http.Client {
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
-				return errors.New(errStoppedRedirects)
+				return errStoppedRedirects
 			}
 			return ValidatePublicHTTPSURL(req.URL.String())
 		},
