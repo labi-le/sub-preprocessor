@@ -1,0 +1,56 @@
+version: 2
+project_name: sub-preprocessor
+
+builds:
+  - id: default
+    main: "./main.go"
+    binary: sub-preprocessor
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+      - mips
+      - mipsle
+      - mips64
+      - mips64le
+    goarm:
+      - "5"
+      - "6"
+      - "7"
+    gomips:
+      - hardfloat
+      - softfloat
+    tags:
+      - netgo
+      - osusergo
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -extldflags '-static'
+
+archives:
+  - id: default
+    formats: [ binary ]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}{{ if .Mips }}_{{ .Mips }}{{ end }}"
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  name_template: 'v{{ .Version }}'
+  make_latest: true

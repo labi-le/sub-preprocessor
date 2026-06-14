@@ -7,6 +7,7 @@ pkgs.mkShell {
     gopls
     gnumake
     golangci-lint
+    goreleaser
   ];
 
   shellHook = ''
