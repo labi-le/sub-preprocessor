@@ -76,7 +76,7 @@ func BenchmarkFirstAllowedIP_Hit(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := preprocess.FirstAllowedIP(entries, ips, allowed)
+		ip, country, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
 		if !ok || country != "GB" || ip.String() != "192.0.2.10" {
 			b.Fatalf("unexpected result: %v %q %v", ip, country, ok)
 		}
@@ -96,7 +96,7 @@ func BenchmarkFirstAllowedIP_Miss(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := preprocess.FirstAllowedIP(entries, ips, allowed)
+		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
 		if ok {
 			b.Fatal("expected miss")
 		}
@@ -119,7 +119,7 @@ func BenchmarkFirstAllowedIP_ManyIPs(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := preprocess.FirstAllowedIP(entries, ips, allowed)
+		ip, country, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
 		if !ok || country != "GB" || ip.String() != "192.0.2.10" {
 			b.Fatalf("unexpected result")
 		}
@@ -139,7 +139,8 @@ func BenchmarkAllIPsAllowed_AllMatch(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if !preprocess.AllIPsAllowed(entries, ips, allowed) {
+		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, true)
+		if !ok {
 			b.Fatal("expected all allowed")
 		}
 	}
@@ -158,7 +159,8 @@ func BenchmarkAllIPsAllowed_OneFails(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if preprocess.AllIPsAllowed(entries, ips, allowed) {
+		_, _, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, true)
+		if ok {
 			b.Fatal("expected not all allowed")
 		}
 	}
@@ -199,7 +201,7 @@ func BenchmarkFilterCore(b *testing.B) {
 		}
 		var output []string
 		for _, node := range nodes {
-			chosenIP, chosenCountry, ok := preprocess.FirstAllowedIP(entries, syntheticIPs, allowed)
+			chosenIP, chosenCountry, ok := preprocess.FilterAndFirstAllowed(entries, syntheticIPs, allowed, false)
 			if !ok {
 				continue
 			}

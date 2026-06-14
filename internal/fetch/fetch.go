@@ -24,18 +24,16 @@ const (
 )
 
 const (
-	defaultHTTPTimeout    = 30 * time.Second
-	maxRedirects          = 10
-	defaultDialTimeout    = 30 * time.Second
-	errNonPublicTarget    = "non-public target is not allowed"
-	errOnlyHTTPS          = "only https URLs are allowed"
-	errURLHostRequired    = "url host is required"
-	errURLUserinfo        = "url userinfo is not allowed"
-	errNotIPv4            = "not an IPv4 address"
-	errNoAllowedCountries = "no allowed countries provided"
+	defaultHTTPTimeout = 30 * time.Second
+	maxRedirects       = 10
+	defaultDialTimeout = 30 * time.Second
+	errNonPublicTarget = "non-public target is not allowed"
+	errOnlyHTTPS       = "only https URLs are allowed"
+	errURLHostRequired = "url host is required"
+	errURLUserinfo     = "url userinfo is not allowed"
 )
 
-var errStoppedRedirects = errors.New(fmt.Sprintf("stopped after %d redirects", maxRedirects))
+var errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
 
 func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {

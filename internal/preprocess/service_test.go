@@ -48,7 +48,7 @@ func TestFirstAllowedIP(t *testing.T) {
 	ips := []netip.Addr{netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.10")}
 	allowed := preprocess.ParseAllowCountries([]string{"DE"})
 
-	ip, country, ok := preprocess.FirstAllowedIP(entries, ips, allowed)
+	ip, country, ok := preprocess.FilterAndFirstAllowed(entries, ips, allowed, false)
 	if !ok || country != "DE" || ip.String() != "198.51.100.10" {
 		t.Fatalf("unexpected firstAllowedIP result: %v %q %v", ip, country, ok)
 	}

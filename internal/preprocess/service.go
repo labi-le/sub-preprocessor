@@ -53,6 +53,27 @@ func NewService(ctx context.Context, geofeedSources []geofeed.Source, refreshInt
 	}, nil
 }
 
+func (s *Service) resolveServers(ctx context.Context, nodes []subscription.Node) map[string][]netip.Addr {
+	uniqueServers := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		if node.Server == "" || node.Port == "" {
+			continue
+		}
+		uniqueServers[node.Server] = struct{}{}
+	}
+
+	resolved := make(map[string][]netip.Addr, len(uniqueServers))
+	for server := range uniqueServers {
+		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
+		ips, resolveErr := resolveIPv4(resolveCtx, server)
+		cancel()
+		if resolveErr == nil && len(ips) > 0 {
+			resolved[server] = ips
+		}
+	}
+	return resolved
+}
+
 func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries []string) ([]string, Stats, error) {
 	entries, err := s.currentEntries(ctx)
 	if err != nil {
@@ -72,27 +93,8 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 	stats := Stats{}
 	output := make([]string, 0, len(nodes))
 
-	// Step 1: collect unique servers for batched DNS resolution
-	uniqueServers := make(map[string]struct{}, len(nodes))
-	for _, node := range nodes {
-		if node.Server == "" || node.Port == "" {
-			continue
-		}
-		uniqueServers[node.Server] = struct{}{}
-	}
+	resolved := s.resolveServers(ctx, nodes)
 
-	// Step 2: resolve all unique servers once and cache results
-	resolved := make(map[string][]netip.Addr, len(uniqueServers))
-	for server := range uniqueServers {
-		resolveCtx, cancel := context.WithTimeout(ctx, s.dnsTimeout)
-		ips, resolveErr := resolveIPv4(resolveCtx, server)
-		cancel()
-		if resolveErr == nil && len(ips) > 0 {
-			resolved[server] = ips
-		}
-	}
-
-	// Step 3: filter loop — look up from resolved map
 	for _, node := range nodes {
 		stats.Total++
 		if node.Server == "" || node.Port == "" {
@@ -106,7 +108,7 @@ func (s *Service) Filter(ctx context.Context, subscriptionURL string, countries 
 			continue
 		}
 
-		chosenIP, chosenCountry, ok := filterAndFirstAllowed(entries, ips, allowed, s.strictDNS)
+		chosenIP, chosenCountry, ok := FilterAndFirstAllowed(entries, ips, allowed, s.strictDNS)
 		if !ok {
 			if s.strictDNS {
 				stats.StrictReject++
@@ -183,29 +185,9 @@ func resolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
 	return out, nil
 }
 
-func AllIPsAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) bool {
-	for _, ip := range ips {
-		if !allowed[geofeed.LookupCountry(entries, ip)] {
-			return false
-		}
-	}
-	return true
-}
-
-func FirstAllowedIP(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool) (netip.Addr, string, bool) {
-	for i := range ips {
-		ip := ips[i]
-		country := geofeed.LookupCountry(entries, ip)
-		if allowed[country] {
-			return ip, country, true
-		}
-	}
-	return netip.Addr{}, "", false
-}
-
-// filterAndFirstAllowed scans ips once, checking if all are allowed (strict)
+// FilterAndFirstAllowed scans ips once, checking if all are allowed (strict)
 // and finding the first allowed IP. strict=true requires ALL IPs to be allowed.
-func filterAndFirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool, strict bool) (netip.Addr, string, bool) {
+func FilterAndFirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed map[string]bool, strict bool) (netip.Addr, string, bool) {
 	for _, ip := range ips {
 		country := geofeed.LookupCountry(entries, ip)
 		if allowed[country] {
@@ -335,7 +317,8 @@ func StripKnownTags(s string) string {
 
 func FormatStats(stats Stats) string {
 	var b strings.Builder
-	b.Grow(160) // rough upper bound for all stats
+	const growSize = 160
+	b.Grow(growSize) // rough upper bound for all stats
 	b.WriteString("done: total=")
 	b.WriteString(strconv.Itoa(stats.Total))
 	b.WriteString(" kept=")
