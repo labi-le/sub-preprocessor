@@ -59,6 +59,22 @@ func ParseAllowed(parts ...string) CountrySet {
 	return set
 }
 
+// All returns a CountrySet with every valid 2-letter country code set.
+func All() CountrySet {
+	var set CountrySet
+	for i := range set {
+		set[i] = ^uint64(0)
+	}
+	return set
+}
+
+// Exclude unsets every country code that is present in other.
+func (s *CountrySet) Exclude(other CountrySet) {
+	for i := range s {
+		s[i] &^= other[i]
+	}
+}
+
 func parseCountryPart(set *CountrySet, part string) {
 	start := 0
 	for start < len(part) && (part[start] == ' ' || part[start] == '\t' || part[start] == '\n' || part[start] == '\r') {

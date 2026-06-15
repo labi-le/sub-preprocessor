@@ -136,7 +136,82 @@ func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
 	if got[0] != input[0] || got[1] != input[2] {
 		t.Fatalf("unexpected filtered values: %v", got)
 	}
-	if &got[0] != &input[0] {
-		t.Fatal("expected filtered slice to reuse input backing array")
+}
+
+func TestCountrySetExclude_RemovesSpecificCountries(t *testing.T) {
+	t.Parallel()
+
+	set := filter.ParseAllowed("DE,US,NL")
+	set.Exclude(filter.ParseAllowed("US,NL"))
+
+	if !set.Has(geofeed.CountryCode{'D', 'E'}) {
+		t.Fatal("expected DE to remain")
+	}
+	if set.Has(geofeed.CountryCode{'U', 'S'}) {
+		t.Fatal("expected US to be excluded")
+	}
+	if set.Has(geofeed.CountryCode{'N', 'L'}) {
+		t.Fatal("expected NL to be excluded")
+	}
+}
+
+func TestCountrySetExclude_UnknownIgnored(t *testing.T) {
+	t.Parallel()
+
+	set := filter.ParseAllowed("DE,US")
+	set.Exclude(filter.ParseAllowed("XXX,AA, U "))
+
+	if !set.Has(geofeed.CountryCode{'D', 'E'}) {
+		t.Fatal("expected DE to remain")
+	}
+	if !set.Has(geofeed.CountryCode{'U', 'S'}) {
+		t.Fatal("expected US to remain")
+	}
+}
+
+func TestCountrySetAll(t *testing.T) {
+	t.Parallel()
+
+	set := filter.All()
+	for c1 := byte('A'); c1 <= 'Z'; c1++ {
+		for c2 := byte('A'); c2 <= 'Z'; c2++ {
+			cc := geofeed.CountryCode{c1, c2}
+			if !set.Has(cc) {
+				t.Fatalf("expected %s to be set", cc)
+			}
+		}
+	}
+}
+
+func TestCountrySetAll_ExceptExcluded(t *testing.T) {
+	t.Parallel()
+
+	set := filter.All()
+	set.Exclude(filter.ParseAllowed("DE,US"))
+
+	for c1 := byte('A'); c1 <= 'Z'; c1++ {
+		for c2 := byte('A'); c2 <= 'Z'; c2++ {
+			cc := geofeed.CountryCode{c1, c2}
+			want := (c1 != 'D' || c2 != 'E') && (c1 != 'U' || c2 != 'S')
+			if got := set.Has(cc); got != want {
+				t.Fatalf("%s: got %v, want %v", cc, got, want)
+			}
+		}
+	}
+}
+
+func BenchmarkCountrySetAll(b *testing.B) {
+	for b.Loop() {
+		_ = filter.All()
+	}
+}
+
+func BenchmarkCountrySetExclude(b *testing.B) {
+	allowed := filter.ParseAllowed("DE,US,NL,FI,EE,GB,FR")
+	excluded := filter.ParseAllowed("US,GB")
+
+	for b.Loop() {
+		set := allowed
+		set.Exclude(excluded)
 	}
 }

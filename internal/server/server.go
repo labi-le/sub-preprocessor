@@ -87,23 +87,40 @@ func New(logger zerolog.Logger, listen string, svc Filterer, groupsMap map[strin
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 
-	app.Get("/", func(c *fiber.Ctx) error {
+	app.Get("/", newIndexHandler(svc, groupsMap))
+
+	return &Server{listen: listen, app: app, logger: logger}
+}
+
+func newIndexHandler(svc Filterer, groupsMap map[string][]string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
 		rawSubscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
 		subURL := fetch.SubscriptionURL(rawSubscriptionURL)
 		rawCountries := c.Query("countries")
 		rawGroups := c.Query("groups")
+		rawExcludeCountries := c.Query("exclude_countries")
+		rawExcludeGroups := c.Query("exclude_groups")
 
 		if rawSubscriptionURL == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "subscription_url is required")
 		}
-		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
-			return fiber.NewError(fiber.StatusBadRequest, "countries or groups is required")
+		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" &&
+			strings.TrimSpace(rawExcludeCountries) == "" && strings.TrimSpace(rawExcludeGroups) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "countries, groups, exclude_countries or exclude_groups is required")
 		}
 		if err := fetch.ValidatePublicHTTPSURL(subURL); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
-		allowed := buildAllowedCountries(rawCountries, rawGroups, groupsMap)
+		allowed := buildCountrySet(rawCountries, rawGroups, groupsMap)
+		excluded := buildCountrySet(rawExcludeCountries, rawExcludeGroups, groupsMap)
+		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
+			allowed = filter.All()
+		}
+		allowed.Exclude(excluded)
+		if isEmpty(allowed) {
+			return fiber.NewError(fiber.StatusBadRequest, "no allowed countries left after exclusions")
+		}
 
 		var sb bytes.Buffer
 		// Pre-allocate some reasonable capacity to avoid reallocations
@@ -123,12 +140,10 @@ func New(logger zerolog.Logger, listen string, svc Filterer, groupsMap map[strin
 
 		sb.WriteByte('\n')
 		return c.Send(sb.Bytes())
-	})
-
-	return &Server{listen: listen, app: app, logger: logger}
+	}
 }
 
-func buildAllowedCountries(rawCountries, rawGroups string, groupsMap map[string][]string) filter.CountrySet {
+func buildCountrySet(rawCountries, rawGroups string, groupsMap map[string][]string) filter.CountrySet {
 	var parts []string
 	if rawCountries != "" {
 		parts = append(parts, rawCountries)
@@ -142,6 +157,15 @@ func buildAllowedCountries(rawCountries, rawGroups string, groupsMap map[string]
 		}
 	}
 	return filter.ParseAllowed(parts...)
+}
+
+func isEmpty(set filter.CountrySet) bool {
+	for _, v := range set {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) Listen() error {

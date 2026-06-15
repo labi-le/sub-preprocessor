@@ -139,8 +139,12 @@ Country filtering using a compact bitset (`[11]uint64`) for O(1) lookup of 2-let
 **Key functions:**
 - `(*CountrySet).Has(country CountryCode) bool` — O(1) check
 - `(*CountrySet).Add(part string)` — add a single country code (whitespace trimmed, case normalized)
+- `(*CountrySet).Exclude(other CountrySet)` — remove one set from another
+- `All() CountrySet` — return a set with all 2-letter codes set
 - `ParseAllowed(parts ...string) CountrySet` — parse `"DE,US,  nl  "` or `"DE", "US", "nl"` into bitset (uses `strings.SplitSeq`)
 - `AllAllowed(lookup, ips, allowed) []netip.Addr` — filter IPs by allowed countries by compacting the input slice in place
+
+When no `countries`/`groups` are provided, the server can start with `All()` and subtract `exclude_countries`/`exclude_groups` to implement an inverted filter.
 
 **Uses:** `geofeed`
 **Tags:** `filter`, `country`, `bitset`, `geo`, `permit`
@@ -234,7 +238,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 - `PipelineContext` — request-scoped state shared across filters (`Buffer`, `Lookup`, `Allowed`, `Resolved`, `Stats`, `IsFirstNode`)
 - `Filter` — interface for workflow stages; `Process(ctx, ips, pctx)`
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
-- `ASNFilter` — drops IPs matching ASN deny patterns (country check removed; ASN only evaluates deny patterns)
+- `ASNFilter` — drops IPs matching ASN deny patterns AND IPs whose Cymru-resolved country is not in `AllowedCountries` (so country filtering works without a geofeed stage)
 - `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`)
 - `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
@@ -242,7 +246,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 - `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed, build filter chain
 - `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
 - `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy shared resolver results into request-local storage
-- `buildFilters(stages, asnR, patterns) []Filter` — construct sequential filter pipeline from config
+- `buildFilters(stages, asnR, patterns) []Filter` — construct filter pipeline; always appends a `GeofeedFilter` last even when `"geofeed"` is not explicitly listed, so that `AllowedCountries` (from `countries`/`groups`/`exclude_*`) is always enforced
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
 **Uses:** `asn`, `config`, `filter`, `geofeed`, `resolver`, `rewrite`, `subscription`
@@ -256,16 +260,25 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 
 HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription.
 
+The root handler now accepts:
+- `subscription_url` (required)
+- `countries` / `groups` — additive allowed countries
+- `exclude_countries` / `exclude_groups` — countries to remove from the allowed set
+
+If only exclusion params are provided (i.e. `countries` and `groups` are both absent), the allowed set starts from `filter.All()` (every country) minus the exclusions. If `countries`/`groups` are present but produce an empty set, the fallback to `All()` is not applied, so the request fails with `400` when nothing remains. If exclusions remove every allowed country, the request also returns `400`.
+
 **Key types:**
 - `Filterer` — interface `Filter(ctx, b, req preprocess.FilterRequest) (Stats, error)`
 - `Server` — `listen` + `fiber.App`
 
 **Key functions:**
-- `New(logger, listen, svc, groupsMap) *Server` — `groupsMap` expands named `groups` query values into country codes before filtering
+- `New(logger, listen, svc, groupsMap) *Server` — wires Fiber, logging, and the filter handler
+- `newIndexHandler(svc, groupsMap) fiber.Handler` — root handler implementation: validates URL, builds allowed/excluded sets, and calls `Filterer`
+- `buildCountrySet(rawCountries, rawGroups, groupsMap) CountrySet` — HTTP-layer group expansion (used for both allowed and excluded sets)
+- `isEmpty(set) bool` — checks whether a `CountrySet` has any country set
 - `(*Server).Listen() error`
 - `(*Server).Shutdown(ctx) error`
 - `(*Server).TestApp() *fiber.App` — for test usage
-- `buildAllowedCountries(rawCountries, rawGroups, groupsMap) CountrySet` — HTTP-layer group expansion
 
 **Uses:** `fetch`, `preprocess`, `fiber`
 **Tags:** `http`, `fiber`, `api`, `handler`, `server`, `healthz`

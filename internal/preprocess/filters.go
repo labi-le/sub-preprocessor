@@ -14,6 +14,11 @@ type Filter interface {
 	Process(ctx context.Context, ips []netip.Addr, pctx *PipelineContext) []netip.Addr
 }
 
+// asnResolver resolves an IP to ASN metadata.
+type asnResolver interface {
+	Resolve(ctx context.Context, ip netip.Addr) (asn.Result, error)
+}
+
 // GeofeedFilter returns IPs whose geofeed country is in the allowed set.
 type GeofeedFilter struct{}
 
@@ -29,9 +34,11 @@ func (f *GeofeedFilter) Process(_ context.Context, ips []netip.Addr, pctx *Pipel
 	return result
 }
 
-// ASNFilter drops nodes whose AS name matches configured deny patterns.
+// ASNFilter drops nodes whose AS name matches configured deny patterns
+// and whose ASN-resolved country is not in the allowed set.
+// and whose ASN country is not in the allowed set.
 type ASNFilter struct {
-	resolver *asn.Resolver
+	resolver asnResolver
 	patterns []*regexp.Regexp
 }
 
@@ -39,22 +46,13 @@ func NewASNFilter(resolver *asn.Resolver, patterns []*regexp.Regexp) *ASNFilter 
 	return &ASNFilter{resolver: resolver, patterns: patterns}
 }
 
-func (f *ASNFilter) isAllowed(ctx context.Context, ip netip.Addr) bool {
-	if f.resolver == nil {
-		return true
-	}
-	result, err := f.resolver.Resolve(ctx, ip)
-	if err != nil {
-		return true
-	}
-	if result.Name != "" {
-		for _, pattern := range f.patterns {
-			if pattern.MatchString(result.Name) {
-				return false
-			}
+func (f *ASNFilter) isNameDenied(name string) bool {
+	for _, pattern := range f.patterns {
+		if pattern.MatchString(name) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, pctx *PipelineContext) []netip.Addr {
@@ -62,27 +60,50 @@ func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, pctx *Pipelin
 		return ips
 	}
 	n := 0
+	asnDrop := false
+	geoDrop := false
 	for _, ip := range ips {
-		if f.isAllowed(ctx, ip) {
+		result, err := f.resolver.Resolve(ctx, ip)
+		if err != nil {
 			ips[n] = ip
 			n++
+			continue
 		}
+		if result.Name != "" && f.isNameDenied(result.Name) {
+			asnDrop = true
+			continue
+		}
+		if !pctx.Allowed.Has(result.Country) {
+			geoDrop = true
+			continue
+		}
+		ips[n] = ip
+		n++
 	}
 	if n == 0 {
-		pctx.Stats.ASNDrop++
+		if asnDrop {
+			pctx.Stats.ASNDrop++
+		} else if geoDrop {
+			pctx.Stats.GeoDrop++
+		}
 	}
 	return ips[:n]
 }
 
 func buildFilters(stages []string, asnR *asn.Resolver, patterns []*regexp.Regexp) []Filter {
-	filters := make([]Filter, 0, len(stages))
+	filters := make([]Filter, 0, len(stages)+1)
+	hasGeofeed := false
 	for _, name := range stages {
 		switch name {
 		case "geofeed":
 			filters = append(filters, NewGeofeedFilter())
+			hasGeofeed = true
 		case "asn":
 			filters = append(filters, NewASNFilter(asnR, patterns))
 		}
+	}
+	if !hasGeofeed {
+		filters = append(filters, NewGeofeedFilter())
 	}
 	return filters
 }
