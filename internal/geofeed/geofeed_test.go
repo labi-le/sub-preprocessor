@@ -3,7 +3,6 @@ package geofeed_test
 import (
 	"context"
 	"net/netip"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -26,13 +25,9 @@ func TestParseAndLookupCountry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Prefix.Bits() > entries[j].Prefix.Bits()
-	})
-
 	lookup := geofeed.NewLookup(entries)
 
-	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("198.51.100.10")); got != "NL" {
+	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("198.51.100.10")); got != (geofeed.CountryCode{'N', 'L'}) {
 		t.Fatalf("unexpected country: %q", got)
 	}
 }
@@ -62,11 +57,11 @@ func TestGstaticGeofeedLive(t *testing.T) {
 	// Verify lookup works for known Google IPs.
 	lookup := geofeed.NewLookup(entries)
 
-	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("8.8.8.8")); got != "US" {
+	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("8.8.8.8")); got != (geofeed.CountryCode{'U', 'S'}) {
 		t.Logf("expected 8.8.8.8 → US, got %q (possibly changed)", got)
 	}
 
-	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("142.250.80.46")); got == "" {
+	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("142.250.80.46")); got == (geofeed.CountryCode{}) {
 		t.Logf("expected known Google IP to resolve to a country, got empty (possibly changed)")
 	}
 }
@@ -107,7 +102,7 @@ func TestExtraGeofeedsLive(t *testing.T) {
 			}
 
 			// Collect unique countries for reporting.
-			countries := make(map[string]int)
+			countries := make(map[geofeed.CountryCode]int)
 			for _, e := range entries {
 				countries[e.Country]++
 			}

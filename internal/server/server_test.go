@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"domains.lst/sub-preprocessor/internal/filter"
+	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/server"
 	"github.com/rs/zerolog"
@@ -23,14 +25,16 @@ func (stubService) Filter(_ context.Context, b *bytes.Buffer, _ preprocess.Filte
 }
 
 type recordingService struct {
-	called bool
-	ctx    context.Context
-	err    error
+	called  bool
+	ctx     context.Context
+	allowed filter.CountrySet
+	err     error
 }
 
-func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
+func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error) {
 	s.called = true
 	s.ctx = ctx
+	s.allowed = req.AllowedCountries
 	if s.err != nil {
 		return preprocess.Stats{}, s.err
 	}
@@ -45,7 +49,7 @@ func nopLogger() zerolog.Logger {
 func TestServerReturnsPlainText(t *testing.T) {
 	t.Parallel()
 
-	srv := server.New(nopLogger(), ":8080", stubService{})
+	srv := server.New(nopLogger(), ":8080", stubService{}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -69,7 +73,11 @@ func TestServerReturnsPlainText(t *testing.T) {
 func TestServerAcceptsGroupsInsteadOfCountries(t *testing.T) {
 	t.Parallel()
 
-	srv := server.New(nopLogger(), ":8080", stubService{})
+	groups := map[string][]string{
+		"nordics": {"FI", "SE", "NO", "DK"},
+	}
+	svc := &recordingService{}
+	srv := server.New(nopLogger(), ":8080", svc, groups)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -85,8 +93,20 @@ func TestServerAcceptsGroupsInsteadOfCountries(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "vless://test") {
+	if !strings.Contains(string(body), "vless://node#ok") {
 		t.Fatalf("unexpected body: %q", body)
+	}
+	if !svc.called {
+		t.Fatal("service should be called")
+	}
+	if !svc.allowed.Has(geofeed.CountryCode{'F', 'I'}) {
+		t.Fatal("expected FI from nordics group")
+	}
+	if !svc.allowed.Has(geofeed.CountryCode{'S', 'E'}) {
+		t.Fatal("expected SE from nordics group")
+	}
+	if svc.allowed.Has(geofeed.CountryCode{'D', 'E'}) {
+		t.Fatal("unexpected DE (not in group)")
 	}
 }
 
@@ -94,7 +114,7 @@ func TestServerRejectsMissingBothCountriesAndGroups(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -114,7 +134,7 @@ func TestServerRejectsNonHTTPSSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=http://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -134,7 +154,7 @@ func TestServerRejectsLocalSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://127.0.0.1/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -154,7 +174,7 @@ func TestServerUsesRequestContext(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 
 	resp, err := srv.TestApp().Test(req)
@@ -175,7 +195,7 @@ func TestServerReturnsNoContentForFavicon(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -203,7 +223,7 @@ func TestServerHidesInternalErrors(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{err: errors.New("dial tcp 10.0.0.5:443: i/o timeout")}
-	srv := server.New(nopLogger(), ":8080", svc)
+	srv := server.New(nopLogger(), ":8080", svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {

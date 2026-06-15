@@ -13,12 +13,17 @@ import (
 
 const maxSubscriptionSize = 10 << 20
 
+// doubleSlash is the URI scheme delimiter. Kept as a package-level
+// var []byte so the compiler can reference it as a static constant
+// in bytes.Contains calls without allocating.
 var doubleSlash = []byte("://")
-var authoritySeparators = []byte{'/', '?', '#'}
+
+// Scheme is a strict URI scheme type.
+type Scheme string
 
 type Node struct {
 	Raw         string
-	Scheme      string
+	Scheme      Scheme
 	Name        string
 	Server      string
 	Port        string
@@ -43,7 +48,7 @@ func Parse(body []byte, yield func(Node) bool) {
 		if line == nil {
 			return
 		}
-		if bytes.Contains(line, doubleSlash) {
+		if strings.Contains(ioutil.UnsafeString(line), "://") {
 			if node, ok := parseNode(ioutil.UnsafeString(line)); ok {
 				if !yield(node) {
 					return
@@ -64,15 +69,20 @@ func parseNode(line string) (Node, bool) {
 		return Node{}, false
 	}
 
-	scheme := line[:idx]
+	scheme := Scheme(line[:idx])
 	rest := line[idx+3:] // after "://"
 
 	// Find end of authority section: '/', '?', '#', or end of string.
+	// Explicit IndexByte calls are faster than IndexAny for short authority strings.
 	authEnd := len(rest)
-	for _, sep := range authoritySeparators {
-		if j := strings.IndexByte(rest, sep); j >= 0 && j < authEnd {
-			authEnd = j
-		}
+	if j := strings.IndexByte(rest, '/'); j >= 0 && j < authEnd {
+		authEnd = j
+	}
+	if j := strings.IndexByte(rest, '?'); j >= 0 && j < authEnd {
+		authEnd = j
+	}
+	if j := strings.IndexByte(rest, '#'); j >= 0 && j < authEnd {
+		authEnd = j
 	}
 
 	authority := rest[:authEnd]
@@ -142,32 +152,37 @@ func Normalize(body []byte) []byte {
 		return body
 	}
 
-	compact := ioutil.UnsafeString(body)
-	compact = strings.ReplaceAll(compact, "\n", "")
-	compact = strings.ReplaceAll(compact, "\r", "")
-	compact = strings.ReplaceAll(compact, "\t", "")
-	compact = strings.ReplaceAll(compact, " ", "")
+	s := stripWhitespace(ioutil.UnsafeString(body))
 
-	if decoded, err := base64.StdEncoding.DecodeString(compact); err == nil && hasSchemePrefix(decoded) {
+	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil && bytes.Contains(decoded, doubleSlash) {
 		return bytes.TrimSpace(decoded)
 	}
-	if decoded, err := base64.RawStdEncoding.DecodeString(compact); err == nil && hasSchemePrefix(decoded) {
+	if decoded, err := base64.RawStdEncoding.DecodeString(s); err == nil && bytes.Contains(decoded, doubleSlash) {
 		return bytes.TrimSpace(decoded)
 	}
 
 	return body
 }
 
-// hasSchemePrefix checks if the body starts with a known URI scheme.
-func hasSchemePrefix(body []byte) bool {
-	return bytes.HasPrefix(body, []byte("vless://")) ||
-		bytes.HasPrefix(body, []byte("vmess://")) ||
-		bytes.HasPrefix(body, []byte("trojan://")) ||
-		bytes.HasPrefix(body, []byte("ss://")) ||
-		bytes.HasPrefix(body, []byte("ssr://")) ||
-		bytes.HasPrefix(body, []byte("tuic://")) ||
-		bytes.HasPrefix(body, []byte("hysteria2://")) ||
-		bytes.HasPrefix(body, []byte("hysteria://")) ||
-		bytes.HasPrefix(body, []byte("wireguard://")) ||
-		bytes.Contains(body, doubleSlash)
+func stripWhitespace(s string) string {
+	for i := range len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			goto slow
+		}
+	}
+	return s
+
+slow:
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := range len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }

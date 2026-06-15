@@ -8,20 +8,16 @@ import (
 )
 
 const (
-	countryCodeLen = 2
-	alphabetSize   = 26
-	bitsPerUint64  = 64
-	toUpperOffset  = 32
+	alphabetSize  = 26
+	bitsPerUint64 = 64
+	toUpperOffset = 32
 )
 
 // CountrySet is a bitset for 2-letter country codes (AA-ZZ).
 // 26 * 26 = 676 bits required. 11 * 64 = 704 bits.
 type CountrySet [11]uint64
 
-func (s *CountrySet) Has(country string) bool {
-	if len(country) != countryCodeLen {
-		return false
-	}
+func (s *CountrySet) Has(country geofeed.CountryCode) bool {
 	c1, c2 := country[0], country[1]
 	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
 		return false
@@ -30,79 +26,37 @@ func (s *CountrySet) Has(country string) bool {
 	return (s[idx/bitsPerUint64] & (1 << (idx % bitsPerUint64))) != 0
 }
 
-func FirstAllowed(lookup geofeed.CountryLookup, ips []netip.Addr, allowed CountrySet, strict bool) (netip.Addr, string, bool) {
-	for _, ip := range ips {
-		country := geofeed.LookupCountry(lookup, ip)
-		if allowed.Has(country) {
-			if !strict {
-				return ip, country, true
-			}
-		} else if strict {
-			return netip.Addr{}, "", false
-		}
-	}
-	if strict {
-		if len(ips) > 0 {
-			country := geofeed.LookupCountry(lookup, ips[0])
-			return ips[0], country, true
-		}
-	}
-	return netip.Addr{}, "", false
-}
-
-// AllAllowed returns all IPs from ips whose country is in the allowed set.
+// AllAllowed compacts ips in-place and returns the allowed prefix sub-slice.
+// Callers must not rely on the input slice contents remaining unchanged.
 func AllAllowed(lookup geofeed.CountryLookup, ips []netip.Addr, allowed CountrySet) []netip.Addr {
-	result := make([]netip.Addr, 0, len(ips))
+	n := 0
 	for _, ip := range ips {
 		country := geofeed.LookupCountry(lookup, ip)
 		if allowed.Has(country) {
-			result = append(result, ip)
+			ips[n] = ip
+			n++
 		}
 	}
-	return result
+	return ips[:n]
 }
 
-func ParseAllowCountries(raw string) CountrySet {
-	var set CountrySet
-	for part := range strings.SplitSeq(raw, ",") {
-		parseCountryPart(&set, part)
-	}
-	return set
+// Add parses a single country code string and adds it to the set.
+// Whitespace is trimmed, case is normalized to uppercase, and
+// non-2-letter or non-ASCII strings are silently ignored.
+func (s *CountrySet) Add(part string) {
+	parseCountryPart(s, part)
 }
 
-// ParseAllowed parses rawCountries (comma-separated) and rawGroups (comma-separated),
-// looking up each group in groupsMap to expand into individual country codes.
-func ParseAllowed(rawCountries string, rawGroups string, groupsMap map[string][]string) CountrySet {
+// ParseAllowed parses one or more comma-separated lists of 2-letter country codes
+// into a CountrySet. Each part may itself contain commas for sub-splitting.
+func ParseAllowed(parts ...string) CountrySet {
 	var set CountrySet
-	for part := range strings.SplitSeq(rawCountries, ",") {
-		parseCountryPart(&set, part)
-	}
-	for part := range strings.SplitSeq(rawGroups, ",") {
-		part = trimSpace(part)
-		if part == "" {
-			continue
-		}
-		countries, ok := groupsMap[part]
-		if !ok {
-			continue
-		}
-		for _, c := range countries {
-			parseCountryPart(&set, c)
+	for _, part := range parts {
+		for sub := range strings.SplitSeq(part, ",") {
+			set.Add(sub)
 		}
 	}
 	return set
-}
-
-func trimSpace(s string) string {
-	start := 0
-	for start < len(s) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	end := len(s)
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
 }
 
 func parseCountryPart(set *CountrySet, part string) {
@@ -115,7 +69,7 @@ func parseCountryPart(set *CountrySet, part string) {
 		end--
 	}
 
-	if end-start == countryCodeLen {
+	if end-start == 2 { //nolint:mnd // ISO 3166-1 alpha-2 length
 		c1 := part[start]
 		c2 := part[start+1]
 		if c1 >= 'a' && c1 <= 'z' {

@@ -31,7 +31,7 @@ This is a small HTTP preprocessor for Mihomo-compatible subscription content.
 
 Current behavior in one line:
 
-1. accepts `subscription_url` + `countries` via HTTP query params
+1. accepts `subscription_url` + `countries` (or `groups` referencing `config.groups`) via HTTP query params
 2. downloads subscription text
 3. parses generic URI-style nodes (not VLESS-only anymore)
 4. resolves node hostnames
@@ -92,7 +92,7 @@ Important keys:
 - `GET /healthz` returns `ok`
 - `GET /` requires:
   - `subscription_url`
-  - `countries` (comma-separated)
+  - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`)
 - Response is `text/plain; charset=utf-8`
 - Stats are returned in `X-Preprocessor-Stats`
 
@@ -100,6 +100,7 @@ Example:
 
 ```bash
 curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries=FI,EE,LV,LT,SE,PL,DE,NL"
+curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&groups=nordics,euronorth"
 ```
 
 ## Bench / performance notes
@@ -113,7 +114,7 @@ curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries
   - skipping non-URI lines during subscription parse
 - Still-hot areas worth revisiting before large refactors:
   - `internal/subscription.Parse`
-  - `internal/preprocess.ParseAllowCountries`
+  - `internal/filter.ParseAllowed`
   - IPv6 support in resolver/filter path is still incomplete / not yet generalized
 
 ## Project layout

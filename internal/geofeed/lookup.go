@@ -1,39 +1,28 @@
 package geofeed
 
-import "net/netip"
-
-const ipv4Bits = 32
+import (
+	"net/netip"
+	"sort"
+)
 
 type CountryLookup interface {
-	LookupCountry(ip netip.Addr) string
+	LookupCountry(ip netip.Addr) CountryCode
 }
 
-type LinearLookup struct {
-	entries []Entry
+// ipRange represents an IPv4 CIDR range with its associated country.
+type ipRange struct {
+	start   uint32
+	end     uint32
+	country CountryCode
 }
 
-func NewLinearLookup(entries []Entry) *LinearLookup {
-	return &LinearLookup{entries: entries}
+type indexedLookup struct {
+	v4 []ipRange
+	v6 []Entry
 }
 
-func (l *LinearLookup) LookupCountry(ip netip.Addr) string {
-	for _, e := range l.entries {
-		if e.Prefix.Contains(ip) {
-			return e.Country
-		}
-	}
-	return ""
-}
-
-type IndexedLookup struct {
-	v4ByBits [ipv4Bits + 1]map[uint32]string
-	v4Bits   []uint8
-	v6       []Entry
-}
-
-func NewIndexedLookup(entries []Entry) *IndexedLookup {
-	lookup := &IndexedLookup{}
-	var present [ipv4Bits + 1]bool
+func newIndexedLookup(entries []Entry) *indexedLookup {
+	lookup := &indexedLookup{}
 
 	for _, entry := range entries {
 		prefix := entry.Prefix.Masked()
@@ -43,41 +32,69 @@ func NewIndexedLookup(entries []Entry) *IndexedLookup {
 			continue
 		}
 
-		bits := prefix.Bits()
-		if lookup.v4ByBits[bits] == nil {
-			lookup.v4ByBits[bits] = make(map[uint32]string)
-			present[bits] = true
-		}
-
-		key := maskIPv4(addrToUint32(addr), uint8(bits))
-		if _, exists := lookup.v4ByBits[bits][key]; !exists {
-			lookup.v4ByBits[bits][key] = entry.Country
-		}
+		r := ipv4PrefixRange(prefix, entry.Country)
+		lookup.v4 = append(lookup.v4, r)
 	}
 
-	for bits := ipv4Bits; bits >= 0; bits-- {
-		if present[bits] {
-			lookup.v4Bits = append(lookup.v4Bits, uint8(bits))
+	// Sort IPv4 ranges by start IP ascending.
+	// For ties on start, sort by bits descending (more specific = later).
+	// This ensures binary search picks the most specific entry for an IP.
+	sort.Slice(lookup.v4, func(i, j int) bool {
+		if lookup.v4[i].start != lookup.v4[j].start {
+			return lookup.v4[i].start < lookup.v4[j].start
 		}
-	}
+		// Longer prefix = smaller range = higher priority = come last
+		return (lookup.v4[i].end - lookup.v4[i].start) > (lookup.v4[j].end - lookup.v4[j].start)
+	})
+
+	// Sort IPv6 entries by prefix length descending (most specific first).
+	// The linear scan depends on this ordering for correct longest-prefix-match.
+	sort.Slice(lookup.v6, func(i, j int) bool {
+		return lookup.v6[i].Prefix.Bits() > lookup.v6[j].Prefix.Bits()
+	})
 
 	return lookup
 }
 
-//nolint:ireturn // constructor intentionally returns the lookup interface
-func NewLookup(entries []Entry) CountryLookup {
-	return NewIndexedLookup(entries)
+// ipv4PrefixRange computes the start/end IP addresses for an IPv4 CIDR prefix.
+func ipv4PrefixRange(prefix netip.Prefix, country CountryCode) ipRange {
+	addr := prefix.Addr()
+	ip := addrToUint32(addr)
+	bits := prefix.Bits()
+	if bits == 0 {
+		return ipRange{start: 0, end: ^uint32(0), country: country}
+	}
+	mask := ^uint32(0) << (32 - bits) //nolint:mnd // IPv4 = 32 bits
+	start := ip & mask
+	end := start | ^mask
+	return ipRange{start: start, end: end, country: country}
 }
 
-func (l *IndexedLookup) LookupCountry(ip netip.Addr) string {
+//nolint:ireturn // constructor intentionally returns the lookup interface
+func NewLookup(entries []Entry) CountryLookup {
+	return newIndexedLookup(entries)
+}
+
+func (l *indexedLookup) LookupCountry(ip netip.Addr) CountryCode {
 	if ip.Is4() {
 		ip32 := addrToUint32(ip)
-		for _, bits := range l.v4Bits {
-			if country, ok := l.v4ByBits[bits][maskIPv4(ip32, bits)]; ok {
-				return country
+		// Binary search: find first entry where start > ip32,
+		// then check the entry just before that (largest start <= ip32).
+		idx := sort.Search(len(l.v4), func(i int) bool {
+			return l.v4[i].start > ip32
+		})
+		// Walk backwards through entries with start <= ip32.
+		// The first one whose range covers ip32 wins (most specific due to sort order).
+		for idx > 0 {
+			idx--
+			if ip32 <= l.v4[idx].end {
+				return l.v4[idx].country
 			}
+			// If this entry's start < last checked entry's start, and it didn't cover,
+			// no earlier entry can cover either (all earlier entries have start <= this start).
+			// But to be safe, we just continue.
 		}
-		return ""
+		return CountryCode{}
 	}
 
 	for _, entry := range l.v6 {
@@ -85,12 +102,12 @@ func (l *IndexedLookup) LookupCountry(ip netip.Addr) string {
 			return entry.Country
 		}
 	}
-	return ""
+	return CountryCode{}
 }
 
-func LookupCountry(lookup CountryLookup, ip netip.Addr) string {
+func LookupCountry(lookup CountryLookup, ip netip.Addr) CountryCode {
 	if lookup == nil {
-		return ""
+		return CountryCode{}
 	}
 	return lookup.LookupCountry(ip)
 }
@@ -98,11 +115,4 @@ func LookupCountry(lookup CountryLookup, ip netip.Addr) string {
 func addrToUint32(addr netip.Addr) uint32 {
 	a4 := addr.As4()
 	return uint32(a4[0])<<24 | uint32(a4[1])<<16 | uint32(a4[2])<<8 | uint32(a4[3])
-}
-
-func maskIPv4(value uint32, bits uint8) uint32 {
-	if bits == 0 {
-		return 0
-	}
-	return value & (^uint32(0) << (ipv4Bits - bits))
 }

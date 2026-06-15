@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog"
@@ -26,10 +27,11 @@ type Server struct {
 
 const defaultBuilderCapacity = 4096
 
-func New(logger zerolog.Logger, listen string, svc Filterer) *Server {
+func New(logger zerolog.Logger, listen string, svc Filterer, groupsMap map[string][]string) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
 		code := fiber.StatusInternalServerError
-		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok && fiberErr != nil {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
 			code = fiberErr.Code
 		}
 
@@ -101,14 +103,15 @@ func New(logger zerolog.Logger, listen string, svc Filterer) *Server {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
+		allowed := buildAllowedCountries(rawCountries, rawGroups, groupsMap)
+
 		var sb bytes.Buffer
 		// Pre-allocate some reasonable capacity to avoid reallocations
 		sb.Grow(defaultBuilderCapacity)
 
 		req := preprocess.FilterRequest{
-			SubscriptionURL: subURL,
-			RawCountries:    rawCountries,
-			RawGroups:       rawGroups,
+			SubscriptionURL:  subURL,
+			AllowedCountries: allowed,
 		}
 		stats, err := svc.Filter(c.Context(), &sb, req)
 		if err != nil {
@@ -123,6 +126,22 @@ func New(logger zerolog.Logger, listen string, svc Filterer) *Server {
 	})
 
 	return &Server{listen: listen, app: app, logger: logger}
+}
+
+func buildAllowedCountries(rawCountries, rawGroups string, groupsMap map[string][]string) filter.CountrySet {
+	var parts []string
+	if rawCountries != "" {
+		parts = append(parts, rawCountries)
+	}
+	if rawGroups != "" {
+		for part := range strings.SplitSeq(rawGroups, ",") {
+			part = strings.TrimSpace(part)
+			if countries, ok := groupsMap[part]; ok {
+				parts = append(parts, countries...)
+			}
+		}
+	}
+	return filter.ParseAllowed(parts...)
 }
 
 func (s *Server) Listen() error {

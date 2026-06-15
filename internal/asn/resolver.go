@@ -9,17 +9,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
-const cymruOriginDomain = "origin.asn.cymru.com"
-const cymruASDomain = "asn.cymru.com"
-const preloadConcurrency = 10
-const minASRecordFields = 5
-const minOriginFields = 3
+const (
+	cymruOriginDomain = "origin.asn.cymru.com"
+	cymruASDomain     = "asn.cymru.com"
+	minASRecordFields = 5
+	minOriginFields   = 3
+)
 
 type Result struct {
-	ASN     uint32
-	Country string
+	Country geofeed.CountryCode
 	Name    string
 }
 
@@ -52,25 +54,6 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 	return result, nil
 }
 
-func (r *Resolver) Preload(ctx context.Context, ips []netip.Addr) {
-	sem := make(chan struct{}, preloadConcurrency)
-	var wg sync.WaitGroup
-
-	for _, ip := range ips {
-		if _, ok := r.cache.Load(ip); ok {
-			continue
-		}
-		wg.Add(1)
-		go func(ip netip.Addr) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			_, _ = r.Resolve(ctx, ip)
-		}(ip)
-	}
-	wg.Wait()
-}
-
 func reverseIP(ip netip.Addr) string {
 	if !ip.Is4() {
 		return ""
@@ -95,7 +78,7 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 	}
 
 	var asn uint32
-	var country string
+	var country geofeed.CountryCode
 	for _, txt := range originTXT {
 		asn, country, err = parseOriginRecord(txt)
 		if err == nil {
@@ -108,7 +91,7 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 
 	asTXT, err := netR.LookupTXT(resolveCtx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
 	if err != nil {
-		return Result{ASN: asn, Country: country}, fmt.Errorf("cymru as lookup: %w", err)
+		return Result{Country: country}, fmt.Errorf("cymru as lookup: %w", err)
 	}
 
 	name := ""
@@ -119,23 +102,27 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 		}
 	}
 
-	return Result{ASN: asn, Country: country, Name: name}, nil
+	return Result{Country: country, Name: name}, nil
 }
 
-func parseOriginRecord(txt string) (uint32, string, error) {
+func parseOriginRecord(txt string) (uint32, geofeed.CountryCode, error) {
 	// "216071 | 146.103.121.0/24 | AE | ripencc | 1992-10-23"
 	parts := strings.Split(txt, "|")
 	if len(parts) < 1 {
-		return 0, "", fmt.Errorf("unexpected origin format: %q", txt)
+		return 0, geofeed.CountryCode{}, fmt.Errorf("unexpected origin format: %q", txt)
 	}
 	asnStr := strings.TrimSpace(parts[0])
 	asn, err := strconv.ParseUint(asnStr, 10, 32)
 	if err != nil {
-		return 0, "", fmt.Errorf("parse asn %q: %w", asnStr, err)
+		return 0, geofeed.CountryCode{}, fmt.Errorf("parse asn %q: %w", asnStr, err)
 	}
-	var country string
+	var country geofeed.CountryCode
 	if len(parts) >= minOriginFields {
-		country = strings.TrimSpace(parts[2])
+		s := strings.TrimSpace(parts[2])
+		s = strings.ToUpper(s)
+		if len(s) == 2 { //nolint:mnd // ISO 3166-1 alpha-2 length
+			country = geofeed.CountryCode{s[0], s[1]}
+		}
 	}
 	return uint32(asn), country, nil
 }

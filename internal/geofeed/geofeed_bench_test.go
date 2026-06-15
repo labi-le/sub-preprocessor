@@ -48,9 +48,9 @@ func BenchmarkParse_1000Entries(b *testing.B) {
 
 func BenchmarkLookupCountry_Hit(b *testing.B) {
 	entries := []geofeed.Entry{
-		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: "DE"},
-		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: "US"},
-		{Prefix: netip.MustParsePrefix("192.0.2.0/24"), Country: "GB"},
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'D', 'E'}},
+		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: geofeed.CountryCode{'U', 'S'}},
+		{Prefix: netip.MustParsePrefix("192.0.2.0/24"), Country: geofeed.CountryCode{'G', 'B'}},
 	}
 	lookup := geofeed.NewLookup(entries)
 	ip := netip.MustParseAddr("198.51.100.42")
@@ -58,7 +58,7 @@ func BenchmarkLookupCountry_Hit(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		got := geofeed.LookupCountry(lookup, ip)
-		if got != "DE" {
+		if got != (geofeed.CountryCode{'D', 'E'}) {
 			b.Fatalf("unexpected %q", got)
 		}
 	}
@@ -66,8 +66,8 @@ func BenchmarkLookupCountry_Hit(b *testing.B) {
 
 func BenchmarkLookupCountry_Miss(b *testing.B) {
 	entries := []geofeed.Entry{
-		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: "DE"},
-		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: "US"},
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'D', 'E'}},
+		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: geofeed.CountryCode{'U', 'S'}},
 	}
 	lookup := geofeed.NewLookup(entries)
 	ip := netip.MustParseAddr("10.0.0.1")
@@ -84,13 +84,13 @@ func BenchmarkLookupCountry_ManyEntries(b *testing.B) {
 	for i := range n {
 		entries[i] = geofeed.Entry{
 			Prefix:  netip.MustParsePrefix(fmt.Sprintf("198.51.%d.0/24", i%200)),
-			Country: "DE",
+			Country: geofeed.CountryCode{'D', 'E'},
 		}
 	}
 	// last entry contains the target IP
 	entries[n-1] = geofeed.Entry{
 		Prefix:  netip.MustParsePrefix("198.51.200.0/24"),
-		Country: "JP",
+		Country: geofeed.CountryCode{'J', 'P'},
 	}
 	ip := netip.MustParseAddr("198.51.200.1")
 	lookup := geofeed.NewLookup(entries)
@@ -98,7 +98,7 @@ func BenchmarkLookupCountry_ManyEntries(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		got := geofeed.LookupCountry(lookup, ip)
-		if got != "JP" {
+		if got != (geofeed.CountryCode{'J', 'P'}) {
 			b.Fatalf("unexpected %q", got)
 		}
 	}

@@ -63,19 +63,3 @@ func (l *Lines) Next() []byte {
 		}
 	}
 }
-
-// ForEachLine iterates over lines in body. Each line is trimmed of leading
-// and trailing whitespace. Empty lines and lines starting with '#' are
-// skipped. If fn returns false, iteration stops early.
-func ForEachLine(body []byte, fn func(line []byte) bool) {
-	it := NewLines(body)
-	for {
-		line := it.Next()
-		if line == nil {
-			return
-		}
-		if !fn(line) {
-			return
-		}
-	}
-}

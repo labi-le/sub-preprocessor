@@ -15,13 +15,20 @@ const (
 	mapInitSize = 32
 )
 
+type cacheEntry struct {
+	addrs   []netip.Addr
+	expires time.Time
+}
+
 type Resolver struct {
 	timeout      time.Duration
+	cache        sync.Map
+	cacheTTL     time.Duration
 	resolvedPool sync.Pool
 	dialer       func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-func New(timeout time.Duration, address string) *Resolver {
+func New(timeout time.Duration, address string, ttl time.Duration) *Resolver {
 	var dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	if address != "" {
 		d := net.Dialer{Timeout: timeout}
@@ -29,9 +36,13 @@ func New(timeout time.Duration, address string) *Resolver {
 			return d.DialContext(ctx, network, address)
 		}
 	}
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
 	return &Resolver{
-		timeout: timeout,
-		dialer:  dial,
+		timeout:  timeout,
+		cacheTTL: ttl,
+		dialer:   dial,
 		resolvedPool: sync.Pool{
 			New: func() any { return make(map[string][]netip.Addr, mapInitSize) },
 		},
@@ -52,12 +63,15 @@ func (r *Resolver) PutResolvedMap(m map[string][]netip.Addr) {
 }
 
 func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, error) {
-	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-	return r.ResolveIPv4(resolveCtx, host)
-}
+	// Check cache.
+	if entry, ok := r.cache.Load(host); ok {
+		ce := entry.(cacheEntry)
+		if ce.expires.After(time.Now()) {
+			return ce.addrs, nil
+		}
+	}
 
-func (r *Resolver) ResolveIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
+	// Bare IPs — skip DNS lookup after cache miss.
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Is4() {
 			out := make([]netip.Addr, 1)
@@ -67,24 +81,29 @@ func (r *Resolver) ResolveIPv4(ctx context.Context, host string) ([]netip.Addr, 
 		return nil, errors.New("not an IPv4 address")
 	}
 
+	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
 	resolver := net.DefaultResolver
 	if r.dialer != nil {
 		resolver = &net.Resolver{Dial: r.dialer}
 	}
 
-	ips, err := resolver.LookupNetIP(ctx, "ip4", host)
+	ips, err := resolver.LookupNetIP(resolveCtx, "ip4", host)
 	if err != nil {
 		return nil, fmt.Errorf("dns lookup: %w", err)
 	}
 
-	return dedupIPv4(ips), nil
+	deduped := dedupIPv4(ips)
+
+	r.cache.Store(host, cacheEntry{addrs: deduped, expires: time.Now().Add(r.cacheTTL)})
+	return deduped, nil
 }
 
 func dedupIPv4(ips []netip.Addr) []netip.Addr {
 	if len(ips) <= maxSmallIPs {
-		var out []netip.Addr
 		var seen [maxSmallIPs]netip.Addr
-		var n int
+		n := 0
 		for _, ip := range ips {
 			if !ip.Is4() {
 				continue
@@ -98,20 +117,21 @@ func dedupIPv4(ips []netip.Addr) []netip.Addr {
 			}
 			if !dup {
 				seen[n] = ip
+				ips[n] = ip // write in-place
 				n++
-				out = append(out, ip)
 			}
 		}
-		return out
+		return ips[:n]
 	}
 
-	out := make([]netip.Addr, 0, len(ips))
 	seen := make(map[netip.Addr]bool, len(ips))
+	n := 0
 	for _, ip := range ips {
 		if ip.Is4() && !seen[ip] {
-			out = append(out, ip)
 			seen[ip] = true
+			ips[n] = ip // write in-place
+			n++
 		}
 	}
-	return out
+	return ips[:n]
 }

@@ -31,13 +31,12 @@ func Run(ctx context.Context) error {
 		ASNTimeout:      cfg.ASN.Timeout,
 		ASNDenyPatterns: cfg.ASN.DenyPatterns,
 		WorkflowStages:  cfg.Workflow.Stages,
-		GroupsMap:       cfg.Groups,
 	})
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	srv := serverpkg.New(logger, cfg.Server.Listen, svc)
+	srv := serverpkg.New(logger, cfg.Server.Listen, svc, cfg.Groups)
 
 	errCh := make(chan error, 1)
 	go func() {

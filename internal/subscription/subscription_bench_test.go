@@ -51,6 +51,15 @@ func BenchmarkNormalize_Base64Large(b *testing.B) {
 	}
 }
 
+func BenchmarkNormalize_Base64Dirty(b *testing.B) {
+	input := []byte("  \n\t" + base64.StdEncoding.EncodeToString([]byte("vless://uuid@example.com:443?security=tls#Node 1\n")) + "\n\t  ")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		subscription.Normalize(input)
+	}
+}
+
 func BenchmarkParse_SingleNode(b *testing.B) {
 	input := []byte("vless://uuid@example.com:443?security=tls#Example")
 	b.ReportAllocs()

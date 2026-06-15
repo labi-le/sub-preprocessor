@@ -17,8 +17,6 @@ const (
 	defaultLogLevel = "info"
 )
 
-var defaultWorkflowStages = []string{"geofeed", "asn"}
-
 type WorkflowConfig struct {
 	Stages []string `yaml:"stages"`
 }
@@ -79,7 +77,7 @@ func Load(path string) (Config, error) {
 		cfg.ASN.Timeout = defaultTimeout
 	}
 	if len(cfg.Workflow.Stages) == 0 {
-		cfg.Workflow.Stages = defaultWorkflowStages
+		cfg.Workflow.Stages = []string{"geofeed", "asn"}
 	}
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
@@ -134,11 +132,9 @@ func (g Groups) Validate() error {
 	return nil
 }
 
-const countryCodeLength = 2
-
 func validateCountryCode(name, c string) error {
 	c = strings.TrimSpace(c)
-	if len(c) != countryCodeLength {
+	if len(c) != 2 { //nolint:mnd // ISO 3166-1 alpha-2 country code length
 		return fmt.Errorf("groups.%s: invalid country code %q", name, c)
 	}
 	if !isASCIILetter(c[0]) || !isASCIILetter(c[1]) {

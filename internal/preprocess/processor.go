@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,29 +29,23 @@ type Options struct {
 	ASNTimeout      time.Duration
 	ASNDenyPatterns []string
 	WorkflowStages  []string
-	GroupsMap       map[string][]string
 }
 
 type FilterRequest struct {
-	SubscriptionURL fetch.SubscriptionURL
-	RawCountries    string
-	RawGroups       string
+	SubscriptionURL  fetch.SubscriptionURL
+	AllowedCountries filter.CountrySet
 }
 
 type Processor struct {
-	mu                sync.RWMutex
-	logger            zerolog.Logger
-	entries           []geofeed.Entry
-	countryLookup     geofeed.CountryLookup
-	sources           []geofeed.Source
-	LoadedAt          time.Time
-	RefreshInterval   time.Duration
-	countriesCacheKey struct{ countries, groups string }
-	countriesCacheVal filter.CountrySet
-	countriesCacheMu  sync.Mutex
-	resolver          *resolver.Resolver
-	filters           []Filter
-	groupsMap         map[string][]string
+	mu              sync.RWMutex
+	reloadMu        sync.Mutex
+	logger          zerolog.Logger
+	countryLookup   geofeed.CountryLookup
+	sources         []geofeed.Source
+	LoadedAt        time.Time
+	RefreshInterval time.Duration
+	resolver        *resolver.Resolver
+	filters         []Filter
 }
 
 type Stats struct {
@@ -63,6 +55,16 @@ type Stats struct {
 	GeoDrop     int
 	ASNDrop     int
 	Unsupported int
+}
+
+// PipelineContext holds request-scoped state shared across the processing pipeline.
+type PipelineContext struct {
+	Buffer      *bytes.Buffer
+	Lookup      geofeed.CountryLookup
+	Allowed     filter.CountrySet
+	Resolved    map[string][]netip.Addr
+	Stats       *Stats
+	IsFirstNode bool
 }
 
 func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
@@ -93,27 +95,22 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 
 	return &Processor{
 		logger:          logger,
-		entries:         entries,
 		countryLookup:   geofeed.NewLookup(entries),
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
 		LoadedAt:        time.Now(),
 		RefreshInterval: opts.RefreshInterval,
-		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress),
+		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, 5*time.Minute),
 		filters:         filters,
-		groupsMap:       opts.GroupsMap,
 	}, nil
 }
 
 func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
-	requestLog := p.logger.With().Str("url", string(req.SubscriptionURL)).Str("countries", req.RawCountries).Logger()
+	requestLog := p.logger.With().Str("url", string(req.SubscriptionURL)).Logger()
 	start := time.Now()
 
-	_, lookup, err := p.currentEntries(ctx)
-	if err != nil {
-		return Stats{}, err
-	}
+	lookup := p.currentEntries(ctx)
 
-	allowed := p.getAllowedCountries(req.RawCountries, req.RawGroups)
+	allowed := req.AllowedCountries
 	isEmpty := true
 	for _, v := range allowed {
 		if v != 0 {
@@ -135,9 +132,17 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	resolved := p.resolver.GetResolvedMap()
 	defer p.resolver.PutResolvedMap(resolved)
 
-	first := true
+	pctx := &PipelineContext{
+		Buffer:      b,
+		Lookup:      lookup,
+		Allowed:     allowed,
+		Resolved:    resolved,
+		Stats:       &stats,
+		IsFirstNode: true,
+	}
+
 	subscription.Parse(body, func(node subscription.Node) bool {
-		p.processNode(ctx, node, b, lookup, allowed, resolved, &stats, &first)
+		p.processNode(ctx, node, pctx)
 		return true
 	})
 
@@ -167,67 +172,78 @@ func (p *Processor) resolveNode(ctx context.Context, server string, resolved map
 			resolved[server] = []netip.Addr{}
 			return []netip.Addr{}
 		}
-		resolved[server] = ips
+		resolved[server] = append([]netip.Addr(nil), ips...)
+		ips = resolved[server]
 	}
 	return ips
 }
 
-func (p *Processor) processNode(ctx context.Context, node subscription.Node, b *bytes.Buffer, lookup geofeed.CountryLookup, allowed filter.CountrySet, resolved map[string][]netip.Addr, stats *Stats, first *bool) {
-	stats.Total++
+func (p *Processor) processNode(ctx context.Context, node subscription.Node, pctx *PipelineContext) {
+	pctx.Stats.Total++
 	if node.Server == "" || node.Port == "" {
-		stats.Unsupported++
+		pctx.Stats.Unsupported++
 		return
 	}
 
-	ips := p.resolveNode(ctx, node.Server, resolved)
+	ips := p.resolveNode(ctx, node.Server, pctx.Resolved)
 	if len(ips) == 0 {
-		stats.DNSDrop++
+		pctx.Stats.DNSDrop++
 		return
 	}
 
 	for _, f := range p.filters {
-		ips = f.Process(ctx, ips, lookup, allowed, stats)
+		ips = f.Process(ctx, ips, pctx)
 		if len(ips) == 0 {
 			return
 		}
 	}
 
 	chosenIP := ips[0]
-	chosenCountry := geofeed.LookupCountry(lookup, chosenIP)
+	chosenCountry := geofeed.LookupCountry(pctx.Lookup, chosenIP)
 
-	if !*first {
-		b.WriteByte('\n')
+	if !pctx.IsFirstNode {
+		pctx.Buffer.WriteByte('\n')
 	}
-	*first = false
-	rewrite.NodeName(b, node, chosenCountry, chosenIP)
-	stats.Kept++
+	pctx.IsFirstNode = false
+	rewrite.NodeName(pctx.Buffer, node, chosenCountry, chosenIP)
+	pctx.Stats.Kept++
 }
 
-//nolint:ireturn // processor stores and returns the lookup behind an interface on purpose
-func (p *Processor) currentEntries(ctx context.Context) ([]geofeed.Entry, geofeed.CountryLookup, error) {
+//nolint:ireturn // pre-existing: returns interface for flexibility
+func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	p.mu.RLock()
-	if !p.ShouldReloadGeofeed(time.Now()) {
-		entries := p.entries
-		lookup := p.countryLookup
-		p.mu.RUnlock()
-		return entries, lookup, nil
-	}
+	lookup := p.countryLookup
+	needsReload := p.ShouldReloadGeofeed(time.Now())
 	p.mu.RUnlock()
+
+	if needsReload {
+		if p.reloadMu.TryLock() {
+			bgCtx := context.WithoutCancel(ctx)
+			go func() {
+				defer p.reloadMu.Unlock()
+				p.doReload(bgCtx)
+			}()
+		}
+	}
+
+	return lookup
+}
+
+func (p *Processor) doReload(ctx context.Context) {
+	entries, err := geofeed.LoadAll(ctx, p.sources)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.ShouldReloadGeofeed(time.Now()) {
-		return p.entries, p.countryLookup, nil
+
+	p.LoadedAt = time.Now()
+
+	if err != nil {
+		p.logger.Error().Err(err).Msg("background geofeed reload failed, keeping stale data")
+		return
 	}
 
-	entries, err := geofeed.LoadAll(ctx, p.sources)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load geofeed: %w", err)
-	}
-	p.entries = entries
 	p.countryLookup = geofeed.NewLookup(entries)
-	p.LoadedAt = time.Now()
-	return p.entries, p.countryLookup, nil
+	p.logger.Info().Int("entries", len(entries)).Msg("geofeed reloaded in background")
 }
 
 func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
@@ -240,34 +256,7 @@ func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
 	return now.Sub(p.LoadedAt) >= p.RefreshInterval
 }
 
-func (p *Processor) getAllowedCountries(rawCountries string, rawGroups string) filter.CountrySet {
-	p.countriesCacheMu.Lock()
-	defer p.countriesCacheMu.Unlock()
-	key := struct{ countries, groups string }{rawCountries, rawGroups}
-	if key == p.countriesCacheKey {
-		return p.countriesCacheVal
-	}
-	out := filter.ParseAllowed(rawCountries, rawGroups, p.groupsMap)
-	p.countriesCacheKey = key
-	p.countriesCacheVal = out
-	return out
-}
-
 func FormatStats(stats Stats) string {
-	var b strings.Builder
-	const growSize = 200
-	b.Grow(growSize)
-	b.WriteString("done: total=")
-	b.WriteString(strconv.Itoa(stats.Total))
-	b.WriteString(" kept=")
-	b.WriteString(strconv.Itoa(stats.Kept))
-	b.WriteString(" dns_drop=")
-	b.WriteString(strconv.Itoa(stats.DNSDrop))
-	b.WriteString(" geo_drop=")
-	b.WriteString(strconv.Itoa(stats.GeoDrop))
-	b.WriteString(" asn_drop=")
-	b.WriteString(strconv.Itoa(stats.ASNDrop))
-	b.WriteString(" unsupported=")
-	b.WriteString(strconv.Itoa(stats.Unsupported))
-	return b.String()
+	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d unsupported=%d",
+		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.Unsupported)
 }

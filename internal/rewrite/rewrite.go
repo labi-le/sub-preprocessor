@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -13,7 +14,7 @@ const (
 	hundred     = 100
 )
 
-func NodeName(b *bytes.Buffer, node subscription.Node, country string, ip netip.Addr) {
+func NodeName(b *bytes.Buffer, node subscription.Node, country geofeed.CountryCode, ip netip.Addr) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
 		return
@@ -30,7 +31,8 @@ func NodeName(b *bytes.Buffer, node subscription.Node, country string, ip netip.
 		b.WriteString(node.Raw)
 	}
 	b.WriteString("#[GEO:")
-	b.WriteString(country)
+	b.WriteByte(country[0])
+	b.WriteByte(country[1])
 	b.WriteString("][IP:")
 	ip4 := ip.As4()
 	writeOctet(b, ip4[0])
@@ -63,20 +65,48 @@ func supportsFragmentRewrite(node subscription.Node) bool {
 }
 
 func StripKnownTags(s string) string {
-	s = strings.TrimSpace(s)
-	for {
-		if !strings.HasPrefix(s, "[") {
-			return strings.TrimSpace(s)
+	// Scan to find the end of all contiguous known tags without slicing.
+	// Performs exactly one slice and one TrimSpace at the end.
+	pos := 0
+	for pos < len(s) {
+		// Skip leading whitespace
+		for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
+			pos++
 		}
-		end := strings.Index(s, "]")
+		if pos >= len(s) || s[pos] != '[' {
+			return strings.TrimSpace(s[pos:])
+		}
+		end := strings.IndexByte(s[pos:], ']')
 		if end < 0 {
-			return strings.TrimSpace(s)
+			return strings.TrimSpace(s[pos:])
 		}
-		tag := s[1:end]
-		if strings.HasPrefix(tag, "GEO:") || strings.HasPrefix(tag, "IP:") || strings.HasPrefix(tag, "JUR:") || tag == "OK" || tag == "BAD" {
-			s = strings.TrimSpace(s[end+1:])
+		tagStart := pos + 1
+		tagEnd := pos + end
+		tag := s[tagStart:tagEnd]
+		if isKnownTag(tag) {
+			pos = tagEnd + 1
 			continue
 		}
-		return strings.TrimSpace(s)
+		return strings.TrimSpace(s[pos:])
 	}
+	return ""
+}
+
+func isKnownTag(tag string) bool {
+	if len(tag) == 0 {
+		return false
+	}
+	if len(tag) == 2 && (tag == "OK" || tag == "BAD") {
+		return true
+	}
+	if len(tag) >= 4 && tag[:4] == "GEO:" {
+		return true
+	}
+	if len(tag) >= 3 && tag[:3] == "IP:" {
+		return true
+	}
+	if len(tag) >= 4 && tag[:4] == "JUR:" {
+		return true
+	}
+	return false
 }

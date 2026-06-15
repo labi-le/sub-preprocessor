@@ -172,18 +172,6 @@ func isPublicIP(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return false
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return false
-	}
-	if ip.Is6() {
-		if private6Prefix.Contains(ip) || linkLocal6Prefix.Contains(ip) {
-			return false
-		}
-	}
-	return true
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsMulticast() &&
+		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified()
 }
-
-var (
-	private6Prefix   = netip.MustParsePrefix("fc00::/7")
-	linkLocal6Prefix = netip.MustParsePrefix("fe80::/10")
-)

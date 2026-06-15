@@ -77,22 +77,20 @@ Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no priv
 
 `./internal/geofeed/geofeed.go`, `lookup.go`
 
-Geofeed CSV parsing, lookup, and data source management. Entries are sorted by prefix length (most specific first). Default country lookup uses an internal indexed IPv4 structure with IPv6 linear fallback.
+Geofeed CSV parsing, lookup, and data source management. Default country lookup uses a flat sorted slice with binary search for IPv4 and linear scan for IPv6.
 
 **Key types:**
-- `Entry` — `Prefix` + `Country` + `Region` + `City`
+- `CountryCode` — strict 2-byte ISO country code (`[2]byte`) with `String()`
+- `Entry` — `Prefix` + `Country` (`Country` is `CountryCode`)
 - `Source` — `URL` + `Type` (also used in config.yaml via yaml tags)
-- `CountryLookup` — interface with `LookupCountry(ip) string`
-- `LinearLookup` — reference linear-scan implementation
-- `IndexedLookup` — built-in indexed IPv4 lookup + IPv6 fallback
+- `CountryLookup` — interface with `LookupCountry(ip) CountryCode`
 
 **Key functions:**
-- `LoadAll(ctx, sources) ([]Entry, error)` — fetch + parse + sort by prefix length
+- `LoadAll(ctx, sources) ([]Entry, error)` — fetch + parse (sorting handled by lookup constructor)
+- `parsePrefixOrAddr` uses `addr.BitLen()` instead of hardcoded `bitsV4`/`bitsV6`
 - `Parse(body) ([]Entry, error)` — parse CSV body
 - `NewLookup(entries) CountryLookup` — default indexed lookup builder
-- `NewLinearLookup(entries) *LinearLookup` — explicit linear implementation
-- `NewIndexedLookup(entries) *IndexedLookup` — indexed implementation
-- `LookupCountry(lookup, ip) string` — helper forwarding to the configured lookup
+- `LookupCountry(lookup, ip) CountryCode` — helper forwarding to the configured lookup
 - `parseLine(line) (Entry, bool)` — one `ioutil.UnsafeString` alloc per line, then `strings.Cut` for CSV fields
 
 **Uses:** `fetch`, `ioutil`
@@ -124,7 +122,6 @@ Shared I/O utilities. Created to eliminate duplicated line-iteration and `unsafe
 - `NewLines(body) Lines` — create iterator
 - `(*Lines).Next() []byte` — return next trimmed non-comment line, `nil` when done
 - `UnsafeString(b) string` — zero-copy `[]byte` → `string` (safe for nil/empty)
-- `ForEachLine(body, fn)` — convenience wrapper over Lines + callback
 
 **Tags:** `util`, `iterator`, `unsafe`, `string`, `utility`, `shared`, `dry`
 
@@ -140,11 +137,10 @@ Country filtering using a compact bitset (`[11]uint64`) for O(1) lookup of 2-let
 - `CountrySet [11]uint64` — bitset for AA–ZZ (676 codes)
 
 **Key functions:**
-- `(*CountrySet).Has(country) bool` — O(1) check
-- `ParseAllowCountries(raw) CountrySet` — parse `"DE,US,  nl  "` into bitset (uses `strings.SplitSeq`)
-- `ParseAllowed(rawCountries, rawGroups, groupsMap) CountrySet` — parse countries + groups, expanding groups into countries
-- `FirstAllowed(lookup, ips, allowed, strict) (ip, country, ok)` — first match in allowed set; strict = all must match
-- `AllAllowed(lookup, ips, allowed) []netip.Addr` — filter IPs by allowed countries
+- `(*CountrySet).Has(country CountryCode) bool` — O(1) check
+- `(*CountrySet).Add(part string)` — add a single country code (whitespace trimmed, case normalized)
+- `ParseAllowed(parts ...string) CountrySet` — parse `"DE,US,  nl  "` or `"DE", "US", "nl"` into bitset (uses `strings.SplitSeq`)
+- `AllAllowed(lookup, ips, allowed) []netip.Addr` — filter IPs by allowed countries by compacting the input slice in place
 
 **Uses:** `geofeed`
 **Tags:** `filter`, `country`, `bitset`, `geo`, `permit`
@@ -155,18 +151,18 @@ Country filtering using a compact bitset (`[11]uint64`) for O(1) lookup of 2-let
 
 `./internal/resolver/resolver.go`
 
-DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Pooled resolved-map for per-request reuse.
+DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Global `sync.Map`-based DNS cache with TTL expiry per `Resolver` instance. Returns shared cached slices, while preprocess isolates them once per request/hostname via a pooled resolved-map.
 
 **Key types:**
-- `Resolver` — `timeout` + `dialer` + `sync.Pool` for resolved maps
+- `Resolver` — `timeout` + `cache` (`sync.Map`) + `cacheTTL` + `dialer` + `sync.Pool` for resolved maps
 
 **Key functions:**
-- `New(timeout, address) *Resolver`
-- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — resolve IPv4 with timeout
-- `(*Resolver).GetResolvedMap() map[string][]netip.Addr` — get pooled map
+- `New(timeout, address, ttl) *Resolver` — TTL defaults to 5 min if ≤ 0
+- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — cache-first (skip for bare IPs), fallback to real DNS; cached host results are returned without per-call copying
+- `(*Resolver).GetResolvedMap() map[string][]netip.Addr` — get pooled per-request hostname map
 - `(*Resolver).PutResolvedMap(m)` — return map to pool
 
-**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`
+**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`, `cache`, `ttl`
 
 ---
 
@@ -177,13 +173,12 @@ DNS resolver for subscription node hostnames. Uses system DNS or custom address.
 ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Caches results in `sync.Map`. Currently IPv4-only.
 
 **Key types:**
-- `Result` — `ASN` + `Country` + `Name`
+- `Result` — `Country` (`geofeed.CountryCode`) + `Name`
 - `Resolver` — `cache sync.Map` + `timeout`
 
 **Key functions:**
 - `New(timeout) *Resolver`
 - `(*Resolver).Resolve(ctx, ip) (Result, error)` — lookup + cache
-- `(*Resolver).Preload(ctx, ips)` — concurrent preload with semaphore (concurrency = 10)
 
 **Uses:** `net` (stdlib, not internal resolver)
 **Tags:** `asn`, `cymru`, `dns`, `ip`, `carrier`, `deny`, `name`
@@ -194,15 +189,16 @@ ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Ca
 
 `./internal/subscription/subscription.go`
 
-Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations.
+Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations. `Normalize` trims, uses a fast-path single-pass ASCII whitespace stripper, then attempts base64 decode.
 
 **Key types:**
+- `Scheme` — strict URI scheme type alias
 - `Node` — `Raw` + `Scheme` + `Name` + `Server` + `Port` + `FragmentIdx`
 
 **Key functions:**
 - `Load(ctx, url fetch.SubscriptionURL) ([]byte, error)` — fetch + normalize
 - `Parse(body, yield)` — iterate lines via `ioutil.Lines`, parse URIs containing `://`
-- `Normalize(body) []byte` — strip whitespace + base64 decode + URI detection
+- `Normalize(body) []byte` — trim + strip ASCII whitespace + base64 decode + URI detection
 - `parseNode(line) (Node, bool)` — scheme → authority → host:port → fragment
 
 **Uses:** `fetch`, `ioutil`
@@ -217,7 +213,7 @@ Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight nod
 Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. Strips existing known tags. Alloc-free IPv4 octet writing.
 
 **Key functions:**
-- `NodeName(b, node, country, ip)` — write rewritten URI fragment into a reusable `bytes.Buffer`
+- `NodeName(b, node, country CountryCode, ip)` — write rewritten URI fragment into a reusable `bytes.Buffer`
 - `StripKnownTags(s) string` — remove `[GEO:…]`, `[IP:…]`, `[OK]`, `[BAD]`, `[JUR:…]`
 - `writeOctet(b, n)` — 1–3 digit IPv4 octet without `fmt.Sprintf`
 
@@ -233,17 +229,19 @@ Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. St
 Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN filtering, and output rewriting per node.
 
 **Key types:**
-- `Processor` — geofeed entries + country lookup + DNS resolver + sequential filter pipeline + country cache + groups map
+- `Processor` — country lookup (with async background reload via `TryLock`) + DNS resolver + sequential filter pipeline (no country cache, no groups map)
 - `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `Unsupported`
-- `Filter` — interface for workflow stages
+- `PipelineContext` — request-scoped state shared across filters (`Buffer`, `Lookup`, `Allowed`, `Resolved`, `Stats`, `IsFirstNode`)
+- `Filter` — interface for workflow stages; `Process(ctx, ips, pctx)`
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
-- `ASNFilter` — drops IPs matching ASN deny patterns
-- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `GroupsMap`)
-- `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `RawCountries string`, `RawGroups string`)
+- `ASNFilter` — drops IPs matching ASN deny patterns (country check removed; ASN only evaluates deny patterns)
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`)
+- `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
 **Key functions:**
 - `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed, build filter chain
 - `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
+- `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy shared resolver results into request-local storage
 - `buildFilters(stages, asnR, patterns) []Filter` — construct sequential filter pipeline from config
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
@@ -263,10 +261,11 @@ HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess 
 - `Server` — `listen` + `fiber.App`
 
 **Key functions:**
-- `New(listen, svc) *Server`
+- `New(logger, listen, svc, groupsMap) *Server` — `groupsMap` expands named `groups` query values into country codes before filtering
 - `(*Server).Listen() error`
 - `(*Server).Shutdown(ctx) error`
 - `(*Server).TestApp() *fiber.App` — for test usage
+- `buildAllowedCountries(rawCountries, rawGroups, groupsMap) CountrySet` — HTTP-layer group expansion
 
 **Uses:** `fetch`, `preprocess`, `fiber`
 **Tags:** `http`, `fiber`, `api`, `handler`, `server`, `healthz`
