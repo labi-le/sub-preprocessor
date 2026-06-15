@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/log"
@@ -22,6 +23,23 @@ import (
 	"github.com/rs/zerolog"
 )
 
+type Options struct {
+	GeofeedSources  []geofeed.Source
+	RefreshInterval time.Duration
+	DNSTimeout      time.Duration
+	DNSAddress      string
+	ASNTimeout      time.Duration
+	ASNDenyPatterns []string
+	WorkflowStages  []string
+	GroupsMap       map[string][]string
+}
+
+type FilterRequest struct {
+	SubscriptionURL fetch.SubscriptionURL
+	RawCountries    string
+	RawGroups       string
+}
+
 type Processor struct {
 	mu                sync.RWMutex
 	logger            zerolog.Logger
@@ -30,11 +48,12 @@ type Processor struct {
 	sources           []geofeed.Source
 	LoadedAt          time.Time
 	RefreshInterval   time.Duration
-	countriesCacheKey string
+	countriesCacheKey struct{ countries, groups string }
 	countriesCacheVal filter.CountrySet
 	countriesCacheMu  sync.Mutex
 	resolver          *resolver.Resolver
 	filters           []Filter
+	groupsMap         map[string][]string
 }
 
 type Stats struct {
@@ -46,18 +65,18 @@ type Stats struct {
 	Unsupported int
 }
 
-func NewProcessor(ctx context.Context, logger zerolog.Logger, geofeedSources []geofeed.Source, refreshInterval time.Duration, dnsTimeout time.Duration, dnsAddress string, asnTimeout time.Duration, asnDenyPatterns []string, workflowStages []string) (*Processor, error) {
+func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
 	initLog := log.Op(logger, "processor.New")
-	initLog.Info().Int("sources", len(geofeedSources)).Msg("loading geofeed")
+	initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
 
-	entries, err := geofeed.LoadAll(ctx, geofeedSources)
+	entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources)
 	if err != nil {
 		return nil, fmt.Errorf("load geofeed: %w", err)
 	}
 	initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
 
-	patterns := make([]*regexp.Regexp, 0, len(asnDenyPatterns))
-	for _, p := range asnDenyPatterns {
+	patterns := make([]*regexp.Regexp, 0, len(opts.ASNDenyPatterns))
+	for _, p := range opts.ASNDenyPatterns {
 		re, errCompile := regexp.Compile(p)
 		if errCompile != nil {
 			return nil, fmt.Errorf("compile asn deny pattern %q: %w", p, errCompile)
@@ -67,25 +86,26 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, geofeedSources []g
 
 	var asnR *asn.Resolver
 	if len(patterns) > 0 {
-		asnR = asn.New(asnTimeout)
+		asnR = asn.New(opts.ASNTimeout)
 	}
 
-	filters := buildFilters(workflowStages, asnR, patterns)
+	filters := buildFilters(opts.WorkflowStages, asnR, patterns)
 
 	return &Processor{
 		logger:          logger,
 		entries:         entries,
 		countryLookup:   geofeed.NewLookup(entries),
-		sources:         append([]geofeed.Source(nil), geofeedSources...),
+		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
 		LoadedAt:        time.Now(),
-		RefreshInterval: refreshInterval,
-		resolver:        resolver.New(dnsTimeout, dnsAddress),
+		RefreshInterval: opts.RefreshInterval,
+		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress),
 		filters:         filters,
+		groupsMap:       opts.GroupsMap,
 	}, nil
 }
 
-func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, subscriptionURL string, rawCountries string) (Stats, error) {
-	requestLog := p.logger.With().Str("url", subscriptionURL).Str("countries", rawCountries).Logger()
+func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
+	requestLog := p.logger.With().Str("url", string(req.SubscriptionURL)).Str("countries", req.RawCountries).Logger()
 	start := time.Now()
 
 	_, lookup, err := p.currentEntries(ctx)
@@ -93,7 +113,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, subscriptionURL
 		return Stats{}, err
 	}
 
-	allowed := p.getAllowedCountries(rawCountries)
+	allowed := p.getAllowedCountries(req.RawCountries, req.RawGroups)
 	isEmpty := true
 	for _, v := range allowed {
 		if v != 0 {
@@ -105,7 +125,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, subscriptionURL
 		return Stats{}, errors.New("no allowed countries provided")
 	}
 
-	body, errLoad := subscription.Load(ctx, subscriptionURL)
+	body, errLoad := subscription.Load(ctx, req.SubscriptionURL)
 	if errLoad != nil {
 		return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 	}
@@ -220,14 +240,15 @@ func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
 	return now.Sub(p.LoadedAt) >= p.RefreshInterval
 }
 
-func (p *Processor) getAllowedCountries(rawCountries string) filter.CountrySet {
+func (p *Processor) getAllowedCountries(rawCountries string, rawGroups string) filter.CountrySet {
 	p.countriesCacheMu.Lock()
 	defer p.countriesCacheMu.Unlock()
-	if rawCountries == p.countriesCacheKey {
+	key := struct{ countries, groups string }{rawCountries, rawGroups}
+	if key == p.countriesCacheKey {
 		return p.countriesCacheVal
 	}
-	out := filter.ParseAllowCountries(rawCountries)
-	p.countriesCacheKey = rawCountries
+	out := filter.ParseAllowed(rawCountries, rawGroups, p.groupsMap)
+	p.countriesCacheKey = key
 	p.countriesCacheVal = out
 	return out
 }

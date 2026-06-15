@@ -43,7 +43,7 @@ func LoadAll(ctx context.Context, sources []Source) ([]Entry, error) {
 			continue
 		}
 
-		body, err := fetch.BytesWithType(ctx, source.URL, maxGeofeedSize, source.Type)
+		body, err := fetch.BytesWithType(ctx, fetch.SubscriptionURL(source.URL), maxGeofeedSize, source.Type)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", source.URL, err)
 		}

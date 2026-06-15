@@ -17,7 +17,7 @@ import (
 
 type stubService struct{}
 
-func (stubService) Filter(_ context.Context, b *bytes.Buffer, _ string, _ string) (preprocess.Stats, error) {
+func (stubService) Filter(_ context.Context, b *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
 	b.WriteString("vless://test")
 	return preprocess.Stats{Total: 1, Kept: 1}, nil
 }
@@ -28,7 +28,7 @@ type recordingService struct {
 	err    error
 }
 
-func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, _ string, _ string) (preprocess.Stats, error) {
+func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
 	s.called = true
 	s.ctx = ctx
 	if s.err != nil {
@@ -63,6 +63,50 @@ func TestServerReturnsPlainText(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "vless://test") {
 		t.Fatalf("unexpected body: %q", body)
+	}
+}
+
+func TestServerAcceptsGroupsInsteadOfCountries(t *testing.T) {
+	t.Parallel()
+
+	srv := server.New(nopLogger(), ":8080", stubService{})
+	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "vless://test") {
+		t.Fatalf("unexpected body: %q", body)
+	}
+}
+
+func TestServerRejectsMissingBothCountriesAndGroups(t *testing.T) {
+	t.Parallel()
+
+	svc := &recordingService{}
+	srv := server.New(nopLogger(), ":8080", svc)
+	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if svc.called {
+		t.Fatal("service should not be called without countries or groups")
 	}
 }
 

@@ -18,6 +18,8 @@ const userAgent = "mihomo-geofeed-preprocessor/0.1"
 
 type FileType string
 
+type SubscriptionURL string
+
 const (
 	FileTypeRaw  FileType = "raw"
 	FileTypeGzip FileType = "gzip"
@@ -35,7 +37,7 @@ const (
 
 var errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
 
-func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType FileType) ([]byte, error) {
+func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
 		return nil, err
 	}
@@ -45,7 +47,7 @@ func BytesWithType(ctx context.Context, rawURL string, limit int64, fileType Fil
 
 	client := NewSafeHTTPClient()
 
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, string(rawURL), nil)
 	if errReq != nil {
 		return nil, fmt.Errorf("create request: %w", errReq)
 	}
@@ -87,8 +89,8 @@ func ValidateFileType(fileType FileType) error {
 	}
 }
 
-func ValidatePublicHTTPSURL(rawURL string) error {
-	u, errURL := url.Parse(rawURL)
+func ValidatePublicHTTPSURL(rawURL SubscriptionURL) error {
+	u, errURL := url.Parse(string(rawURL))
 	if errURL != nil {
 		return fmt.Errorf("invalid url: %w", errURL)
 	}
@@ -149,7 +151,7 @@ func NewSafeHTTPClient() *http.Client {
 			if len(via) >= maxRedirects {
 				return errStoppedRedirects
 			}
-			return ValidatePublicHTTPSURL(req.URL.String())
+			return ValidatePublicHTTPSURL(SubscriptionURL(req.URL.String()))
 		},
 	}
 }

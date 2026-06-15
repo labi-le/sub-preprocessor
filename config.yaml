@@ -13,22 +13,16 @@ geofeed:
       type: raw
 
 resolver:
-  # Optional: custom DNS server address (e.g. "8.8.8.8:53").
-  # If not set, uses the system resolver (router's DNS).
-  # address: "8.8.8.8:53"
   timeout: 5s
 
-# Filter workflow order. Known stages: geofeed, asn.
-# Filters always run as a sequential pipeline in this order.
 workflow:
   stages:
     - asn
     - geofeed
 
-# Optional ASN filtering: drop nodes whose AS name matches deny patterns.
-# Uses Team Cymru DNS to resolve ASN by IP.
 asn:
   deny_patterns:
     - "(?i)VDSINA"
     - "(?i)HOSTOFF"
+    - "(?i)ServHost"
   timeout: 5s

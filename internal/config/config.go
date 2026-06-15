@@ -32,17 +32,22 @@ type Config struct {
 	Server struct {
 		Listen string `yaml:"listen"`
 	} `yaml:"server"`
-	Geofeed struct {
-		Sources         []geofeed.Source `yaml:"sources"`
-		RefreshInterval time.Duration    `yaml:"refresh_interval"`
-	} `yaml:"geofeed"`
+	Geofeed  GeofeedConfig `yaml:"geofeed"`
 	Resolver struct {
 		Address string        `yaml:"address"`
 		Timeout time.Duration `yaml:"timeout"`
 	} `yaml:"resolver"`
 	ASN      ASNConfig      `yaml:"asn"`
 	Workflow WorkflowConfig `yaml:"workflow"`
+	Groups   Groups         `yaml:"groups"`
 }
+
+type GeofeedConfig struct {
+	Sources         []geofeed.Source `yaml:"sources"`
+	RefreshInterval time.Duration    `yaml:"refresh_interval"`
+}
+
+type Groups map[string][]string
 
 type ASNConfig struct {
 	DenyPatterns []string      `yaml:"deny_patterns"`
@@ -76,28 +81,72 @@ func Load(path string) (Config, error) {
 	if len(cfg.Workflow.Stages) == 0 {
 		cfg.Workflow.Stages = defaultWorkflowStages
 	}
-	if errValidate := validateGeofeedSources(cfg.Geofeed.Sources); errValidate != nil {
+	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}
 
 	return cfg, nil
 }
 
-func validateGeofeedSources(sources []geofeed.Source) error {
-	if len(sources) == 0 {
+func (cfg *Config) Validate() error {
+	if err := cfg.Geofeed.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Groups.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *GeofeedConfig) Validate() error {
+	if len(g.Sources) == 0 {
 		return errors.New("geofeed.sources must contain at least one source")
 	}
-	for i := range sources {
-		sources[i].URL = strings.TrimSpace(sources[i].URL)
-		if sources[i].URL == "" {
+	for i := range g.Sources {
+		g.Sources[i].URL = strings.TrimSpace(g.Sources[i].URL)
+		if g.Sources[i].URL == "" {
 			return errors.New("geofeed.sources.url must not be empty")
 		}
-		if sources[i].Type == "" {
+		if g.Sources[i].Type == "" {
 			return errors.New("geofeed.sources.type must not be empty")
 		}
-		if errValidate := fetch.ValidateFileType(sources[i].Type); errValidate != nil {
+		if errValidate := fetch.ValidateFileType(g.Sources[i].Type); errValidate != nil {
 			return fmt.Errorf("validate source type: %w", errValidate)
 		}
 	}
 	return nil
+}
+
+func (g Groups) Validate() error {
+	for name, countries := range g {
+		if name == "" {
+			return errors.New("groups: group name must not be empty")
+		}
+		if len(countries) == 0 {
+			return fmt.Errorf("groups.%s: must contain at least one country", name)
+		}
+		for _, c := range countries {
+			if err := validateCountryCode(name, c); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+const countryCodeLength = 2
+
+func validateCountryCode(name, c string) error {
+	c = strings.TrimSpace(c)
+	if len(c) != countryCodeLength {
+		return fmt.Errorf("groups.%s: invalid country code %q", name, c)
+	}
+	if !isASCIILetter(c[0]) || !isASCIILetter(c[1]) {
+		return fmt.Errorf("groups.%s: invalid country code %q", name, c)
+	}
+	return nil
+}
+
+func isASCIILetter(b byte) bool {
+	return ('A' <= b && b <= 'Z') || ('a' <= b && b <= 'z')
 }

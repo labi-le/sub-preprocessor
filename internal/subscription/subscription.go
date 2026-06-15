@@ -25,7 +25,7 @@ type Node struct {
 	FragmentIdx int // index of '#' in Raw, or -1 if not present
 }
 
-func Load(ctx context.Context, rawURL string) ([]byte, error) {
+func Load(ctx context.Context, rawURL fetch.SubscriptionURL) ([]byte, error) {
 	body, err := fetch.BytesWithType(ctx, rawURL, maxSubscriptionSize, fetch.FileTypeRaw)
 	if err != nil {
 		return nil, fmt.Errorf("fetch subscription: %w", err)

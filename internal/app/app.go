@@ -23,7 +23,16 @@ func Run(ctx context.Context) error {
 	logger := log.InitLogger(cfg.Log.Level)
 	logger.Info().Str("level", cfg.Log.Level).Msg("logger initialized")
 
-	svc, err := preprocess.NewProcessor(ctx, logger, cfg.Geofeed.Sources, cfg.Geofeed.RefreshInterval, cfg.Resolver.Timeout, cfg.Resolver.Address, cfg.ASN.Timeout, cfg.ASN.DenyPatterns, cfg.Workflow.Stages)
+	svc, err := preprocess.NewProcessor(ctx, logger, preprocess.Options{
+		GeofeedSources:  cfg.Geofeed.Sources,
+		RefreshInterval: cfg.Geofeed.RefreshInterval,
+		DNSTimeout:      cfg.Resolver.Timeout,
+		DNSAddress:      cfg.Resolver.Address,
+		ASNTimeout:      cfg.ASN.Timeout,
+		ASNDenyPatterns: cfg.ASN.DenyPatterns,
+		WorkflowStages:  cfg.Workflow.Stages,
+		GroupsMap:       cfg.Groups,
+	})
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}

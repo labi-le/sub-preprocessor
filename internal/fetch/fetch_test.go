@@ -51,7 +51,7 @@ func TestValidateFileTypeRejectsAuto(t *testing.T) {
 func TestValidatePublicHTTPSURLRejectsHTTP(t *testing.T) {
 	t.Parallel()
 
-	err := fetch.ValidatePublicHTTPSURL("http://example.com/test")
+	err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("http://example.com/test"))
 	if err == nil || !strings.Contains(err.Error(), "only https") {
 		t.Fatalf("unexpected error: %v", err)
 	}

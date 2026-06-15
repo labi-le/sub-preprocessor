@@ -45,7 +45,7 @@ func TestGstaticGeofeedLive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	body, err := fetch.BytesWithType(ctx, "https://www.gstatic.com/geofeed/corp_external", 10<<20, fetch.FileTypeRaw)
+	body, err := fetch.BytesWithType(ctx, fetch.SubscriptionURL("https://www.gstatic.com/geofeed/corp_external"), 10<<20, fetch.FileTypeRaw)
 	if err != nil {
 		t.Fatalf("fetch gstatic geofeed: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestExtraGeofeedsLive(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
-			body, err := fetch.BytesWithType(ctx, src.url, 10<<20, src.fileType)
+			body, err := fetch.BytesWithType(ctx, fetch.SubscriptionURL(src.url), 10<<20, src.fileType)
 			if err != nil {
 				t.Fatalf("fetch %s: %v", src.name, err)
 			}

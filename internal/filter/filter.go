@@ -70,6 +70,41 @@ func ParseAllowCountries(raw string) CountrySet {
 	return set
 }
 
+// ParseAllowed parses rawCountries (comma-separated) and rawGroups (comma-separated),
+// looking up each group in groupsMap to expand into individual country codes.
+func ParseAllowed(rawCountries string, rawGroups string, groupsMap map[string][]string) CountrySet {
+	var set CountrySet
+	for part := range strings.SplitSeq(rawCountries, ",") {
+		parseCountryPart(&set, part)
+	}
+	for part := range strings.SplitSeq(rawGroups, ",") {
+		part = trimSpace(part)
+		if part == "" {
+			continue
+		}
+		countries, ok := groupsMap[part]
+		if !ok {
+			continue
+		}
+		for _, c := range countries {
+			parseCountryPart(&set, c)
+		}
+	}
+	return set
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
+		end--
+	}
+	return s[start:end]
+}
+
 func parseCountryPart(set *CountrySet, part string) {
 	start := 0
 	for start < len(part) && (part[start] == ' ' || part[start] == '\t' || part[start] == '\n' || part[start] == '\r') {

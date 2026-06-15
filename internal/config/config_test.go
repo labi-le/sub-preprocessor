@@ -76,3 +76,58 @@ func TestLoadGeofeedRefreshInterval(t *testing.T) {
 		t.Fatalf("unexpected refresh interval: %v", cfg.Geofeed.RefreshInterval)
 	}
 }
+
+func TestLoadGroups(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  nordics:\n    - FI\n    - SE\n    - NO\n    - DK\n  baltics:\n    - EE\n    - LV\n    - LT\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Groups) != 2 {
+		t.Fatalf("unexpected groups count: %d", len(cfg.Groups))
+	}
+	if len(cfg.Groups["nordics"]) != 4 {
+		t.Fatalf("unexpected nordics countries: %v", cfg.Groups["nordics"])
+	}
+	if len(cfg.Groups["baltics"]) != 3 {
+		t.Fatalf("unexpected baltics countries: %v", cfg.Groups["baltics"])
+	}
+}
+
+func TestLoadRejectsInvalidGroupCountryCode(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  invalid:\n    - XYZ\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error for invalid country code")
+	}
+}
+
+func TestLoadRejectsGroupWithEmptyName(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  \"\":\n    - FI\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error for empty group name")
+	}
+}

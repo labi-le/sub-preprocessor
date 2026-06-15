@@ -34,13 +34,18 @@ Application bootstrap: loads config, creates `Processor`, starts HTTP server, ha
 YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema.
 
 **Key types:**
-- `Config` — root config struct (`log`, `server`, `geofeed`, `resolver`, `workflow`, `asn`)
+- `Config` — root config struct (`log`, `server`, `geofeed`, `resolver`, `workflow`, `asn`, `groups`)
+- `GeofeedConfig` — `sources` + `refresh_interval` with `Validate() error` method
+- `Groups` — `map[string][]string` with `Validate() error` method
 - `LogConfig` — `level` (`yaml:"level"`, default `"info"`)
 - `WorkflowConfig` — `stages` (sequential pipeline order; known names: `geofeed`, `asn`)
 - `ASNConfig` — `deny_patterns` + `timeout`
 
 **Key functions:**
-- `Load(path) (Config, error)` — read + unmarshal + validate + apply defaults
+- `Load(path) (Config, error)` — read + unmarshal + apply defaults + call `cfg.Validate()`
+- `(*Config).Validate() error` — validates geofeed sources and groups
+- `(*GeofeedConfig).Validate() error` — validates sources are non-empty with valid types
+- `(Groups).Validate() error` — validates group names and 2-letter country codes
 
 **Uses:** `fetch`, `geofeed`
 **Tags:** `config`, `yaml`, `validation`, `startup`, `defaults`
@@ -55,10 +60,11 @@ Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no priv
 
 **Key types:**
 - `FileType` — `"raw"` | `"gzip"`
+- `SubscriptionURL` — lightweight `string` type for subscription URLs
 
 **Key functions:**
-- `BytesWithType(ctx, url, limit, fileType) ([]byte, error)` — fetch + decode body
-- `ValidatePublicHTTPSURL(url) error` — SSRF guard
+- `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body
+- `ValidatePublicHTTPSURL(url SubscriptionURL) error` — SSRF guard
 - `NewSafeHTTPClient() *http.Client` — transport with private-IP blocking
 - `MaybeDecode(resp, fileType) (io.ReadCloser, error)` — wrap gzip if needed
 - `ValidateFileType(fileType) error` — must be `raw` or `gzip`
@@ -136,6 +142,7 @@ Country filtering using a compact bitset (`[11]uint64`) for O(1) lookup of 2-let
 **Key functions:**
 - `(*CountrySet).Has(country) bool` — O(1) check
 - `ParseAllowCountries(raw) CountrySet` — parse `"DE,US,  nl  "` into bitset (uses `strings.SplitSeq`)
+- `ParseAllowed(rawCountries, rawGroups, groupsMap) CountrySet` — parse countries + groups, expanding groups into countries
 - `FirstAllowed(lookup, ips, allowed, strict) (ip, country, ok)` — first match in allowed set; strict = all must match
 - `AllAllowed(lookup, ips, allowed) []netip.Addr` — filter IPs by allowed countries
 
@@ -193,7 +200,7 @@ Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight nod
 - `Node` — `Raw` + `Scheme` + `Name` + `Server` + `Port` + `FragmentIdx`
 
 **Key functions:**
-- `Load(ctx, url) ([]byte, error)` — fetch + normalize
+- `Load(ctx, url fetch.SubscriptionURL) ([]byte, error)` — fetch + normalize
 - `Parse(body, yield)` — iterate lines via `ioutil.Lines`, parse URIs containing `://`
 - `Normalize(body) []byte` — strip whitespace + base64 decode + URI detection
 - `parseNode(line) (Node, bool)` — scheme → authority → host:port → fragment
@@ -226,15 +233,17 @@ Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. St
 Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN filtering, and output rewriting per node.
 
 **Key types:**
-- `Processor` — geofeed entries + country lookup + DNS resolver + sequential filter pipeline + country cache
+- `Processor` — geofeed entries + country lookup + DNS resolver + sequential filter pipeline + country cache + groups map
 - `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `Unsupported`
 - `Filter` — interface for workflow stages
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `GroupsMap`)
+- `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `RawCountries string`, `RawGroups string`)
 
 **Key functions:**
-- `NewProcessor(ctx, sources, …) (*Processor, error)` — load geofeed, build filter chain
-- `(*Processor).Filter(ctx, b, url, countries) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
+- `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed, build filter chain
+- `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
 - `buildFilters(stages, asnR, patterns) []Filter` — construct sequential filter pipeline from config
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
@@ -250,7 +259,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription.
 
 **Key types:**
-- `Filterer` — interface (accepts `Processor.Filter` with caller-owned `bytes.Buffer`)
+- `Filterer` — interface `Filter(ctx, b, req preprocess.FilterRequest) (Stats, error)`
 - `Server` — `listen` + `fiber.App`
 
 **Key functions:**

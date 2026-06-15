@@ -15,7 +15,7 @@ import (
 )
 
 type Filterer interface {
-	Filter(ctx context.Context, b *bytes.Buffer, subscriptionURL string, rawCountries string) (preprocess.Stats, error)
+	Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error)
 }
 
 type Server struct {
@@ -86,16 +86,18 @@ func New(logger zerolog.Logger, listen string, svc Filterer) *Server {
 	})
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		subscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
+		rawSubscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
+		subURL := fetch.SubscriptionURL(rawSubscriptionURL)
 		rawCountries := c.Query("countries")
+		rawGroups := c.Query("groups")
 
-		if subscriptionURL == "" {
+		if rawSubscriptionURL == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "subscription_url is required")
 		}
-		if strings.TrimSpace(rawCountries) == "" {
-			return fiber.NewError(fiber.StatusBadRequest, "countries is required")
+		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "countries or groups is required")
 		}
-		if err := fetch.ValidatePublicHTTPSURL(subscriptionURL); err != nil {
+		if err := fetch.ValidatePublicHTTPSURL(subURL); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
@@ -103,7 +105,12 @@ func New(logger zerolog.Logger, listen string, svc Filterer) *Server {
 		// Pre-allocate some reasonable capacity to avoid reallocations
 		sb.Grow(defaultBuilderCapacity)
 
-		stats, err := svc.Filter(c.Context(), &sb, subscriptionURL, rawCountries)
+		req := preprocess.FilterRequest{
+			SubscriptionURL: subURL,
+			RawCountries:    rawCountries,
+			RawGroups:       rawGroups,
+		}
+		stats, err := svc.Filter(c.Context(), &sb, req)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "failed to preprocess subscription")
 		}
