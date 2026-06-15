@@ -30,6 +30,5 @@ workflow:
 # Uses Team Cymru DNS to resolve ASN by IP.
 asn:
   deny_patterns:
-    - "(?i)OVH"
-    - "(?i)HETZNER"
+    - "(?i)VDSINA"
   timeout: 5s
