@@ -1,6 +1,7 @@
 package preprocess_test
 
 import (
+	"bytes"
 	"net/netip"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestRewriteNodeName(t *testing.T) {
 		return true
 	})
 
-	var b strings.Builder
+	var b bytes.Buffer
 	rewrite.NodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
 	got := b.String()
 	want := "vless://uuid@example.com:443?security=tls#[GEO:NL][IP:198.51.100.10] Old Name"
@@ -40,7 +41,7 @@ func TestRewriteNodeNameUnknownSchemeStillRewritesURIFragment(t *testing.T) {
 		return true
 	})
 
-	var b strings.Builder
+	var b bytes.Buffer
 	rewrite.NodeName(&b, nodes[0], "NL", netip.MustParseAddr("198.51.100.10"))
 	got := b.String()
 	want := "trojan://uuid@example.com:443#[GEO:NL][IP:198.51.100.10] Old Name"
@@ -53,10 +54,11 @@ func TestFirstAllowedIP(t *testing.T) {
 	t.Parallel()
 
 	entries := []geofeed.Entry{{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: "DE"}, {Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: "US"}}
+	lookup := geofeed.NewLookup(entries)
 	ips := []netip.Addr{netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.10")}
 	allowed := filter.ParseAllowCountries("DE")
 
-	ip, country, ok := filter.FirstAllowed(entries, ips, allowed, false)
+	ip, country, ok := filter.FirstAllowed(lookup, ips, allowed, false)
 	if !ok || country != "DE" || ip.String() != "198.51.100.10" {
 		t.Fatalf("unexpected firstAllowedIP result: %v %q %v", ip, country, ok)
 	}

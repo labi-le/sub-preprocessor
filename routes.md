@@ -34,8 +34,9 @@ Application bootstrap: loads config, creates `Processor`, starts HTTP server, ha
 YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema.
 
 **Key types:**
-- `Config` — root config struct
-- `WorkflowConfig` — `stages` + `algorithm` (`fail_first` / `all`)
+- `Config` — root config struct (`log`, `server`, `geofeed`, `resolver`, `workflow`, `asn`)
+- `LogConfig` — `level` (`yaml:"level"`, default `"info"`)
+- `WorkflowConfig` — `stages` (sequential pipeline order; known names: `geofeed`, `asn`)
 - `ASNConfig` — `deny_patterns` + `timeout`
 
 **Key functions:**
@@ -68,18 +69,24 @@ Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no priv
 
 ## `internal/geofeed`
 
-`./internal/geofeed/geofeed.go`
+`./internal/geofeed/geofeed.go`, `lookup.go`
 
-Geofeed CSV parsing, lookup, and data source management. Entries are sorted by prefix length (most specific first) for fastest match.
+Geofeed CSV parsing, lookup, and data source management. Entries are sorted by prefix length (most specific first). Default country lookup uses an internal indexed IPv4 structure with IPv6 linear fallback.
 
 **Key types:**
 - `Entry` — `Prefix` + `Country` + `Region` + `City`
 - `Source` — `URL` + `Type` (also used in config.yaml via yaml tags)
+- `CountryLookup` — interface with `LookupCountry(ip) string`
+- `LinearLookup` — reference linear-scan implementation
+- `IndexedLookup` — built-in indexed IPv4 lookup + IPv6 fallback
 
 **Key functions:**
 - `LoadAll(ctx, sources) ([]Entry, error)` — fetch + parse + sort by prefix length
 - `Parse(body) ([]Entry, error)` — parse CSV body
-- `LookupCountry(entries, ip) string` — linear scan by prefix containment
+- `NewLookup(entries) CountryLookup` — default indexed lookup builder
+- `NewLinearLookup(entries) *LinearLookup` — explicit linear implementation
+- `NewIndexedLookup(entries) *IndexedLookup` — indexed implementation
+- `LookupCountry(lookup, ip) string` — helper forwarding to the configured lookup
 - `parseLine(line) (Entry, bool)` — one `ioutil.UnsafeString` alloc per line, then `strings.Cut` for CSV fields
 
 **Uses:** `fetch`, `ioutil`
@@ -87,7 +94,18 @@ Geofeed CSV parsing, lookup, and data source management. Entries are sorted by p
 
 ---
 
-## `internal/ioutil`
+## `internal/log`
+
+`./internal/log/log.go`, `ctxlog.go`
+
+Logging package using `github.com/rs/zerolog`. Sets up console logging with timestamps, caller info (short `file:line`), and configurable log level.
+
+**Key functions:**
+- `InitDefault()` — configure the global `zerolog.Logger` with default `info` level (called from `main()`)
+- `InitLogger(level str) zerolog.Logger` — override global level from config, return logger
+- `Op(logger, op) zerolog.Logger` — create child logger with `"op"` field (contextual)
+
+**Tags:** `log`, `zerolog`, `logging`, `structured-log`, `contextual`
 
 `./internal/ioutil/ioutil.go`
 
@@ -118,8 +136,8 @@ Country filtering using a compact bitset (`[11]uint64`) for O(1) lookup of 2-let
 **Key functions:**
 - `(*CountrySet).Has(country) bool` — O(1) check
 - `ParseAllowCountries(raw) CountrySet` — parse `"DE,US,  nl  "` into bitset (uses `strings.SplitSeq`)
-- `FirstAllowed(entries, ips, allowed, strict) (ip, country, ok)` — first match in allowed set; strict = all must match
-- `AllAllowed(entries, ips, allowed) []netip.Addr` — filter IPs by allowed countries
+- `FirstAllowed(lookup, ips, allowed, strict) (ip, country, ok)` — first match in allowed set; strict = all must match
+- `AllAllowed(lookup, ips, allowed) []netip.Addr` — filter IPs by allowed countries
 
 **Uses:** `geofeed`
 **Tags:** `filter`, `country`, `bitset`, `geo`, `permit`
@@ -192,7 +210,7 @@ Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight nod
 Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. Strips existing known tags. Alloc-free IPv4 octet writing.
 
 **Key functions:**
-- `NodeName(b, node, country, ip)` — write rewritten URi fragment
+- `NodeName(b, node, country, ip)` — write rewritten URI fragment into a reusable `bytes.Buffer`
 - `StripKnownTags(s) string` — remove `[GEO:…]`, `[IP:…]`, `[OK]`, `[BAD]`, `[JUR:…]`
 - `writeOctet(b, n)` — 1–3 digit IPv4 octet without `fmt.Sprintf`
 
@@ -205,19 +223,19 @@ Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. St
 
 `./internal/preprocess/processor.go`, `filters.go`
 
-Core processing. Orchestrates subscription loading, DNS resolution, geo/ASN filtering, and output rewriting per node.
+Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN filtering, and output rewriting per node.
 
 **Key types:**
-- `Processor` — geofeed entries + DNS resolver + filter pipeline + country cache
+- `Processor` — geofeed entries + country lookup + DNS resolver + sequential filter pipeline + country cache
 - `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `Unsupported`
 - `Filter` — interface for workflow stages
-- `GeoFilter` — returns IPs in allowed countries
+- `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns
 
 **Key functions:**
 - `NewProcessor(ctx, sources, …) (*Processor, error)` — load geofeed, build filter chain
-- `(*Processor).Filter(ctx, b, url, countries) (Stats, error)` — main pipeline
-- `buildFilters(stages, asnR, patterns) []Filter` — construct filter pipeline from config
+- `(*Processor).Filter(ctx, b, url, countries) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
+- `buildFilters(stages, asnR, patterns) []Filter` — construct sequential filter pipeline from config
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
 **Uses:** `asn`, `config`, `filter`, `geofeed`, `resolver`, `rewrite`, `subscription`
@@ -232,7 +250,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geo/ASN filt
 HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription.
 
 **Key types:**
-- `Filterer` — interface (accepts `Processor.Filter`)
+- `Filterer` — interface (accepts `Processor.Filter` with caller-owned `bytes.Buffer`)
 - `Server` — `listen` + `fiber.App`
 
 **Key functions:**
@@ -252,15 +270,17 @@ HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess 
 main
  └─ app
      ├─ config ─── fetch, geofeed
+     ├─ log        (zerolog initialization)
      ├─ preprocess
      │   ├─ asn        (Team Cymru DNS)
      │   ├─ config     (workflow constants)
      │   ├─ filter ─── geofeed (lookup)
      │   ├─ geofeed ── fetch, ioutil
+     │   ├─ log        (ctxlog.Op helper)
      │   ├─ resolver   (hostname DNS)
      │   ├─ rewrite ── subscription
      │   └─ subscription ── fetch, ioutil
-     └─ server ─── fetch, preprocess
+     └─ server ─── fetch, preprocess, log
 ```
 
 ## Quick Tag Index
@@ -278,4 +298,5 @@ main
 | `fiber`, `http-handler` | `server` |
 | `config`, `yaml`, `defaults` | `config` |
 | `bootstrap`, `wire` | `app` |
+| `log`, `zerolog`, `structured-log` | `log` |
 | `shared-iterator`, `unsafe-string` | `ioutil` |

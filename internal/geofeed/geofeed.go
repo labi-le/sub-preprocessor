@@ -136,15 +136,6 @@ func parseLine(line []byte) (Entry, bool) {
 	return entry, true
 }
 
-func LookupCountry(entries []Entry, ip netip.Addr) string {
-	for _, e := range entries {
-		if e.Prefix.Contains(ip) {
-			return e.Country
-		}
-	}
-	return ""
-}
-
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	if strings.Contains(s, "/") {
 		p, errParse := netip.ParsePrefix(s)

@@ -6,7 +6,7 @@ services:
     image: sub-preprocessor:latest
     container_name: sub-preprocessor
     ports:
-      - "7008:8080"
+      - "7008:8081"
     volumes:
       - ./config.yaml:/config.yaml:ro
     restart: always

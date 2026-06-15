@@ -36,3 +36,43 @@ func TestNormalizeBase64(t *testing.T) {
 		t.Fatalf("unexpected normalize result: %q", got)
 	}
 }
+
+func TestNormalizeRawBase64(t *testing.T) {
+	t.Parallel()
+
+	raw := "vless://uuid@example.com:443?security=tls#Node 1\n"
+	encoded := base64.RawStdEncoding.EncodeToString([]byte(raw))
+	if got := string(subscription.Normalize([]byte(encoded))); got != strings.TrimSpace(raw) {
+		t.Fatalf("unexpected normalize result: %q", got)
+	}
+}
+
+func TestNormalizeBase64WithWhitespace(t *testing.T) {
+	t.Parallel()
+
+	raw := "vless://uuid@example.com:443?security=tls#Node 1\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(raw))
+	spaced := "  \n\t" + encoded[:8] + "\n" + encoded[8:] + "\t  "
+	if got := string(subscription.Normalize([]byte(spaced))); got != strings.TrimSpace(raw) {
+		t.Fatalf("unexpected normalize result: %q", got)
+	}
+}
+
+func TestNormalizeInvalidReturnsOriginal(t *testing.T) {
+	t.Parallel()
+
+	input := []byte("this is not base64!!!")
+	if got := string(subscription.Normalize(input)); got != string(input) {
+		t.Fatalf("unexpected normalize fallback: %q", got)
+	}
+}
+
+func TestNormalizeInvalidWithWhitespaceReturnsOriginal(t *testing.T) {
+	t.Parallel()
+
+	input := []byte("  this is\nnot\tbase64!!!  ")
+	want := strings.TrimSpace(string(input))
+	if got := string(subscription.Normalize(input)); got != want {
+		t.Fatalf("unexpected normalize fallback: %q", got)
+	}
+}

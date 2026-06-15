@@ -1,6 +1,7 @@
 package preprocess_test
 
 import (
+	"bytes"
 	"net/netip"
 	"strings"
 	"testing"
@@ -41,13 +42,12 @@ func BenchmarkRewriteNodeName(b *testing.B) {
 	node := nodes[0]
 	ip := netip.MustParseAddr("198.51.100.10")
 	country := "NL"
-	var sb strings.Builder
+	var sb bytes.Buffer
 	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		sb.Grow(256)
 		rewrite.NodeName(&sb, node, country, ip)
 	}
 }
@@ -61,13 +61,12 @@ func BenchmarkRewriteNodeName_EmptyName(b *testing.B) {
 	node := nodes[0]
 	ip := netip.MustParseAddr("203.0.113.5")
 	country := "US"
-	var sb strings.Builder
+	var sb bytes.Buffer
 	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		sb.Grow(256)
 		rewrite.NodeName(&sb, node, country, ip)
 	}
 }
@@ -84,10 +83,11 @@ func BenchmarkFirstAllowedIP_Hit(b *testing.B) {
 		netip.MustParseAddr("203.0.113.10"),
 	}
 	allowed := filter.ParseAllowCountries("GB")
+	lookup := geofeed.NewLookup(entries)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := filter.FirstAllowed(entries, ips, allowed, false)
+		ip, country, ok := filter.FirstAllowed(lookup, ips, allowed, false)
 		if !ok || country != "GB" || ip != ips[0] {
 			b.Fatalf("unexpected result: %v %q %v", ip, country, ok)
 		}
@@ -104,10 +104,11 @@ func BenchmarkFirstAllowedIP_Miss(b *testing.B) {
 		netip.MustParseAddr("172.16.0.1"),
 	}
 	allowed := filter.ParseAllowCountries("GB")
+	lookup := geofeed.NewLookup(entries)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := filter.FirstAllowed(entries, ips, allowed, false)
+		_, _, ok := filter.FirstAllowed(lookup, ips, allowed, false)
 		if ok {
 			b.Fatal("expected miss")
 		}
@@ -127,10 +128,11 @@ func BenchmarkFirstAllowedIP_ManyIPs(b *testing.B) {
 	}
 	ips[9] = netip.MustParseAddr("192.0.2.10")
 	allowed := filter.ParseAllowCountries("GB")
+	lookup := geofeed.NewLookup(entries)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		ip, country, ok := filter.FirstAllowed(entries, ips, allowed, false)
+		ip, country, ok := filter.FirstAllowed(lookup, ips, allowed, false)
 		if !ok || country != "GB" || ip != ips[9] {
 			b.Fatalf("unexpected result")
 		}
@@ -147,10 +149,11 @@ func BenchmarkAllIPsAllowed_AllMatch(b *testing.B) {
 		netip.MustParseAddr("203.0.113.5"),
 	}
 	allowed := filter.ParseAllowCountries("DE,US")
+	lookup := geofeed.NewLookup(entries)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := filter.FirstAllowed(entries, ips, allowed, true)
+		_, _, ok := filter.FirstAllowed(lookup, ips, allowed, true)
 		if !ok {
 			b.Fatal("expected all allowed")
 		}
@@ -167,10 +170,11 @@ func BenchmarkAllIPsAllowed_OneFails(b *testing.B) {
 		netip.MustParseAddr("10.0.0.1"),
 	}
 	allowed := filter.ParseAllowCountries("DE")
+	lookup := geofeed.NewLookup(entries)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_, _, ok := filter.FirstAllowed(entries, ips, allowed, true)
+		_, _, ok := filter.FirstAllowed(lookup, ips, allowed, true)
 		if ok {
 			b.Fatal("expected not all allowed")
 		}
@@ -196,6 +200,7 @@ func BenchmarkFilterCore(b *testing.B) {
 	body := []byte(sb.String())
 
 	allowed := filter.ParseAllowCountries("DE,US")
+	lookup := geofeed.NewLookup(entries)
 	syntheticIPs := []netip.Addr{
 		netip.MustParseAddr("198.51.100.42"),
 		netip.MustParseAddr("203.0.113.10"),
@@ -203,13 +208,14 @@ func BenchmarkFilterCore(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
+	var output bytes.Buffer
+	output.Grow(4096)
 
 	for range b.N {
-		var output strings.Builder
-		output.Grow(4096)
+		output.Reset()
 		first := true
 		subscription.Parse(body, func(node subscription.Node) bool {
-			chosenIP, chosenCountry, ok := filter.FirstAllowed(entries, syntheticIPs, allowed, false)
+			chosenIP, chosenCountry, ok := filter.FirstAllowed(lookup, syntheticIPs, allowed, false)
 			if !ok {
 				return true
 			}
@@ -220,6 +226,8 @@ func BenchmarkFilterCore(b *testing.B) {
 			rewrite.NodeName(&output, node, chosenCountry, chosenIP)
 			return true
 		})
-		_ = output.String()
+		if output.Len() == 0 {
+			b.Fatal("expected output")
+		}
 	}
 }

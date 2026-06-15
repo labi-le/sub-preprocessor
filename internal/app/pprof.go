@@ -3,19 +3,20 @@
 package app
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 
 	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
+
+	zlog "github.com/rs/zerolog/log"
 )
 
 func init() {
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
 		go func() {
-			fmt.Fprintln(os.Stderr, "pprof listening on", addr)
+			zlog.Info().Str("addr", addr).Msg("pprof listening")
 			if err := http.ListenAndServe(addr, nil); err != nil {
-				fmt.Fprintln(os.Stderr, "pprof error:", err)
+				zlog.Error().Err(err).Msg("pprof error")
 			}
 		}()
 	}

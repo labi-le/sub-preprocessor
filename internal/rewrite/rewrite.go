@@ -1,6 +1,7 @@
 package rewrite
 
 import (
+	"bytes"
 	"net/netip"
 	"strings"
 
@@ -12,7 +13,7 @@ const (
 	hundred     = 100
 )
 
-func NodeName(b *strings.Builder, node subscription.Node, country string, ip netip.Addr) {
+func NodeName(b *bytes.Buffer, node subscription.Node, country string, ip netip.Addr) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
 		return
@@ -43,7 +44,7 @@ func NodeName(b *strings.Builder, node subscription.Node, country string, ip net
 	b.WriteString(cleanName)
 }
 
-func writeOctet(b *strings.Builder, n byte) {
+func writeOctet(b *bytes.Buffer, n byte) {
 	switch {
 	case n >= hundred:
 		b.WriteByte('0' + n/hundred)

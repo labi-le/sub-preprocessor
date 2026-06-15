@@ -1,3 +1,6 @@
+log:
+  level: info
+
 server:
   listen: :8080
 
@@ -15,16 +18,12 @@ resolver:
   # address: "8.8.8.8:53"
   timeout: 5s
 
-# Filter workflow order. Known stages: geo, asn.
-# algorithm: fail_first (default) — pick first matching IP, stop on first stage failure.
-#            all              — filter all IPs through all stages, keep node if any IP survives.
-# If omitted, defaults to [geo, asn] with fail_first (backward compatible).
-# Uncomment to control order, algorithm, or disable specific filters:
+# Filter workflow order. Known stages: geofeed, asn.
+# Filters always run as a sequential pipeline in this order.
 workflow:
   stages:
     - asn
-    - geo
-  algorithm: fail_first
+    - geofeed
 
 # Optional ASN filtering: drop nodes whose AS name matches deny patterns.
 # Uses Team Cymru DNS to resolve ASN by IP.

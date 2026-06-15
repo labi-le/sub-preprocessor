@@ -12,21 +12,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultTimeout = 5 * time.Second
-
 const (
-	WorkflowFailFirst = "fail_first"
-	WorkflowAll       = "all"
+	defaultTimeout  = 5 * time.Second
+	defaultLogLevel = "info"
 )
 
-var defaultWorkflowStages = []string{"geo", "asn"}
+var defaultWorkflowStages = []string{"geofeed", "asn"}
 
 type WorkflowConfig struct {
-	Stages    []string `yaml:"stages"`
-	Algorithm string   `yaml:"algorithm"`
+	Stages []string `yaml:"stages"`
+}
+
+type LogConfig struct {
+	Level string `yaml:"level"`
 }
 
 type Config struct {
+	Log    LogConfig `yaml:"log"`
 	Server struct {
 		Listen string `yaml:"listen"`
 	} `yaml:"server"`
@@ -58,6 +60,10 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unmarshal config: %w", errUnmarshal)
 	}
 
+	if cfg.Log.Level == "" {
+		cfg.Log.Level = defaultLogLevel
+	}
+
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
 	}
@@ -69,12 +75,6 @@ func Load(path string) (Config, error) {
 	}
 	if len(cfg.Workflow.Stages) == 0 {
 		cfg.Workflow.Stages = defaultWorkflowStages
-	}
-	if cfg.Workflow.Algorithm == "" {
-		cfg.Workflow.Algorithm = WorkflowFailFirst
-	}
-	if cfg.Workflow.Algorithm != WorkflowFailFirst && cfg.Workflow.Algorithm != WorkflowAll {
-		return Config{}, fmt.Errorf("unknown workflow algorithm: %q (must be %q or %q)", cfg.Workflow.Algorithm, WorkflowFailFirst, WorkflowAll)
 	}
 	if errValidate := validateGeofeedSources(cfg.Geofeed.Sources); errValidate != nil {
 		return Config{}, errValidate

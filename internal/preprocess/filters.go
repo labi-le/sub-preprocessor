@@ -12,18 +12,18 @@ import (
 
 // Filter processes a node's IPs through one workflow stage.
 type Filter interface {
-	Process(ctx context.Context, ips []netip.Addr, entries []geofeed.Entry, allowed filter.CountrySet, stats *Stats) []netip.Addr
+	Process(ctx context.Context, ips []netip.Addr, lookup geofeed.CountryLookup, allowed filter.CountrySet, stats *Stats) []netip.Addr
 }
 
-// GeoFilter returns IPs whose country is in the allowed set.
-type GeoFilter struct{}
+// GeofeedFilter returns IPs whose geofeed country is in the allowed set.
+type GeofeedFilter struct{}
 
-func NewGeoFilter() *GeoFilter {
-	return &GeoFilter{}
+func NewGeofeedFilter() *GeofeedFilter {
+	return &GeofeedFilter{}
 }
 
-func (f *GeoFilter) Process(_ context.Context, ips []netip.Addr, entries []geofeed.Entry, allowed filter.CountrySet, stats *Stats) []netip.Addr {
-	result := filter.AllAllowed(entries, ips, allowed)
+func (f *GeofeedFilter) Process(_ context.Context, ips []netip.Addr, lookup geofeed.CountryLookup, allowed filter.CountrySet, stats *Stats) []netip.Addr {
+	result := filter.AllAllowed(lookup, ips, allowed)
 	if len(result) == 0 {
 		stats.GeoDrop++
 	}
@@ -59,7 +59,7 @@ func (f *ASNFilter) isAllowed(ctx context.Context, ip netip.Addr, allowed filter
 	return true
 }
 
-func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, _ []geofeed.Entry, allowed filter.CountrySet, stats *Stats) []netip.Addr {
+func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, _ geofeed.CountryLookup, allowed filter.CountrySet, stats *Stats) []netip.Addr {
 	if f.resolver == nil {
 		return ips
 	}
@@ -79,8 +79,8 @@ func buildFilters(stages []string, asnR *asn.Resolver, patterns []*regexp.Regexp
 	filters := make([]Filter, 0, len(stages))
 	for _, name := range stages {
 		switch name {
-		case "geo":
-			filters = append(filters, NewGeoFilter())
+		case "geofeed":
+			filters = append(filters, NewGeofeedFilter())
 		case "asn":
 			filters = append(filters, NewASNFilter(asnR, patterns))
 		}

@@ -30,9 +30,9 @@ func (s *CountrySet) Has(country string) bool {
 	return (s[idx/bitsPerUint64] & (1 << (idx % bitsPerUint64))) != 0
 }
 
-func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet, strict bool) (netip.Addr, string, bool) {
+func FirstAllowed(lookup geofeed.CountryLookup, ips []netip.Addr, allowed CountrySet, strict bool) (netip.Addr, string, bool) {
 	for _, ip := range ips {
-		country := geofeed.LookupCountry(entries, ip)
+		country := geofeed.LookupCountry(lookup, ip)
 		if allowed.Has(country) {
 			if !strict {
 				return ip, country, true
@@ -43,7 +43,7 @@ func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet,
 	}
 	if strict {
 		if len(ips) > 0 {
-			country := geofeed.LookupCountry(entries, ips[0])
+			country := geofeed.LookupCountry(lookup, ips[0])
 			return ips[0], country, true
 		}
 	}
@@ -51,10 +51,10 @@ func FirstAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet,
 }
 
 // AllAllowed returns all IPs from ips whose country is in the allowed set.
-func AllAllowed(entries []geofeed.Entry, ips []netip.Addr, allowed CountrySet) []netip.Addr {
+func AllAllowed(lookup geofeed.CountryLookup, ips []netip.Addr, allowed CountrySet) []netip.Addr {
 	result := make([]netip.Addr, 0, len(ips))
 	for _, ip := range ips {
-		country := geofeed.LookupCountry(entries, ip)
+		country := geofeed.LookupCountry(lookup, ip)
 		if allowed.Has(country) {
 			result = append(result, ip)
 		}
