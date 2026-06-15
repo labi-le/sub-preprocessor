@@ -30,4 +30,5 @@ workflow:
 asn:
   deny_patterns:
     - "(?i)VDSINA"
+    - "(?i)HOSTOFF"
   timeout: 5s
