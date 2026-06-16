@@ -10,3 +10,22 @@ services:
     volumes:
       - ./config.yaml:/config.yaml:ro
     restart: always
+
+  gemini-block-checker:
+    image: alpine:3.21
+    container_name: gemini-block-checker
+    network_mode: host
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl bash bind-tools
+        wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        chmod +x /usr/local/bin/yq
+        exec /scripts/asn-block-check.sh
+    volumes:
+      - ./config.yaml:/config.yaml:rw
+      - ./scripts:/scripts:ro
+    environment:
+      - INTERVAL=300
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    restart: unless-stopped
