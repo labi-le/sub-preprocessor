@@ -18,13 +18,14 @@ resolver:
 workflow:
   stages:
     - asn
-    - geofeed
+    # - geofeed
 
 asn:
   deny_patterns:
     - "(?i)VDSINA"
     - "(?i)HOSTOFF"
     - "(?i)ServHost"
+    - "(?i)TAKEHOST-AS"
   timeout: 5s
 
 groups:
