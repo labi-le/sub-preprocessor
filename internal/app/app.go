@@ -8,10 +8,11 @@ import (
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/reload"
 	serverpkg "domains.lst/sub-preprocessor/internal/server"
 )
 
-const defaultConfigPath = "./config.yaml"
+const defaultConfigPath = "./config/config.yaml"
 const shutdownTimeout = 3 * time.Second
 
 func Run(ctx context.Context) error {
@@ -23,20 +24,27 @@ func Run(ctx context.Context) error {
 	logger := log.InitLogger(cfg.Log.Level)
 	logger.Info().Str("level", cfg.Log.Level).Msg("logger initialized")
 
-	svc, err := preprocess.NewProcessor(ctx, logger, preprocess.Options{
-		GeofeedSources:  cfg.Geofeed.Sources,
-		RefreshInterval: cfg.Geofeed.RefreshInterval,
-		DNSTimeout:      cfg.Resolver.Timeout,
-		DNSAddress:      cfg.Resolver.Address,
-		ASNTimeout:      cfg.ASN.Timeout,
-		ASNDenyPatterns: cfg.ASN.DenyPatterns,
-		WorkflowStages:  cfg.Workflow.Stages,
-	})
+	svc, err := preprocess.NewProcessor(ctx, logger, reload.OptionsFromConfig(cfg))
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	srv := serverpkg.New(logger, cfg.Server.Listen, svc, cfg.Groups)
+	holder := serverpkg.NewHolder(&serverpkg.Snapshot{Svc: svc, Groups: cfg.Groups})
+	srv := serverpkg.New(logger, cfg.Server.Listen, holder)
+
+	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc)
+	watcher, err := reload.NewWatcher(defaultConfigPath, reloader.Reload, logger)
+	if err != nil {
+		return fmt.Errorf("create config watcher: %w", err)
+	}
+
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		if watchErr := watcher.Run(ctx); watchErr != nil {
+			logger.Error().Err(watchErr).Msg("config watcher error")
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -48,7 +56,9 @@ func Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
 		logger.Info().Msg("shutting down")
-		if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil {
+		shutdownErr := srv.Shutdown(shutdownCtx)
+		<-watcherDone
+		if shutdownErr != nil {
 			return fmt.Errorf("server shutdown: %w", shutdownErr)
 		}
 		logger.Info().Msg("shutdown complete")

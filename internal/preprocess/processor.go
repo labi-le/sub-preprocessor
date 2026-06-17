@@ -22,13 +22,15 @@ import (
 )
 
 type Options struct {
-	GeofeedSources  []geofeed.Source
-	RefreshInterval time.Duration
-	DNSTimeout      time.Duration
-	DNSAddress      string
-	ASNTimeout      time.Duration
-	ASNDenyPatterns []string
-	WorkflowStages  []string
+	GeofeedSources    []geofeed.Source
+	RefreshInterval   time.Duration
+	DNSTimeout        time.Duration
+	DNSAddress        string
+	ASNTimeout        time.Duration
+	ASNDenyPatterns   []string
+	WorkflowStages    []string
+	PreloadedGeofeed  geofeed.CountryLookup
+	PreloadedLoadedAt time.Time
 }
 
 type FilterRequest struct {
@@ -69,13 +71,25 @@ type PipelineContext struct {
 
 func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
 	initLog := log.Op(logger, "processor.New")
-	initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
 
-	entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources)
-	if err != nil {
-		return nil, fmt.Errorf("load geofeed: %w", err)
+	var (
+		lookup   geofeed.CountryLookup
+		loadedAt time.Time
+	)
+	if opts.PreloadedGeofeed != nil {
+		initLog.Info().Msg("using preloaded geofeed lookup")
+		lookup = opts.PreloadedGeofeed
+		loadedAt = opts.PreloadedLoadedAt
+	} else {
+		initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
+		entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources)
+		if err != nil {
+			return nil, fmt.Errorf("load geofeed: %w", err)
+		}
+		initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
+		lookup = geofeed.NewLookup(entries)
+		loadedAt = time.Now()
 	}
-	initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
 
 	patterns := make([]*regexp.Regexp, 0, len(opts.ASNDenyPatterns))
 	for _, p := range opts.ASNDenyPatterns {
@@ -95,9 +109,9 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 
 	return &Processor{
 		logger:          logger,
-		countryLookup:   geofeed.NewLookup(entries),
+		countryLookup:   lookup,
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
-		LoadedAt:        time.Now(),
+		LoadedAt:        loadedAt,
 		RefreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress),
 		filters:         filters,
@@ -254,6 +268,13 @@ func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
 		return true
 	}
 	return now.Sub(p.LoadedAt) >= p.RefreshInterval
+}
+
+//nolint:ireturn // returns the countryLookup interface so callers can carry geofeed state across reloads
+func (p *Processor) GeofeedState() (geofeed.CountryLookup, time.Time) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.countryLookup, p.LoadedAt
 }
 
 func FormatStats(stats Stats) string {

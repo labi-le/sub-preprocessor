@@ -27,7 +27,7 @@ type Server struct {
 
 const defaultBuilderCapacity = 4096
 
-func New(logger zerolog.Logger, listen string, svc Filterer, groupsMap map[string][]string) *Server {
+func New(logger zerolog.Logger, listen string, holder *Holder) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
 		code := fiber.StatusInternalServerError
 		var fiberErr *fiber.Error
@@ -87,13 +87,14 @@ func New(logger zerolog.Logger, listen string, svc Filterer, groupsMap map[strin
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 
-	app.Get("/", newIndexHandler(svc, groupsMap))
+	app.Get("/", newIndexHandler(holder))
 
 	return &Server{listen: listen, app: app, logger: logger}
 }
 
-func newIndexHandler(svc Filterer, groupsMap map[string][]string) fiber.Handler {
+func newIndexHandler(holder *Holder) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		snap := holder.Load()
 		rawSubscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
 		subURL := fetch.SubscriptionURL(rawSubscriptionURL)
 		rawCountries := c.Query("countries")
@@ -112,8 +113,8 @@ func newIndexHandler(svc Filterer, groupsMap map[string][]string) fiber.Handler 
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
-		allowed := buildCountrySet(rawCountries, rawGroups, groupsMap)
-		excluded := buildCountrySet(rawExcludeCountries, rawExcludeGroups, groupsMap)
+		allowed := buildCountrySet(rawCountries, rawGroups, snap.Groups)
+		excluded := buildCountrySet(rawExcludeCountries, rawExcludeGroups, snap.Groups)
 		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
 			allowed = filter.All()
 		}
@@ -130,7 +131,7 @@ func newIndexHandler(svc Filterer, groupsMap map[string][]string) fiber.Handler 
 			SubscriptionURL:  subURL,
 			AllowedCountries: allowed,
 		}
-		stats, err := svc.Filter(c.Context(), &sb, req)
+		stats, err := snap.Svc.Filter(c.Context(), &sb, req)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "failed to preprocess subscription")
 		}

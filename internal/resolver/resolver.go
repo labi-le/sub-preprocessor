@@ -67,7 +67,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, erro
 
 	resolver := net.DefaultResolver
 	if r.dialer != nil {
-		resolver = &net.Resolver{Dial: r.dialer}
+		resolver = &net.Resolver{PreferGo: true, Dial: r.dialer}
 	}
 
 	ips, err := resolver.LookupNetIP(resolveCtx, "ip4", host)

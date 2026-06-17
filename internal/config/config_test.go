@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -129,5 +130,46 @@ func TestLoadRejectsGroupWithEmptyName(t *testing.T) {
 
 	if _, err := config.Load(path); err == nil {
 		t.Fatal("expected error for empty group name")
+	}
+}
+
+func TestEqual(t *testing.T) {
+	cfgA := config.Config{Server: struct {
+		Listen string `yaml:"listen"`
+	}{Listen: ":8080"}}
+	cfgB := cfgA
+	if !config.Equal(cfgA, cfgB) {
+		t.Fatal("identical configs should be equal")
+	}
+	cfgB.Server.Listen = ":9090"
+	if config.Equal(cfgA, cfgB) {
+		t.Fatal("configs with different listen should not be equal")
+	}
+}
+
+func TestGeofeedSourcesChanged(t *testing.T) {
+	src := geofeed.Source{URL: "https://example.com/feed.csv", Type: "raw"}
+	cfgA := config.Config{Geofeed: config.GeofeedConfig{Sources: []geofeed.Source{src}}}
+	cfgB := cfgA
+	if config.GeofeedSourcesChanged(cfgA, cfgB) {
+		t.Fatal("identical sources should not be changed")
+	}
+	cfgB.Geofeed.Sources = append(cfgB.Geofeed.Sources, geofeed.Source{URL: "https://other.com/feed.csv", Type: "gzip"})
+	if !config.GeofeedSourcesChanged(cfgA, cfgB) {
+		t.Fatal("added source should be detected as changed")
+	}
+}
+
+func TestListenChanged(t *testing.T) {
+	cfgA := config.Config{Server: struct {
+		Listen string `yaml:"listen"`
+	}{Listen: ":8080"}}
+	cfgB := cfgA
+	if config.ListenChanged(cfgA, cfgB) {
+		t.Fatal("same listen should not be changed")
+	}
+	cfgB.Server.Listen = ":9090"
+	if !config.ListenChanged(cfgA, cfgB) {
+		t.Fatal("different listen should be detected")
 	}
 }

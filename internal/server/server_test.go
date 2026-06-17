@@ -42,14 +42,45 @@ func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, req prep
 	return preprocess.Stats{Total: 1, Kept: 1}, nil
 }
 
+type snapStub struct {
+	marker  string
+	allowed filter.CountrySet
+}
+
+func (s *snapStub) Filter(_ context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error) {
+	s.allowed = req.AllowedCountries
+	b.WriteString(s.marker)
+	return preprocess.Stats{Total: 1, Kept: 1}, nil
+}
+
 func nopLogger() zerolog.Logger {
 	return zerolog.Nop()
+}
+
+func newServer(svc server.Filterer, groups map[string][]string) *server.Server {
+	holder := server.NewHolder(&server.Snapshot{Svc: svc, Groups: groups})
+	return server.New(nopLogger(), ":8080", holder)
+}
+
+func doGet(t *testing.T, srv *server.Server, target string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
 }
 
 func TestServerReturnsPlainText(t *testing.T) {
 	t.Parallel()
 
-	srv := server.New(nopLogger(), ":8080", stubService{}, nil)
+	srv := newServer(stubService{}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -77,7 +108,7 @@ func TestServerAcceptsGroupsInsteadOfCountries(t *testing.T) {
 		"nordics": {"FI", "SE", "NO", "DK"},
 	}
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, groups)
+	srv := newServer(svc, groups)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -114,7 +145,7 @@ func TestServerRejectsMissingBothCountriesAndGroups(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -134,7 +165,7 @@ func TestServerRejectsNonHTTPSSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=http://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -154,7 +185,7 @@ func TestServerRejectsLocalSubscriptionURL(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://127.0.0.1/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -174,7 +205,7 @@ func TestServerUsesRequestContext(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 
 	resp, err := srv.TestApp().Test(req)
@@ -195,7 +226,7 @@ func TestServerReturnsNoContentForFavicon(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -223,7 +254,7 @@ func TestServerHidesInternalErrors(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{err: errors.New("dial tcp 10.0.0.5:443: i/o timeout")}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -248,7 +279,7 @@ func TestServerExcludesCountries(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI,EE,DE&exclude_countries=DE,EE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -281,7 +312,7 @@ func TestServerExcludesGroup(t *testing.T) {
 		"baltics": {"EE", "LV", "LT"},
 	}
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, groups)
+	srv := newServer(svc, groups)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics,baltics&exclude_groups=baltics", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -304,7 +335,7 @@ func TestServerExcludeOnly(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&exclude_countries=DE", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -333,7 +364,7 @@ func TestServerExcludesAllAllowedReturnsError(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=FI&exclude_countries=FI", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -356,7 +387,7 @@ func TestServerUnknownExcludeGroupIgnored(t *testing.T) {
 		"nordics": {"FI", "SE"},
 	}
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, groups)
+	srv := newServer(svc, groups)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics&exclude_groups=unknown", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -379,7 +410,7 @@ func TestServerMalformedCountriesDoesNotAllowAll(t *testing.T) {
 	t.Parallel()
 
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, nil)
+	srv := newServer(svc, nil)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&countries=XXX", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -402,7 +433,7 @@ func TestServerUnknownGroupDoesNotAllowAll(t *testing.T) {
 		"nordics": {"FI"},
 	}
 	svc := &recordingService{}
-	srv := server.New(nopLogger(), ":8080", svc, groups)
+	srv := newServer(svc, groups)
 	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=unknown", nil)
 	resp, err := srv.TestApp().Test(req)
 	if err != nil {
@@ -415,5 +446,47 @@ func TestServerUnknownGroupDoesNotAllowAll(t *testing.T) {
 	}
 	if svc.called {
 		t.Fatal("service should not be called with unknown group")
+	}
+}
+
+func TestServerReadsSnapshotPerRequest(t *testing.T) {
+	t.Parallel()
+
+	stubA := &snapStub{marker: "SNAP-A"}
+	holder := server.NewHolder(&server.Snapshot{
+		Svc:    stubA,
+		Groups: map[string][]string{"ga": {"FI"}},
+	})
+	srv := server.New(nopLogger(), ":8080", holder)
+
+	statusA, bodyA := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&groups=ga")
+	if statusA != http.StatusOK {
+		t.Fatalf("snapshot A: unexpected status: %d", statusA)
+	}
+	if !strings.Contains(bodyA, "SNAP-A") {
+		t.Fatalf("snapshot A: unexpected body: %q", bodyA)
+	}
+	if !stubA.allowed.Has(geofeed.CountryCode{'F', 'I'}) {
+		t.Fatal("snapshot A: expected FI from group ga")
+	}
+
+	stubB := &snapStub{marker: "SNAP-B"}
+	holder.Store(&server.Snapshot{
+		Svc:    stubB,
+		Groups: map[string][]string{"gb": {"DE"}},
+	})
+
+	statusB, bodyB := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&groups=gb")
+	if statusB != http.StatusOK {
+		t.Fatalf("snapshot B: unexpected status: %d", statusB)
+	}
+	if !strings.Contains(bodyB, "SNAP-B") {
+		t.Fatalf("snapshot B: expected swapped body, got: %q", bodyB)
+	}
+	if !stubB.allowed.Has(geofeed.CountryCode{'D', 'E'}) {
+		t.Fatal("snapshot B: expected DE from group gb")
+	}
+	if stubA.allowed.Has(geofeed.CountryCode{'D', 'E'}) {
+		t.Fatal("snapshot A service must not handle the post-swap request")
 	}
 }

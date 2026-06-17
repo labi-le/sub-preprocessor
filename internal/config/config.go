@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -145,4 +146,16 @@ func validateCountryCode(name, c string) error {
 
 func isASCIILetter(b byte) bool {
 	return ('A' <= b && b <= 'Z') || ('a' <= b && b <= 'z')
+}
+
+func Equal(a, b Config) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func GeofeedSourcesChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Geofeed.Sources, newCfg.Geofeed.Sources)
+}
+
+func ListenChanged(old, newCfg Config) bool {
+	return old.Server.Listen != newCfg.Server.Listen
 }

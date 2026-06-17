@@ -18,12 +18,23 @@ Entry point. Creates `context.Context` with `SIGINT/SIGTERM` cancellation, calls
 
 `./internal/app/app.go`, `pprof.go`
 
-Application bootstrap: loads config, creates `Processor`, starts HTTP server, handles graceful shutdown.
+Application bootstrap: loads config, creates `Processor`, wires the config watcher and reloader, starts HTTP server, handles graceful shutdown.
 
 **Key exports:**
 - `Run(ctx) error` — main lifecycle
 
-**Tags:** `bootstrap`, `wire`, `shutdown`, `lifecycle`
+**Constants:**
+- `defaultConfigPath = "./config/config.yaml"` — path passed to `config.Load`, `reload.NewReloader`, and `reload.NewWatcher`
+
+**Wiring (inside `Run`):**
+- Builds `server.Holder` seeded with the startup `Snapshot`
+- Creates `server.New(logger, listen, holder)` (no longer passes `svc`/`groupsMap` directly)
+- Creates `reload.NewReloader` seeded with startup `cfg` + `svc`
+- Creates `reload.NewWatcher` with `reloader.Reload` as the `onChange` callback
+- Runs watcher in a goroutine; joins it via `watcherDone` channel before returning from shutdown
+
+**Uses:** `config`, `log`, `preprocess`, `reload`, `server`
+**Tags:** `bootstrap`, `wire`, `shutdown`, `lifecycle`, `hot-reload`
 
 ---
 
@@ -31,7 +42,7 @@ Application bootstrap: loads config, creates `Processor`, starts HTTP server, ha
 
 `./internal/config/config.go`
 
-YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema.
+YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema. Also provides diff helpers used by the reloader to decide what changed.
 
 **Key types:**
 - `Config` — root config struct (`log`, `server`, `geofeed`, `resolver`, `workflow`, `asn`, `groups`)
@@ -46,9 +57,12 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `(*Config).Validate() error` — validates geofeed sources and groups
 - `(*GeofeedConfig).Validate() error` — validates sources are non-empty with valid types
 - `(Groups).Validate() error` — validates group names and 2-letter country codes
+- `Equal(a, b Config) bool` — deep equality check via `reflect.DeepEqual`; used by reloader to skip no-op reloads
+- `GeofeedSourcesChanged(old, newCfg Config) bool` — true when `geofeed.sources` differ; reloader uses this to decide whether to carry over the existing lookup
+- `ListenChanged(old, newCfg Config) bool` — true when `server.listen` changed; reloader logs a warning and ignores the change (restart required)
 
 **Uses:** `fetch`, `geofeed`
-**Tags:** `config`, `yaml`, `validation`, `startup`, `defaults`
+**Tags:** `config`, `yaml`, `validation`, `startup`, `defaults`, `diff`, `reload`
 
 ---
 
@@ -102,14 +116,15 @@ Geofeed CSV parsing, lookup, and data source management. Default country lookup 
 
 `./internal/log/log.go`, `ctxlog.go`
 
-Logging package using `github.com/rs/zerolog`. Sets up console logging with timestamps, caller info (short `file:line`), and configurable log level.
+Logging package using `github.com/rs/zerolog`. Sets up console logging with timestamps, caller info (short `file:line`), and configurable log level. Supports runtime level changes without restarting.
 
 **Key functions:**
 - `InitDefault()` — configure the global `zerolog.Logger` with default `info` level (called from `main()`)
-- `InitLogger(level str) zerolog.Logger` — override global level from config, return logger
+- `InitLogger(level string) zerolog.Logger` — override global level via `zerolog.SetGlobalLevel`, return logger; called after config is loaded
+- `SetLevel(level string) error` — change the global zerolog level at runtime via `zerolog.SetGlobalLevel`; returns an error if the level string is unrecognised; called by the reloader when log level changes in config
 - `Op(logger, op) zerolog.Logger` — create child logger with `"op"` field (contextual)
 
-**Tags:** `log`, `zerolog`, `logging`, `structured-log`, `contextual`
+**Tags:** `log`, `zerolog`, `logging`, `structured-log`, `contextual`, `runtime-level`
 
 `./internal/ioutil/ioutil.go`
 
@@ -155,7 +170,7 @@ When no `countries`/`groups` are provided, the server can start with `All()` and
 
 `./internal/resolver/resolver.go`
 
-DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. No result caching: every call performs a fresh DNS lookup. preprocess still isolates results once per request/hostname via a pooled resolved-map.
+DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. No result caching: every call performs a fresh DNS lookup. preprocess still isolates results once per request/hostname via a pooled resolved-map. When a custom `resolver.address` is configured, `PreferGo: true` is set on the `net.Resolver` so the custom `Dial` function is actually used (the cgo resolver ignores `Dial`).
 
 **Key types:**
 - `Resolver` — `timeout` + `dialer` + `sync.Pool` for resolved maps
@@ -239,26 +254,31 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 - `Filter` — interface for workflow stages; `Process(ctx, ips, pctx)`
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns AND IPs whose Cymru-resolved country is not in `AllowedCountries` (so country filtering works without a geofeed stage)
-- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`)
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `PreloadedGeofeed`, `PreloadedLoadedAt`)
 - `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
 **Key functions:**
-- `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed, build filter chain
+- `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed (or use `opts.PreloadedGeofeed` when set), build filter chain
 - `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
+- `(*Processor).GeofeedState() (geofeed.CountryLookup, time.Time)` — returns the current lookup and `LoadedAt` under read lock; used by the reloader to carry geofeed state across config reloads when sources are unchanged
 - `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy resolver results into request-local storage
 - `buildFilters(stages, asnR, patterns) []Filter` — construct filter pipeline; always appends a `GeofeedFilter` last even when `"geofeed"` is not explicitly listed, so that `AllowedCountries` (from `countries`/`groups`/`exclude_*`) is always enforced
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
-**Uses:** `asn`, `config`, `filter`, `geofeed`, `resolver`, `rewrite`, `subscription`
-**Tags:** `orchestrator`, `pipeline`, `filter`, `geo`, `asn`, `stats`, `workflow`
+**Options fields added for hot-reload:**
+- `PreloadedGeofeed geofeed.CountryLookup` — when non-nil, `NewProcessor` skips the initial geofeed fetch and uses this lookup directly
+- `PreloadedLoadedAt time.Time` — paired with `PreloadedGeofeed`; sets `Processor.LoadedAt` so the background refresh timer is not reset unnecessarily
+
+**Uses:** `asn`, `config`, `filter`, `geofeed`, `log`, `resolver`, `rewrite`, `subscription`
+**Tags:** `orchestrator`, `pipeline`, `filter`, `geo`, `asn`, `stats`, `workflow`, `hot-reload`
 
 ---
 
 ## `internal/server`
 
-`./internal/server/server.go`
+`./internal/server/server.go`, `holder.go`
 
-HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription.
+HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription. The active `Processor` and groups map are held in an atomic `Holder` so the reloader can swap them without restarting the server.
 
 The root handler now accepts:
 - `subscription_url` (required)
@@ -269,19 +289,46 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 **Key types:**
 - `Filterer` — interface `Filter(ctx, b, req preprocess.FilterRequest) (Stats, error)`
+- `Snapshot` — `Svc Filterer` + `Groups map[string][]string`; the immutable value swapped atomically on reload
+- `Holder` — wraps `atomic.Pointer[Snapshot]`; safe for concurrent reads and single-writer stores
 - `Server` — `listen` + `fiber.App`
 
 **Key functions:**
-- `New(logger, listen, svc, groupsMap) *Server` — wires Fiber, logging, and the filter handler
-- `newIndexHandler(svc, groupsMap) fiber.Handler` — root handler implementation: validates URL, builds allowed/excluded sets, and calls `Filterer`
+- `NewHolder(initial *Snapshot) *Holder` — create a Holder seeded with the startup snapshot
+- `(*Holder).Load() *Snapshot` — atomic load of the current snapshot
+- `(*Holder).Store(s *Snapshot)` — atomic store of a new snapshot (called by reloader)
+- `New(logger zerolog.Logger, listen string, holder *Holder) *Server` — wires Fiber, logging, and the filter handler; reads `Holder` on every request so reloads are picked up without restart
+- `newIndexHandler(holder *Holder) fiber.Handler` — root handler: loads snapshot, validates URL, builds allowed/excluded sets, calls `Filterer`
 - `buildCountrySet(rawCountries, rawGroups, groupsMap) CountrySet` — HTTP-layer group expansion (used for both allowed and excluded sets)
 - `isEmpty(set) bool` — checks whether a `CountrySet` has any country set
 - `(*Server).Listen() error`
 - `(*Server).Shutdown(ctx) error`
 - `(*Server).TestApp() *fiber.App` — for test usage
 
-**Uses:** `fetch`, `preprocess`, `fiber`
-**Tags:** `http`, `fiber`, `api`, `handler`, `server`, `healthz`
+**Uses:** `fetch`, `filter`, `preprocess`, `fiber`
+**Tags:** `http`, `fiber`, `api`, `handler`, `server`, `healthz`, `atomic-swap`, `hot-reload`
+
+---
+
+## `internal/reload`
+
+`./internal/reload/reloader.go`, `watcher.go`, `options.go`
+
+Config hot-reload. Watches the config file for changes (via fsnotify on the parent directory), debounces bursts, and atomically swaps the active `Processor` + groups into the server `Holder`. On any error the previous settings are kept unchanged.
+
+**Key types:**
+- `Reloader` — holds `path`, `*server.Holder`, `zerolog.Logger`, and the last-applied `config.Config` + `*preprocess.Processor` for diffing
+- `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; debounces events with a 200 ms window
+
+**Key functions:**
+- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor) *Reloader` — seed with startup state so the first reload can diff against it
+- `(*Reloader).Reload(ctx context.Context)` — 7-step algorithm: load config → skip if `Equal` → build `OptionsFromConfig` → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot
+- `NewWatcher(configPath string, onChange func(context.Context), logger zerolog.Logger) (*Watcher, error)` — register fsnotify watch on parent directory; return error if watcher or directory watch fails
+- `(*Watcher).Run(ctx context.Context) error` — event loop: debounce matching events, call `onChange` once per burst; close fsnotify watcher on ctx cancellation and return nil (callers use the return as a join point)
+- `OptionsFromConfig(cfg config.Config) preprocess.Options` — single source of truth for mapping `config.Config` to `preprocess.Options`; leaves `PreloadedGeofeed`/`PreloadedLoadedAt` unset (callers decide whether to carry over geofeed state)
+
+**Uses:** `config`, `geofeed`, `log`, `preprocess`, `server`, `fsnotify`
+**Tags:** `reload`, `fsnotify`, `hot-reload`, `watch`, `atomic-swap`, `debounce`
 
 ---
 
@@ -301,7 +348,12 @@ main
      │   ├─ resolver   (hostname DNS)
      │   ├─ rewrite ── subscription
      │   └─ subscription ── fetch, ioutil
-     └─ server ─── fetch, preprocess, log
+     ├─ reload
+     │   ├─ config     (Load, Equal, GeofeedSourcesChanged, ListenChanged)
+     │   ├─ log        (SetLevel)
+     │   ├─ preprocess (NewProcessor, Options, GeofeedState)
+     │   └─ server     (Holder, Snapshot)
+     └─ server ─── fetch, filter, preprocess
 ```
 
 ## Quick Tag Index
@@ -316,8 +368,9 @@ main
 | `uri-parse`, `node`, `base64` | `subscription` |
 | `geo-tag`, `output-rewrite` | `rewrite` |
 | `pipeline`, `orchestrator` | `preprocess` |
-| `fiber`, `http-handler` | `server` |
-| `config`, `yaml`, `defaults` | `config` |
-| `bootstrap`, `wire` | `app` |
-| `log`, `zerolog`, `structured-log` | `log` |
+| `atomic-swap`, `http-handler` | `server` |
+| `config`, `yaml`, `defaults`, `diff` | `config` |
+| `bootstrap`, `wire`, `hot-reload` | `app` |
+| `log`, `zerolog`, `structured-log`, `runtime-level` | `log` |
 | `shared-iterator`, `unsafe-string` | `ioutil` |
+| `fsnotify`, `watch`, `debounce`, `hot-reload` | `reload` |

@@ -37,10 +37,11 @@ func InitLogger(level string) zerolog.Logger {
 		lvl = zerolog.InfoLevel
 	}
 
+	zerolog.SetGlobalLevel(lvl)
+
 	out := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
 	zerolog.CallerMarshalFunc = shortCaller
 	logger := zerolog.New(out).
-		Level(lvl).
 		With().
 		Timestamp().
 		Caller().
@@ -48,4 +49,16 @@ func InitLogger(level string) zerolog.Logger {
 
 	zlog.Logger = logger
 	return logger
+}
+
+// SetLevel changes the global zerolog level at runtime.
+// All loggers that do not have a per-logger level set will respect the new level.
+// Returns an error if the level string is not recognised.
+func SetLevel(level string) error {
+	lvl, err := zerolog.ParseLevel(level)
+	if err != nil {
+		return err
+	}
+	zerolog.SetGlobalLevel(lvl)
+	return nil
 }

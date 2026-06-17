@@ -8,7 +8,7 @@ services:
     ports:
       - "7008:8080"
     volumes:
-      - ./config.yaml:/config.yaml:ro
+      - ./config:/config:ro
     restart: always
 
   gemini-block-checker:
@@ -23,9 +23,10 @@ services:
         chmod +x /usr/local/bin/yq
         exec /scripts/asn-block-check.sh
     volumes:
-      - ./config.yaml:/config.yaml:rw
+      - ./config:/config:rw
       - ./scripts:/scripts:ro
     environment:
       - INTERVAL=300
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CONFIG=/config/config.yaml
     restart: unless-stopped
