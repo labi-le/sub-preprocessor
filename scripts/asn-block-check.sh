@@ -56,9 +56,9 @@ while true; do
             continue
         fi
 
-        # Add deny pattern to config
+        # style="double" keeps regex metacharacters in the pattern as a valid quoted YAML scalar
         PATTERN="(?i)$AS_NAME"
-        if yq eval -i ".asn.deny_patterns += [\"$PATTERN\"]" "$CONFIG" 2>/dev/null; then
+        if yq eval -i "(.asn.deny_patterns += [\"$PATTERN\"]) | .asn.deny_patterns[-1] style=\"double\"" "$CONFIG" 2>/dev/null; then
             echo "[asn-block-check] ADDED deny_pattern: $PATTERN"
         else
             echo "[asn-block-check] failed to update config (yq missing or config not writable)"

@@ -155,18 +155,18 @@ When no `countries`/`groups` are provided, the server can start with `All()` and
 
 `./internal/resolver/resolver.go`
 
-DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Global `sync.Map`-based DNS cache with TTL expiry per `Resolver` instance. Returns shared cached slices, while preprocess isolates them once per request/hostname via a pooled resolved-map.
+DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. No result caching: every call performs a fresh DNS lookup. preprocess still isolates results once per request/hostname via a pooled resolved-map.
 
 **Key types:**
-- `Resolver` — `timeout` + `cache` (`sync.Map`) + `cacheTTL` + `dialer` + `sync.Pool` for resolved maps
+- `Resolver` — `timeout` + `dialer` + `sync.Pool` for resolved maps
 
 **Key functions:**
-- `New(timeout, address, ttl) *Resolver` — TTL defaults to 5 min if ≤ 0
-- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — cache-first (skip for bare IPs), fallback to real DNS; cached host results are returned without per-call copying
+- `New(timeout, address) *Resolver`
+- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — bare IPs returned directly, otherwise a fresh DNS lookup
 - `(*Resolver).GetResolvedMap() map[string][]netip.Addr` — get pooled per-request hostname map
 - `(*Resolver).PutResolvedMap(m)` — return map to pool
 
-**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`, `cache`, `ttl`
+**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`
 
 ---
 
@@ -174,15 +174,15 @@ DNS resolver for subscription node hostnames. Uses system DNS or custom address.
 
 `./internal/asn/resolver.go`
 
-ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Caches results in `sync.Map`. Currently IPv4-only.
+ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). No result caching: every call performs a fresh lookup. Currently IPv4-only.
 
 **Key types:**
 - `Result` — `Country` (`geofeed.CountryCode`) + `Name`
-- `Resolver` — `cache sync.Map` + `timeout`
+- `Resolver` — `timeout`
 
 **Key functions:**
 - `New(timeout) *Resolver`
-- `(*Resolver).Resolve(ctx, ip) (Result, error)` — lookup + cache
+- `(*Resolver).Resolve(ctx, ip) (Result, error)` — fresh Cymru lookup (IPv6 rejected)
 
 **Uses:** `net` (stdlib, not internal resolver)
 **Tags:** `asn`, `cymru`, `dns`, `ip`, `carrier`, `deny`, `name`
@@ -245,7 +245,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 **Key functions:**
 - `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed, build filter chain
 - `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
-- `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy shared resolver results into request-local storage
+- `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy resolver results into request-local storage
 - `buildFilters(stages, asnR, patterns) []Filter` — construct filter pipeline; always appends a `GeofeedFilter` last even when `"geofeed"` is not explicitly listed, so that `AllowedCountries` (from `countries`/`groups`/`exclude_*`) is always enforced
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 

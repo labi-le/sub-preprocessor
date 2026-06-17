@@ -19,7 +19,6 @@ func BenchmarkResolveASN(b *testing.B) {
 	ip := netip.MustParseAddr("8.8.8.8")
 	ctx := context.Background()
 
-	// Preload once to avoid repeated DNS lookups in the benchmark loop.
 	_, err := resolver.Resolve(ctx, ip)
 	if err != nil {
 		b.Fatalf("initial resolve: %v", err)

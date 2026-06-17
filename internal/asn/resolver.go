@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -26,7 +25,6 @@ type Result struct {
 }
 
 type Resolver struct {
-	cache   sync.Map
 	timeout time.Duration
 }
 
@@ -39,19 +37,7 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 		return Result{}, fmt.Errorf("ASN lookup is not supported for IPv6: %s", ip)
 	}
 
-	if v, ok := r.cache.Load(ip); ok {
-		if res, ok2 := v.(Result); ok2 {
-			return res, nil
-		}
-	}
-
-	result, err := r.lookup(ctx, ip)
-	if err != nil {
-		return Result{}, err
-	}
-
-	r.cache.Store(ip, result)
-	return result, nil
+	return r.lookup(ctx, ip)
 }
 
 func reverseIP(ip netip.Addr) string {

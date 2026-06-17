@@ -15,20 +15,13 @@ const (
 	mapInitSize = 32
 )
 
-type cacheEntry struct {
-	addrs   []netip.Addr
-	expires time.Time
-}
-
 type Resolver struct {
 	timeout      time.Duration
-	cache        sync.Map
-	cacheTTL     time.Duration
 	resolvedPool sync.Pool
 	dialer       func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-func New(timeout time.Duration, address string, ttl time.Duration) *Resolver {
+func New(timeout time.Duration, address string) *Resolver {
 	var dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	if address != "" {
 		d := net.Dialer{Timeout: timeout}
@@ -36,13 +29,9 @@ func New(timeout time.Duration, address string, ttl time.Duration) *Resolver {
 			return d.DialContext(ctx, network, address)
 		}
 	}
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
 	return &Resolver{
-		timeout:  timeout,
-		cacheTTL: ttl,
-		dialer:   dial,
+		timeout: timeout,
+		dialer:  dial,
 		resolvedPool: sync.Pool{
 			New: func() any { return make(map[string][]netip.Addr, mapInitSize) },
 		},
@@ -63,15 +52,7 @@ func (r *Resolver) PutResolvedMap(m map[string][]netip.Addr) {
 }
 
 func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, error) {
-	// Check cache.
-	if entry, ok := r.cache.Load(host); ok {
-		ce := entry.(cacheEntry)
-		if ce.expires.After(time.Now()) {
-			return ce.addrs, nil
-		}
-	}
-
-	// Bare IPs — skip DNS lookup after cache miss.
+	// Bare IPs — skip DNS lookup.
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Is4() {
 			out := make([]netip.Addr, 1)
@@ -94,10 +75,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, erro
 		return nil, fmt.Errorf("dns lookup: %w", err)
 	}
 
-	deduped := dedupIPv4(ips)
-
-	r.cache.Store(host, cacheEntry{addrs: deduped, expires: time.Now().Add(r.cacheTTL)})
-	return deduped, nil
+	return dedupIPv4(ips), nil
 }
 
 func dedupIPv4(ips []netip.Addr) []netip.Addr {

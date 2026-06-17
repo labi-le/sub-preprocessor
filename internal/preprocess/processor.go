@@ -99,7 +99,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
 		LoadedAt:        time.Now(),
 		RefreshInterval: opts.RefreshInterval,
-		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, 5*time.Minute),
+		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress),
 		filters:         filters,
 	}, nil
 }

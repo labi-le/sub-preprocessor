@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"testing"
-	"time"
 
 	"domains.lst/sub-preprocessor/internal/resolver"
 )
@@ -82,13 +81,11 @@ func buildDNSResponse(query []byte) []byte {
 	return resp
 }
 
-// BenchmarkResolution_Cold measures DNS resolution where every call hits the
-// mock DNS server (no prior cache fill). This is the worst-case path.
-func BenchmarkResolution_Cold(b *testing.B) {
+func BenchmarkResolution(b *testing.B) {
 	addr, cleanup := fakeDNS(b)
 	defer cleanup()
 
-	r := resolver.New(5_000_000_000, addr, 5*time.Minute) // 5s timeout, custom DNS addr
+	r := resolver.New(5_000_000_000, addr)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -100,40 +97,11 @@ func BenchmarkResolution_Cold(b *testing.B) {
 	}
 }
 
-// BenchmarkResolution_Hot measures DNS resolution where the cache is
-// pre-warmed: the first call populates the cache, subsequent calls hit it.
-// Before cache implementation, this behaves identically to Cold.
-func BenchmarkResolution_Hot(b *testing.B) {
-	addr, cleanup := fakeDNS(b)
-	defer cleanup()
-
-	r := resolver.New(5_000_000_000, addr, 5*time.Minute)
-	// Pre-warm: resolve once to populate the cache.
-	if _, err := r.Resolve(context.Background(), "example.com"); err != nil {
-		b.Fatal(err)
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		_, err := r.Resolve(context.Background(), "example.com")
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkResolution_Concurrent measures parallel resolution for the same
-// hostname — simulates multiple concurrent HTTP requests hitting the cache.
 func BenchmarkResolution_Concurrent(b *testing.B) {
 	addr, cleanup := fakeDNS(b)
 	defer cleanup()
 
-	r := resolver.New(5_000_000_000, addr, 5*time.Minute)
-	// Pre-warm once
-	if _, err := r.Resolve(context.Background(), "example.com"); err != nil {
-		b.Fatal(err)
-	}
+	r := resolver.New(5_000_000_000, addr)
 
 	b.ReportAllocs()
 	b.ResetTimer()
