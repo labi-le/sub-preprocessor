@@ -1,9 +1,7 @@
 log:
   level: info
-
 server:
   listen: :8080
-
 geofeed:
   refresh_interval: 24h
   sources:
@@ -11,23 +9,21 @@ geofeed:
       type: gzip
     - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
       type: raw
-
 resolver:
   timeout: 5s
-
 workflow:
   stages:
     - asn
     # - geofeed
-
 asn:
   deny_patterns:
     - "(?i)VDSINA"
     - "(?i)HOSTOFF"
     - "(?i)ServHost"
     - "(?i)TAKEHOST-AS"
+    - "(?i)CHERRYSERVERS1-AS"
+    - "(?i)DINSERVGRO-NET"
   timeout: 5s
-
 groups:
   nato:
     - "AL"
