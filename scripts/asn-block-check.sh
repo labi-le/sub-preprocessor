@@ -14,9 +14,9 @@ fi
 echo "[asn-block-check] starting, config=$CONFIG, interval=${INTERVAL}s"
 
 while true; do
-    IP=$(curl -sS --max-time 10 ifconfig.me 2>/dev/null || true)
+    IP=$(curl -4 -fsS --max-time 10 https://ifconfig.io/ 2>/dev/null || true)
     if [ -z "$IP" ]; then
-        echo "[asn-block-check] failed to get public IP, retrying in ${INTERVAL}s"
+        echo "[asn-block-check] no public IP returned, retrying in ${INTERVAL}s"
         sleep "$INTERVAL"
         continue
     fi
