@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/metacubex/mihomo v1.19.27
 	github.com/rs/zerolog v1.35.1
 	go.uber.org/goleak v1.3.0
