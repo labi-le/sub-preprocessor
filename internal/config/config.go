@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,7 +17,19 @@ import (
 const (
 	defaultTimeout  = 5 * time.Second
 	defaultLogLevel = "info"
+
+	defaultSubsInterval    = 30 * time.Minute
+	minSubsInterval        = time.Minute
+	defaultCheckRounds     = 5
+	defaultCheckRoundPause = 3 * time.Second
+	defaultCheckTimeout    = 2 * time.Second
+	defaultCheckTestURL    = "https://www.gstatic.com/generate_204"
+	defaultCheckStatus     = "204"
+	defaultCheckMaxAvgMs   = 1000
+	defaultCheckConcurr    = 16
 )
+
+var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 type WorkflowConfig struct {
 	Stages []string `yaml:"stages"`
@@ -36,9 +49,38 @@ type Config struct {
 		Address string        `yaml:"address"`
 		Timeout time.Duration `yaml:"timeout"`
 	} `yaml:"resolver"`
-	ASN      ASNConfig      `yaml:"asn"`
-	Workflow WorkflowConfig `yaml:"workflow"`
-	Groups   Groups         `yaml:"groups"`
+	ASN           ASNConfig           `yaml:"asn"`
+	Workflow      WorkflowConfig      `yaml:"workflow"`
+	Groups        Groups              `yaml:"groups"`
+	Subscriptions SubscriptionsConfig `yaml:"subscriptions"`
+}
+
+type SubscriptionsConfig struct {
+	Interval         time.Duration        `yaml:"interval"`
+	ExcludeCountries []string             `yaml:"exclude_countries"`
+	ExcludeGroups    []string             `yaml:"exclude_groups"`
+	Check            CheckConfig          `yaml:"check"`
+	Sources          []SubscriptionSource `yaml:"sources"`
+}
+
+type CheckConfig struct {
+	Rounds         int           `yaml:"rounds"`
+	RoundPause     time.Duration `yaml:"round_pause"`
+	Timeout        time.Duration `yaml:"timeout"`
+	TestURL        string        `yaml:"test_url"`
+	ExpectedStatus string        `yaml:"expected_status"`
+	MaxFail        int           `yaml:"max_fail"`
+	MaxAvgMs       int           `yaml:"max_avg_ms"`
+	Concurrency    int           `yaml:"concurrency"`
+}
+
+type SubscriptionSource struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
+}
+
+func (cfg Config) SubscriptionsEnabled() bool {
+	return len(cfg.Subscriptions.Sources) > 0
 }
 
 type GeofeedConfig struct {
@@ -80,6 +122,7 @@ func Load(path string) (Config, error) {
 	if len(cfg.Workflow.Stages) == 0 {
 		cfg.Workflow.Stages = []string{"geofeed", "asn"}
 	}
+	cfg.Subscriptions.applyDefaults()
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}
@@ -94,7 +137,101 @@ func (cfg *Config) Validate() error {
 	if err := cfg.Groups.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Subscriptions.Validate(cfg.Groups); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *SubscriptionsConfig) applyDefaults() {
+	if s.Interval == 0 {
+		s.Interval = defaultSubsInterval
+	}
+	c := &s.Check
+	if c.Rounds == 0 {
+		c.Rounds = defaultCheckRounds
+	}
+	if c.RoundPause == 0 {
+		c.RoundPause = defaultCheckRoundPause
+	}
+	if c.Timeout == 0 {
+		c.Timeout = defaultCheckTimeout
+	}
+	if c.TestURL == "" {
+		c.TestURL = defaultCheckTestURL
+	}
+	if c.ExpectedStatus == "" {
+		c.ExpectedStatus = defaultCheckStatus
+	}
+	if c.MaxAvgMs == 0 {
+		c.MaxAvgMs = defaultCheckMaxAvgMs
+	}
+	if c.Concurrency == 0 {
+		c.Concurrency = defaultCheckConcurr
+	}
+}
+
+func (s *SubscriptionsConfig) Validate(groups Groups) error {
+	if len(s.Sources) == 0 {
+		return nil
+	}
+	if s.Interval < minSubsInterval {
+		return fmt.Errorf("subscriptions.interval must be at least %v", minSubsInterval)
+	}
+	if err := s.Check.validate(); err != nil {
+		return err
+	}
+	for _, c := range s.ExcludeCountries {
+		if err := validateCountryCode("subscriptions.exclude_countries", c); err != nil {
+			return err
+		}
+	}
+	for _, g := range s.ExcludeGroups {
+		if _, ok := groups[g]; !ok {
+			return fmt.Errorf("subscriptions.exclude_groups: unknown group %q", g)
+		}
+	}
+	seen := make(map[string]struct{}, len(s.Sources))
+	for _, src := range s.Sources {
+		if !sourceNameRe.MatchString(src.Name) {
+			return fmt.Errorf("subscriptions.sources: invalid name %q", src.Name)
+		}
+		if _, dup := seen[src.Name]; dup {
+			return fmt.Errorf("subscriptions.sources: duplicate name %q", src.Name)
+		}
+		seen[src.Name] = struct{}{}
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(src.URL)); err != nil {
+			return fmt.Errorf("subscriptions.sources.%s: %w", src.Name, err)
+		}
+	}
+	return nil
+}
+
+func (c *CheckConfig) validate() error {
+	if c.Rounds < 1 {
+		return errors.New("subscriptions.check.rounds must be at least 1")
+	}
+	if c.Concurrency < 1 {
+		return errors.New("subscriptions.check.concurrency must be at least 1")
+	}
+	if c.Timeout <= 0 || c.RoundPause < 0 {
+		return errors.New("subscriptions.check: timeout must be positive, round_pause non-negative")
+	}
+	if c.MaxFail < 0 || c.MaxFail >= c.Rounds {
+		return errors.New("subscriptions.check.max_fail must be within [0, rounds)")
+	}
+	if c.MaxAvgMs < 1 {
+		return errors.New("subscriptions.check.max_avg_ms must be at least 1")
+	}
+	return nil
+}
+
+func SubscriptionsChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Subscriptions, newCfg.Subscriptions)
+}
+
+func GroupsChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Groups, newCfg.Groups)
 }
 
 func (g *GeofeedConfig) Validate() error {

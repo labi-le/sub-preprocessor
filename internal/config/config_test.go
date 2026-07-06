@@ -173,3 +173,156 @@ func TestListenChanged(t *testing.T) {
 		t.Fatal("different listen should be detected")
 	}
 }
+
+func writeConfig(t *testing.T, subsBlock string) (config.Config, error) {
+	t.Helper()
+	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  geo_blocked: [RU, IR]\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(base+subsBlock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return config.Load(path)
+}
+
+func TestLoadSubscriptionsDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SubscriptionsEnabled() {
+		t.Fatal("expected subscriptions enabled")
+	}
+	s := cfg.Subscriptions
+	if s.Interval != 30*time.Minute {
+		t.Fatalf("interval: %v", s.Interval)
+	}
+	c := s.Check
+	if c.Rounds != 5 || c.MaxFail != 0 || c.MaxAvgMs != 1000 || c.Concurrency != 16 {
+		t.Fatalf("check defaults: %+v", c)
+	}
+	if c.RoundPause != 3*time.Second || c.Timeout != 2*time.Second {
+		t.Fatalf("check durations: %+v", c)
+	}
+	if c.TestURL != "https://www.gstatic.com/generate_204" || c.ExpectedStatus != "204" {
+		t.Fatalf("check url/status: %+v", c)
+	}
+	if len(s.Sources) != 1 || s.Sources[0].Name != "mifa" || s.Sources[0].URL != "https://mifa.world/vless" {
+		t.Fatalf("sources: %+v", s.Sources)
+	}
+}
+
+func TestLoadSubscriptionsFullBlock(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, `subscriptions:
+  interval: 15m
+  exclude_countries: [CN]
+  exclude_groups: [geo_blocked]
+  check:
+    rounds: 3
+    round_pause: 1s
+    timeout: 1500ms
+    test_url: https://cp.cloudflare.com/generate_204
+    expected_status: "200/204"
+    max_fail: 1
+    max_avg_ms: 800
+    concurrency: 8
+  sources:
+    - name: alpha
+      url: https://a.example.com/sub
+    - name: beta
+      url: https://b.example.com/sub
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Subscriptions
+	if s.Interval != 15*time.Minute || len(s.ExcludeCountries) != 1 || len(s.ExcludeGroups) != 1 {
+		t.Fatalf("subs: %+v", s)
+	}
+	c := s.Check
+	if c.Rounds != 3 || c.RoundPause != time.Second || c.Timeout != 1500*time.Millisecond ||
+		c.TestURL != "https://cp.cloudflare.com/generate_204" || c.ExpectedStatus != "200/204" ||
+		c.MaxFail != 1 || c.MaxAvgMs != 800 || c.Concurrency != 8 {
+		t.Fatalf("check: %+v", c)
+	}
+	if len(s.Sources) != 2 || s.Sources[1].Name != "beta" {
+		t.Fatalf("sources: %+v", s.Sources)
+	}
+}
+
+func TestSubscriptionsDisabledWhenAbsent(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SubscriptionsEnabled() {
+		t.Fatal("expected disabled")
+	}
+}
+
+func TestLoadRejectsBadSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"bad name":        "subscriptions:\n  sources:\n    - name: Mifa!\n      url: https://a.example.com/s\n",
+		"dup name":        "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n    - name: a\n      url: https://b.example.com/s\n",
+		"http url":        "subscriptions:\n  sources:\n    - name: a\n      url: http://a.example.com/s\n",
+		"private ip":      "subscriptions:\n  sources:\n    - name: a\n      url: https://192.168.1.1/s\n",
+		"unknown group":   "subscriptions:\n  exclude_groups: [nope]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+		"bad country":     "subscriptions:\n  exclude_countries: [RUS]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+		"short interval":  "subscriptions:\n  interval: 10s\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+		"zero rounds":     "subscriptions:\n  check:\n    rounds: -1\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+		"bad concurrency": "subscriptions:\n  check:\n    concurrency: -2\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+	}
+	for name, block := range cases {
+		if _, err := writeConfig(t, block); err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+	}
+}
+
+func TestSubscriptionsChanged(t *testing.T) {
+	t.Parallel()
+
+	a, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	if config.SubscriptionsChanged(a, b) {
+		t.Fatal("identical configs must not differ")
+	}
+	b.Subscriptions.Sources = append([]config.SubscriptionSource{}, a.Subscriptions.Sources...)
+	b.Subscriptions.Sources = append(b.Subscriptions.Sources, config.SubscriptionSource{Name: "b", URL: "https://b.example.com/s"})
+	if !config.SubscriptionsChanged(a, b) {
+		t.Fatal("source add must be detected")
+	}
+	c := a
+	c.ASN.DenyPatterns = []string{"changed"}
+	if config.SubscriptionsChanged(a, c) {
+		t.Fatal("asn change must not affect subscriptions diff")
+	}
+}
+
+func TestGroupsChanged(t *testing.T) {
+	t.Parallel()
+
+	a, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	if config.GroupsChanged(a, b) {
+		t.Fatal("identical groups must not differ")
+	}
+	b.Groups = config.Groups{"geo_blocked": {"RU"}}
+	if !config.GroupsChanged(a, b) {
+		t.Fatal("groups change must be detected")
+	}
+}
