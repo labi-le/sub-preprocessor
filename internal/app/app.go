@@ -35,8 +35,8 @@ func Run(ctx context.Context) error {
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
 		return holder.Load().Svc
 	}, logger)
-	if err := ctl.Apply(cfg); err != nil {
-		return fmt.Errorf("start stable subscriptions worker: %w", err)
+	if applyErr := ctl.Apply(cfg); applyErr != nil {
+		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
 	defer ctl.Stop()
 

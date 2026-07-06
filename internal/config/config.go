@@ -79,7 +79,7 @@ type SubscriptionSource struct {
 	URL  string `yaml:"url"`
 }
 
-func (cfg Config) SubscriptionsEnabled() bool {
+func (cfg *Config) SubscriptionsEnabled() bool {
 	return len(cfg.Subscriptions.Sources) > 0
 }
 

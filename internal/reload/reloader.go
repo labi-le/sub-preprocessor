@@ -100,8 +100,8 @@ func (r *Reloader) Reload(ctx context.Context) {
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg)
 	if r.ctl != nil && subsAffected {
-		if err := r.ctl.Apply(newCfg); err != nil {
-			r.logger.Error().Err(err).
+		if applyErr := r.ctl.Apply(newCfg); applyErr != nil {
+			r.logger.Error().Err(applyErr).
 				Msg("applying subscriptions config failed; stable worker stopped")
 		} else {
 			r.logger.Info().Msg("subscriptions config applied")

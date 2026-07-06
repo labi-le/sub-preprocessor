@@ -13,6 +13,8 @@ import (
 	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
+const sourceBufSize = 4096
+
 // Filterer matches server.Filterer; declared locally to avoid an import cycle.
 type Filterer interface {
 	Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error)
@@ -80,7 +82,7 @@ func (c *Checker) RunOnce(ctx context.Context) {
 	bodies := make([]SourceBody, 0, len(c.sources))
 	for _, src := range c.sources {
 		var buf bytes.Buffer
-		buf.Grow(4096)
+		buf.Grow(sourceBufSize)
 		if _, err := svc.Filter(ctx, &buf, preprocess.FilterRequest{
 			SubscriptionURL:  fetch.SubscriptionURL(src.URL),
 			AllowedCountries: c.allowed,

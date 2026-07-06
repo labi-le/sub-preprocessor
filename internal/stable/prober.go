@@ -37,26 +37,57 @@ func NewMihomoProber(cfg config.CheckConfig, logger zerolog.Logger) (*MihomoProb
 	return &MihomoProber{cfg: cfg, expected: expected, logger: logger}, nil
 }
 
+type delayAcc struct {
+	succ int
+	sum  int
+}
+
 // Probe parses the payload once and URL-tests every node for the configured
 // number of rounds. The result map contains only nodes that succeeded at
 // least once, keyed by node name.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
-	mappings, err := convert.ConvertsV2Ray(payload)
+	proxies, err := m.parseProxies(payload)
 	if err != nil {
-		return nil, fmt.Errorf("convert payload: %w", err)
+		return nil, err
 	}
-
-	proxies := make([]mihomo.Proxy, 0, len(mappings))
 	defer func() {
 		for _, px := range proxies {
 			_ = px.Close()
 		}
 	}()
 
+	accs := make(map[string]*delayAcc, len(proxies))
+	var mu sync.Mutex
+	for round := range m.cfg.Rounds {
+		if round > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("probe interrupted: %w", ctx.Err())
+			case <-time.After(m.cfg.RoundPause):
+			}
+		}
+		m.runRound(ctx, proxies, &mu, accs)
+	}
+
+	res := make(map[string]ProbeResult, len(accs))
+	for name, a := range accs {
+		res[name] = ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
+	}
+
+	return res, nil
+}
+
+func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, error) {
+	mappings, err := convert.ConvertsV2Ray(payload)
+	if err != nil {
+		return nil, fmt.Errorf("convert payload: %w", err)
+	}
+
+	proxies := make([]mihomo.Proxy, 0, len(mappings))
 	parseFailures := 0
 	for _, mapping := range mappings {
-		px, err := adapter.ParseProxy(mapping)
-		if err != nil {
+		px, parseErr := adapter.ParseProxy(mapping)
+		if parseErr != nil {
 			parseFailures++
 
 			continue
@@ -70,56 +101,41 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 		return nil, errors.New("no parsable proxies in payload")
 	}
 
-	type acc struct {
-		succ int
-		sum  int
-	}
-	accs := make(map[string]*acc, len(proxies))
+	return proxies, nil
+}
 
-	var mu sync.Mutex
-	for round := range m.cfg.Rounds {
-		if round > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(m.cfg.RoundPause):
+func (m *MihomoProber) runRound(
+	ctx context.Context,
+	proxies []mihomo.Proxy,
+	mu *sync.Mutex,
+	accs map[string]*delayAcc,
+) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, m.cfg.Concurrency)
+	for _, px := range proxies {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			tctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
+			defer cancel()
+
+			delay, testErr := px.URLTest(tctx, m.cfg.TestURL, m.expected)
+			if testErr != nil {
+				return
 			}
-		}
-
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, m.cfg.Concurrency)
-		for _, px := range proxies {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				tctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
-				defer cancel()
-
-				delay, err := px.URLTest(tctx, m.cfg.TestURL, m.expected)
-				if err != nil {
-					return
-				}
-				mu.Lock()
-				a := accs[px.Name()]
-				if a == nil {
-					a = &acc{}
-					accs[px.Name()] = a
-				}
-				a.succ++
-				a.sum += int(delay)
-				mu.Unlock()
-			}()
-		}
-		wg.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			a := accs[px.Name()]
+			if a == nil {
+				a = &delayAcc{}
+				accs[px.Name()] = a
+			}
+			a.succ++
+			a.sum += int(delay)
+		}()
 	}
-
-	res := make(map[string]ProbeResult, len(accs))
-	for name, a := range accs {
-		res[name] = ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
-	}
-
-	return res, nil
+	wg.Wait()
 }
