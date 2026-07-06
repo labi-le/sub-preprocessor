@@ -11,6 +11,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/stable"
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog"
 )
@@ -27,7 +28,7 @@ type Server struct {
 
 const defaultBuilderCapacity = 4096
 
-func New(logger zerolog.Logger, listen string, holder *Holder) *Server {
+func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
 		code := fiber.StatusInternalServerError
 		var fiberErr *fiber.Error
@@ -89,7 +90,27 @@ func New(logger zerolog.Logger, listen string, holder *Holder) *Server {
 
 	app.Get("/", newIndexHandler(holder))
 
+	app.Get("/stable.txt", newStableHandler(stableHolder))
+
 	return &Server{listen: listen, app: app, logger: logger}
+}
+
+func newStableHandler(holder *stable.Holder) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		snap := holder.Load()
+		if snap == nil || len(snap.Payload) == 0 {
+			return fiber.NewError(fiber.StatusServiceUnavailable, "stable list not ready")
+		}
+
+		c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
+		c.Set("X-Stable-Stats", fmt.Sprintf(
+			"updated=%s sources=%d/%d merged=%d tested=%d kept=%d",
+			snap.UpdatedAt.Format(time.RFC3339),
+			snap.Stats.SourcesOK, snap.Stats.SourcesTotal,
+			snap.Stats.Merged, snap.Stats.Tested, snap.Stats.Kept,
+		))
+		return c.Send(snap.Payload)
+	}
 }
 
 func newIndexHandler(holder *Holder) fiber.Handler {

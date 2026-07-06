@@ -9,11 +9,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/server"
+	"domains.lst/sub-preprocessor/internal/stable"
 	"github.com/rs/zerolog"
 )
 
@@ -59,7 +61,7 @@ func nopLogger() zerolog.Logger {
 
 func newServer(svc server.Filterer, groups map[string][]string) *server.Server {
 	holder := server.NewHolder(&server.Snapshot{Svc: svc, Groups: groups})
-	return server.New(nopLogger(), ":8080", holder)
+	return server.New(nopLogger(), ":8080", holder, stable.NewHolder())
 }
 
 func doGet(t *testing.T, srv *server.Server, target string) (int, string) {
@@ -449,6 +451,89 @@ func TestServerUnknownGroupDoesNotAllowAll(t *testing.T) {
 	}
 }
 
+func TestStableNotReady(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(stubService{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/stable.txt", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "stable list not ready") {
+		t.Fatalf("unexpected body: %q", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("unexpected content type: %q", ct)
+	}
+}
+
+func TestStableServesPayload(t *testing.T) {
+	t.Parallel()
+
+	stableHolder := stable.NewHolder()
+	updated := time.Date(2026, 7, 7, 3, 4, 5, 0, time.UTC)
+	stableHolder.Store(&stable.Snapshot{
+		Payload:   []byte("vless://x#a-001\n"),
+		UpdatedAt: updated,
+		Stats:     stable.Stats{SourcesOK: 1, SourcesTotal: 2, Merged: 3, Tested: 2, Kept: 1},
+	})
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}})
+	srv := server.New(nopLogger(), ":8080", holder, stableHolder)
+
+	req := httptest.NewRequest(http.MethodGet, "/stable.txt", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if string(body) != "vless://x#a-001\n" {
+		t.Fatalf("unexpected body: %q", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("unexpected content type: %q", ct)
+	}
+	wantStats := "updated=" + updated.Format(time.RFC3339) + " sources=1/2 merged=3 tested=2 kept=1"
+	if got := resp.Header.Get("X-Stable-Stats"); got != wantStats {
+		t.Fatalf("stats header:\ngot  %q\nwant %q", got, wantStats)
+	}
+}
+
+func TestStableRejectsPost(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(stubService{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/stable.txt", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+}
+
 func TestServerReadsSnapshotPerRequest(t *testing.T) {
 	t.Parallel()
 
@@ -457,7 +542,7 @@ func TestServerReadsSnapshotPerRequest(t *testing.T) {
 		Svc:    stubA,
 		Groups: map[string][]string{"ga": {"FI"}},
 	})
-	srv := server.New(nopLogger(), ":8080", holder)
+	srv := server.New(nopLogger(), ":8080", holder, stable.NewHolder())
 
 	statusA, bodyA := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&groups=ga")
 	if statusA != http.StatusOK {

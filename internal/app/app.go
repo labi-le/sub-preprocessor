@@ -10,6 +10,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/reload"
 	serverpkg "domains.lst/sub-preprocessor/internal/server"
+	"domains.lst/sub-preprocessor/internal/stable"
 )
 
 const defaultConfigPath = "./config/config.yaml"
@@ -30,7 +31,8 @@ func Run(ctx context.Context) error {
 	}
 
 	holder := serverpkg.NewHolder(&serverpkg.Snapshot{Svc: svc, Groups: cfg.Groups})
-	srv := serverpkg.New(logger, cfg.Server.Listen, holder)
+	stableHolder := stable.NewHolder()
+	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
 
 	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc)
 	watcher, err := reload.NewWatcher(defaultConfigPath, reloader.Reload, logger)
