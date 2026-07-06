@@ -32,9 +32,17 @@ func Run(ctx context.Context) error {
 
 	holder := serverpkg.NewHolder(&serverpkg.Snapshot{Svc: svc, Groups: cfg.Groups})
 	stableHolder := stable.NewHolder()
+	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
+		return holder.Load().Svc
+	}, logger)
+	if err := ctl.Apply(cfg); err != nil {
+		return fmt.Errorf("start stable subscriptions worker: %w", err)
+	}
+	defer ctl.Stop()
+
 	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
 
-	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc)
+	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc, ctl)
 	watcher, err := reload.NewWatcher(defaultConfigPath, reloader.Reload, logger)
 	if err != nil {
 		return fmt.Errorf("create config watcher: %w", err)

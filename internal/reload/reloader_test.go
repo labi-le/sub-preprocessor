@@ -2,6 +2,8 @@ package reload_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/reload"
 	"domains.lst/sub-preprocessor/internal/server"
+	"domains.lst/sub-preprocessor/internal/stable"
 )
 
 // baseGeofeedYAML is a minimal, valid config whose single geofeed source points
@@ -36,6 +39,18 @@ func (stubLookup) LookupCountry(_ netip.Addr) geofeed.CountryCode {
 	return geofeed.CountryCode{'N', 'L'}
 }
 
+// failingFilterer satisfies stable.Filterer and always errors, guaranteeing the
+// stable worker never performs network fetches from reload tests.
+type failingFilterer struct{}
+
+func (failingFilterer) Filter(
+	_ context.Context,
+	_ *bytes.Buffer,
+	_ preprocess.FilterRequest,
+) (preprocess.Stats, error) {
+	return preprocess.Stats{}, errors.New("stub filterer: no network in tests")
+}
+
 func writeConfig(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -50,6 +65,7 @@ func setupReloader(
 	t *testing.T,
 	logger zerolog.Logger,
 	loadedAt time.Time,
+	ctl *stable.Controller,
 ) (*reload.Reloader, *server.Holder, string) {
 	t.Helper()
 	ctx := t.Context()
@@ -72,7 +88,7 @@ func setupReloader(
 	}
 
 	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
-	r := reload.NewReloader(path, holder, logger, cfg, proc)
+	r := reload.NewReloader(path, holder, logger, cfg, proc, ctl)
 	return r, holder, path
 }
 
@@ -127,7 +143,7 @@ func TestOptionsFromConfig(t *testing.T) {
 // unchanged (the only black-box signal available without a builder spy).
 func TestReloadNoOpOnIdenticalConfig(t *testing.T) {
 	loadedAt := time.Now().Add(-time.Hour)
-	r, holder, _ := setupReloader(t, zerolog.Nop(), loadedAt)
+	r, holder, _ := setupReloader(t, zerolog.Nop(), loadedAt, nil)
 
 	before := holder.Load()
 	r.Reload(t.Context()) // file content unchanged
@@ -155,7 +171,7 @@ func TestReloadKeepsOldOnError(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			loadedAt := time.Now().Add(-time.Hour)
-			r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt)
+			r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt, nil)
 
 			before := holder.Load()
 			writeConfig(t, path, tc.content)
@@ -174,7 +190,7 @@ func TestReloadKeepsOldOnError(t *testing.T) {
 // unchanged — proven by the preserved LoadedAt (no re-fetch occurred).
 func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 	loadedAt := time.Now().Add(-time.Hour)
-	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt)
+	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt, nil)
 
 	before := holder.Load()
 	writeConfig(t, path, baseGeofeedYAML+"asn:\n  deny_patterns:\n    - \"^AS1234 \"\n")
@@ -207,7 +223,7 @@ func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 // other changed fields (groups) must be applied to the new snapshot.
 func TestReloadFirstReloadCarriesLoadedAt(t *testing.T) {
 	loadedAt := time.Now().Add(-90 * time.Minute)
-	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt)
+	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt, nil)
 
 	writeConfig(t, path, baseGeofeedYAML+"groups:\n  nordics:\n    - FI\n    - SE\n")
 	r.Reload(t.Context())
@@ -234,7 +250,7 @@ func TestReloadListenChangeWarns(t *testing.T) {
 	logger := zerolog.New(&logBuf)
 
 	loadedAt := time.Now().Add(-time.Hour)
-	r, holder, path := setupReloader(t, logger, loadedAt)
+	r, holder, path := setupReloader(t, logger, loadedAt, nil)
 
 	before := holder.Load()
 	logBuf.Reset() // discard setup logs; capture only the reload
@@ -248,5 +264,66 @@ func TestReloadListenChangeWarns(t *testing.T) {
 	}
 	if logs := logBuf.String(); !strings.Contains(logs, "requires restart") {
 		t.Fatalf("AC7: expected a 'requires restart' warning, got logs:\n%s", logs)
+	}
+}
+
+// subsYAML adds a minimal valid subscriptions block on top of the base config.
+const subsYAML = baseGeofeedYAML +
+	"subscriptions:\n" +
+	"  sources:\n" +
+	"    - name: alpha\n" +
+	"      url: https://example.com/sub.txt\n"
+
+// TestReloadAppliesSubscriptions: adding a subscriptions block must trigger
+// Controller.Apply on the wired controller (observed via the reloader's own
+// "subscriptions config applied" log, written only on a successful Apply).
+// The controller gets a Nop logger and a failing filterer so its worker
+// goroutine stays silent and offline.
+func TestReloadAppliesSubscriptions(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	ctl := stable.NewController(t.Context(), stable.NewHolder(),
+		func() stable.Filterer { return failingFilterer{} }, zerolog.Nop())
+	t.Cleanup(ctl.Stop)
+
+	loadedAt := time.Now().Add(-time.Hour)
+	r, _, path := setupReloader(t, logger, loadedAt, ctl)
+	logBuf.Reset()
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	ctl.Stop()
+
+	if logs := logBuf.String(); !strings.Contains(logs, "subscriptions config applied") {
+		t.Fatalf("expected 'subscriptions config applied' log, got:\n%s", logs)
+	}
+}
+
+// TestReloadSkipsApplyOnUnrelatedChange: an asn.deny_patterns edit (what the
+// gemini sidecar rewrites periodically) must NOT restart the stable worker —
+// no "subscriptions config applied" log may appear.
+func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	ctl := stable.NewController(t.Context(), stable.NewHolder(),
+		func() stable.Filterer { return failingFilterer{} }, zerolog.Nop())
+	t.Cleanup(ctl.Stop)
+
+	loadedAt := time.Now().Add(-time.Hour)
+	r, holder, path := setupReloader(t, logger, loadedAt, ctl)
+
+	before := holder.Load()
+	logBuf.Reset()
+
+	writeConfig(t, path, baseGeofeedYAML+"asn:\n  deny_patterns:\n    - \"^AS9999 \"\n")
+	r.Reload(t.Context())
+
+	if holder.Load() == before {
+		t.Fatal("valid asn edit must still swap the snapshot")
+	}
+	if logs := logBuf.String(); strings.Contains(logs, "subscriptions config applied") {
+		t.Fatalf("unrelated change must not re-apply subscriptions, got:\n%s", logs)
 	}
 }

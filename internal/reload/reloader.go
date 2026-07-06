@@ -9,6 +9,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/server"
+	"domains.lst/sub-preprocessor/internal/stable"
 )
 
 // Reloader rebuilds the processing pipeline from a config file on demand and
@@ -25,6 +26,7 @@ type Reloader struct {
 	logger      zerolog.Logger
 	currentCfg  config.Config
 	currentProc *preprocess.Processor
+	ctl         *stable.Controller
 }
 
 // NewReloader creates a Reloader seeded with the settings already applied at
@@ -35,6 +37,7 @@ func NewReloader(
 	logger zerolog.Logger,
 	cfg config.Config,
 	proc *preprocess.Processor,
+	ctl *stable.Controller,
 ) *Reloader {
 	return &Reloader{
 		path:        path,
@@ -42,6 +45,7 @@ func NewReloader(
 		logger:      logger,
 		currentCfg:  cfg,
 		currentProc: proc,
+		ctl:         ctl,
 	}
 }
 
@@ -89,6 +93,21 @@ func (r *Reloader) Reload(ctx context.Context) {
 	}
 
 	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
+
+	// The stable worker derives its filter set from both sections, so either
+	// change requires a restart; anything else (e.g. the gemini sidecar
+	// rewriting asn.deny_patterns) must leave the worker running.
+	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
+		config.GroupsChanged(r.currentCfg, newCfg)
+	if r.ctl != nil && subsAffected {
+		if err := r.ctl.Apply(newCfg); err != nil {
+			r.logger.Error().Err(err).
+				Msg("applying subscriptions config failed; stable worker stopped")
+		} else {
+			r.logger.Info().Msg("subscriptions config applied")
+		}
+	}
+
 	r.currentCfg = newCfg
 	r.currentProc = newProc
 	r.logger.Info().Msg("config reloaded")

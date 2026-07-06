@@ -86,3 +86,24 @@ groups:
     - "CU"
     - "CN"
     - "BY"
+subscriptions:
+  interval: 30m
+  exclude_groups:
+    - geo_blocked
+  sources:
+    - name: mifa
+      url: https://mifa.world/vless
+    - name: aetris
+      url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
+    - name: purple
+      url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
+    - name: mehrtat
+      url: https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt
+    - name: mhditaheri
+      url: https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vless
+    - name: iboxz
+      url: https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/vless
+    - name: ebrasha
+      url: https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt
+    - name: bahemmat
+      url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt

@@ -278,7 +278,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 
 `./internal/server/server.go`, `holder.go`
 
-HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription. The active `Processor` and groups map are held in an atomic `Holder` so the reloader can swap them without restarting the server.
+HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription, `GET /stable.txt` → latest stability-tested node list. The active `Processor` and groups map are held in an atomic `Holder` so the reloader can swap them without restarting the server.
 
 The root handler now accepts:
 - `subscription_url` (required)
@@ -286,6 +286,8 @@ The root handler now accepts:
 - `exclude_countries` / `exclude_groups` — countries to remove from the allowed set
 
 If only exclusion params are provided (i.e. `countries` and `groups` are both absent), the allowed set starts from `filter.All()` (every country) minus the exclusions. If `countries`/`groups` are present but produce an empty set, the fallback to `All()` is not applied, so the request fails with `400` when nothing remains. If exclusions remove every allowed country, the request also returns `400`.
+
+`GET /stable.txt` serves the newest `stable.Snapshot` payload (plain-text URI list) with an `X-Stable-Stats` header (`updated=<RFC3339> sources=<ok>/<total> merged=<n> tested=<n> kept=<n>`). Until the first successful check cycle completes it returns `503 stable list not ready`.
 
 **Key types:**
 - `Filterer` — interface `Filter(ctx, b, req preprocess.FilterRequest) (Stats, error)`
@@ -297,16 +299,47 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 - `NewHolder(initial *Snapshot) *Holder` — create a Holder seeded with the startup snapshot
 - `(*Holder).Load() *Snapshot` — atomic load of the current snapshot
 - `(*Holder).Store(s *Snapshot)` — atomic store of a new snapshot (called by reloader)
-- `New(logger zerolog.Logger, listen string, holder *Holder) *Server` — wires Fiber, logging, and the filter handler; reads `Holder` on every request so reloads are picked up without restart
+- `New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server` — wires Fiber, logging, and the filter handler; reads `Holder` on every request so reloads are picked up without restart
 - `newIndexHandler(holder *Holder) fiber.Handler` — root handler: loads snapshot, validates URL, builds allowed/excluded sets, calls `Filterer`
+- `newStableHandler(holder *stable.Holder) fiber.Handler` — serves the stable payload or `503` before the first cycle
 - `buildCountrySet(rawCountries, rawGroups, groupsMap) CountrySet` — HTTP-layer group expansion (used for both allowed and excluded sets)
 - `isEmpty(set) bool` — checks whether a `CountrySet` has any country set
 - `(*Server).Listen() error`
 - `(*Server).Shutdown(ctx) error`
 - `(*Server).TestApp() *fiber.App` — for test usage
 
-**Uses:** `fetch`, `filter`, `preprocess`, `fiber`
+**Uses:** `fetch`, `filter`, `preprocess`, `stable`, `fiber`
 **Tags:** `http`, `fiber`, `api`, `handler`, `server`, `healthz`, `atomic-swap`, `hot-reload`
+
+---
+
+## `internal/stable`
+
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `checker.go`, `controller.go`
+
+Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, and atomically publishes the survivor payload for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
+
+**Key types:**
+- `Stats` — `SourcesOK/SourcesTotal/Merged/Tested/Kept` counters for the `X-Stable-Stats` header
+- `Snapshot` — immutable `Payload []byte` + `UpdatedAt` + `Stats`
+- `Holder` — `atomic.Pointer[Snapshot]`; `Load()` returns nil before the first successful cycle
+- `SourceBody` / `Entry` — merge input (source name + fetched body) and output (label + relabeled raw URI)
+- `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
+- `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
+- `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`
+- `Checker` — the periodic worker loop
+- `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads
+
+**Key functions:**
+- `Merge(bodies []SourceBody) []Entry` — dedupe by `Server:Port` first-wins in source order; relabel fragments to `<source>-NNN`
+- `SelectSurvivors(entries, results, rounds, maxFail, maxAvgMs) []Survivor` — keep `rounds-successes <= maxFail && mean <= maxAvgMs`, sort by mean ascending
+- `BuildPayload(survivors) []byte` — newline-joined URI list
+- `NewMihomoProber(cfg config.CheckConfig, logger) (*MihomoProber, error)` — parses `expected_status` ranges once; `Probe` = `convert.ConvertsV2Ray` → `adapter.ParseProxy` → rounds × concurrent `URLTest` (semaphore `check.concurrency`, per-node timeout)
+- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle
+- `NewController(ctx, holder, filterer func() Filterer, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` stops the old worker and starts a new one when `subscriptions.sources` is non-empty; allowed set = `filter.All()` minus `exclude_countries`/`exclude_groups`; `Stop` is idempotent and joins the worker goroutine
+
+**Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
+**Tags:** `stable`, `probe`, `url-test`, `delay`, `worker`, `mihomo`, `atomic-swap`
 
 ---
 
@@ -321,13 +354,13 @@ Config hot-reload. Watches the config file for changes (via fsnotify on the pare
 - `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; debounces events with a 200 ms window
 
 **Key functions:**
-- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor) *Reloader` — seed with startup state so the first reload can diff against it
-- `(*Reloader).Reload(ctx context.Context)` — 7-step algorithm: load config → skip if `Equal` → build `OptionsFromConfig` → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot
+- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl *stable.Controller) *Reloader` — seed with startup state so the first reload can diff against it
+- `(*Reloader).Reload(ctx context.Context)` — load config → skip if `Equal` → build `OptionsFromConfig` → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot → `ctl.Apply(newCfg)` only when `SubscriptionsChanged || GroupsChanged` (the gemini sidecar's periodic `asn.deny_patterns` rewrites must not restart the stable worker)
 - `NewWatcher(configPath string, onChange func(context.Context), logger zerolog.Logger) (*Watcher, error)` — register fsnotify watch on parent directory; return error if watcher or directory watch fails
 - `(*Watcher).Run(ctx context.Context) error` — event loop: debounce matching events, call `onChange` once per burst; close fsnotify watcher on ctx cancellation and return nil (callers use the return as a join point)
 - `OptionsFromConfig(cfg config.Config) preprocess.Options` — single source of truth for mapping `config.Config` to `preprocess.Options`; leaves `PreloadedGeofeed`/`PreloadedLoadedAt` unset (callers decide whether to carry over geofeed state)
 
-**Uses:** `config`, `geofeed`, `log`, `preprocess`, `server`, `fsnotify`
+**Uses:** `config`, `geofeed`, `log`, `preprocess`, `server`, `stable`, `fsnotify`
 **Tags:** `reload`, `fsnotify`, `hot-reload`, `watch`, `atomic-swap`, `debounce`
 
 ---
@@ -349,11 +382,19 @@ main
      │   ├─ rewrite ── subscription
      │   └─ subscription ── fetch, ioutil
      ├─ reload
-     │   ├─ config     (Load, Equal, GeofeedSourcesChanged, ListenChanged)
+     │   ├─ config     (Load, Equal, GeofeedSourcesChanged, ListenChanged, SubscriptionsChanged, GroupsChanged)
      │   ├─ log        (SetLevel)
      │   ├─ preprocess (NewProcessor, Options, GeofeedState)
-     │   └─ server     (Holder, Snapshot)
-     └─ server ─── fetch, filter, preprocess
+     │   ├─ server     (Holder, Snapshot)
+     │   └─ stable     (Controller.Apply on subscriptions/groups change)
+     ├─ stable
+     │   ├─ config     (SubscriptionsConfig, CheckConfig)
+     │   ├─ filter     (allowed CountrySet)
+     │   ├─ fetch      (SubscriptionURL type)
+     │   ├─ preprocess (FilterRequest via Filterer)
+     │   ├─ subscription (Parse for merge/dedupe)
+     │   └─ mihomo     (adapter, convert, utils, constant)
+     └─ server ─── fetch, filter, preprocess, stable
 ```
 
 ## Quick Tag Index
@@ -374,3 +415,4 @@ main
 | `log`, `zerolog`, `structured-log`, `runtime-level` | `log` |
 | `shared-iterator`, `unsafe-string` | `ioutil` |
 | `fsnotify`, `watch`, `debounce`, `hot-reload` | `reload` |
+| `stable`, `probe`, `url-test`, `mihomo` | `stable` |
