@@ -28,23 +28,33 @@ a package's public API (key types, constructors, interfaces) — update
 ## What this project is
 
 This is a small HTTP preprocessor for Mihomo-compatible subscription content.
+It exposes two modes.
 
-Current behavior in one line:
+**On-demand filter (`GET /`)** — filter one subscription URL at request time:
 
 1. accepts `subscription_url` + `countries` (or `groups` referencing `config.groups`) via HTTP query params
 2. downloads subscription text
-3. parses generic URI-style nodes (not VLESS-only anymore)
+3. parses generic URI-style nodes (not VLESS-only; `vmess://` base64-JSON is decoded too)
 4. resolves node hostnames
 5. geofilters by IP country from geofeed sources
 6. rewrites node fragment/name with `[GEO:XX][IP:x.x.x.x] ...`
 7. returns raw Mihomo-compatible text/plain subscription body
+
+**Stable subscriptions worker (`GET /stable.txt`)** — a background worker keeps
+one curated list built from all `subscriptions.sources`. Each cycle fetches every
+source, runs it through the same geo/ASN filter, merges and dedupes by
+`server:port` (first source wins), relabels kept nodes to `<source>-NNN`, probes
+every node with an embedded Mihomo URL test, and keeps only those that pass all
+rounds under the latency threshold. The result is swapped in atomically; the last
+good list is kept if a cycle fails (`503` only until the first cycle completes).
 
 ## Important current design decisions
 
 - Parsing is **generic URI parsing**, not hardcoded to `vless://` only.
 - Filtering logic only cares about hostname/IP and final geofeed country.
 - Output rewriting is still **scheme-aware/safe**: it only rewrites parsed URI nodes.
-- TCP health-check and old dead-IP cache were intentionally removed from the current design.
+- The on-demand `/` path does no liveness probing; it only geo/ASN-filters. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
+- The resolver keeps an in-memory DNS TTL cache (`resolver.cache_ttl` / `resolver.cache_negative_ttl`) so repeated stable cycles don't hammer the upstream DNS.
 - Geofeed sources are explicit in YAML via `geofeed.sources[].url` + `geofeed.sources[].type`.
 - File type is explicit only: `raw` or `gzip`. There is no auto-detection/legacy mode.
 - Geofeed data is cached in memory and reloaded by `geofeed.refresh_interval`.
@@ -63,9 +73,9 @@ Current behavior in one line:
 
 ## Current config shape
 
-`config.yaml` currently contains only server/geofeed/resolver settings.
-
-Subscription URL and allowed countries are **not** stored in YAML; they come from HTTP query params.
+`config.yaml` is hot-reloaded on change. The `/` request still takes its
+`subscription_url` and allowed countries from HTTP query params; the
+`subscriptions` block only configures the `/stable.txt` worker.
 
 Important keys:
 
@@ -74,7 +84,14 @@ Important keys:
 - `geofeed.sources[].url`
 - `geofeed.sources[].type` (`raw` or `gzip`)
 - `resolver.timeout`
-- `resolver.strict_dns`
+- `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
+- `workflow.stages` (order of filter stages: `asn`, `geofeed`)
+- `asn.deny_patterns` (+ `asn.timeout`)
+- `groups.<name>` (country sets referenced by requests and `exclude_groups`)
+- `subscriptions.interval`
+- `subscriptions.exclude_groups`
+- `subscriptions.sources[].name` / `subscriptions.sources[].url`
+- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `concurrency`)
 
 ## Important package map
 
@@ -83,8 +100,14 @@ Important keys:
 - `internal/config` — YAML config parsing/validation
 - `internal/fetch` — safe HTTP fetching, file-type decoding, SSRF protections
 - `internal/geofeed` — geofeed download/parse/lookup
-- `internal/subscription` — subscription fetch/normalize/parse
-- `internal/preprocess` — core filtering and fragment rewrite logic
+- `internal/resolver` — DNS resolution with an in-memory TTL cache
+- `internal/asn` — ASN lookup (Team Cymru) for `asn.deny_patterns`
+- `internal/filter` — country allow/deny bitset
+- `internal/subscription` — subscription fetch/normalize/parse (incl. `vmess://` decode)
+- `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
+- `internal/preprocess` — the core per-node filter pipeline
+- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, Mihomo prober, checker loop, holder
+- `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 
 ## API behavior to remember
@@ -93,8 +116,10 @@ Important keys:
 - `GET /` requires:
   - `subscription_url`
   - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`)
+  - optional `exclude_countries` / `exclude_groups` subtract from the allow-list
+- `GET /stable.txt` serves the worker's current list; `503` until the first cycle completes. Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
-- Stats are returned in `X-Preprocessor-Stats`
+- `/` stats are returned in `X-Preprocessor-Stats`
 
 Example:
 
