@@ -111,8 +111,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt
     - name: bijandi
       url: https://raw.githubusercontent.com/amir-reza-bijandi/v2ray-configs/main/configs.txt
-    - name: idtheo
-      url: https://raw.githubusercontent.com/idtheo/V2Ray-CleanIPs-Servers/main/shield.txt
     - name: 3inker
       url: https://raw.githubusercontent.com/3inker/v2ray-subscription/main/subs/all_not_ru.txt
     - name: huangyurong
