@@ -22,15 +22,17 @@ import (
 )
 
 type Options struct {
-	GeofeedSources    []geofeed.Source
-	RefreshInterval   time.Duration
-	DNSTimeout        time.Duration
-	DNSAddress        string
-	ASNTimeout        time.Duration
-	ASNDenyPatterns   []string
-	WorkflowStages    []string
-	PreloadedGeofeed  geofeed.CountryLookup
-	PreloadedLoadedAt time.Time
+	GeofeedSources      []geofeed.Source
+	RefreshInterval     time.Duration
+	DNSTimeout          time.Duration
+	DNSAddress          string
+	DNSCacheTTL         time.Duration
+	DNSCacheNegativeTTL time.Duration
+	ASNTimeout          time.Duration
+	ASNDenyPatterns     []string
+	WorkflowStages      []string
+	PreloadedGeofeed    geofeed.CountryLookup
+	PreloadedLoadedAt   time.Time
 }
 
 type FilterRequest struct {
@@ -113,7 +115,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
 		LoadedAt:        loadedAt,
 		RefreshInterval: opts.RefreshInterval,
-		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress),
+		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		filters:         filters,
 	}, nil
 }

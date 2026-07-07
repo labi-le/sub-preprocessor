@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	defaultTimeout  = 5 * time.Second
-	defaultLogLevel = "info"
+	defaultTimeout          = 5 * time.Second
+	defaultLogLevel         = "info"
+	defaultDNSCacheTTL      = 30 * time.Minute
+	defaultDNSNegativeCache = 10 * time.Minute
 
 	defaultSubsInterval    = 30 * time.Minute
 	minSubsInterval        = time.Minute
@@ -46,8 +48,10 @@ type Config struct {
 	} `yaml:"server"`
 	Geofeed  GeofeedConfig `yaml:"geofeed"`
 	Resolver struct {
-		Address string        `yaml:"address"`
-		Timeout time.Duration `yaml:"timeout"`
+		Address          string        `yaml:"address"`
+		Timeout          time.Duration `yaml:"timeout"`
+		CacheTTL         time.Duration `yaml:"cache_ttl"`
+		CacheNegativeTTL time.Duration `yaml:"cache_negative_ttl"`
 	} `yaml:"resolver"`
 	ASN           ASNConfig           `yaml:"asn"`
 	Workflow      WorkflowConfig      `yaml:"workflow"`
@@ -116,6 +120,12 @@ func Load(path string) (Config, error) {
 	if cfg.Resolver.Timeout == 0 {
 		cfg.Resolver.Timeout = defaultTimeout
 	}
+	if cfg.Resolver.CacheTTL == 0 {
+		cfg.Resolver.CacheTTL = defaultDNSCacheTTL
+	}
+	if cfg.Resolver.CacheNegativeTTL == 0 {
+		cfg.Resolver.CacheNegativeTTL = defaultDNSNegativeCache
+	}
 	if cfg.ASN.Timeout == 0 {
 		cfg.ASN.Timeout = defaultTimeout
 	}
@@ -131,6 +141,12 @@ func Load(path string) (Config, error) {
 }
 
 func (cfg *Config) Validate() error {
+	if cfg.Resolver.CacheTTL < 0 {
+		return errors.New("resolver.cache_ttl must not be negative")
+	}
+	if cfg.Resolver.CacheNegativeTTL < 0 {
+		return errors.New("resolver.cache_negative_ttl must not be negative")
+	}
 	if err := cfg.Geofeed.Validate(); err != nil {
 		return err
 	}

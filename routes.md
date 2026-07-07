@@ -170,18 +170,18 @@ When no `countries`/`groups` are provided, the server can start with `All()` and
 
 `./internal/resolver/resolver.go`
 
-DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. No result caching: every call performs a fresh DNS lookup. preprocess still isolates results once per request/hostname via a pooled resolved-map. When a custom `resolver.address` is configured, `PreferGo: true` is set on the `net.Resolver` so the custom `Dial` function is actually used (the cgo resolver ignores `Dial`).
+DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Process-wide TTL cache (RWMutex map): positive hits cached for `resolver.cache_ttl`, failed/empty lookups negative-cached for `resolver.cache_negative_ttl` (returned as empty result without error); zero TTLs disable caching entirely. Cache is capped at 16384 entries — on overflow expired entries are evicted, or the map is reset when everything is still fresh. preprocess still isolates results once per request/hostname via a pooled resolved-map. When a custom `resolver.address` is configured, `PreferGo: true` is set on the `net.Resolver` so the custom `Dial` function is actually used (the cgo resolver ignores `Dial`).
 
 **Key types:**
-- `Resolver` — `timeout` + `dialer` + `sync.Pool` for resolved maps
+- `Resolver` — `timeout` + `dialer` + TTL cache (`map[string]cacheEntry` under `sync.RWMutex`) + `sync.Pool` for resolved maps
 
 **Key functions:**
-- `New(timeout, address) *Resolver`
-- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — bare IPs returned directly, otherwise a fresh DNS lookup
+- `New(timeout, address, cacheTTL, negativeTTL) *Resolver`
+- `(*Resolver).Resolve(ctx, host) ([]netip.Addr, error)` — bare IPs returned directly, then cache, then DNS lookup
 - `(*Resolver).GetResolvedMap() map[string][]netip.Addr` — get pooled per-request hostname map
 - `(*Resolver).PutResolvedMap(m)` — return map to pool
 
-**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`
+**Tags:** `dns`, `resolve`, `hostname`, `ip`, `pool`, `dedup`, `cache`, `ttl`
 
 ---
 

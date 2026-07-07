@@ -185,6 +185,49 @@ func writeConfig(t *testing.T, subsBlock string) (config.Config, error) {
 	return config.Load(path)
 }
 
+func TestLoadResolverCacheDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Resolver.CacheTTL != 30*time.Minute {
+		t.Fatalf("cache_ttl: %v", cfg.Resolver.CacheTTL)
+	}
+	if cfg.Resolver.CacheNegativeTTL != 10*time.Minute {
+		t.Fatalf("cache_negative_ttl: %v", cfg.Resolver.CacheNegativeTTL)
+	}
+}
+
+func TestLoadResolverCacheExplicit(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "resolver:\n  cache_ttl: 1h\n  cache_negative_ttl: 5m\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Resolver.CacheTTL != time.Hour {
+		t.Fatalf("cache_ttl: %v", cfg.Resolver.CacheTTL)
+	}
+	if cfg.Resolver.CacheNegativeTTL != 5*time.Minute {
+		t.Fatalf("cache_negative_ttl: %v", cfg.Resolver.CacheNegativeTTL)
+	}
+}
+
+func TestLoadRejectsNegativeResolverCache(t *testing.T) {
+	t.Parallel()
+
+	for _, block := range []string{
+		"resolver:\n  cache_ttl: -1s\n",
+		"resolver:\n  cache_negative_ttl: -1s\n",
+	} {
+		if _, err := writeConfig(t, block); err == nil {
+			t.Fatalf("expected error for %q", block)
+		}
+	}
+}
+
 func TestLoadSubscriptionsDefaults(t *testing.T) {
 	t.Parallel()
 

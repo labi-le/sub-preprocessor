@@ -15,12 +15,14 @@ import (
 // startup path leaves them zero so NewProcessor performs the initial fetch.
 func OptionsFromConfig(cfg config.Config) preprocess.Options {
 	return preprocess.Options{
-		GeofeedSources:  cfg.Geofeed.Sources,
-		RefreshInterval: cfg.Geofeed.RefreshInterval,
-		DNSTimeout:      cfg.Resolver.Timeout,
-		DNSAddress:      cfg.Resolver.Address,
-		ASNTimeout:      cfg.ASN.Timeout,
-		ASNDenyPatterns: cfg.ASN.DenyPatterns,
-		WorkflowStages:  cfg.Workflow.Stages,
+		GeofeedSources:      cfg.Geofeed.Sources,
+		RefreshInterval:     cfg.Geofeed.RefreshInterval,
+		DNSTimeout:          cfg.Resolver.Timeout,
+		DNSAddress:          cfg.Resolver.Address,
+		DNSCacheTTL:         cfg.Resolver.CacheTTL,
+		DNSCacheNegativeTTL: cfg.Resolver.CacheNegativeTTL,
+		ASNTimeout:          cfg.ASN.Timeout,
+		ASNDenyPatterns:     cfg.ASN.DenyPatterns,
+		WorkflowStages:      cfg.Workflow.Stages,
 	}
 }
