@@ -45,6 +45,18 @@ asn:
     - "(?i)MHost-AS"
     - "(?i)THE"
     - "(?i)SELECTEL-MSK"
+    - "(?i)AS-SKYNET-SPB"
+    - "(?i)HOSTUP"
+    - "(?i)FORTIS-AS"
+    - "(?i)GCORE"
+    - "(?i)hostman"
+    - "(?i)tietokettu"
+    - "(?i)AEZA-AS"
+    - "(?i)AlbHost"
+    - "(?i)INIOS-AS"
+    - "(?i)WEYRO"
+    - "(?i)shinomiya"
+    - "(?i)KVMKA-COM"
   timeout: 5s
 groups:
   nato:
