@@ -145,8 +145,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
     - name: avia
       url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
-    - name: jebance
-      url: https://raw.githubusercontent.com/JeBance/CheburNet/gh-pages/cheburnet.txt
     - name: prince
       url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
     - name: qjlxg
