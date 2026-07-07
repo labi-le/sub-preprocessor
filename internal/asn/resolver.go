@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -17,6 +18,10 @@ const (
 	cymruASDomain     = "asn.cymru.com"
 	minASRecordFields = 5
 	minOriginFields   = 3
+
+	// cacheTTL is how long Cymru results are cached in memory.
+	// Cymru data is static (RIR allocations), so 6h is conservative.
+	cacheTTL = 6 * time.Hour
 )
 
 type Result struct {
@@ -24,12 +29,22 @@ type Result struct {
 	Name    string
 }
 
+type cachedResult struct {
+	result    Result
+	expiresAt time.Time
+}
+
 type Resolver struct {
 	timeout time.Duration
+	cache   map[netip.Addr]cachedResult
+	mu      sync.Mutex
 }
 
 func New(timeout time.Duration) *Resolver {
-	return &Resolver{timeout: timeout}
+	return &Resolver{
+		timeout: timeout,
+		cache:   make(map[netip.Addr]cachedResult),
+	}
 }
 
 func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
@@ -37,7 +52,23 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 		return Result{}, fmt.Errorf("ASN lookup is not supported for IPv6: %s", ip)
 	}
 
-	return r.lookup(ctx, ip)
+	r.mu.Lock()
+	if cached, ok := r.cache[ip]; ok && time.Now().Before(cached.expiresAt) {
+		r.mu.Unlock()
+		return cached.result, nil
+	}
+	r.mu.Unlock()
+
+	result, err := r.lookup(ctx, ip)
+	if err != nil {
+		return Result{}, err
+	}
+
+	r.mu.Lock()
+	r.cache[ip] = cachedResult{result: result, expiresAt: time.Now().Add(cacheTTL)}
+	r.mu.Unlock()
+
+	return result, nil
 }
 
 func reverseIP(ip netip.Addr) string {
@@ -120,4 +151,11 @@ func parseASRecord(txt string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[4])
+}
+
+// CacheLen returns the number of cached ASN entries (for observability).
+func (r *Resolver) CacheLen() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cache)
 }

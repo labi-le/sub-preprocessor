@@ -34,4 +34,7 @@ result-*
 .DS_Store
 Thumbs.db
 
+# Private config (untracked)
+config/private.yaml
+
 benchmarks

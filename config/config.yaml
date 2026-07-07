@@ -167,3 +167,15 @@ subscriptions:
       url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
     - name: tepo80
       url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
+    - name: etoneya-su
+      url: https://etoneya.su/other
+    - name: etoneya-best
+      url: https://etoneya.best/other
+    - name: etoneya-alley
+      url: https://alley.serv00.net/other
+    - name: etoneya-tenshi
+      url: https://internet-tenshi.kangel.tech/other
+    - name: etoneya-blacklist
+      url: https://blacklist.etoneya.baby
+    - name: etoneya-etoskam
+      url: https://etoskam.ru/other

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -83,6 +84,12 @@ type SubscriptionSource struct {
 	URL  string `yaml:"url"`
 }
 
+type privateConfig struct {
+	Subscriptions struct {
+		Sources []SubscriptionSource `yaml:"sources"`
+	} `yaml:"subscriptions"`
+}
+
 func (cfg *Config) SubscriptionsEnabled() bool {
 	return len(cfg.Subscriptions.Sources) > 0
 }
@@ -135,6 +142,18 @@ func Load(path string) (Config, error) {
 	cfg.Subscriptions.applyDefaults()
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
+	}
+
+	privatePath := filepath.Join(filepath.Dir(path), "private.yaml")
+	if b, err := os.ReadFile(privatePath); err == nil {
+		var priv privateConfig
+		if err := yaml.Unmarshal(b, &priv); err != nil {
+			return Config{}, fmt.Errorf("unmarshal private config: %w", err)
+		}
+		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
+		if err := cfg.Subscriptions.Validate(cfg.Groups); err != nil {
+			return Config{}, fmt.Errorf("private config: %w", err)
+		}
 	}
 
 	return cfg, nil
