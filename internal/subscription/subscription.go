@@ -70,6 +70,9 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	scheme := Scheme(line[:idx])
+	if scheme == SchemeVmess {
+		return parseVmess(line, idx)
+	}
 	rest := line[idx+3:] // after "://"
 
 	// Find end of authority section: '/', '?', '#', or end of string.

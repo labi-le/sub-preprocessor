@@ -25,6 +25,32 @@ func NodeName(b *bytes.Buffer, node subscription.Node, country geofeed.CountryCo
 		cleanName = node.Server
 	}
 
+	// vmess carries its name in the base64 JSON "ps" field, not a URI
+	// fragment, so the geo/IP tag is folded into the payload and re-encoded.
+	if node.Scheme == subscription.SchemeVmess {
+		var name bytes.Buffer
+		name.WriteString("[GEO:")
+		name.WriteByte(country[0])
+		name.WriteByte(country[1])
+		name.WriteString("][IP:")
+		ip4 := ip.As4()
+		writeOctet(&name, ip4[0])
+		name.WriteByte('.')
+		writeOctet(&name, ip4[1])
+		name.WriteByte('.')
+		writeOctet(&name, ip4[2])
+		name.WriteByte('.')
+		writeOctet(&name, ip4[3])
+		name.WriteString("] ")
+		name.WriteString(cleanName)
+		if out, ok := subscription.RewriteVmessName(node.Raw, name.String()); ok {
+			b.WriteString(out)
+			return
+		}
+		b.WriteString(node.Raw)
+		return
+	}
+
 	if node.FragmentIdx >= 0 {
 		b.WriteString(node.Raw[:node.FragmentIdx])
 	} else {

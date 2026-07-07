@@ -31,16 +31,30 @@ func Merge(bodies []SourceBody) []Entry {
 			if _, dup := seen[key]; dup {
 				return true
 			}
+			label := fmt.Sprintf("%s-%03d", src.Name, kept+1)
+			raw, ok := relabelNode(n, label)
+			if !ok {
+				return true
+			}
 			seen[key] = struct{}{}
 			kept++
-			label := fmt.Sprintf("%s-%03d", src.Name, kept)
-			raw := n.Raw
-			if n.FragmentIdx >= 0 {
-				raw = raw[:n.FragmentIdx]
-			}
-			entries = append(entries, Entry{Label: label, Raw: raw + "#" + label})
+			entries = append(entries, Entry{Label: label, Raw: raw})
 			return true
 		})
 	}
 	return entries
+}
+
+// relabelNode rewrites a node's display name to label so probe results map
+// back to entries. vmess names live in the base64 JSON ps field; every other
+// scheme uses a URI #fragment.
+func relabelNode(n subscription.Node, label string) (string, bool) {
+	if n.Scheme == subscription.SchemeVmess {
+		return subscription.RewriteVmessName(n.Raw, label)
+	}
+	raw := n.Raw
+	if n.FragmentIdx >= 0 {
+		raw = raw[:n.FragmentIdx]
+	}
+	return raw + "#" + label, true
 }
