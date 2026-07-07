@@ -121,3 +121,39 @@ subscriptions:
       url: https://raw.githubusercontent.com/formatorcn/daily-v2ray-sub/main/sub.txt
     - name: slxkware
       url: https://raw.githubusercontent.com/slxkware/Vless-list/main/White%20Vless.txt
+    - name: zxcursed
+      url: https://raw.githubusercontent.com/zxcursedzxc0721/vless-subscriptions/main/all/vless.txt
+    - name: fifthidea
+      url: https://raw.githubusercontent.com/fifthidea/sub/main/sub/sub-full-plaintxt.txt
+    - name: ninjanexus
+      url: https://raw.githubusercontent.com/ninjastrikers/nexus-nodes/main/configs/vless.txt
+    - name: darmioniks
+      url: https://raw.githubusercontent.com/Darmioniks/proxy-and-vless-collector/main/vless_filtered.txt
+    - name: theavel
+      url: https://raw.githubusercontent.com/theavel/free-vless-proxy/main/all.txt
+    - name: yafeisun
+      url: https://raw.githubusercontent.com/yafeisun/v2raynode/refs/heads/main/result/karing.txt
+    - name: jagger
+      url: https://raw.githubusercontent.com/jagger235711/V2rayCollector/main/results/vless.txt
+    - name: wlunlocker
+      url: https://raw.githubusercontent.com/wlunlocker/vpn-configs/main/blacklist_vpn1.txt
+    - name: ishalumi
+      url: https://raw.githubusercontent.com/ishalumi/proxy-node-collector/main/output/nodes.txt
+    - name: yuanxiawan
+      url: https://raw.githubusercontent.com/yuanxiawan/freevless/main/results/valid_vless_configs.txt
+    - name: vova
+      url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
+    - name: avia
+      url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
+    - name: jebance
+      url: https://raw.githubusercontent.com/JeBance/CheburNet/gh-pages/cheburnet.txt
+    - name: prince
+      url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
+    - name: qjlxg
+      url: https://raw.githubusercontent.com/qjlxg/eastmoney/main/all_nodes.txt
+    - name: niqonopin
+      url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
+    - name: wind7077
+      url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
+    - name: tepo80
+      url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
