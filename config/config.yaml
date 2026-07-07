@@ -109,3 +109,17 @@ subscriptions:
       url: https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt
     - name: bahemmat
       url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt
+    - name: bijandi
+      url: https://raw.githubusercontent.com/amir-reza-bijandi/v2ray-configs/main/configs.txt
+    - name: idtheo
+      url: https://raw.githubusercontent.com/idtheo/V2Ray-CleanIPs-Servers/main/shield.txt
+    - name: 3inker
+      url: https://raw.githubusercontent.com/3inker/v2ray-subscription/main/subs/all_not_ru.txt
+    - name: huangyurong
+      url: https://raw.githubusercontent.com/HuangYurong123/p-configs/main/Splitted-By-Protocol/vless.txt
+    - name: rabbitson
+      url: https://raw.githubusercontent.com/MrRabbitson/RabbitProxyZ-proxy-list/refs/heads/main/lite.txt
+    - name: formatorcn
+      url: https://raw.githubusercontent.com/formatorcn/daily-v2ray-sub/main/sub.txt
+    - name: slxkware
+      url: https://raw.githubusercontent.com/slxkware/Vless-list/main/White%20Vless.txt
