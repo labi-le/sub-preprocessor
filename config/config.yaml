@@ -95,10 +95,8 @@ subscriptions:
       url: https://mifa.world/vless
     - name: aetris
       url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
-    # purple disabled: hub.mos.ru resolves to private 10.x addresses,
-    # which the SSRF guard rejects (non-public target is not allowed).
-    # - name: purple
-    #   url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
+    - name: purple
+      url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
     - name: mehrtat
       url: https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt
     - name: mhditaheri
