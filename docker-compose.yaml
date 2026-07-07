@@ -21,12 +21,14 @@ services:
         apk add --no-cache curl bash bind-tools
         wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
         chmod +x /usr/local/bin/yq
+        export GEMINI_API_KEY="$(sed -n 's/^LITELLM_GOOGLE_API_KEY=//p' /run/agenix/litellm-env)"
         exec /scripts/asn-block-check.sh
     volumes:
       - ./config:/config:rw
       - ./scripts:/scripts:ro
+      # agenix-decrypted secret; key read from it at container start (survives reboot/restart)
+      - /run/agenix/litellm-env:/run/agenix/litellm-env:ro
     environment:
       - INTERVAL=300
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - CONFIG=/config/config.yaml
     restart: unless-stopped
