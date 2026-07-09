@@ -58,6 +58,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		filter.All(),
 		time.Hour,
 		5, 0, 1000,
+		time.Minute,
 		func() stable.Filterer { return filterer },
 		prober,
 		holder,
@@ -96,8 +97,9 @@ func TestCheckerStoresSnapshot(t *testing.T) {
 		t.Error("UpdatedAt is zero")
 	}
 	wantProbed := "vless://u@1.1.1.1:443?x=1#alpha-001\nvless://u@2.2.2.2:443#beta-001\n"
-	if got := string(prober.gotPayload); got != wantProbed {
-		t.Errorf("probed payload:\ngot  %q\nwant %q", got, wantProbed)
+	wantProbedAlt := "vless://u@2.2.2.2:443#beta-001\nvless://u@1.1.1.1:443?x=1#alpha-001\n"
+	if got := string(prober.gotPayload); got != wantProbed && got != wantProbedAlt {
+		t.Errorf("probed payload:\ngot  %q\nwant %q or %q", string(prober.gotPayload), wantProbed, wantProbedAlt)
 	}
 }
 

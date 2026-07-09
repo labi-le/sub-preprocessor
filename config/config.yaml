@@ -16,7 +16,7 @@ resolver:
 workflow:
   stages:
     - asn
-    # - geofeed
+    - geofeed
 asn:
   deny_patterns:
     - "(?i)VDSINA"
@@ -179,3 +179,51 @@ subscriptions:
       url: https://blacklist.etoneya.baby
     - name: etoneya-etoskam
       url: https://etoskam.ru/other
+    - name: etoneyaproject
+      url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
+    - name: bywarm-selected
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/selected.txt
+    - name: bywarm-wl
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/wl.txt
+    - name: bywarm-merged
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt
+    - name: wlrus
+      url: https://wlrus.lol/confs/blackl.txt
+    - name: goida
+      url: https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
+    - name: igareck-white
+      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+    - name: igareck-black
+      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt
+    - name: vlessuniversal
+      url: https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
+    - name: kfwl
+      url: https://raw.githubusercontent.com/prominbro/KfWL/refs/heads/main/KfWL.txt
+    - name: prominbro
+      url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
+    - name: obwl-wwh
+      url: https://obwlsub.vercel.app/wwh
+    - name: obhodwl
+      url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL
+    - name: reality
+      url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
+    - name: genlib
+      url: https://raw.githubusercontent.com/gergew452/Generation-Liberty/refs/heads/main/githubmirror/best.txt
+    - name: noname-de
+      url: https://white-lists.vercel.app/api/filter?code=DE&type=white&min=false
+    - name: gbr
+      url: https://gbr.mydan.online/configs
+    - name: mygala
+      url: https://mygala.ru/vpn/subscription.txt
+    - name: whitelist-sanuyyq
+      url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
+    - name: lime
+      url: https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
+    - name: shatak
+      url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
+    - name: rostunnel-gen
+      url: https://subrostunnel.vercel.app/gen.txt
+    - name: rostunnel-mega
+      url: https://rostunnel.vercel.app/mega.txt
+    - name: abikus
+      url: https://cdn.jsdelivr.net/gh/AbikusSudo/RussiaVPN@main/docs/index.html

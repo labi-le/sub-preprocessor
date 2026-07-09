@@ -158,6 +158,11 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	}
 
 	subscription.Parse(body, func(node subscription.Node) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
 		p.processNode(ctx, node, pctx)
 		return true
 	})
@@ -196,6 +201,11 @@ func (p *Processor) resolveNode(ctx context.Context, server string, resolved map
 
 func (p *Processor) processNode(ctx context.Context, node subscription.Node, pctx *PipelineContext) {
 	pctx.Stats.Total++
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 	if node.Server == "" || node.Port == "" {
 		pctx.Stats.Unsupported++
 		return

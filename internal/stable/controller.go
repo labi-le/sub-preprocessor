@@ -56,6 +56,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		subs.Check.Rounds,
 		subs.Check.MaxFail,
 		subs.Check.MaxAvgMs,
+		subs.Check.SourceTimeout,
 		c.filterer,
 		prober,
 		c.holder,

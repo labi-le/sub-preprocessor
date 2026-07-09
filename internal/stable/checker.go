@@ -29,33 +29,35 @@ type Checker struct {
 	rounds   int
 	maxFail  int
 	maxAvgMs int
+	sourceTimeout time.Duration
 	filterer func() Filterer
 	prober   Prober
 	holder   *Holder
 	logger   zerolog.Logger
 }
-
 func NewChecker(
 	sources []config.SubscriptionSource,
 	allowed filter.CountrySet,
 	interval time.Duration,
 	rounds, maxFail, maxAvgMs int,
+	sourceTimeout time.Duration,
 	filterer func() Filterer,
 	prober Prober,
 	holder *Holder,
 	logger zerolog.Logger,
 ) *Checker {
 	return &Checker{
-		sources:  sources,
-		allowed:  allowed,
-		interval: interval,
-		rounds:   rounds,
-		maxFail:  maxFail,
-		maxAvgMs: maxAvgMs,
-		filterer: filterer,
-		prober:   prober,
-		holder:   holder,
-		logger:   logger,
+		sources:       sources,
+		allowed:       allowed,
+		interval:      interval,
+		rounds:        rounds,
+		maxFail:       maxFail,
+		maxAvgMs:      maxAvgMs,
+		sourceTimeout: sourceTimeout,
+		filterer:      filterer,
+		prober:        prober,
+		holder:        holder,
+		logger:        logger,
 	}
 }
 
@@ -79,39 +81,65 @@ func (c *Checker) Run(ctx context.Context) {
 // published snapshot is kept untouched.
 func (c *Checker) RunOnce(ctx context.Context) {
 	svc := c.filterer()
-	bodies := make([]SourceBody, 0, len(c.sources))
-	for _, src := range c.sources {
-		var buf bytes.Buffer
-		buf.Grow(sourceBufSize)
-		if _, err := svc.Filter(ctx, &buf, preprocess.FilterRequest{
-			SubscriptionURL:  fetch.SubscriptionURL(src.URL),
-			AllowedCountries: c.allowed,
-		}); err != nil {
-			c.logger.Warn().Str("source", src.Name).Err(err).Msg("source fetch failed")
 
+	type result struct {
+		name string
+		body SourceBody
+		err  error
+	}
+
+	const fetchConcurrency = 8
+	sem := make(chan struct{}, fetchConcurrency)
+	results := make(chan result, len(c.sources))
+
+	for _, src := range c.sources {
+		go func(src config.SubscriptionSource) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			c.logger.Debug().Str("source", src.Name).Msg("fetching source")
+			sourceCtx, cancel := context.WithTimeout(ctx, c.sourceTimeout)
+			defer cancel()
+
+			var buf bytes.Buffer
+			buf.Grow(sourceBufSize)
+			_, err := svc.Filter(sourceCtx, &buf, preprocess.FilterRequest{
+				SubscriptionURL:  fetch.SubscriptionURL(src.URL),
+				AllowedCountries: c.allowed,
+			})
+			if err != nil {
+				results <- result{name: src.Name, err: err}
+				return
+			}
+			results <- result{name: src.Name, body: SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)}}
+		}(src)
+	}
+
+	bodies := make([]SourceBody, 0, len(c.sources))
+	for range c.sources {
+		r := <-results
+		if r.err != nil {
+			c.logger.Warn().Str("source", r.name).Err(r.err).Msg("source fetch failed")
 			continue
 		}
-		bodies = append(bodies, SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)})
+		bodies = append(bodies, r.body)
 	}
 
 	entries := Merge(bodies)
 	if len(entries) == 0 {
 		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
-
 		return
 	}
 
 	res, err := c.prober.Probe(ctx, entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
-
 		return
 	}
 
 	survivors := SelectSurvivors(entries, res, c.rounds, c.maxFail, c.maxAvgMs)
 	if len(survivors) == 0 {
 		c.logger.Warn().Msg("no survivors; keeping previous stable list")
-
 		return
 	}
 

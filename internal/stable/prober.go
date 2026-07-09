@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/common/convert"
@@ -58,19 +57,21 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 
 	accs := make(map[string]*delayAcc, len(proxies))
 	var mu sync.Mutex
-	for round := range m.cfg.Rounds {
-		if round > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("probe interrupted: %w", ctx.Err())
-			case <-time.After(m.cfg.RoundPause):
-			}
-		}
-		m.runRound(ctx, proxies, &mu, accs)
+	var wg sync.WaitGroup
+	for range m.cfg.Rounds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.runRound(ctx, proxies, &mu, accs)
+		}()
 	}
+	wg.Wait()
 
 	res := make(map[string]ProbeResult, len(accs))
 	for name, a := range accs {
+		if a.succ == 0 {
+			continue
+		}
 		res[name] = ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
 	}
 

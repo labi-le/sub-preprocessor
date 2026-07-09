@@ -30,6 +30,7 @@ const (
 	defaultCheckStatus     = "204"
 	defaultCheckMaxAvgMs   = 1000
 	defaultCheckConcurr    = 16
+	defaultSourceTimeout = 120 * time.Second
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -76,6 +77,7 @@ type CheckConfig struct {
 	ExpectedStatus string        `yaml:"expected_status"`
 	MaxFail        int           `yaml:"max_fail"`
 	MaxAvgMs       int           `yaml:"max_avg_ms"`
+	SourceTimeout  time.Duration `yaml:"source_timeout"`
 	Concurrency    int           `yaml:"concurrency"`
 }
 
@@ -198,6 +200,9 @@ func (s *SubscriptionsConfig) applyDefaults() {
 	if c.ExpectedStatus == "" {
 		c.ExpectedStatus = defaultCheckStatus
 	}
+	if c.SourceTimeout == 0 {
+		c.SourceTimeout = defaultSourceTimeout
+	}
 	if c.MaxAvgMs == 0 {
 		c.MaxAvgMs = defaultCheckMaxAvgMs
 	}
@@ -251,6 +256,9 @@ func (c *CheckConfig) validate() error {
 	}
 	if c.Timeout <= 0 || c.RoundPause < 0 {
 		return errors.New("subscriptions.check: timeout must be positive, round_pause non-negative")
+	}
+	if c.SourceTimeout <= 0 {
+		return errors.New("subscriptions.check.source_timeout must be positive")
 	}
 	if c.MaxFail < 0 || c.MaxFail >= c.Rounds {
 		return errors.New("subscriptions.check.max_fail must be within [0, rounds)")
