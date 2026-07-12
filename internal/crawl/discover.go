@@ -69,8 +69,8 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 			continue
 		}
 		if n.depth > 0 {
-			if discovered >= c.opts.MaxChannels {
-				continue
+			if c.opts.MaxChannels > 0 && discovered >= c.opts.MaxChannels {
+				continue // safety cap on discovered channels (0 = unlimited)
 			}
 			discovered++
 		}

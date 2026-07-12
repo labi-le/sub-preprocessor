@@ -51,7 +51,7 @@ services:
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1
       - CRAWL_DEPTH=2
-      - CRAWL_MAX_CHANNELS=25
+      - CRAWL_MAX_CHANNELS=0   # 0 = no cap (visited-set still prevents re-visiting channels within a cycle)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
     restart: unless-stopped

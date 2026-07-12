@@ -54,7 +54,7 @@ type Options struct {
 	Pages        int           // t.me/s pages (~20 msgs each) to walk back per seed channel
 	Prune        bool          // drop managed sources that no longer classify as live
 	MaxDepth     int           // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels  int           // safety cap on discovered (non-seed) channels visited per cycle
+	MaxChannels  int           // safety cap on discovered (non-seed) channels per cycle; 0 = unlimited
 	StatePath    string        // persisted productive-channel memory; empty disables persistence
 	StateTTL     time.Duration // drop a productive channel from memory after this long without a live sub
 }

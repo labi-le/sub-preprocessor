@@ -54,7 +54,7 @@ func runCrawl() {
 		Pages:        atoiDefault(getenv("CRAWL_PAGES", "6"), 6),
 		Prune:        boolDefault(getenv("CRAWL_PRUNE", ""), true),
 		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", "2"), 2),
-		MaxChannels:  atoiDefault(getenv("CRAWL_MAX_CHANNELS", "25"), 25),
+		MaxChannels:  intDefault(getenv("CRAWL_MAX_CHANNELS", "0"), 0),
 		StatePath:    getenv("CRAWL_STATE", "/config/.crawler-state.json"),
 		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", "720h"), 720*time.Hour),
 	}
