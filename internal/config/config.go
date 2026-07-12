@@ -126,9 +126,9 @@ type GeoBlockConfig struct {
 	Gemini GeminiConfig  `yaml:"gemini"`
 }
 
-// DeadCacheConfig configures the short-TTL cache of nodes that failed the stable
-// probe, so later cycles skip re-probing them. Reuses the geoblock SQLite store
-// keyed by server:port.
+// DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
+// the stable probe, so later cycles skip re-probing them (see stable.DeadSet;
+// keyed by server:port, not persisted).
 type DeadCacheConfig struct {
 	TTL time.Duration `yaml:"ttl"`
 }
