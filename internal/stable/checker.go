@@ -98,7 +98,7 @@ func (c *Checker) RunOnce(ctx context.Context) {
 		err  error
 	}
 
-	const fetchConcurrency = 8
+	const fetchConcurrency = 16
 	sem := make(chan struct{}, fetchConcurrency)
 	results := make(chan result, len(c.sources))
 
