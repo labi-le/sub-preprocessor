@@ -26,6 +26,13 @@ type Blocklist interface {
 	Block(host string) error
 }
 
+// DeadCache skips re-probing recently-dead nodes; a nil DeadCache disables it.
+type DeadCache interface {
+	Blocked(key string) bool
+	Block(key string) error
+	Prune() error
+}
+
 // Checker periodically fetches sources through the preprocess pipeline,
 // merges them, probes the nodes and publishes survivors to the holder.
 type Checker struct {
@@ -39,6 +46,7 @@ type Checker struct {
 	filterer      func() Filterer
 	prober        Prober
 	store         Blocklist
+	dead          DeadCache
 	holder        *Holder
 	logger        zerolog.Logger
 }
@@ -52,6 +60,7 @@ func NewChecker(
 	filterer func() Filterer,
 	prober Prober,
 	store Blocklist,
+	dead DeadCache,
 	holder *Holder,
 	logger zerolog.Logger,
 ) *Checker {
@@ -66,6 +75,7 @@ func NewChecker(
 		filterer:      filterer,
 		prober:        prober,
 		store:         store,
+		dead:          dead,
 		holder:        holder,
 		logger:        logger,
 	}
@@ -141,14 +151,43 @@ func (c *Checker) RunOnce(ctx context.Context) {
 		return
 	}
 
-	res, err := c.prober.Probe(ctx, entriesPayload(entries))
+	// Skip nodes marked dead by a recent cycle (short TTL) so the probe only
+	// re-tests live/unknown nodes; probing is the biggest per-cycle cost.
+	probe := entries
+	deadSkipped := 0
+	if c.dead != nil {
+		probe = make([]Entry, 0, len(entries))
+		for _, e := range entries {
+			if c.dead.Blocked(e.Addr) {
+				deadSkipped++
+				continue
+			}
+			probe = append(probe, e)
+		}
+		if len(probe) == 0 {
+			c.logger.Warn().Int("dead_skipped", deadSkipped).Msg("all merged nodes recently dead; keeping previous stable list")
+			return
+		}
+	}
+
+	res, err := c.prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
 		return
 	}
 
-	survivors := SelectSurvivors(entries, res, c.rounds, c.maxFail, c.maxAvgMs)
-	survivors = c.geminiGate(ctx, entries, survivors)
+	// Cache nodes that returned no successful probe so later cycles skip them.
+	if c.dead != nil {
+		for _, e := range probe {
+			if _, ok := res[e.Label]; !ok {
+				_ = c.dead.Block(e.Addr)
+			}
+		}
+		_ = c.dead.Prune()
+	}
+
+	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
+	survivors = c.geminiGate(ctx, probe, survivors)
 	if len(survivors) == 0 {
 		c.logger.Warn().Msg("no survivors; keeping previous stable list")
 		return
@@ -161,13 +200,15 @@ func (c *Checker) RunOnce(ctx context.Context) {
 			SourcesOK:    len(bodies),
 			SourcesTotal: len(c.sources),
 			Merged:       len(entries),
-			Tested:       len(res),
+			Tested:       len(probe),
 			Kept:         len(survivors),
 		},
 	})
 	c.logger.Info().
 		Int("sources_ok", len(bodies)).
 		Int("merged", len(entries)).
+		Int("dead_skipped", deadSkipped).
+		Int("probed", len(probe)).
 		Int("kept", len(survivors)).
 		Msg("stable list updated")
 }

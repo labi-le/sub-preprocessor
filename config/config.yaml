@@ -30,6 +30,9 @@ geoblock:
     key_var: LITELLM_GOOGLE_API_KEY
     timeout: 15s
     concurrency: 8
+deadcache:
+  db_path: /config/.deadnodes.db
+  ttl: 2h
 groups:
   nato:
     - "AL"

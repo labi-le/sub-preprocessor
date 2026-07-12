@@ -16,6 +16,7 @@ type SourceBody struct {
 type Entry struct {
 	Label string
 	Raw   string
+	Addr  string // server:port, the dead-cache key
 }
 
 // Merge parses all source bodies in order, dedupes nodes by Server:Port
@@ -38,7 +39,7 @@ func Merge(bodies []SourceBody) []Entry {
 			}
 			seen[key] = struct{}{}
 			kept++
-			entries = append(entries, Entry{Label: label, Raw: raw})
+			entries = append(entries, Entry{Label: label, Raw: raw, Addr: key})
 			return true
 		})
 	}

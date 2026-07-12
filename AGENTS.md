@@ -89,6 +89,7 @@ Important keys:
 - `asn.deny_patterns` (+ `asn.timeout`) — usually empty now; the per-host `geoblock` list replaces ASN-name denial. The ASN stage still does country filtering.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` (`enabled`, `model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`)
+- `deadcache.db_path` / `deadcache.ttl` (SQLite cache of probe-dead nodes keyed by `server:port`; default TTL 2h; skips re-probing)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
 - `subscriptions.exclude_groups`
@@ -109,7 +110,7 @@ Important keys:
 - `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed the Gemini reachability check
-- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, Mihomo prober + through-node Gemini reachability gate, checker loop, holder
+- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node Gemini reachability gate, checker loop, holder
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 

@@ -284,7 +284,7 @@ func TestReloadAppliesSubscriptions(t *testing.T) {
 	logger := zerolog.New(&logBuf)
 
 	ctl := stable.NewController(t.Context(), stable.NewHolder(),
-		func() stable.Filterer { return failingFilterer{} }, nil, zerolog.Nop())
+		func() stable.Filterer { return failingFilterer{} }, nil, nil, zerolog.Nop())
 	t.Cleanup(ctl.Stop)
 
 	loadedAt := time.Now().Add(-time.Hour)
@@ -308,7 +308,7 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 	logger := zerolog.New(&logBuf)
 
 	ctl := stable.NewController(t.Context(), stable.NewHolder(),
-		func() stable.Filterer { return failingFilterer{} }, nil, zerolog.Nop())
+		func() stable.Filterer { return failingFilterer{} }, nil, nil, zerolog.Nop())
 	t.Cleanup(ctl.Stop)
 
 	loadedAt := time.Now().Add(-time.Hour)

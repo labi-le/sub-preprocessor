@@ -53,6 +53,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `ASNConfig` — `deny_patterns` + `timeout`
 - `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
 - `GeminiConfig` — `enabled`/`endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency`; `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE` env file)
+- `DeadCacheConfig` — `db_path` + `ttl` (short-TTL cache of nodes that failed the probe; skips re-probing them)
 
 **Key functions:**
 - `Load(path) (Config, error)` — read + unmarshal + apply defaults + call `cfg.Validate()`
@@ -340,12 +341,12 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `Stats` — `SourcesOK/SourcesTotal/Merged/Tested/Kept` counters for the `X-Stable-Stats` header
 - `Snapshot` — immutable `Payload []byte` + `UpdatedAt` + `Stats`
 - `Holder` — `atomic.Pointer[Snapshot]`; `Load()` returns nil before the first successful cycle
-- `SourceBody` / `Entry` — merge input (source name + fetched body) and output (label + relabeled raw URI)
+- `SourceBody` / `Entry` — merge input (source name + fetched body) and output (`Label` + relabeled `Raw` URI + `Addr` server:port, the dead-cache key)
 - `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
 - `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
 - `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`
+- `Blocklist` — `Block(host)` (gemini geo-block store); `DeadCache` — `Blocked(key)/Block(key)/Prune()` (short-TTL dead-node cache keyed by `server:port`); both satisfied by `*geoblock.Store`
 - `GeminiOutcome` — per-node through-node Gemini result (`Server`/`Reachable`/`Blocked`)
-- `Blocklist` — interface `Block(host string) error` (satisfied by `*geoblock.Store`); nil disables persistence
 - `Checker` — the periodic worker loop
 - `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads
 
@@ -354,8 +355,8 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `SelectSurvivors(entries, results, rounds, maxFail, maxAvgMs) []Survivor` — keep `rounds-successes <= maxFail && mean <= maxAvgMs`, sort by mean ascending
 - `BuildPayload(survivors) []byte` — newline-joined URI list
 - `NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, logger) (*MihomoProber, error)` — latency `Probe` (HEAD `URLTest`) plus `GeminiCheck(ctx, payload) map[label]GeminiOutcome` + `GeminiEnabled()`; `GeminiCheck` dials the Gemini API through each node (mihomo `DialContext` + fixed-conn `http.Transport`, `GET`) and scans the body for the geo-block marker
-- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle; after `SelectSurvivors`, `geminiGate` keeps only Gemini-reachable survivors and writes geo-blocked hosts to the store (TTL)
-- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key (`cfg.GeoBlock.Gemini.APIKeyResolved()`), builds the prober + checker (with the geo-block store), stops the old worker and starts a new one when `subscriptions.sources` is non-empty; allowed set = `filter.All()` minus `exclude_countries`/`exclude_groups`; `Stop` is idempotent
+- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle: drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), then `SelectSurvivors` + `geminiGate` keep only Gemini-reachable survivors
+- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key, builds the prober + checker (with the geo-block + dead-node stores), stops the old worker and starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
 **Tags:** `stable`, `probe`, `url-test`, `gemini`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`

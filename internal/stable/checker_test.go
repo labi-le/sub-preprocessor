@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		time.Minute,
 		func() stable.Filterer { return filterer },
 		prober,
+		nil,
 		nil,
 		holder,
 		zerolog.Nop(),
@@ -209,6 +211,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 		holder,
 		func() stable.Filterer { return fakeFilterer{} },
 		nil,
+		nil,
 		zerolog.Nop(),
 	)
 
@@ -252,6 +255,7 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 		stable.NewHolder(),
 		func() stable.Filterer { return fakeFilterer{} },
 		nil,
+		nil,
 		zerolog.Nop(),
 	)
 
@@ -272,5 +276,54 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 	if err := ctl.Apply(cfg); err == nil {
 		ctl.Stop()
 		t.Fatal("expected error for bad expected_status")
+	}
+}
+
+type fakeDeadCache struct {
+	blocked  map[string]bool
+	recorded []string
+}
+
+func (d *fakeDeadCache) Blocked(key string) bool { return d.blocked[key] }
+func (d *fakeDeadCache) Block(key string) error {
+	d.recorded = append(d.recorded, key)
+	d.blocked[key] = true
+	return nil
+}
+func (d *fakeDeadCache) Prune() error { return nil }
+
+func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	// alpha-001 is dead (absent from probe results); beta-001 is alive.
+	prober := &fakeProber{res: map[string]stable.ProbeResult{"beta-001": {Successes: 5, MeanMs: 100}}}
+	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	holder := stable.NewHolder()
+	c := stable.NewChecker(
+		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+	)
+
+	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
+	c.RunOnce(context.Background())
+	if !dead.blocked["1.1.1.1:443"] {
+		t.Fatalf("dead alpha should be recorded, got %v", dead.recorded)
+	}
+	if !strings.Contains(string(prober.gotPayload), "1.1.1.1:443") {
+		t.Fatal("cycle 1 should have probed alpha")
+	}
+
+	// Cycle 2: alpha is now known-dead -> skipped before probing; beta still probed.
+	prober.gotPayload = nil
+	c.RunOnce(context.Background())
+	if strings.Contains(string(prober.gotPayload), "1.1.1.1:443") {
+		t.Errorf("cycle 2 must skip known-dead alpha, probed %q", prober.gotPayload)
+	}
+	if !strings.Contains(string(prober.gotPayload), "2.2.2.2:443") {
+		t.Errorf("cycle 2 must still probe beta, probed %q", prober.gotPayload)
 	}
 }

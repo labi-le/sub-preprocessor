@@ -24,9 +24,9 @@ func TestMergeDedupesAndRelabels(t *testing.T) {
 	})
 
 	want := []stable.Entry{
-		{Label: "alpha-001", Raw: "vless://uuid-a@host.example:443?type=tcp#alpha-001"},
-		{Label: "alpha-002", Raw: "vless://uuid-b@other.example:8443#alpha-002"},
-		{Label: "beta-001", Raw: "vless://uuid-d@beta.example:443#beta-001"},
+		{Label: "alpha-001", Raw: "vless://uuid-a@host.example:443?type=tcp#alpha-001", Addr: "host.example:443"},
+		{Label: "alpha-002", Raw: "vless://uuid-b@other.example:8443#alpha-002", Addr: "other.example:8443"},
+		{Label: "beta-001", Raw: "vless://uuid-d@beta.example:443#beta-001", Addr: "beta.example:443"},
 	}
 
 	if len(entries) != len(want) {

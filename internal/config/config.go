@@ -31,6 +31,7 @@ const (
 	defaultCheckMaxAvgMs     = 1000
 	defaultCheckConcurr      = 16
 	defaultSourceTimeout     = 120 * time.Second
+	defaultDeadCacheTTL      = 2 * time.Hour
 	defaultGeoBlockTTL       = 720 * time.Hour
 	defaultGeminiEndpoint    = "https://generativelanguage.googleapis.com"
 	defaultGeminiModel       = "gemini-2.0-flash"
@@ -67,6 +68,7 @@ type Config struct {
 	Groups        Groups              `yaml:"groups"`
 	Subscriptions SubscriptionsConfig `yaml:"subscriptions"`
 	GeoBlock      GeoBlockConfig      `yaml:"geoblock"`
+	DeadCache     DeadCacheConfig     `yaml:"deadcache"`
 }
 
 type SubscriptionsConfig struct {
@@ -122,6 +124,20 @@ type GeoBlockConfig struct {
 	DBPath string        `yaml:"db_path"`
 	TTL    time.Duration `yaml:"ttl"`
 	Gemini GeminiConfig  `yaml:"gemini"`
+}
+
+// DeadCacheConfig configures the short-TTL cache of nodes that failed the stable
+// probe, so later cycles skip re-probing them. Reuses the geoblock SQLite store
+// keyed by server:port.
+type DeadCacheConfig struct {
+	DBPath string        `yaml:"db_path"`
+	TTL    time.Duration `yaml:"ttl"`
+}
+
+func (d *DeadCacheConfig) applyDefaults() {
+	if d.TTL == 0 {
+		d.TTL = defaultDeadCacheTTL
+	}
 }
 
 // GeminiConfig configures the through-node Gemini reachability check run during
@@ -222,6 +238,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg.Subscriptions.applyDefaults()
 	cfg.GeoBlock.applyDefaults()
+	cfg.DeadCache.applyDefaults()
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}

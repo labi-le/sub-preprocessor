@@ -41,6 +41,17 @@ func Run(ctx context.Context) error {
 		logger.Info().Str("db", cfg.GeoBlock.DBPath).Int("blocked", gbStore.Count()).Msg("geoblock store")
 	}
 
+	var dcache stable.DeadCache
+	if cfg.DeadCache.DBPath != "" {
+		deadStore, derr := geoblock.Open(cfg.DeadCache.DBPath, cfg.DeadCache.TTL)
+		if derr != nil {
+			return fmt.Errorf("open dead-node cache: %w", derr)
+		}
+		defer func() { _ = deadStore.Close() }()
+		dcache = deadStore
+		logger.Info().Str("db", cfg.DeadCache.DBPath).Dur("ttl", cfg.DeadCache.TTL).Int("dead", deadStore.Count()).Msg("dead-node cache")
+	}
+
 	opts := reload.OptionsFromConfig(cfg)
 	opts.Blocklist = pblock
 	svc, err := preprocess.NewProcessor(ctx, logger, opts)
@@ -52,7 +63,7 @@ func Run(ctx context.Context) error {
 	stableHolder := stable.NewHolder()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
 		return holder.Load().Svc
-	}, sblock, logger)
+	}, sblock, dcache, logger)
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
