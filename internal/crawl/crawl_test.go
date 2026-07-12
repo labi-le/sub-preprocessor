@@ -263,9 +263,10 @@ func TestNextDaily(t *testing.T) {
 		now  time.Time
 		want time.Time
 	}{
-		{base.Add(3 * time.Hour), base.Add(4 * time.Hour)},  // 03:00 -> today 04:00
-		{base.Add(5 * time.Hour), base.Add(28 * time.Hour)}, // 05:00 -> tomorrow 04:00
-		{base.Add(4 * time.Hour), base.Add(28 * time.Hour)}, // exactly 04:00 -> tomorrow (strictly after)
+		{base.Add(3 * time.Hour), base.Add(4 * time.Hour)},                                            // 03:00 -> today 04:00
+		{base.Add(5 * time.Hour), base.Add(28 * time.Hour)},                                           // 05:00 -> tomorrow 04:00
+		{base.Add(4 * time.Hour), base.Add(28 * time.Hour)},                                           // exactly 04:00 -> tomorrow (strictly after)
+		{time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 4, 0, 0, 0, time.UTC)}, // year rollover
 	}
 	for _, c := range cases {
 		if got := nextDaily(c.now, 4, 0); !got.Equal(c.want) {

@@ -71,11 +71,14 @@ func runCrawl() {
 	}
 	// CRAWL_AT="HH:MM" runs once daily at that wall-clock time (local TZ);
 	// otherwise fall back to the CRAWL_INTERVAL ticker.
-	if h, m, ok := parseHHMM(getenv("CRAWL_AT", "")); ok {
-		logger.Info().Str("at", getenv("CRAWL_AT", "")).Str("tz", time.Now().Location().String()).
-			Msg("daily schedule")
+	at := getenv("CRAWL_AT", "")
+	if h, m, ok := parseHHMM(at); ok {
+		logger.Info().Str("at", at).Str("tz", time.Now().Location().String()).Msg("daily schedule")
 		c.RunDaily(ctx, h, m)
 		return
+	}
+	if at != "" {
+		logger.Warn().Str("at", at).Msg("invalid CRAWL_AT, using interval schedule")
 	}
 	c.Run(ctx, interval)
 }
