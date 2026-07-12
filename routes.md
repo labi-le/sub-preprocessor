@@ -33,7 +33,7 @@ Application bootstrap: loads config, creates `Processor`, wires the config watch
 - Creates `reload.NewWatcher` with `reloader.Reload` as the `onChange` callback
 - Runs watcher in a goroutine; joins it via `watcherDone` channel before returning from shutdown
 
-**Uses:** `config`, `log`, `preprocess`, `reload`, `server`
+**Uses:** `config`, `geoblock`, `log`, `preprocess`, `reload`, `server`, `stable`
 **Tags:** `bootstrap`, `wire`, `shutdown`, `lifecycle`, `hot-reload`
 
 ---
@@ -51,6 +51,8 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `LogConfig` — `level` (`yaml:"level"`, default `"info"`)
 - `WorkflowConfig` — `stages` (sequential pipeline order; known names: `geofeed`, `asn`)
 - `ASNConfig` — `deny_patterns` + `timeout`
+- `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
+- `GeminiConfig` — `enabled`/`endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency`; `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE` env file)
 
 **Key functions:**
 - `Load(path) (Config, error)` — read + unmarshal + apply defaults + call `cfg.Validate()`
@@ -241,6 +243,20 @@ Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. St
 
 ---
 
+## `internal/geoblock`
+
+`./internal/geoblock/store.go`
+
+Persistent per-host geo-block list: node hosts that failed the through-node Gemini reachability check, each with a TTL (default 30d). Backed by SQLite via the pure-Go `modernc.org/sqlite` driver (works under `CGO_ENABLED=0`/distroless). Reads are served from an in-memory cache (the filter hot path); the DB file is touched only on write/prune/load.
+
+**Key types:**
+- `Store` — `Open(path, ttl)`, `Blocked(host) bool`, `Block(host) error`, `Prune() error`, `Count() int`, `Close() error`
+
+**Uses:** `modernc.org/sqlite`
+**Tags:** `geoblock`, `sqlite`, `ttl`, `blocklist`, `gemini`
+
+---
+
 ## `internal/preprocess`
 
 `./internal/preprocess/processor.go`, `filters.go`
@@ -249,12 +265,13 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 
 **Key types:**
 - `Processor` — country lookup (with async background reload via `TryLock`) + DNS resolver + sequential filter pipeline (no country cache, no groups map)
-- `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `Unsupported`
+- `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `GeoBlockDrop` / `Unsupported`
 - `PipelineContext` — request-scoped state shared across filters (`Buffer`, `Lookup`, `Allowed`, `Resolved`, `Stats`, `IsFirstNode`)
 - `Filter` — interface for workflow stages; `Process(ctx, ips, pctx)`
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns AND IPs whose Cymru-resolved country is not in `AllowedCountries` (so country filtering works without a geofeed stage)
-- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `PreloadedGeofeed`, `PreloadedLoadedAt`)
+- `Blocklist` — interface `Blocked(host string) bool` (satisfied by `*geoblock.Store`); when set, `processNode` drops nodes whose `Server` is currently geo-blocked (`GeoBlockDrop`) before DNS resolution, on both `/` and the worker
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `Blocklist`, `PreloadedGeofeed`, `PreloadedLoadedAt`). The ASN resolver is now built whenever the `asn` stage is active (not only when `deny_patterns` is non-empty), so country filtering survives an empty deny list.
 - `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
 **Key functions:**
@@ -315,9 +332,9 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 ## `internal/stable`
 
-`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `checker.go`, `controller.go`
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `checker.go`, `controller.go`
 
-Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, and atomically publishes the survivor payload for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
+Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, then runs a **Gemini reachability gate** through each surviving node (a real API `GET`, body-inspected for the geo-block marker — the check mihomo's HEAD-only `URLTest` cannot do), records geo-blocked node hosts in the `geoblock` store (TTL) and drops them, and atomically publishes the rest for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
 
 **Key types:**
 - `Stats` — `SourcesOK/SourcesTotal/Merged/Tested/Kept` counters for the `X-Stable-Stats` header
@@ -327,6 +344,8 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
 - `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
 - `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`
+- `GeminiOutcome` — per-node through-node Gemini result (`Server`/`Reachable`/`Blocked`)
+- `Blocklist` — interface `Block(host string) error` (satisfied by `*geoblock.Store`); nil disables persistence
 - `Checker` — the periodic worker loop
 - `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads
 
@@ -334,12 +353,12 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `Merge(bodies []SourceBody) []Entry` — dedupe by `Server:Port` first-wins in source order; relabel fragments to `<source>-NNN`
 - `SelectSurvivors(entries, results, rounds, maxFail, maxAvgMs) []Survivor` — keep `rounds-successes <= maxFail && mean <= maxAvgMs`, sort by mean ascending
 - `BuildPayload(survivors) []byte` — newline-joined URI list
-- `NewMihomoProber(cfg config.CheckConfig, logger) (*MihomoProber, error)` — parses `expected_status` ranges once; `Probe` = `convert.ConvertsV2Ray` → `adapter.ParseProxy` → rounds × concurrent `URLTest` (semaphore `check.concurrency`, per-node timeout)
-- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle
-- `NewController(ctx, holder, filterer func() Filterer, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` stops the old worker and starts a new one when `subscriptions.sources` is non-empty; allowed set = `filter.All()` minus `exclude_countries`/`exclude_groups`; `Stop` is idempotent and joins the worker goroutine
+- `NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, logger) (*MihomoProber, error)` — latency `Probe` (HEAD `URLTest`) plus `GeminiCheck(ctx, payload) map[label]GeminiOutcome` + `GeminiEnabled()`; `GeminiCheck` dials the Gemini API through each node (mihomo `DialContext` + fixed-conn `http.Transport`, `GET`) and scans the body for the geo-block marker
+- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle; after `SelectSurvivors`, `geminiGate` keeps only Gemini-reachable survivors and writes geo-blocked hosts to the store (TTL)
+- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key (`cfg.GeoBlock.Gemini.APIKeyResolved()`), builds the prober + checker (with the geo-block store), stops the old worker and starts a new one when `subscriptions.sources` is non-empty; allowed set = `filter.All()` minus `exclude_countries`/`exclude_groups`; `Stop` is idempotent
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
-**Tags:** `stable`, `probe`, `url-test`, `delay`, `worker`, `mihomo`, `atomic-swap`
+**Tags:** `stable`, `probe`, `url-test`, `gemini`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`
 
 ---
 
@@ -354,8 +373,8 @@ Config hot-reload. Watches the config file **and its `private.yaml` overlay sibl
 - `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; fires `onChange` for events on either `config.yaml` or its `private.yaml` sibling; debounces events with a 200 ms window
 
 **Key functions:**
-- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl *stable.Controller) *Reloader` — seed with startup state so the first reload can diff against it
-- `(*Reloader).Reload(ctx context.Context)` — load config → skip if `Equal` → build `OptionsFromConfig` → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot → `ctl.Apply(newCfg)` only when `SubscriptionsChanged || GroupsChanged` (the gemini sidecar's periodic `asn.deny_patterns` rewrites must not restart the stable worker)
+- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl *stable.Controller, blocklist preprocess.Blocklist) *Reloader` — seed with startup state so the first reload can diff against it; injects the shared geo-block store into every rebuilt `Processor`
+- `(*Reloader).Reload(ctx context.Context)` — load config → skip if `Equal` → build `OptionsFromConfig` (+ inject `Blocklist`) → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot → `ctl.Apply(newCfg)` only when `SubscriptionsChanged || GroupsChanged`
 - `NewWatcher(configPath string, onChange func(context.Context), logger zerolog.Logger) (*Watcher, error)` — register fsnotify watch on parent directory; return error if watcher or directory watch fails
 - `(*Watcher).Run(ctx context.Context) error` — event loop: debounce matching events, call `onChange` once per burst; close fsnotify watcher on ctx cancellation and return nil (callers use the return as a join point)
 - `OptionsFromConfig(cfg config.Config) preprocess.Options` — single source of truth for mapping `config.Config` to `preprocess.Options`; leaves `PreloadedGeofeed`/`PreloadedLoadedAt` unset (callers decide whether to carry over geofeed state)
@@ -410,6 +429,7 @@ main
  ├─ app
  │   ├─ config ─── fetch, geofeed
  │   ├─ log        (zerolog initialization)
+ │   ├─ geoblock   (SQLite TTL geo-block list; modernc pure-Go; injected into preprocess/stable via interfaces)
  │   ├─ preprocess
  │   │   ├─ asn        (Team Cymru DNS)
  │   │   ├─ config     (workflow constants)
@@ -455,4 +475,5 @@ main
 | `log`, `zerolog`, `structured-log`, `runtime-level` | `log` |
 | `shared-iterator`, `unsafe-string` | `ioutil` |
 | `fsnotify`, `watch`, `debounce`, `hot-reload` | `reload` |
-| `stable`, `probe`, `url-test`, `mihomo` | `stable` |
+| `stable`, `probe`, `url-test`, `gemini`, `mihomo` | `stable` |
+| `geoblock`, `sqlite`, `ttl`, `blocklist` | `geoblock` |

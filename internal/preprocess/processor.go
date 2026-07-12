@@ -188,6 +188,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		Int("dns_drop", stats.DNSDrop).
 		Int("geo_drop", stats.GeoDrop).
 		Int("asn_drop", stats.ASNDrop).
+		Int("geoblock_drop", stats.GeoBlockDrop).
 		Int("unsupported", stats.Unsupported).
 		Dur("latency", time.Since(start)).
 		Msg("subscription processed")
