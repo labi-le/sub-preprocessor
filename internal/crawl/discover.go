@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // channelRe matches a t.me channel reference and captures the username slug and
@@ -19,30 +20,48 @@ var reservedSlugs = map[string]bool{
 }
 
 // scan performs a relevance-gated breadth-first crawl of the channel repost
-// graph. Seeds are crawled unconditionally; a discovered channel is expanded
-// only when it itself yielded at least one live subscription (thematic gate),
-// bounded by MaxDepth and MaxChannels. It returns the set of live subscription
-// URLs found across every visited channel.
-func (c *Crawler) scan(ctx context.Context) map[string]bool {
+// graph. Seeds are the configured channels plus every remembered productive
+// channel (st), all crawled at depth 0 and always expanded; a newly discovered
+// channel is expanded only when it itself yielded at least one live
+// subscription (thematic gate). Discovered (non-seed) visits are capped by
+// MaxChannels; recursion depth by MaxDepth. Channels that yield a live sub are
+// recorded into st so they become permanent seeds on future cycles, surviving
+// days when their recent pages carry no live sub. Returns every live
+// subscription URL found.
+func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 	live := map[string]bool{}
 	visited := map[string]bool{}
+	discovered := 0
 
 	type node struct {
 		channel string
 		depth   int
 	}
-	queue := make([]node, 0, len(c.opts.Channels))
+	seeds := map[string]struct{}{}
 	for _, s := range c.opts.Channels {
 		if slug := normalizeSlug(s); slug != "" {
-			queue = append(queue, node{slug, 0})
+			seeds[slug] = struct{}{}
 		}
 	}
+	for _, slug := range st.seeds() {
+		seeds[slug] = struct{}{}
+	}
+	queue := make([]node, 0, len(seeds))
+	for slug := range seeds {
+		queue = append(queue, node{slug, 0})
+	}
 
-	for len(queue) > 0 && len(visited) < c.opts.MaxChannels {
+	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
 		if n.channel == "" || visited[n.channel] {
 			continue
+		}
+		if n.depth > 0 {
+			if discovered >= c.opts.MaxChannels {
+				continue
+			}
+			discovered++
 		}
 		visited[n.channel] = true
 
@@ -62,6 +81,9 @@ func (c *Crawler) scan(ctx context.Context) map[string]bool {
 		found := c.classifyAll(ctx, keys(cand))
 		for u := range found {
 			live[u] = true
+		}
+		if len(found) > 0 {
+			st.record(n.channel, time.Now())
 		}
 		c.logger.Info().Str("channel", n.channel).Int("depth", n.depth).
 			Int("subs", len(found)).Msg("scanned channel")

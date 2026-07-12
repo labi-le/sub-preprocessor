@@ -50,10 +50,12 @@ var (
 type Options struct {
 	Channels    []string
 	PrivatePath string
-	Pages       int  // t.me/s pages (~20 msgs each) to walk back per seed channel
-	Prune       bool // drop managed sources that no longer classify as live
-	MaxDepth    int  // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels int  // safety cap on channels visited per cycle
+	Pages       int           // t.me/s pages (~20 msgs each) to walk back per seed channel
+	Prune       bool          // drop managed sources that no longer classify as live
+	MaxDepth    int           // repost-recursion depth; 0 = only seed channels (no recursion)
+	MaxChannels int           // safety cap on discovered (non-seed) channels visited per cycle
+	StatePath   string        // persisted productive-channel memory; empty disables persistence
+	StateTTL    time.Duration // drop a productive channel from memory after this long without a live sub
 }
 
 type source struct {
@@ -137,9 +139,17 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 
-	// Discover live subscription URLs by scanning the channel repost graph.
-	live := c.scan(ctx)
-	c.logger.Info().Int("discovered", len(live)).Msg("live subscriptions discovered")
+	// Discover live subscription URLs by scanning the channel repost graph,
+	// seeded by configured channels plus remembered productive ones. scan
+	// records freshly productive channels into st; stale ones are pruned.
+	st := loadState(c.opts.StatePath)
+	live := c.scan(ctx, &st)
+	st.prune(time.Now().Add(-c.opts.StateTTL))
+	if err := saveState(c.opts.StatePath, st); err != nil {
+		c.logger.Warn().Err(err).Msg("save crawler state failed")
+	}
+	c.logger.Info().Int("discovered", len(live)).Int("productive", len(st.Productive)).
+		Msg("live subscriptions discovered")
 
 	// Existing managed sources not rediscovered this cycle are re-classified so
 	// prune can drop the dead ones (and !Prune can retain the still-live ones).

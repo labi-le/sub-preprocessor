@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 )
 
 func TestExtractURLs(t *testing.T) {
@@ -176,4 +177,47 @@ func keysOf(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestStateRecordSaveLoadPrune(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".crawler-state.json")
+	now := time.Now()
+
+	st := loadState(path) // missing file → empty
+	if len(st.Productive) != 0 {
+		t.Fatalf("missing state should be empty, got %+v", st.Productive)
+	}
+	st.record("rap_ex", now)
+	st.record("o00000000i", now.Add(-1000*time.Hour)) // stale
+	if err := saveState(path, st); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	got := loadState(path)
+	if len(got.Productive) != 2 {
+		t.Fatalf("roundtrip: got %d entries, want 2", len(got.Productive))
+	}
+
+	got.prune(now.Add(-720 * time.Hour)) // 30d cutoff
+	if _, ok := got.Productive["rap_ex"]; !ok {
+		t.Error("fresh channel must survive prune")
+	}
+	if _, ok := got.Productive["o00000000i"]; ok {
+		t.Error("stale channel must be pruned")
+	}
+	if seeds := got.seeds(); len(seeds) != 1 || seeds[0] != "rap_ex" {
+		t.Errorf("seeds after prune = %v, want [rap_ex]", seeds)
+	}
+}
+
+func TestStateEmptyPathDisabled(t *testing.T) {
+	t.Parallel()
+
+	st := loadState("")
+	st.record("x", time.Now())
+	if err := saveState("", st); err != nil {
+		t.Fatalf("saveState with empty path must be a no-op, got %v", err)
+	}
 }

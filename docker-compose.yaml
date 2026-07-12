@@ -50,4 +50,6 @@ services:
       - CRAWL_PRUNE=1
       - CRAWL_DEPTH=2
       - CRAWL_MAX_CHANNELS=25
+      - CRAWL_STATE=/config/.crawler-state.json
+      - CRAWL_STATE_TTL=720h
     restart: unless-stopped
