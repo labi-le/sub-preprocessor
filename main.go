@@ -52,6 +52,8 @@ func runCrawl() {
 		PrivatePath: getenv("CRAWL_PRIVATE", "/config/private.yaml"),
 		Pages:       atoiDefault(getenv("CRAWL_PAGES", "6"), 6),
 		Prune:       boolDefault(getenv("CRAWL_PRUNE", ""), true),
+		MaxDepth:    intDefault(getenv("CRAWL_DEPTH", "2"), 2),
+		MaxChannels: atoiDefault(getenv("CRAWL_MAX_CHANNELS", "25"), 25),
 	}
 	interval := durationDefault(getenv("CRAWL_INTERVAL", "30m"), 30*time.Minute)
 
@@ -114,6 +116,13 @@ func splitList(s string) []string {
 
 func atoiDefault(s string, def int) int {
 	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
+
+func intDefault(s string, def int) int {
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 {
 		return n
 	}
 	return def

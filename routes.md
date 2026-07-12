@@ -385,15 +385,15 @@ Decides whether a URL serves a usable Mihomo-compatible subscription, reusing th
 
 ## `internal/crawl`
 
-`./internal/crawl/crawl.go`
+`./internal/crawl/crawl.go`, `discover.go`
 
-Format-agnostic subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service.
+Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service.
 
 **Key types:**
-- `Options{Channels []string, PrivatePath string, Pages int, Prune bool}`
+- `Options{Channels []string, PrivatePath string, Pages int, Prune bool, MaxDepth int, MaxChannels int}`
 - `Crawler` — `New(opts, logger)`; `RunOnce(ctx)` one cycle, `Run(ctx, interval)` loop
 
-**Behavior:** SSRF-gates candidates via `fetch.ValidatePublicHTTPSURL` and skips Telegram/CDN noise hosts before fetching; classifies concurrently; managed (`tg-`) sources are fully derived from currently-live URLs (implicit prune when `Prune`), hand-added private sources are preserved; only rewrites `private.yaml` (atomic temp+rename) when the managed set changes, so unchanged cycles trigger no reload.
+**Behavior:** `scan` (in `discover.go`) does a **relevance-gated BFS** over the channel repost graph — seeds are crawled unconditionally, a discovered channel (`extractChannels`: forwarded-from/@mention `t.me/<slug>` links, excluding self/reserved/bot `?start=`) is expanded only if it itself yielded a live subscription, bounded by `MaxDepth`/`MaxChannels`; the subscription yield is the thematic signal (a VPN channel forwards VPN channels; a news channel yields nothing and its branch stops). Page fetches are sequential (rate-limit friendly). SSRF-gates candidates via `fetch.ValidatePublicHTTPSURL` and skips Telegram/CDN noise hosts before fetching; classifies concurrently; managed (`tg-`) sources are fully derived from currently-live URLs (implicit prune when `Prune`), hand-added private sources are preserved; only rewrites `private.yaml` (atomic temp+rename) when the managed set changes, so unchanged cycles trigger no reload.
 
 **Uses:** `classify`, `fetch`, `subscription` (via classify), `yaml.v3`, `zerolog`
 **Tags:** `crawl`, `telegram`, `subscription`, `private-overlay`, `ssrf`, `sidecar`

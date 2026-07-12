@@ -48,4 +48,6 @@ services:
       - CRAWL_INTERVAL=30m
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1
+      - CRAWL_DEPTH=2
+      - CRAWL_MAX_CHANNELS=25
     restart: unless-stopped

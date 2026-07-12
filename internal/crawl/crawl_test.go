@@ -126,3 +126,54 @@ func TestLoadPrivateMissingFile(t *testing.T) {
 		t.Fatalf("missing file should yield no sources, got %+v", got.Subscriptions.Sources)
 	}
 }
+
+func TestExtractChannels(t *testing.T) {
+	t.Parallel()
+
+	pages := []string{
+		`Forwarded from <a href="https://t.me/d_code/26804">Код Дурова</a>` +
+			`text <a href="https://t.me/rap_ex">@rap_ex</a>` +
+			`bot <a href="https://t.me/govpn?start=evolution">GoVPN</a>` +
+			`self <a href="https://t.me/o00000000i/3631">x</a>` +
+			`canon <a href="https://t.me/s/o00000000i">s</a>` +
+			`share <a href="https://t.me/share/url?url=x">s</a>` +
+			`dup <a href="https://t.me/rap_ex/12">again</a>`,
+	}
+	got := extractChannels(pages, "o00000000i")
+
+	want := map[string]bool{"d_code": true, "rap_ex": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want channels %v", got, keysOf(want))
+	}
+	for _, ch := range got {
+		if !want[ch] {
+			t.Errorf("unexpected channel %q (bot/self/reserved should be excluded)", ch)
+		}
+	}
+}
+
+func TestNormalizeSlug(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"o00000000i":            "o00000000i",
+		"@rap_ex":               "rap_ex",
+		"https://t.me/rap_ex":   "rap_ex",
+		"https://t.me/s/chan01": "chan01",
+		"T.me/Foo/123":          "foo",
+		"  spaced  ":            "spaced",
+	}
+	for in, want := range cases {
+		if got := normalizeSlug(in); got != want {
+			t.Errorf("normalizeSlug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

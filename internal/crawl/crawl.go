@@ -50,8 +50,10 @@ var (
 type Options struct {
 	Channels    []string
 	PrivatePath string
-	Pages       int  // t.me/s pages (~20 msgs each) to walk back per channel
+	Pages       int  // t.me/s pages (~20 msgs each) to walk back per seed channel
 	Prune       bool // drop managed sources that no longer classify as live
+	MaxDepth    int  // repost-recursion depth; 0 = only seed channels (no recursion)
+	MaxChannels int  // safety cap on channels visited per cycle
 }
 
 type source struct {
@@ -129,38 +131,46 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 // rewritten when the managed source set actually changes, so an unchanged cycle
 // triggers no reload.
 func (c *Crawler) RunOnce(ctx context.Context) {
-	candidates := c.collect(ctx)
-	c.logger.Info().Int("candidates", len(candidates)).Msg("collected subscription candidates")
-
 	pf, err := loadPrivate(c.opts.PrivatePath)
 	if err != nil {
 		c.logger.Error().Err(err).Str("path", c.opts.PrivatePath).Msg("read private.yaml failed")
 		return
 	}
 
-	// URLs to (re)classify: fresh candidates plus already-managed sources (so
-	// prune can re-verify them). Deduped by URL.
-	toCheck := map[string]struct{}{}
-	for _, u := range candidates {
-		toCheck[u] = struct{}{}
-	}
+	// Discover live subscription URLs by scanning the channel repost graph.
+	live := c.scan(ctx)
+	c.logger.Info().Int("discovered", len(live)).Msg("live subscriptions discovered")
+
+	// Existing managed sources not rediscovered this cycle are re-classified so
+	// prune can drop the dead ones (and !Prune can retain the still-live ones).
 	managedURL := map[string]bool{}
+	var recheck []string
 	for _, s := range pf.Subscriptions.Sources {
 		if strings.HasPrefix(s.Name, managedPrefix) {
 			managedURL[s.URL] = true
-			toCheck[s.URL] = struct{}{}
+			if !live[s.URL] {
+				recheck = append(recheck, s.URL)
+			}
 		}
 	}
-	live := c.classifyAll(ctx, keys(toCheck))
+	for u := range c.classifyAll(ctx, recheck) {
+		live[u] = true
+	}
 
 	var managed, kept []source
+	all := map[string]struct{}{}
 	for _, s := range pf.Subscriptions.Sources {
-		if !strings.HasPrefix(s.Name, managedPrefix) {
+		if strings.HasPrefix(s.Name, managedPrefix) {
+			all[s.URL] = struct{}{}
+		} else {
 			kept = append(kept, s) // hand-added private source, untouched
 		}
 	}
+	for u := range live {
+		all[u] = struct{}{}
+	}
 	seen := map[string]bool{}
-	for u := range toCheck {
+	for u := range all {
 		keep := live[u]
 		if !c.opts.Prune && managedURL[u] && !keep {
 			keep = true // prune disabled: retain existing managed sources
@@ -183,36 +193,6 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	c.logger.Info().Int("managed", len(managed)).Int("total", len(next)).Msg("private.yaml updated")
-}
-
-// collect scrapes every channel and returns the deduped set of candidate URLs
-// that pass the noise filter and the SSRF public-https gate.
-func (c *Crawler) collect(ctx context.Context) []string {
-	seen := map[string]struct{}{}
-	for _, ch := range c.opts.Channels {
-		before := ""
-		for range c.opts.Pages {
-			u := "https://t.me/s/" + ch
-			if before != "" {
-				u += "?before=" + before
-			}
-			page, err := c.client.page(ctx, u)
-			if err != nil || page == "" {
-				break
-			}
-			for _, raw := range extractURLs(page) {
-				if candidate(raw) {
-					seen[raw] = struct{}{}
-				}
-			}
-			cur := pageCursor(page)
-			if cur == "" {
-				break
-			}
-			before = cur
-		}
-	}
-	return keys(seen)
 }
 
 func (c *Crawler) classifyAll(ctx context.Context, urls []string) map[string]bool {
