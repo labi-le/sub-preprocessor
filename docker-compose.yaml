@@ -32,3 +32,24 @@ services:
       - INTERVAL=300
       - CONFIG=/config/config.yaml
     restart: unless-stopped
+
+  tg-sub-crawler:
+    image: alpine:3.21
+    container_name: tg-sub-crawler
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache bash curl grep sed coreutils
+        wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        chmod +x /usr/local/bin/yq
+        exec bash /scripts/tg-sub-crawler.sh
+    volumes:
+      - ./config:/config:rw
+      - ./scripts:/scripts:ro
+    environment:
+      - CHANNEL=o00000000i
+      - PRIVATE=/config/private.yaml
+      - INTERVAL=1800
+      - PAGES=6
+      - PRUNE=1
+    restart: unless-stopped

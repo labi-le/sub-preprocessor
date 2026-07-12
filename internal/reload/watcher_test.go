@@ -166,3 +166,49 @@ func TestWatcherIgnoresOtherFiles(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 }
+
+// TestWatcherDetectsPrivateOverlay proves a write to the private.yaml overlay
+// sibling triggers onChange, because config.Load merges it into the effective
+// config and the stable worker's sources come from that merge.
+func TestWatcherDetectsPrivateOverlay(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int64
+	w, err := reload.NewWatcher(cfgPath, func(context.Context) { calls.Add(1) }, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// An atomic temp+rename of private.yaml (how the crawler writes it).
+	privPath := filepath.Join(dir, "private.yaml")
+	tmp := filepath.Join(dir, "private.yaml.tmp")
+	if err := os.WriteFile(tmp, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, privPath); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	if got := calls.Load(); got < 1 {
+		t.Fatalf("expected onChange after private.yaml write, got %d", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
