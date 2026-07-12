@@ -191,7 +191,7 @@ DNS resolver for subscription node hostnames. Uses system DNS or custom address.
 
 `./internal/asn/resolver.go`
 
-ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). No result caching: every call performs a fresh lookup. Currently IPv4-only.
+ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Results are cached in memory with a 6h TTL (`cacheTTL`), so repeated IPs across nodes/cycles skip the lookup; `CacheLen()` exposes the size. Currently IPv4-only.
 
 **Key types:**
 - `Result` — `Country` (`geofeed.CountryCode`) + `Name`
