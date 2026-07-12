@@ -8,9 +8,9 @@ LLM-oriented reference. Each package described with purpose, key exports, and se
 
 `./main.go`
 
-Entry point. Creates `context.Context` with `SIGINT/SIGTERM` cancellation, calls `app.Run()`.
+Entry point. With no args, creates `context.Context` with `SIGINT/SIGTERM` cancellation and calls `app.Run()` (the HTTP service). Two subcommands share the binary: `crawl` runs the Telegram subscription crawler loop (`internal/crawl`, configured via `CRAWL_*` env), `classify <url>` classifies one URL and exits 0 (live subscription) / 1 (not) / 2 (usage).
 
-**Tags:** `entrypoint`, `root`, `signal`, `main`
+**Tags:** `entrypoint`, `root`, `signal`, `main`, `subcommand`, `crawl`, `classify`
 
 ---
 
@@ -347,11 +347,11 @@ Background worker that produces a stability-tested subscription list. Every `sub
 
 `./internal/reload/reloader.go`, `watcher.go`, `options.go`
 
-Config hot-reload. Watches the config file for changes (via fsnotify on the parent directory), debounces bursts, and atomically swaps the active `Processor` + groups into the server `Holder`. On any error the previous settings are kept unchanged.
+Config hot-reload. Watches the config file **and its `private.yaml` overlay sibling** for changes (via fsnotify on the parent directory), debounces bursts, and atomically swaps the active `Processor` + groups into the server `Holder`. On any error the previous settings are kept unchanged. The private overlay matters because the crawler writes it, and a change there must restart the stable worker.
 
 **Key types:**
 - `Reloader` — holds `path`, `*server.Holder`, `zerolog.Logger`, and the last-applied `config.Config` + `*preprocess.Processor` for diffing
-- `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; debounces events with a 200 ms window
+- `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; fires `onChange` for events on either `config.yaml` or its `private.yaml` sibling; debounces events with a 200 ms window
 
 **Key functions:**
 - `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl *stable.Controller) *Reloader` — seed with startup state so the first reload can diff against it
@@ -365,36 +365,72 @@ Config hot-reload. Watches the config file for changes (via fsnotify on the pare
 
 ---
 
+## `internal/classify`
+
+`./internal/classify/classify.go`
+
+Decides whether a URL serves a usable Mihomo-compatible subscription, reusing the SSRF-safe client and the same normalizer/parser the preprocessor uses. Used by the `crawl` subcommand and the `classify` CLI subcommand.
+
+**Key types:**
+- `Result{Nodes int, Expired bool}` — `(Result).Live()` reports `Nodes > 0 && !Expired`
+
+**Key functions:**
+- `Body(body []byte, subUserinfo string, now int64) Result` — pure classifier: base64-normalizes the body, counts only **proxy-scheme** nodes (`vless`/`vmess`/`ss`/`ssr`/`trojan`/`tuic`/`hysteria`/`hysteria2`/`hy2`/`anytls` — so HTML pages full of `https://` links are rejected), and marks expired from a `subscription-userinfo: expire=` header
+- `URL(ctx, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error)` — SSRF-gate + fetch + `Body`
+
+**Uses:** `fetch`, `subscription`
+**Tags:** `classify`, `subscription`, `ssrf`, `crawler`
+
+---
+
+## `internal/crawl`
+
+`./internal/crawl/crawl.go`
+
+Format-agnostic subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service.
+
+**Key types:**
+- `Options{Channels []string, PrivatePath string, Pages int, Prune bool}`
+- `Crawler` — `New(opts, logger)`; `RunOnce(ctx)` one cycle, `Run(ctx, interval)` loop
+
+**Behavior:** SSRF-gates candidates via `fetch.ValidatePublicHTTPSURL` and skips Telegram/CDN noise hosts before fetching; classifies concurrently; managed (`tg-`) sources are fully derived from currently-live URLs (implicit prune when `Prune`), hand-added private sources are preserved; only rewrites `private.yaml` (atomic temp+rename) when the managed set changes, so unchanged cycles trigger no reload.
+
+**Uses:** `classify`, `fetch`, `subscription` (via classify), `yaml.v3`, `zerolog`
+**Tags:** `crawl`, `telegram`, `subscription`, `private-overlay`, `ssrf`, `sidecar`
+
+---
 ## Dependency Graph
 
 ```
 main
- └─ app
-     ├─ config ─── fetch, geofeed
-     ├─ log        (zerolog initialization)
-     ├─ preprocess
-     │   ├─ asn        (Team Cymru DNS)
-     │   ├─ config     (workflow constants)
-     │   ├─ filter ─── geofeed (lookup)
-     │   ├─ geofeed ── fetch, ioutil
-     │   ├─ log        (ctxlog.Op helper)
-     │   ├─ resolver   (hostname DNS)
-     │   ├─ rewrite ── subscription
-     │   └─ subscription ── fetch, ioutil
-     ├─ reload
-     │   ├─ config     (Load, Equal, GeofeedSourcesChanged, ListenChanged, SubscriptionsChanged, GroupsChanged)
-     │   ├─ log        (SetLevel)
-     │   ├─ preprocess (NewProcessor, Options, GeofeedState)
-     │   ├─ server     (Holder, Snapshot)
-     │   └─ stable     (Controller.Apply on subscriptions/groups change)
-     ├─ stable
-     │   ├─ config     (SubscriptionsConfig, CheckConfig)
-     │   ├─ filter     (allowed CountrySet)
-     │   ├─ fetch      (SubscriptionURL type)
-     │   ├─ preprocess (FilterRequest via Filterer)
-     │   ├─ subscription (Parse for merge/dedupe)
-     │   └─ mihomo     (adapter, convert, utils, constant)
-     └─ server ─── fetch, filter, preprocess, stable
+ ├─ app
+ │   ├─ config ─── fetch, geofeed
+ │   ├─ log        (zerolog initialization)
+ │   ├─ preprocess
+ │   │   ├─ asn        (Team Cymru DNS)
+ │   │   ├─ config     (workflow constants)
+ │   │   ├─ filter ─── geofeed (lookup)
+ │   │   ├─ geofeed ── fetch, ioutil
+ │   │   ├─ log        (ctxlog.Op helper)
+ │   │   ├─ resolver   (hostname DNS)
+ │   │   ├─ rewrite ── subscription
+ │   │   └─ subscription ── fetch, ioutil
+ │   ├─ reload
+ │   │   ├─ config     (Load, Equal, GeofeedSourcesChanged, ListenChanged, SubscriptionsChanged, GroupsChanged)
+ │   │   ├─ log        (SetLevel)
+ │   │   ├─ preprocess (NewProcessor, Options, GeofeedState)
+ │   │   ├─ server     (Holder, Snapshot)
+ │   │   └─ stable     (Controller.Apply on subscriptions/groups change)
+ │   ├─ stable
+ │   │   ├─ config     (SubscriptionsConfig, CheckConfig)
+ │   │   ├─ filter     (allowed CountrySet)
+ │   │   ├─ fetch      (SubscriptionURL type)
+ │   │   ├─ preprocess (FilterRequest via Filterer)
+ │   │   ├─ subscription (Parse for merge/dedupe)
+ │   │   └─ mihomo     (adapter, convert, utils, constant)
+ │   └─ server ─── fetch, filter, preprocess, stable
+ ├─ crawl ─── classify, fetch, yaml.v3
+ └─ classify ─── fetch, subscription
 ```
 
 ## Quick Tag Index

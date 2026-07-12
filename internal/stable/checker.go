@@ -23,18 +23,19 @@ type Filterer interface {
 // Checker periodically fetches sources through the preprocess pipeline,
 // merges them, probes the nodes and publishes survivors to the holder.
 type Checker struct {
-	sources  []config.SubscriptionSource
-	allowed  filter.CountrySet
-	interval time.Duration
-	rounds   int
-	maxFail  int
-	maxAvgMs int
+	sources       []config.SubscriptionSource
+	allowed       filter.CountrySet
+	interval      time.Duration
+	rounds        int
+	maxFail       int
+	maxAvgMs      int
 	sourceTimeout time.Duration
-	filterer func() Filterer
-	prober   Prober
-	holder   *Holder
-	logger   zerolog.Logger
+	filterer      func() Filterer
+	prober        Prober
+	holder        *Holder
+	logger        zerolog.Logger
 }
+
 func NewChecker(
 	sources []config.SubscriptionSource,
 	allowed filter.CountrySet,

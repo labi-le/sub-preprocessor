@@ -34,22 +34,18 @@ services:
     restart: unless-stopped
 
   tg-sub-crawler:
-    image: alpine:3.21
+    image: sub-preprocessor:latest
     container_name: tg-sub-crawler
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        apk add --no-cache bash curl grep sed coreutils
-        wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-        chmod +x /usr/local/bin/yq
-        exec bash /scripts/tg-sub-crawler.sh
+    command: ["crawl"]
+    user: "0:0"
+    depends_on:
+      - sub-preprocessor
     volumes:
       - ./config:/config:rw
-      - ./scripts:/scripts:ro
     environment:
-      - CHANNEL=o00000000i
-      - PRIVATE=/config/private.yaml
-      - INTERVAL=1800
-      - PAGES=6
-      - PRUNE=1
+      - CRAWL_CHANNELS=o00000000i
+      - CRAWL_PRIVATE=/config/private.yaml
+      - CRAWL_INTERVAL=30m
+      - CRAWL_PAGES=6
+      - CRAWL_PRUNE=1
     restart: unless-stopped

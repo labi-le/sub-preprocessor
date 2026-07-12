@@ -30,7 +30,7 @@ const (
 	defaultCheckStatus     = "204"
 	defaultCheckMaxAvgMs   = 1000
 	defaultCheckConcurr    = 16
-	defaultSourceTimeout = 120 * time.Second
+	defaultSourceTimeout   = 120 * time.Second
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
