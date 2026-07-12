@@ -31,7 +31,6 @@ geoblock:
     timeout: 15s
     concurrency: 8
 deadcache:
-  db_path: /config/.deadnodes.db
   ttl: 2h
 groups:
   nato:

@@ -42,14 +42,9 @@ func Run(ctx context.Context) error {
 	}
 
 	var dcache stable.DeadCache
-	if cfg.DeadCache.DBPath != "" {
-		deadStore, derr := geoblock.Open(cfg.DeadCache.DBPath, cfg.DeadCache.TTL)
-		if derr != nil {
-			return fmt.Errorf("open dead-node cache: %w", derr)
-		}
-		defer func() { _ = deadStore.Close() }()
-		dcache = deadStore
-		logger.Info().Str("db", cfg.DeadCache.DBPath).Dur("ttl", cfg.DeadCache.TTL).Int("dead", deadStore.Count()).Msg("dead-node cache")
+	if cfg.DeadCache.TTL > 0 {
+		dcache = stable.NewDeadSet(cfg.DeadCache.TTL)
+		logger.Info().Dur("ttl", cfg.DeadCache.TTL).Msg("dead-node cache (in-memory)")
 	}
 
 	opts := reload.OptionsFromConfig(cfg)

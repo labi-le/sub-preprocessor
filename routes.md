@@ -53,7 +53,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `ASNConfig` — `deny_patterns` + `timeout`
 - `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
 - `GeminiConfig` — `enabled`/`endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency`; `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE` env file)
-- `DeadCacheConfig` — `db_path` + `ttl` (short-TTL cache of nodes that failed the probe; skips re-probing them)
+- `DeadCacheConfig` — `ttl` (in-memory short-TTL cache of probe-dead nodes; skips re-probing them; default 2h)
 
 **Key functions:**
 - `Load(path) (Config, error)` — read + unmarshal + apply defaults + call `cfg.Validate()`
@@ -333,7 +333,7 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 ## `internal/stable`
 
-`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `checker.go`, `controller.go`
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `checker.go`, `controller.go`, `deadset.go`
 
 Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, then runs a **Gemini reachability gate** through each surviving node (a real API `GET`, body-inspected for the geo-block marker — the check mihomo's HEAD-only `URLTest` cannot do), records geo-blocked node hosts in the `geoblock` store (TTL) and drops them, and atomically publishes the rest for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
 
@@ -345,7 +345,7 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
 - `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
 - `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`
-- `Blocklist` — `Block(host)` (gemini geo-block store); `DeadCache` — `Blocked(key)/Block(key)/Prune()` (short-TTL dead-node cache keyed by `server:port`); both satisfied by `*geoblock.Store`
+- `Blocklist` — `Block(host)`, the gemini geo-block store (`*geoblock.Store`, SQLite/30d). `DeadCache` — `Blocked(key)/Block(key)/Prune()`, the dead-node cache; satisfied by `*DeadSet` (in-memory, not persisted — dead nodes are cheap to re-probe after a restart)
 - `GeminiOutcome` — per-node through-node Gemini result (`Server`/`Reachable`/`Blocked`)
 - `Checker` — the periodic worker loop
 - `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads

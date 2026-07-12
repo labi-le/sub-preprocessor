@@ -130,8 +130,7 @@ type GeoBlockConfig struct {
 // probe, so later cycles skip re-probing them. Reuses the geoblock SQLite store
 // keyed by server:port.
 type DeadCacheConfig struct {
-	DBPath string        `yaml:"db_path"`
-	TTL    time.Duration `yaml:"ttl"`
+	TTL time.Duration `yaml:"ttl"`
 }
 
 func (d *DeadCacheConfig) applyDefaults() {

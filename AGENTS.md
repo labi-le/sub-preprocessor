@@ -89,7 +89,7 @@ Important keys:
 - `asn.deny_patterns` (+ `asn.timeout`) — usually empty now; the per-host `geoblock` list replaces ASN-name denial. The ASN stage still does country filtering.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` (`enabled`, `model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`)
-- `deadcache.db_path` / `deadcache.ttl` (SQLite cache of probe-dead nodes keyed by `server:port`; default TTL 2h; skips re-probing)
+- `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
 - `subscriptions.exclude_groups`
