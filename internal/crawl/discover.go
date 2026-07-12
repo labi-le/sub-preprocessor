@@ -44,13 +44,13 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 		}
 	}
 	for _, s := range c.opts.Channels {
-		addSeed(s) // CRAWL_CHANNELS env
+		addSeed(s)
 	}
 	for _, s := range loadChannels(c.opts.ChannelsPath) {
-		addSeed(s) // channels.yaml, re-read each cycle
+		addSeed(s)
 	}
 	for _, slug := range st.seeds() {
-		seeds[slug] = struct{}{} // remembered productive channels
+		seeds[slug] = struct{}{}
 	}
 	if len(seeds) == 0 {
 		c.logger.Warn().Str("channels_file", c.opts.ChannelsPath).
@@ -70,7 +70,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 		}
 		if n.depth > 0 {
 			if c.opts.MaxChannels > 0 && discovered >= c.opts.MaxChannels {
-				continue // safety cap on discovered channels (0 = unlimited)
+				continue
 			}
 			discovered++
 		}

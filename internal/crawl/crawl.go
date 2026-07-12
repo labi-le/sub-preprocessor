@@ -77,9 +77,7 @@ type Crawler struct {
 	logger zerolog.Logger
 }
 
-// fetchClient is the subset of *http.Client used here; kept as an interface so
-// tests can avoid the network. classify.URL wants an *http.Client, so the real
-// crawler uses fetch.NewSafeHTTPClient().
+// fetchClient fetches a channel page; an interface so tests can avoid the network.
 type fetchClient interface {
 	page(ctx context.Context, u string) (string, error)
 }
@@ -130,6 +128,35 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// RunDaily runs one cycle at the next occurrence of hour:min in the process's
+// local time zone, then once every 24h at that wall-clock time, until ctx is
+// done. Unlike Run it does not fire immediately — it waits for the scheduled
+// time.
+func (c *Crawler) RunDaily(ctx context.Context, hour, min int) {
+	for {
+		next := nextDaily(time.Now(), hour, min)
+		c.logger.Info().Time("next_run", next).Str("in", time.Until(next).Truncate(time.Second).String()).
+			Msg("crawl scheduled")
+		t := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+			c.RunOnce(ctx)
+		}
+	}
+}
+
+// nextDaily returns the next instant at hour:min (local) strictly after now.
+func nextDaily(now time.Time, hour, min int) time.Time {
+	n := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location())
+	if !n.After(now) {
+		n = n.Add(24 * time.Hour)
+	}
+	return n
+}
+
 // RunOnce performs one crawl+classify+merge cycle. The private overlay is only
 // rewritten when the managed source set actually changes, so an unchanged cycle
 // triggers no reload.
@@ -174,7 +201,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		if strings.HasPrefix(s.Name, managedPrefix) {
 			all[s.URL] = struct{}{}
 		} else {
-			kept = append(kept, s) // hand-added private source, untouched
+			kept = append(kept, s)
 		}
 	}
 	for u := range live {
@@ -184,7 +211,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	for u := range all {
 		keep := live[u]
 		if !c.opts.Prune && managedURL[u] && !keep {
-			keep = true // prune disabled: retain existing managed sources
+			keep = true
 		}
 		if keep && !seen[u] {
 			seen[u] = true

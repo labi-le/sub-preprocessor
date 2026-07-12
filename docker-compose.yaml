@@ -47,6 +47,8 @@ services:
       # CRAWL_CHANNELS (comma/space list) still works as an extra override.
       - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
+      - TZ=Europe/Moscow
+      - CRAWL_AT=04:00       # run once daily at 04:00 MSK (falls back to CRAWL_INTERVAL if unset)
       - CRAWL_INTERVAL=30m
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1

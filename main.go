@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the zoneinfo DB so TZ works in the distroless image
 
 	"github.com/rs/zerolog"
 	zlog "github.com/rs/zerolog/log"
@@ -68,6 +69,14 @@ func runCrawl() {
 		c.RunOnce(ctx)
 		return
 	}
+	// CRAWL_AT="HH:MM" runs once daily at that wall-clock time (local TZ);
+	// otherwise fall back to the CRAWL_INTERVAL ticker.
+	if h, m, ok := parseHHMM(getenv("CRAWL_AT", "")); ok {
+		logger.Info().Str("at", getenv("CRAWL_AT", "")).Str("tz", time.Now().Location().String()).
+			Msg("daily schedule")
+		c.RunDaily(ctx, h, m)
+		return
+	}
 	c.Run(ctx, interval)
 }
 
@@ -125,6 +134,16 @@ func intDefault(s string, def int) int {
 		return n
 	}
 	return def
+}
+
+// parseHHMM parses "HH:MM" (24h). Empty or malformed input returns ok=false so
+// the caller falls back to the interval schedule.
+func parseHHMM(s string) (hour, min int, ok bool) {
+	t, err := time.Parse("15:04", strings.TrimSpace(s))
+	if err != nil {
+		return 0, 0, false
+	}
+	return t.Hour(), t.Minute(), true
 }
 
 func durationDefault(s string, def time.Duration) time.Duration {

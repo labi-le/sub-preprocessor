@@ -37,8 +37,8 @@ func TestCandidate(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]bool{
-		"https://is.wepogp.gay/x?payload=abc": true,  // real external https
-		"https://host.example/sub":            true,  //
+		"https://is.wepogp.gay/x?payload=abc": true,
+		"https://host.example/sub":            true,
 		"https://t.me/chan":                   false, // telegram noise
 		"https://cdn4.telesco.pe/file/x.jpg":  false, // telegram media cdn
 		"https://192.168.1.1/sub":             false, // SSRF: private ip
@@ -252,5 +252,24 @@ func TestLoadChannels(t *testing.T) {
 	}
 	if c := loadChannels(bad); c != nil {
 		t.Errorf("malformed file should yield nil, got %v", c)
+	}
+}
+
+func TestNextDaily(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		now  time.Time
+		want time.Time
+	}{
+		{base.Add(3 * time.Hour), base.Add(4 * time.Hour)},  // 03:00 -> today 04:00
+		{base.Add(5 * time.Hour), base.Add(28 * time.Hour)}, // 05:00 -> tomorrow 04:00
+		{base.Add(4 * time.Hour), base.Add(28 * time.Hour)}, // exactly 04:00 -> tomorrow (strictly after)
+	}
+	for _, c := range cases {
+		if got := nextDaily(c.now, 4, 0); !got.Equal(c.want) {
+			t.Errorf("nextDaily(%v) = %v, want %v", c.now, got, c.want)
+		}
 	}
 }
