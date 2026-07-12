@@ -470,6 +470,9 @@ func TestStableNotReady(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
+	if ra := resp.Header.Get("Retry-After"); ra != "30" {
+		t.Fatalf("expected Retry-After 30, got %q", ra)
+	}
 	if !strings.Contains(string(body), "stable list not ready") {
 		t.Fatalf("unexpected body: %q", body)
 	}

@@ -95,10 +95,16 @@ func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *sta
 	return &Server{listen: listen, app: app, logger: logger}
 }
 
+// stableRetryAfter (seconds) is the Retry-After hint on the warm-up 503, before
+// the worker publishes its first list. Short on purpose: the first list lands in
+// minutes, not the inter-cycle interval.
+const stableRetryAfter = "30"
+
 func newStableHandler(holder *stable.Holder) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		snap := holder.Load()
 		if snap == nil || len(snap.Payload) == 0 {
+			c.Set("Retry-After", stableRetryAfter)
 			return fiber.NewError(fiber.StatusServiceUnavailable, "stable list not ready")
 		}
 
