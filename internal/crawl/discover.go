@@ -38,13 +38,24 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 		depth   int
 	}
 	seeds := map[string]struct{}{}
-	for _, s := range c.opts.Channels {
+	addSeed := func(s string) {
 		if slug := normalizeSlug(s); slug != "" {
 			seeds[slug] = struct{}{}
 		}
 	}
+	for _, s := range c.opts.Channels {
+		addSeed(s) // CRAWL_CHANNELS env
+	}
+	for _, s := range loadChannels(c.opts.ChannelsPath) {
+		addSeed(s) // channels.yaml, re-read each cycle
+	}
 	for _, slug := range st.seeds() {
-		seeds[slug] = struct{}{}
+		seeds[slug] = struct{}{} // remembered productive channels
+	}
+	if len(seeds) == 0 {
+		c.logger.Warn().Str("channels_file", c.opts.ChannelsPath).
+			Msg("no seed channels; add them to channels.yaml or CRAWL_CHANNELS")
+		return live
 	}
 	queue := make([]node, 0, len(seeds))
 	for slug := range seeds {

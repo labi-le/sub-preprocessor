@@ -43,7 +43,9 @@ services:
     volumes:
       - ./config:/config:rw
     environment:
-      - CRAWL_CHANNELS=o00000000i
+      # Seed channels live in config/channels.yaml (hot-reloaded each cycle).
+      # CRAWL_CHANNELS (comma/space list) still works as an extra override.
+      - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
       - CRAWL_INTERVAL=30m
       - CRAWL_PAGES=6

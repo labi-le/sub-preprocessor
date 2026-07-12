@@ -1,6 +1,7 @@
 package crawl
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
@@ -219,5 +220,37 @@ func TestStateEmptyPathDisabled(t *testing.T) {
 	st.record("x", time.Now())
 	if err := saveState("", st); err != nil {
 		t.Fatalf("saveState with empty path must be a no-op, got %v", err)
+	}
+}
+
+func TestLoadChannels(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channels.yaml")
+	content := "channels:\n  - o00000000i\n  - \"@rap_ex\"\n  - https://t.me/remiuc\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := loadChannels(path)
+	want := []string{"o00000000i", "@rap_ex", "https://t.me/remiuc"}
+	if len(got) != len(want) {
+		t.Fatalf("loadChannels = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("channel[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if c := loadChannels(filepath.Join(dir, "nope.yaml")); c != nil {
+		t.Errorf("missing file should yield nil, got %v", c)
+	}
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("channels: [not: valid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := loadChannels(bad); c != nil {
+		t.Errorf("malformed file should yield nil, got %v", c)
 	}
 }

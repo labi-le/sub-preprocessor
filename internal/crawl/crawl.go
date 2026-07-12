@@ -48,14 +48,15 @@ var (
 
 // Options configures a crawl run.
 type Options struct {
-	Channels    []string
-	PrivatePath string
-	Pages       int           // t.me/s pages (~20 msgs each) to walk back per seed channel
-	Prune       bool          // drop managed sources that no longer classify as live
-	MaxDepth    int           // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels int           // safety cap on discovered (non-seed) channels visited per cycle
-	StatePath   string        // persisted productive-channel memory; empty disables persistence
-	StateTTL    time.Duration // drop a productive channel from memory after this long without a live sub
+	Channels     []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
+	ChannelsPath string   // YAML file of seed channels, re-read each cycle for hot-reload
+	PrivatePath  string
+	Pages        int           // t.me/s pages (~20 msgs each) to walk back per seed channel
+	Prune        bool          // drop managed sources that no longer classify as live
+	MaxDepth     int           // repost-recursion depth; 0 = only seed channels (no recursion)
+	MaxChannels  int           // safety cap on discovered (non-seed) channels visited per cycle
+	StatePath    string        // persisted productive-channel memory; empty disables persistence
+	StateTTL     time.Duration // drop a productive channel from memory after this long without a live sub
 }
 
 type source struct {
