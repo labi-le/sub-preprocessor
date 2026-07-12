@@ -18,46 +18,18 @@ workflow:
     - asn
     - geofeed
 asn:
-  deny_patterns:
-    - "(?i)VDSINA"
-    - "(?i)HOSTOFF"
-    - "(?i)ServHost"
-    - "(?i)TAKEHOST-AS"
-    - "(?i)CHERRYSERVERS1-AS"
-    - "(?i)DINSERVGRO-NET"
-    - "(?i)AS56971"
-    - "(?i)EXPRESSHOST"
-    - "(?i)BV-EU-AS"
-    - "(?i)PUSHPKT"
-    - "(?i)VPSPay-ASN"
-    - "(?i)TWC-EU"
-    - "(?i)RETN-LV"
-    - "(?i)ETERNITY-AS"
-    - "(?i)DEDIK-IO"
-    - "(?i)nodehost-as"
-    - "(?i)GreatFlower"
-    - "(?i)lain"
-    - "(?i)QWINS-LTD"
-    - "(?i)HOSTKEY-AS"
-    - "(?i)PLYM-AS"
-    - "(?i)GIR-AS"
-    - "(?i)CHERRYSERVERS5-AS"
-    - "(?i)MHost-AS"
-    - "(?i)THE"
-    - "(?i)SELECTEL-MSK"
-    - "(?i)AS-SKYNET-SPB"
-    - "(?i)HOSTUP"
-    - "(?i)FORTIS-AS"
-    - "(?i)GCORE"
-    - "(?i)hostman"
-    - "(?i)tietokettu"
-    - "(?i)AEZA-AS"
-    - "(?i)AlbHost"
-    - "(?i)INIOS-AS"
-    - "(?i)WEYRO"
-    - "(?i)shinomiya"
-    - "(?i)KVMKA-COM"
+  deny_patterns: []
   timeout: 5s
+geoblock:
+  db_path: /config/.geoblock.db
+  ttl: 720h
+  gemini:
+    enabled: true
+    model: gemini-2.0-flash
+    key_file: /run/agenix/litellm-env
+    key_var: LITELLM_GOOGLE_API_KEY
+    timeout: 15s
+    concurrency: 8
 groups:
   nato:
     - "AL"

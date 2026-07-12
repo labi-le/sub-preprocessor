@@ -36,7 +36,6 @@ func (f *GeofeedFilter) Process(_ context.Context, ips []netip.Addr, pctx *Pipel
 
 // ASNFilter drops nodes whose AS name matches configured deny patterns
 // and whose ASN-resolved country is not in the allowed set.
-// and whose ASN country is not in the allowed set.
 type ASNFilter struct {
 	resolver asnResolver
 	patterns []*regexp.Regexp

@@ -21,16 +21,23 @@ const (
 	defaultDNSCacheTTL      = 30 * time.Minute
 	defaultDNSNegativeCache = 10 * time.Minute
 
-	defaultSubsInterval    = 30 * time.Minute
-	minSubsInterval        = time.Minute
-	defaultCheckRounds     = 5
-	defaultCheckRoundPause = 3 * time.Second
-	defaultCheckTimeout    = 2 * time.Second
-	defaultCheckTestURL    = "https://www.gstatic.com/generate_204"
-	defaultCheckStatus     = "204"
-	defaultCheckMaxAvgMs   = 1000
-	defaultCheckConcurr    = 16
-	defaultSourceTimeout   = 120 * time.Second
+	defaultSubsInterval      = 30 * time.Minute
+	minSubsInterval          = time.Minute
+	defaultCheckRounds       = 5
+	defaultCheckRoundPause   = 3 * time.Second
+	defaultCheckTimeout      = 2 * time.Second
+	defaultCheckTestURL      = "https://www.gstatic.com/generate_204"
+	defaultCheckStatus       = "204"
+	defaultCheckMaxAvgMs     = 1000
+	defaultCheckConcurr      = 16
+	defaultSourceTimeout     = 120 * time.Second
+	defaultGeoBlockTTL       = 720 * time.Hour
+	defaultGeminiEndpoint    = "https://generativelanguage.googleapis.com"
+	defaultGeminiModel       = "gemini-2.0-flash"
+	defaultGeminiMarker      = "User location is not supported for the API use"
+	defaultGeminiKeyVar      = "LITELLM_GOOGLE_API_KEY"
+	defaultGeminiTimeout     = 15 * time.Second
+	defaultGeminiConcurrency = 8
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -59,6 +66,7 @@ type Config struct {
 	Workflow      WorkflowConfig      `yaml:"workflow"`
 	Groups        Groups              `yaml:"groups"`
 	Subscriptions SubscriptionsConfig `yaml:"subscriptions"`
+	GeoBlock      GeoBlockConfig      `yaml:"geoblock"`
 }
 
 type SubscriptionsConfig struct {
@@ -108,6 +116,77 @@ type ASNConfig struct {
 	Timeout      time.Duration `yaml:"timeout"`
 }
 
+// GeoBlockConfig configures the per-node Gemini geo-block list: a SQLite TTL
+// store of node hosts that failed the Gemini reachability check.
+type GeoBlockConfig struct {
+	DBPath string        `yaml:"db_path"`
+	TTL    time.Duration `yaml:"ttl"`
+	Gemini GeminiConfig  `yaml:"gemini"`
+}
+
+// GeminiConfig configures the through-node Gemini reachability check run during
+// the stable probe: a real API GET whose body reveals a geo-block, which
+// mihomo's HEAD-only URLTest cannot detect.
+type GeminiConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	Endpoint    string        `yaml:"endpoint"`
+	Model       string        `yaml:"model"`
+	Marker      string        `yaml:"marker"`
+	APIKey      string        `yaml:"api_key"`
+	KeyFile     string        `yaml:"key_file"`
+	KeyVar      string        `yaml:"key_var"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
+func (g *GeoBlockConfig) applyDefaults() {
+	if g.TTL == 0 {
+		g.TTL = defaultGeoBlockTTL
+	}
+	gm := &g.Gemini
+	if gm.Endpoint == "" {
+		gm.Endpoint = defaultGeminiEndpoint
+	}
+	if gm.Model == "" {
+		gm.Model = defaultGeminiModel
+	}
+	if gm.Marker == "" {
+		gm.Marker = defaultGeminiMarker
+	}
+	if gm.KeyVar == "" {
+		gm.KeyVar = defaultGeminiKeyVar
+	}
+	if gm.Timeout == 0 {
+		gm.Timeout = defaultGeminiTimeout
+	}
+	if gm.Concurrency == 0 {
+		gm.Concurrency = defaultGeminiConcurrency
+	}
+}
+
+// APIKeyResolved returns the inline api_key, or the value of key_var read from
+// key_file (an env-style KEY=VALUE file, e.g. the agenix secret). Empty without
+// error when neither is set, which disables the Gemini check.
+func (g GeminiConfig) APIKeyResolved() (string, error) {
+	if g.APIKey != "" {
+		return g.APIKey, nil
+	}
+	if g.KeyFile == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(g.KeyFile)
+	if err != nil {
+		return "", fmt.Errorf("gemini key_file: %w", err)
+	}
+	prefix := g.KeyVar + "="
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
+			return strings.TrimSpace(v), nil
+		}
+	}
+	return "", fmt.Errorf("gemini key_file %q: %s not found", g.KeyFile, g.KeyVar)
+}
+
 func Load(path string) (Config, error) {
 	b, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -142,6 +221,7 @@ func Load(path string) (Config, error) {
 		cfg.Workflow.Stages = []string{"geofeed", "asn"}
 	}
 	cfg.Subscriptions.applyDefaults()
+	cfg.GeoBlock.applyDefaults()
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}

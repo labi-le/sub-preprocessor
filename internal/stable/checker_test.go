@@ -61,6 +61,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		time.Minute,
 		func() stable.Filterer { return filterer },
 		prober,
+		nil,
 		holder,
 		zerolog.Nop(),
 	)
@@ -207,6 +208,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 		context.Background(),
 		holder,
 		func() stable.Filterer { return fakeFilterer{} },
+		nil,
 		zerolog.Nop(),
 	)
 
@@ -249,6 +251,7 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 		context.Background(),
 		stable.NewHolder(),
 		func() stable.Filterer { return fakeFilterer{} },
+		nil,
 		zerolog.Nop(),
 	)
 

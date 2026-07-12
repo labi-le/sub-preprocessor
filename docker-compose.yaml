@@ -5,33 +5,14 @@ services:
       dockerfile: Dockerfile
     image: sub-preprocessor:latest
     container_name: sub-preprocessor
+    user: "1000:1000" # config owner: read the 0400 agenix secret + write /config/.geoblock.db
     ports:
       - "7008:8080"
     volumes:
-      - ./config:/config:ro
-    restart: always
-
-  gemini-block-checker:
-    image: alpine:3.21
-    container_name: gemini-block-checker
-    network_mode: host
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        apk add --no-cache curl bash bind-tools
-        wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-        chmod +x /usr/local/bin/yq
-        export GEMINI_API_KEY="$(sed -n 's/^LITELLM_GOOGLE_API_KEY=//p' /run/agenix/litellm-env)"
-        exec /scripts/asn-block-check.sh
-    volumes:
       - ./config:/config:rw
-      - ./scripts:/scripts:ro
-      # agenix-decrypted secret; key read from it at container start (survives reboot/restart)
+      # agenix-decrypted secret; the Gemini key is read from it (geoblock.gemini.key_file)
       - /run/agenix/litellm-env:/run/agenix/litellm-env:ro
-    environment:
-      - INTERVAL=300
-      - CONFIG=/config/config.yaml
-    restart: unless-stopped
+    restart: always
 
   tg-sub-crawler:
     image: sub-preprocessor:latest

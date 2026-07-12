@@ -22,18 +22,20 @@ type Prober interface {
 
 // MihomoProber runs repeated URL tests through mihomo's adapter stack.
 type MihomoProber struct {
-	cfg      config.CheckConfig
-	expected utils.IntRanges[uint16]
-	logger   zerolog.Logger
+	cfg       config.CheckConfig
+	expected  utils.IntRanges[uint16]
+	gemini    config.GeminiConfig
+	geminiKey string
+	logger    zerolog.Logger
 }
 
-func NewMihomoProber(cfg config.CheckConfig, logger zerolog.Logger) (*MihomoProber, error) {
+func NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, logger zerolog.Logger) (*MihomoProber, error) {
 	expected, err := utils.NewUnsignedRanges[uint16](cfg.ExpectedStatus)
 	if err != nil {
 		return nil, fmt.Errorf("parse expected_status %q: %w", cfg.ExpectedStatus, err)
 	}
 
-	return &MihomoProber{cfg: cfg, expected: expected, logger: logger}, nil
+	return &MihomoProber{cfg: cfg, expected: expected, gemini: gemini, geminiKey: geminiKey, logger: logger}, nil
 }
 
 type delayAcc struct {

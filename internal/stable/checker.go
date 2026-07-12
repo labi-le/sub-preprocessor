@@ -20,6 +20,12 @@ type Filterer interface {
 	Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error)
 }
 
+// Blocklist records nodes that failed the Gemini check; declared locally to
+// avoid importing geoblock. A nil Blocklist disables persistence.
+type Blocklist interface {
+	Block(host string) error
+}
+
 // Checker periodically fetches sources through the preprocess pipeline,
 // merges them, probes the nodes and publishes survivors to the holder.
 type Checker struct {
@@ -32,6 +38,7 @@ type Checker struct {
 	sourceTimeout time.Duration
 	filterer      func() Filterer
 	prober        Prober
+	store         Blocklist
 	holder        *Holder
 	logger        zerolog.Logger
 }
@@ -44,6 +51,7 @@ func NewChecker(
 	sourceTimeout time.Duration,
 	filterer func() Filterer,
 	prober Prober,
+	store Blocklist,
 	holder *Holder,
 	logger zerolog.Logger,
 ) *Checker {
@@ -57,6 +65,7 @@ func NewChecker(
 		sourceTimeout: sourceTimeout,
 		filterer:      filterer,
 		prober:        prober,
+		store:         store,
 		holder:        holder,
 		logger:        logger,
 	}
@@ -139,6 +148,7 @@ func (c *Checker) RunOnce(ctx context.Context) {
 	}
 
 	survivors := SelectSurvivors(entries, res, c.rounds, c.maxFail, c.maxAvgMs)
+	survivors = c.geminiGate(ctx, entries, survivors)
 	if len(survivors) == 0 {
 		c.logger.Warn().Msg("no survivors; keeping previous stable list")
 		return
@@ -170,4 +180,54 @@ func entriesPayload(entries []Entry) []byte {
 	}
 
 	return b.Bytes()
+}
+
+// geminiChecker is the optional Gemini capability of a Prober, asserted at run
+// time so a plain Prober (e.g. the test fake) needs no Gemini methods.
+type geminiChecker interface {
+	GeminiEnabled() bool
+	GeminiCheck(ctx context.Context, payload []byte) map[string]GeminiOutcome
+}
+
+// geminiGate drops survivors that cannot reach Gemini through their own node
+// and records geo-blocked node hosts in the store (TTL) so later cycles skip
+// them before probing. A survivor is kept only when the through-node API GET
+// returns a body without the geo-block marker.
+func (c *Checker) geminiGate(ctx context.Context, entries []Entry, survivors []Survivor) []Survivor {
+	gc, ok := c.prober.(geminiChecker)
+	if !ok || !gc.GeminiEnabled() {
+		return survivors
+	}
+
+	subset := make([]Entry, 0, len(survivors))
+	for _, s := range survivors {
+		subset = append(subset, s.Entry)
+	}
+	outcomes := gc.GeminiCheck(ctx, entriesPayload(subset))
+	if outcomes == nil {
+		c.logger.Warn().Msg("gemini gate skipped: no outcomes")
+		return survivors
+	}
+
+	kept := make([]Survivor, 0, len(survivors))
+	var blocked, unreachable int
+	for _, s := range survivors {
+		o := outcomes[s.Label]
+		switch {
+		case o.Blocked:
+			blocked++
+			if c.store != nil {
+				if err := c.store.Block(o.Server); err != nil {
+					c.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
+				}
+			}
+		case !o.Reachable:
+			unreachable++
+		default:
+			kept = append(kept, s)
+		}
+	}
+	c.logger.Info().Int("survivors", len(survivors)).Int("kept", len(kept)).
+		Int("gemini_blocked", blocked).Int("gemini_unreachable", unreachable).Msg("gemini gate")
+	return kept
 }

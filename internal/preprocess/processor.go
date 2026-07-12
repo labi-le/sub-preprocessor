@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -33,11 +34,18 @@ type Options struct {
 	WorkflowStages      []string
 	PreloadedGeofeed    geofeed.CountryLookup
 	PreloadedLoadedAt   time.Time
+	Blocklist           Blocklist
 }
 
 type FilterRequest struct {
 	SubscriptionURL  fetch.SubscriptionURL
 	AllowedCountries filter.CountrySet
+}
+
+// Blocklist reports whether a node host is currently geo-blocked (failed the
+// Gemini reachability check). Satisfied by *geoblock.Store; nil disables it.
+type Blocklist interface {
+	Blocked(host string) bool
 }
 
 type Processor struct {
@@ -50,15 +58,17 @@ type Processor struct {
 	RefreshInterval time.Duration
 	resolver        *resolver.Resolver
 	filters         []Filter
+	blocklist       Blocklist
 }
 
 type Stats struct {
-	Total       int
-	Kept        int
-	DNSDrop     int
-	GeoDrop     int
-	ASNDrop     int
-	Unsupported int
+	Total        int
+	Kept         int
+	DNSDrop      int
+	GeoDrop      int
+	ASNDrop      int
+	GeoBlockDrop int
+	Unsupported  int
 }
 
 // PipelineContext holds request-scoped state shared across the processing pipeline.
@@ -103,7 +113,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	}
 
 	var asnR *asn.Resolver
-	if len(patterns) > 0 {
+	if len(patterns) > 0 || slices.Contains(opts.WorkflowStages, "asn") {
 		asnR = asn.New(opts.ASNTimeout)
 	}
 
@@ -116,6 +126,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		LoadedAt:        loadedAt,
 		RefreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
+		blocklist:       opts.Blocklist,
 		filters:         filters,
 	}, nil
 }
@@ -210,6 +221,10 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		pctx.Stats.Unsupported++
 		return
 	}
+	if p.blocklist != nil && p.blocklist.Blocked(node.Server) {
+		pctx.Stats.GeoBlockDrop++
+		return
+	}
 
 	ips := p.resolveNode(ctx, node.Server, pctx.Resolved)
 	if len(ips) == 0 {
@@ -290,6 +305,6 @@ func (p *Processor) GeofeedState() (geofeed.CountryLookup, time.Time) {
 }
 
 func FormatStats(stats Stats) string {
-	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d unsupported=%d",
-		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.Unsupported)
+	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d geoblock_drop=%d unsupported=%d",
+		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.GeoBlockDrop, stats.Unsupported)
 }

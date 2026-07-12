@@ -27,6 +27,7 @@ type Reloader struct {
 	currentCfg  config.Config
 	currentProc *preprocess.Processor
 	ctl         *stable.Controller
+	blocklist   preprocess.Blocklist
 }
 
 // NewReloader creates a Reloader seeded with the settings already applied at
@@ -38,6 +39,7 @@ func NewReloader(
 	cfg config.Config,
 	proc *preprocess.Processor,
 	ctl *stable.Controller,
+	blocklist preprocess.Blocklist,
 ) *Reloader {
 	return &Reloader{
 		path:        path,
@@ -46,6 +48,7 @@ func NewReloader(
 		currentCfg:  cfg,
 		currentProc: proc,
 		ctl:         ctl,
+		blocklist:   blocklist,
 	}
 }
 
@@ -67,6 +70,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 	}
 
 	opts := OptionsFromConfig(newCfg)
+	opts.Blocklist = r.blocklist
 	if !config.GeofeedSourcesChanged(r.currentCfg, newCfg) {
 		lookup, at := r.currentProc.GeofeedState()
 		opts.PreloadedGeofeed = lookup

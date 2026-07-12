@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geoblock"
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/reload"
@@ -25,7 +26,24 @@ func Run(ctx context.Context) error {
 	logger := log.InitLogger(cfg.Log.Level)
 	logger.Info().Str("level", cfg.Log.Level).Msg("logger initialized")
 
-	svc, err := preprocess.NewProcessor(ctx, logger, reload.OptionsFromConfig(cfg))
+	var (
+		gbStore *geoblock.Store
+		pblock  preprocess.Blocklist
+		sblock  stable.Blocklist
+	)
+	if cfg.GeoBlock.DBPath != "" {
+		gbStore, err = geoblock.Open(cfg.GeoBlock.DBPath, cfg.GeoBlock.TTL)
+		if err != nil {
+			return fmt.Errorf("open geoblock store: %w", err)
+		}
+		defer func() { _ = gbStore.Close() }()
+		pblock, sblock = gbStore, gbStore
+		logger.Info().Str("db", cfg.GeoBlock.DBPath).Int("blocked", gbStore.Count()).Msg("geoblock store")
+	}
+
+	opts := reload.OptionsFromConfig(cfg)
+	opts.Blocklist = pblock
+	svc, err := preprocess.NewProcessor(ctx, logger, opts)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
@@ -34,7 +52,7 @@ func Run(ctx context.Context) error {
 	stableHolder := stable.NewHolder()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
 		return holder.Load().Svc
-	}, logger)
+	}, sblock, logger)
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
@@ -42,7 +60,7 @@ func Run(ctx context.Context) error {
 
 	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
 
-	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc, ctl)
+	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc, ctl, pblock)
 	watcher, err := reload.NewWatcher(defaultConfigPath, reloader.Reload, logger)
 	if err != nil {
 		return fmt.Errorf("create config watcher: %w", err)
