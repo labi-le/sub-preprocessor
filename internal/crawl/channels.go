@@ -31,7 +31,7 @@ func loadChannels(path string) []string {
 		return nil
 	}
 	var cf channelsFile
-	if err := yaml.Unmarshal(b, &cf); err != nil {
+	if unmarshalErr := yaml.Unmarshal(b, &cf); unmarshalErr != nil {
 		return nil
 	}
 	return cf.Channels

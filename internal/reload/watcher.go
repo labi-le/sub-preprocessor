@@ -43,9 +43,9 @@ func NewWatcher(configPath string, onChange func(context.Context), logger zerolo
 	}
 
 	cleaned := filepath.Clean(configPath)
-	if err := fsw.Add(filepath.Dir(cleaned)); err != nil {
+	if addErr := fsw.Add(filepath.Dir(cleaned)); addErr != nil {
 		_ = fsw.Close()
-		return nil, fmt.Errorf("watch config directory: %w", err)
+		return nil, fmt.Errorf("watch config directory: %w", addErr)
 	}
 
 	return &Watcher{
@@ -63,36 +63,14 @@ func NewWatcher(configPath string, onChange func(context.Context), logger zerolo
 // the fsnotify watcher and returns nil; it returns ONLY after Close, so callers
 // may treat the return as the goroutine join point.
 func (w *Watcher) Run(ctx context.Context) error {
-	var (
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-
-	resetDebounce := func() {
-		if timer == nil {
-			timer = time.NewTimer(w.debounce)
-		} else {
-			if !timer.Stop() {
-				// Drain a value that already fired but was not yet consumed.
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(w.debounce)
-		}
-		timerC = timer.C
-	}
+	deb := &debouncer{interval: w.debounce}
+	var timerC <-chan time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
-			if err := w.fsw.Close(); err != nil {
-				w.logger.Error().Err(err).Msg("reload: close fsnotify watcher")
-			}
+			deb.stop()
+			w.closeWatcher()
 			return nil
 
 		case ev, ok := <-w.fsw.Events:
@@ -100,7 +78,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 				return nil
 			}
 			if w.matches(ev) {
-				resetDebounce()
+				timerC = deb.reset()
 			}
 
 		case err, ok := <-w.fsw.Errors:
@@ -113,6 +91,48 @@ func (w *Watcher) Run(ctx context.Context) error {
 			timerC = nil
 			w.onChange(ctx)
 		}
+	}
+}
+
+// closeWatcher closes the underlying fsnotify watcher, logging (but not
+// returning) any close error, matching Run's non-fatal shutdown contract.
+func (w *Watcher) closeWatcher() {
+	if err := w.fsw.Close(); err != nil {
+		w.logger.Error().Err(err).Msg("reload: close fsnotify watcher")
+	}
+}
+
+// debouncer coalesces a burst of events into a single fire on its channel after
+// interval elapses with no further reset. It is not safe for concurrent use;
+// Run drives it from a single goroutine.
+type debouncer struct {
+	timer    *time.Timer
+	interval time.Duration
+}
+
+// reset (re)starts the debounce window and returns the channel that fires once
+// the window elapses. It drains a stale value from an already-fired timer so a
+// reset never leaves a spurious tick queued.
+func (d *debouncer) reset() <-chan time.Time {
+	if d.timer == nil {
+		d.timer = time.NewTimer(d.interval)
+	} else {
+		if !d.timer.Stop() {
+			// Drain a value that already fired but was not yet consumed.
+			select {
+			case <-d.timer.C:
+			default:
+			}
+		}
+		d.timer.Reset(d.interval)
+	}
+	return d.timer.C
+}
+
+// stop halts the debounce timer if one is running.
+func (d *debouncer) stop() {
+	if d.timer != nil {
+		d.timer.Stop()
 	}
 }
 

@@ -59,7 +59,7 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 // parseExpire extracts expire=<unix> from a subscription-userinfo header value
 // such as "upload=0; download=0; total=0; expire=1786085295".
 func parseExpire(h string) (int64, bool) {
-	for _, part := range strings.Split(h, ";") {
+	for part := range strings.SplitSeq(h, ";") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "expire="); ok {
 			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 			if err != nil {
@@ -97,5 +97,5 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	if int64(len(body)) > maxSubscriptionSize {
 		return Result{}, fmt.Errorf("response too large: over %d bytes", maxSubscriptionSize)
 	}
-	return Body(body, resp.Header.Get("subscription-userinfo"), time.Now().Unix()), nil
+	return Body(body, resp.Header.Get("Subscription-Userinfo"), time.Now().Unix()), nil
 }

@@ -19,6 +19,15 @@ var reservedSlugs = map[string]bool{
 	"bg": true, "login": true, "confirmphone": true, "tg": true, "telegram": true,
 }
 
+// discoveredPages caps how many pages are fetched for non-seed channels.
+const discoveredPages = 3
+
+// scanNode is a channel queued for crawling at a given repost-graph depth.
+type scanNode struct {
+	channel string
+	depth   int
+}
+
 // scan performs a relevance-gated breadth-first crawl of the channel repost
 // graph. Seeds are the configured channels plus every remembered productive
 // channel (st), all crawled at depth 0 and always expanded; a newly discovered
@@ -33,33 +42,15 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 	visited := map[string]bool{}
 	discovered := 0
 
-	type node struct {
-		channel string
-		depth   int
-	}
-	seeds := map[string]struct{}{}
-	addSeed := func(s string) {
-		if slug := normalizeSlug(s); slug != "" {
-			seeds[slug] = struct{}{}
-		}
-	}
-	for _, s := range c.opts.Channels {
-		addSeed(s)
-	}
-	for _, s := range loadChannels(c.opts.ChannelsPath) {
-		addSeed(s)
-	}
-	for _, slug := range st.seeds() {
-		seeds[slug] = struct{}{}
-	}
+	seeds := c.buildSeeds(st)
 	if len(seeds) == 0 {
 		c.logger.Warn().Str("channels_file", c.opts.ChannelsPath).
 			Msg("no seed channels; add them to channels.yaml or CRAWL_CHANNELS")
 		return live
 	}
-	queue := make([]node, 0, len(seeds))
+	queue := make([]scanNode, 0, len(seeds))
 	for slug := range seeds {
-		queue = append(queue, node{slug, 0})
+		queue = append(queue, scanNode{slug, 0})
 	}
 
 	for len(queue) > 0 {
@@ -76,41 +67,69 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 		}
 		visited[n.channel] = true
 
-		pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n.depth))
-		if len(pages) == 0 {
-			continue
-		}
-
-		cand := map[string]struct{}{}
-		for _, p := range pages {
-			for _, raw := range extractURLs(p) {
-				if candidate(raw) {
-					cand[raw] = struct{}{}
-				}
-			}
-		}
-		found := c.classifyAll(ctx, keys(cand))
-		for u := range found {
-			live[u] = true
-		}
-		if len(found) > 0 {
-			st.record(n.channel, time.Now())
-		}
-		c.logger.Info().Str("channel", n.channel).Int("depth", n.depth).
-			Int("subs", len(found)).Msg("scanned channel")
-
-		// Thematic gate: expand into referenced channels only from seeds or from
-		// channels that actually produced subscriptions.
-		if n.depth >= c.opts.MaxDepth || (n.depth > 0 && len(found) == 0) {
-			continue
-		}
-		for _, ch := range extractChannels(pages, n.channel) {
+		for _, ch := range c.scanChannel(ctx, n, st, live) {
 			if !visited[ch] {
-				queue = append(queue, node{ch, n.depth + 1})
+				queue = append(queue, scanNode{ch, n.depth + 1})
 			}
 		}
 	}
 	return live
+}
+
+// buildSeeds collects the depth-0 seed channels: configured channels, the
+// hot-reloaded channels file, and remembered productive channels.
+func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
+	seeds := map[string]struct{}{}
+	addSeed := func(s string) {
+		if slug := normalizeSlug(s); slug != "" {
+			seeds[slug] = struct{}{}
+		}
+	}
+	for _, s := range c.opts.Channels {
+		addSeed(s)
+	}
+	for _, s := range loadChannels(c.opts.ChannelsPath) {
+		addSeed(s)
+	}
+	for _, slug := range st.seeds() {
+		seeds[slug] = struct{}{}
+	}
+	return seeds
+}
+
+// scanChannel scrapes one channel, classifies its candidate URLs into live,
+// records productivity in st, and returns the referenced channels to expand
+// into (nil when the thematic gate closes or the channel yielded no pages).
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]bool) []string {
+	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n.depth))
+	if len(pages) == 0 {
+		return nil
+	}
+
+	cand := map[string]struct{}{}
+	for _, p := range pages {
+		for _, raw := range extractURLs(p) {
+			if candidate(raw) {
+				cand[raw] = struct{}{}
+			}
+		}
+	}
+	found := c.classifyAll(ctx, keys(cand))
+	for u := range found {
+		live[u] = true
+	}
+	if len(found) > 0 {
+		st.record(n.channel, time.Now())
+	}
+	c.logger.Info().Str("channel", n.channel).Int("depth", n.depth).
+		Int("subs", len(found)).Msg("scanned channel")
+
+	// Thematic gate: expand into referenced channels only from seeds or from
+	// channels that actually produced subscriptions.
+	if n.depth >= c.opts.MaxDepth || (n.depth > 0 && len(found) == 0) {
+		return nil
+	}
+	return extractChannels(pages, n.channel)
 }
 
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
@@ -144,10 +163,10 @@ func (c *Crawler) pagesFor(depth int) int {
 	if depth == 0 {
 		return c.opts.Pages
 	}
-	if c.opts.Pages < 3 {
+	if c.opts.Pages < discoveredPages {
 		return c.opts.Pages
 	}
-	return 3
+	return discoveredPages
 }
 
 // extractChannels returns the distinct channel slugs referenced across pages,

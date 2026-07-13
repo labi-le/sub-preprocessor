@@ -34,7 +34,7 @@ func TestSetLevel_InvalidLevel(t *testing.T) {
 	// level should remain unchanged (debug from previous test or info)
 }
 
-func TestInitLogger_ReturnsLogger(t *testing.T) {
+func TestInitLogger_ReturnsLogger(_ *testing.T) {
 	logger := ilog.InitLogger("warn")
 	// zerolog.Logger is a value type; just verify it's usable
 	_ = logger.With().Str("k", "v").Logger()

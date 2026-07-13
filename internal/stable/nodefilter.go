@@ -23,6 +23,9 @@ type geminiChecker interface {
 	GeminiCheck(ctx context.Context, payload []byte) map[string]GeminiOutcome
 }
 
+// geminiFilterName is the configuration name of the through-node Gemini filter.
+const geminiFilterName = "gemini"
+
 // geminiFilter keeps only survivors that can reach the Gemini API through their
 // own node, and records geo-blocked node hosts in the store (TTL) so later
 // cycles skip them before probing. A survivor is kept only when the through-node
@@ -33,7 +36,7 @@ type geminiFilter struct {
 	logger zerolog.Logger
 }
 
-func (g *geminiFilter) name() string { return "gemini" }
+func (g *geminiFilter) name() string { return geminiFilterName }
 
 func (g *geminiFilter) apply(ctx context.Context, _ []Entry, survivors []Survivor) []Survivor {
 	if !g.prober.GeminiEnabled() {
@@ -81,7 +84,7 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 	var filters []NodeFilter
 	for _, n := range names {
 		switch n {
-		case "gemini":
+		case geminiFilterName:
 			gc, ok := prober.(geminiChecker)
 			if !ok {
 				logger.Warn().Msg("gemini filter requested but prober lacks Gemini support; skipping")

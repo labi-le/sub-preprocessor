@@ -82,11 +82,11 @@ func saveState(path string, st state) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("write temp: %w", err)
+	if writeErr := os.WriteFile(tmp, b, 0o600); writeErr != nil {
+		return fmt.Errorf("write temp: %w", writeErr)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename: %w", err)
+	if renameErr := os.Rename(tmp, path); renameErr != nil {
+		return fmt.Errorf("rename: %w", renameErr)
 	}
 	return nil
 }

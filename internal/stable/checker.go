@@ -100,6 +100,59 @@ func (c *Checker) Run(ctx context.Context) {
 // RunOnce executes a single check cycle. On any failure the previously
 // published snapshot is kept untouched.
 func (c *Checker) RunOnce(ctx context.Context) {
+	bodies := c.fetchSources(ctx)
+
+	entries := Merge(bodies)
+	if len(entries) == 0 {
+		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
+		return
+	}
+
+	probe, deadSkipped, ok := c.filterDead(entries)
+	if !ok {
+		return
+	}
+
+	res, err := c.prober.Probe(ctx, entriesPayload(probe))
+	if err != nil {
+		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
+		return
+	}
+
+	c.recordDead(probe, res)
+
+	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
+	for _, f := range c.filters {
+		survivors = f.apply(ctx, probe, survivors)
+	}
+	if len(survivors) == 0 {
+		c.logger.Warn().Msg("no survivors; keeping previous stable list")
+		return
+	}
+
+	c.holder.Store(&Snapshot{
+		Payload:   BuildPayload(survivors),
+		UpdatedAt: time.Now(),
+		Stats: Stats{
+			SourcesOK:    len(bodies),
+			SourcesTotal: len(c.sources),
+			Merged:       len(entries),
+			Tested:       len(probe),
+			Kept:         len(survivors),
+		},
+	})
+	c.logger.Info().
+		Int("sources_ok", len(bodies)).
+		Int("merged", len(entries)).
+		Int("dead_skipped", deadSkipped).
+		Int("probed", len(probe)).
+		Int("kept", len(survivors)).
+		Msg("stable list updated")
+}
+
+// fetchSources fetches every configured source concurrently through the
+// preprocess pipeline and returns the successfully-filtered bodies.
+func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
 	svc := c.filterer()
 
 	type result struct {
@@ -144,75 +197,43 @@ func (c *Checker) RunOnce(ctx context.Context) {
 		}
 		bodies = append(bodies, r.body)
 	}
+	return bodies
+}
 
-	entries := Merge(bodies)
-	if len(entries) == 0 {
-		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
+// filterDead drops nodes a recent cycle marked dead so the probe only re-tests
+// live/unknown nodes. It returns the nodes to probe, how many were skipped, and
+// false when nothing remains to probe (caller keeps the previous list).
+func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, ok bool) {
+	if c.dead == nil {
+		return entries, 0, true
+	}
+	probe = make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if c.dead.Blocked(e.Addr) {
+			deadSkipped++
+			continue
+		}
+		probe = append(probe, e)
+	}
+	if len(probe) == 0 {
+		c.logger.Warn().Int("dead_skipped", deadSkipped).Msg("all merged nodes recently dead; keeping previous stable list")
+		return nil, deadSkipped, false
+	}
+	return probe, deadSkipped, true
+}
+
+// recordDead caches nodes that returned no successful probe so later cycles
+// skip them, then prunes expired entries.
+func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
+	if c.dead == nil {
 		return
 	}
-
-	// Skip nodes marked dead by a recent cycle (short TTL) so the probe only
-	// re-tests live/unknown nodes; probing is the biggest per-cycle cost.
-	probe := entries
-	deadSkipped := 0
-	if c.dead != nil {
-		probe = make([]Entry, 0, len(entries))
-		for _, e := range entries {
-			if c.dead.Blocked(e.Addr) {
-				deadSkipped++
-				continue
-			}
-			probe = append(probe, e)
-		}
-		if len(probe) == 0 {
-			c.logger.Warn().Int("dead_skipped", deadSkipped).Msg("all merged nodes recently dead; keeping previous stable list")
-			return
+	for _, e := range probe {
+		if _, ok := res[e.Label]; !ok {
+			_ = c.dead.Block(e.Addr)
 		}
 	}
-
-	res, err := c.prober.Probe(ctx, entriesPayload(probe))
-	if err != nil {
-		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
-		return
-	}
-
-	// Cache nodes that returned no successful probe so later cycles skip them.
-	if c.dead != nil {
-		for _, e := range probe {
-			if _, ok := res[e.Label]; !ok {
-				_ = c.dead.Block(e.Addr)
-			}
-		}
-		_ = c.dead.Prune()
-	}
-
-	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
-	for _, f := range c.filters {
-		survivors = f.apply(ctx, probe, survivors)
-	}
-	if len(survivors) == 0 {
-		c.logger.Warn().Msg("no survivors; keeping previous stable list")
-		return
-	}
-
-	c.holder.Store(&Snapshot{
-		Payload:   BuildPayload(survivors),
-		UpdatedAt: time.Now(),
-		Stats: Stats{
-			SourcesOK:    len(bodies),
-			SourcesTotal: len(c.sources),
-			Merged:       len(entries),
-			Tested:       len(probe),
-			Kept:         len(survivors),
-		},
-	})
-	c.logger.Info().
-		Int("sources_ok", len(bodies)).
-		Int("merged", len(entries)).
-		Int("dead_skipped", deadSkipped).
-		Int("probed", len(probe)).
-		Int("kept", len(survivors)).
-		Msg("stable list updated")
+	_ = c.dead.Prune()
 }
 
 func entriesPayload(entries []Entry) []byte {

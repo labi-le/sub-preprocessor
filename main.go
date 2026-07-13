@@ -21,6 +21,15 @@ import (
 	"domains.lst/sub-preprocessor/internal/log"
 )
 
+const (
+	defaultCrawlPages    = 6
+	defaultCrawlDepth    = 2
+	defaultCrawlStateTTL = 720 * time.Hour
+	defaultCrawlInterval = 30 * time.Minute
+	classifyTimeout      = 30 * time.Second
+	exitUsageError       = 2
+)
+
 func main() {
 	log.InitDefault()
 
@@ -52,14 +61,14 @@ func runCrawl() {
 		Channels:     splitList(getenv("CRAWL_CHANNELS", "")),
 		ChannelsPath: getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
 		PrivatePath:  getenv("CRAWL_PRIVATE", "/config/private.yaml"),
-		Pages:        atoiDefault(getenv("CRAWL_PAGES", "6"), 6),
+		Pages:        atoiDefault(getenv("CRAWL_PAGES", "6"), defaultCrawlPages),
 		Prune:        boolDefault(getenv("CRAWL_PRUNE", ""), true),
-		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", "2"), 2),
+		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", "2"), defaultCrawlDepth),
 		MaxChannels:  intDefault(getenv("CRAWL_MAX_CHANNELS", "0"), 0),
 		StatePath:    getenv("CRAWL_STATE", "/config/.crawler-state.json"),
-		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", "720h"), 720*time.Hour),
+		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", "720h"), defaultCrawlStateTTL),
 	}
-	interval := durationDefault(getenv("CRAWL_INTERVAL", "30m"), 30*time.Minute)
+	interval := durationDefault(getenv("CRAWL_INTERVAL", "30m"), defaultCrawlInterval)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -89,9 +98,9 @@ func runCrawl() {
 func runClassify(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: sub-preprocessor classify <url>")
-		return 2
+		return exitUsageError
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
 	defer cancel()
 
 	res, err := classify.URL(ctx, fetch.NewSafeHTTPClient(), fetch.SubscriptionURL(args[0]))
@@ -103,7 +112,7 @@ func runClassify(args []string) int {
 		fmt.Fprintf(os.Stderr, "not a live subscription (nodes=%d expired=%v)\n", res.Nodes, res.Expired)
 		return 1
 	}
-	fmt.Println(res.Nodes)
+	fmt.Fprintln(os.Stdout, res.Nodes)
 	return 0
 }
 
@@ -141,7 +150,7 @@ func intDefault(s string, def int) int {
 
 // parseHHMM parses "HH:MM" (24h). Empty or malformed input returns ok=false so
 // the caller falls back to the interval schedule.
-func parseHHMM(s string) (hour, min int, ok bool) {
+func parseHHMM(s string) (hour, minute int, ok bool) {
 	t, err := time.Parse("15:04", strings.TrimSpace(s))
 	if err != nil {
 		return 0, 0, false

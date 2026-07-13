@@ -41,21 +41,21 @@ func TestWatcherDebounceCoalesces(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Two writes within 50ms (a multi-field config edit).
-	if err := os.WriteFile(cfgPath, []byte("a: 2\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(cfgPath, []byte("a: 2\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	time.Sleep(25 * time.Millisecond)
-	if err := os.WriteFile(cfgPath, []byte("a: 3\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(cfgPath, []byte("a: 3\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	// One atomic temp+rename into place (how `yq -i` writes), same directory.
 	tmp := filepath.Join(dir, "config.yaml.tmp")
-	if err := os.WriteFile(tmp, []byte("a: 4\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(tmp, []byte("a: 4\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := os.Rename(tmp, cfgPath); err != nil {
-		t.Fatal(err)
+	if renameErr := os.Rename(tmp, cfgPath); renameErr != nil {
+		t.Fatal(renameErr)
 	}
 
 	// Wait well past the 200ms debounce window so the timer has fired.
@@ -71,9 +71,9 @@ func TestWatcherDebounceCoalesces(t *testing.T) {
 
 	cancel()
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run returned error: %v", err)
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("Run returned error: %v", runErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after ctx cancel")
@@ -104,9 +104,9 @@ func TestWatcherShutdownReturnsCleanly(t *testing.T) {
 	cancel()
 
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run returned error on shutdown: %v", err)
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("Run returned error on shutdown: %v", runErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return within 1s after ctx cancel")
@@ -138,8 +138,8 @@ func TestWatcherIgnoresOtherFiles(t *testing.T) {
 	// Writes to a sibling file in the same watched directory must be ignored.
 	other := filepath.Join(dir, "other.txt")
 	for i := 0; i < 3; i++ {
-		if err := os.WriteFile(other, []byte{byte(i)}, 0o644); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(other, []byte{byte(i)}, 0o644); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -150,8 +150,8 @@ func TestWatcherIgnoresOtherFiles(t *testing.T) {
 	}
 
 	// A write to the config file itself IS detected.
-	if err := os.WriteFile(cfgPath, []byte("a: 2\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(cfgPath, []byte("a: 2\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	time.Sleep(300 * time.Millisecond)
 
@@ -192,11 +192,11 @@ func TestWatcherDetectsPrivateOverlay(t *testing.T) {
 	// An atomic temp+rename of private.yaml (how the crawler writes it).
 	privPath := filepath.Join(dir, "private.yaml")
 	tmp := filepath.Join(dir, "private.yaml.tmp")
-	if err := os.WriteFile(tmp, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(tmp, []byte("subscriptions:\n  sources: []\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := os.Rename(tmp, privPath); err != nil {
-		t.Fatal(err)
+	if renameErr := os.Rename(tmp, privPath); renameErr != nil {
+		t.Fatal(renameErr)
 	}
 
 	time.Sleep(300 * time.Millisecond)

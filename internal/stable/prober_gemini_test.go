@@ -1,4 +1,4 @@
-package stable
+package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
 	"testing"

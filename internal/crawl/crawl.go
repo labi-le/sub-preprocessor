@@ -38,6 +38,8 @@ const (
 	classifyTimeout     = 15 * time.Second
 	fetchTimeout        = 20 * time.Second
 	userAgent           = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"
+	maxPageBytes        = 8 << 20 // cap on bytes read from a single channel page
+	oneDay              = 24 * time.Hour
 )
 
 var (
@@ -91,20 +93,20 @@ func (httpFetcher) page(ctx context.Context, u string) (string, error) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := fetch.NewSafeHTTPClient().Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("bad status: %s", resp.Status)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read body: %w", err)
 	}
 	return string(b), nil
 }
@@ -132,9 +134,9 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 // local time zone, then once every 24h at that wall-clock time, until ctx is
 // done. Unlike Run it does not fire immediately — it waits for the scheduled
 // time.
-func (c *Crawler) RunDaily(ctx context.Context, hour, min int) {
+func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
 	for {
-		next := nextDaily(time.Now(), hour, min)
+		next := nextDaily(time.Now(), hour, minute)
 		c.logger.Info().Time("next_run", next).Str("in", time.Until(next).Truncate(time.Second).String()).
 			Msg("crawl scheduled")
 		t := time.NewTimer(time.Until(next))
@@ -149,10 +151,10 @@ func (c *Crawler) RunDaily(ctx context.Context, hour, min int) {
 }
 
 // nextDaily returns the next instant at hour:min (local) strictly after now.
-func nextDaily(now time.Time, hour, min int) time.Time {
-	n := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location())
+func nextDaily(now time.Time, hour, minute int) time.Time {
+	n := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
 	if !n.After(now) {
-		n = n.Add(24 * time.Hour)
+		n = n.Add(oneDay)
 	}
 	return n
 }
@@ -173,14 +175,30 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	st := loadState(c.opts.StatePath)
 	live := c.scan(ctx, &st)
 	st.prune(time.Now().Add(-c.opts.StateTTL))
-	if err := saveState(c.opts.StatePath, st); err != nil {
-		c.logger.Warn().Err(err).Msg("save crawler state failed")
+	if saveErr := saveState(c.opts.StatePath, st); saveErr != nil {
+		c.logger.Warn().Err(saveErr).Msg("save crawler state failed")
 	}
 	c.logger.Info().Int("discovered", len(live)).Int("productive", len(st.Productive)).
 		Msg("live subscriptions discovered")
 
-	// Existing managed sources not rediscovered this cycle are re-classified so
-	// prune can drop the dead ones (and !Prune can retain the still-live ones).
+	managedURL := c.recheckManaged(ctx, pf, live)
+	next, managed := c.mergeManaged(pf, live, managedURL)
+	if sameSources(pf.Subscriptions.Sources, next) {
+		c.logger.Info().Int("managed", len(managed)).Msg("no change")
+		return
+	}
+	pf.Subscriptions.Sources = next
+	if writeErr := writePrivate(c.opts.PrivatePath, pf); writeErr != nil {
+		c.logger.Error().Err(writeErr).Msg("write private.yaml failed")
+		return
+	}
+	c.logger.Info().Int("managed", len(managed)).Int("total", len(next)).Msg("private.yaml updated")
+}
+
+// recheckManaged records the URLs of existing managed sources and re-classifies
+// the ones not rediscovered this cycle, marking any still live in live so prune
+// can drop the dead ones (and !Prune can retain the still-live ones).
+func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]bool) map[string]bool {
 	managedURL := map[string]bool{}
 	var recheck []string
 	for _, s := range pf.Subscriptions.Sources {
@@ -194,8 +212,13 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	for u := range c.classifyAll(ctx, recheck) {
 		live[u] = true
 	}
+	return managedURL
+}
 
-	var managed, kept []source
+// mergeManaged combines the retained hand-added sources with the current managed
+// set (deduped and sorted by name) and returns the full next source list plus
+// the managed subset for logging.
+func (c *Crawler) mergeManaged(pf privateFile, live, managedURL map[string]bool) (kept, managed []source) {
 	all := map[string]struct{}{}
 	for _, s := range pf.Subscriptions.Sources {
 		if strings.HasPrefix(s.Name, managedPrefix) {
@@ -219,18 +242,8 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		}
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
-
-	next := append(kept, managed...)
-	if sameSources(pf.Subscriptions.Sources, next) {
-		c.logger.Info().Int("managed", len(managed)).Msg("no change")
-		return
-	}
-	pf.Subscriptions.Sources = next
-	if err := writePrivate(c.opts.PrivatePath, pf); err != nil {
-		c.logger.Error().Err(err).Msg("write private.yaml failed")
-		return
-	}
-	c.logger.Info().Int("managed", len(managed)).Int("total", len(next)).Msg("private.yaml updated")
+	kept = append(kept, managed...)
+	return kept, managed
 }
 
 func (c *Crawler) classifyAll(ctx context.Context, urls []string) map[string]bool {
@@ -318,10 +331,10 @@ func loadPrivate(path string) (privateFile, error) {
 		if os.IsNotExist(err) {
 			return pf, nil
 		}
-		return pf, err
+		return pf, fmt.Errorf("read private.yaml: %w", err)
 	}
-	if err := yaml.Unmarshal(b, &pf); err != nil {
-		return pf, fmt.Errorf("unmarshal private.yaml: %w", err)
+	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
+		return pf, fmt.Errorf("unmarshal private.yaml: %w", unmarshalErr)
 	}
 	return pf, nil
 }
@@ -332,11 +345,11 @@ func writePrivate(path string, pf privateFile) error {
 		return fmt.Errorf("marshal private.yaml: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("write temp: %w", err)
+	if writeErr := os.WriteFile(tmp, b, 0o644); writeErr != nil { //nolint:gosec // private.yaml is read by the service under another uid; 0644 required
+		return fmt.Errorf("write temp: %w", writeErr)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename: %w", err)
+	if renameErr := os.Rename(tmp, path); renameErr != nil {
+		return fmt.Errorf("rename: %w", renameErr)
 	}
 	return nil
 }

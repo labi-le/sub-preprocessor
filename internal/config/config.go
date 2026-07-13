@@ -195,7 +195,7 @@ func (g GeminiConfig) APIKeyResolved() (string, error) {
 		return "", fmt.Errorf("gemini key_file: %w", err)
 	}
 	prefix := g.KeyVar + "="
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
 			return strings.TrimSpace(v), nil
 		}
@@ -248,14 +248,14 @@ func Load(path string) (Config, error) {
 	}
 
 	privatePath := filepath.Join(filepath.Dir(path), "private.yaml")
-	if b, err := os.ReadFile(privatePath); err == nil {
+	if privBytes, readErr := os.ReadFile(privatePath); readErr == nil {
 		var priv privateConfig
-		if err := yaml.Unmarshal(b, &priv); err != nil {
-			return Config{}, fmt.Errorf("unmarshal private config: %w", err)
+		if unmarshalErr := yaml.Unmarshal(privBytes, &priv); unmarshalErr != nil {
+			return Config{}, fmt.Errorf("unmarshal private config: %w", unmarshalErr)
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
-		if err := cfg.Subscriptions.Validate(cfg.Groups); err != nil {
-			return Config{}, fmt.Errorf("private config: %w", err)
+		if validateErr := cfg.Subscriptions.Validate(cfg.Groups); validateErr != nil {
+			return Config{}, fmt.Errorf("private config: %w", validateErr)
 		}
 	}
 

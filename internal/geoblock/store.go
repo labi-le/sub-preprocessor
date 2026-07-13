@@ -5,6 +5,7 @@
 package geoblock
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -32,29 +33,29 @@ func Open(path string, ttl time.Duration) (*Store, error) {
 	// Reads hit the in-memory cache, so a single connection avoids lock
 	// contention between the occasional Block/Prune writes.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+	if _, pragmaErr := db.ExecContext(context.Background(), `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); pragmaErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("geoblock pragmas: %w", err)
+		return nil, fmt.Errorf("geoblock pragmas: %w", pragmaErr)
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS geoblock (host TEXT PRIMARY KEY, blocked_until INTEGER NOT NULL)`); err != nil {
+	if _, schemaErr := db.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS geoblock (host TEXT PRIMARY KEY, blocked_until INTEGER NOT NULL)`); schemaErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("geoblock schema: %w", err)
+		return nil, fmt.Errorf("geoblock schema: %w", schemaErr)
 	}
 
 	s := &Store{db: db, ttl: ttl, blocked: make(map[string]int64)}
-	if err := s.load(); err != nil {
+	if loadErr := s.load(); loadErr != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, loadErr
 	}
 	return s, nil
 }
 
 func (s *Store) load() error {
 	now := time.Now().UnixNano()
-	if _, err := s.db.Exec(`DELETE FROM geoblock WHERE blocked_until <= ?`, now); err != nil {
-		return fmt.Errorf("geoblock prune on load: %w", err)
+	if _, pruneErr := s.db.ExecContext(context.Background(), `DELETE FROM geoblock WHERE blocked_until <= ?`, now); pruneErr != nil {
+		return fmt.Errorf("geoblock prune on load: %w", pruneErr)
 	}
-	rows, err := s.db.Query(`SELECT host, blocked_until FROM geoblock WHERE blocked_until > ?`, now)
+	rows, err := s.db.QueryContext(context.Background(), `SELECT host, blocked_until FROM geoblock WHERE blocked_until > ?`, now)
 	if err != nil {
 		return fmt.Errorf("geoblock load: %w", err)
 	}
@@ -62,12 +63,15 @@ func (s *Store) load() error {
 	for rows.Next() {
 		var host string
 		var exp int64
-		if err := rows.Scan(&host, &exp); err != nil {
-			return fmt.Errorf("geoblock scan: %w", err)
+		if scanErr := rows.Scan(&host, &exp); scanErr != nil {
+			return fmt.Errorf("geoblock scan: %w", scanErr)
 		}
 		s.blocked[host] = exp
 	}
-	return rows.Err()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return fmt.Errorf("geoblock rows: %w", rowsErr)
+	}
+	return nil
 }
 
 // Blocked reports whether host is currently blocked (present and not expired).
@@ -90,7 +94,8 @@ func (s *Store) Block(host string) error {
 	s.mu.Lock()
 	s.blocked[host] = exp
 	s.mu.Unlock()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(
+		context.Background(),
 		`INSERT INTO geoblock(host, blocked_until) VALUES(?, ?) ON CONFLICT(host) DO UPDATE SET blocked_until=excluded.blocked_until`,
 		host, exp,
 	)
@@ -110,7 +115,7 @@ func (s *Store) Prune() error {
 		}
 	}
 	s.mu.Unlock()
-	if _, err := s.db.Exec(`DELETE FROM geoblock WHERE blocked_until <= ?`, now); err != nil {
+	if _, err := s.db.ExecContext(context.Background(), `DELETE FROM geoblock WHERE blocked_until <= ?`, now); err != nil {
 		return fmt.Errorf("geoblock prune: %w", err)
 	}
 	return nil
@@ -125,5 +130,8 @@ func (s *Store) Count() int {
 
 // Close closes the underlying database.
 func (s *Store) Close() error {
-	return s.db.Close()
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("geoblock close: %w", err)
+	}
+	return nil
 }

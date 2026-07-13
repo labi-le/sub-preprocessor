@@ -1,15 +1,17 @@
-package geoblock
+package geoblock_test
 
 import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"domains.lst/sub-preprocessor/internal/geoblock"
 )
 
 func TestBlockAndQuery(t *testing.T) {
 	t.Parallel()
 
-	s, err := Open(filepath.Join(t.TempDir(), "gb.db"), time.Hour)
+	s, err := geoblock.Open(filepath.Join(t.TempDir(), "gb.db"), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,8 +23,8 @@ func TestBlockAndQuery(t *testing.T) {
 	if s.Blocked("") {
 		t.Fatal("empty host must never be blocked")
 	}
-	if err := s.Block("1.2.3.4"); err != nil {
-		t.Fatal(err)
+	if blockErr := s.Block("1.2.3.4"); blockErr != nil {
+		t.Fatal(blockErr)
 	}
 	if !s.Blocked("1.2.3.4") {
 		t.Fatal("host should be blocked after Block")
@@ -35,7 +37,7 @@ func TestBlockAndQuery(t *testing.T) {
 func TestExpiryAndPrune(t *testing.T) {
 	t.Parallel()
 
-	s, err := Open(filepath.Join(t.TempDir(), "gb.db"), 40*time.Millisecond)
+	s, err := geoblock.Open(filepath.Join(t.TempDir(), "gb.db"), 40*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +51,8 @@ func TestExpiryAndPrune(t *testing.T) {
 	if s.Blocked("9.9.9.9") {
 		t.Fatal("should be unblocked after TTL")
 	}
-	if err := s.Prune(); err != nil {
-		t.Fatal(err)
+	if pruneErr := s.Prune(); pruneErr != nil {
+		t.Fatal(pruneErr)
 	}
 	if s.Count() != 0 {
 		t.Fatalf("expired entry should be pruned, count=%d", s.Count())
@@ -61,14 +63,14 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "gb.db")
-	s, err := Open(path, time.Hour)
+	s, err := geoblock.Open(path, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = s.Block("10.0.0.1")
 	_ = s.Close()
 
-	s2, err := Open(path, time.Hour)
+	s2, err := geoblock.Open(path, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func TestExpiredPrunedOnLoad(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "gb.db")
-	s, err := Open(path, time.Nanosecond) // expires effectively immediately
+	s, err := geoblock.Open(path, time.Nanosecond) // expires effectively immediately
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +92,7 @@ func TestExpiredPrunedOnLoad(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	_ = s.Close()
 
-	s2, err := Open(path, time.Hour)
+	s2, err := geoblock.Open(path, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

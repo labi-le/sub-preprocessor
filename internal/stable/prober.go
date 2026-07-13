@@ -61,11 +61,9 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for range m.cfg.Rounds {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			m.runRound(ctx, proxies, &mu, accs)
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -17,6 +17,10 @@ import (
 // marker; the error JSON is tiny, so this only guards against a hostile node.
 const maxGeminiBody = 64 << 10
 
+// geminiTLSHandshakeTimeout bounds the through-node TLS handshake to the
+// Gemini endpoint; the per-request deadline still comes from gemini.Timeout.
+const geminiTLSHandshakeTimeout = 10 * time.Second
+
 // GeminiOutcome is the per-node result of the through-node Gemini check.
 type GeminiOutcome struct {
 	Server    string // node host (no port); the geoblock key
@@ -92,7 +96,7 @@ func (m *MihomoProber) geminiProbeOne(ctx context.Context, px mihomo.Proxy, targ
 		port = "443"
 	}
 	var meta mihomo.Metadata
-	if err := meta.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port)); err != nil {
+	if addrErr := meta.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port)); addrErr != nil {
 		return false, false
 	}
 	conn, err := px.DialContext(tctx, &meta)
@@ -103,7 +107,7 @@ func (m *MihomoProber) geminiProbeOne(ctx context.Context, px mihomo.Proxy, targ
 
 	transport := &http.Transport{
 		DialContext:         func(context.Context, string, string) (net.Conn, error) { return conn, nil },
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout: geminiTLSHandshakeTimeout,
 	}
 	client := &http.Client{
 		Timeout:   m.gemini.Timeout,

@@ -115,8 +115,8 @@ func TestMergeKeepsGeoTagVmess(t *testing.T) {
 			t.Fatalf("decode: %v", err)
 		}
 		var m map[string]any
-		if err := json.Unmarshal(decoded, &m); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if unmarshalErr := json.Unmarshal(decoded, &m); unmarshalErr != nil {
+			t.Fatalf("unmarshal: %v", unmarshalErr)
 		}
 		s, _ := m["ps"].(string)
 		return s

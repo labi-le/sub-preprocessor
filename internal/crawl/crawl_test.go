@@ -1,4 +1,4 @@
-package crawl
+package crawl //nolint:testpackage // exercises unexported crawl helpers
 
 import (
 	"os"
