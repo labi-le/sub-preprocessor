@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "geoblock": {
+      "type": "stdio",
+      "command": "ssh",
+      "args": [
+        "pet",
+        "docker run -i --rm -e PYTHONUNBUFFERED=1 -v /home/labile/projects/sub-preprocessor/config:/data mcp/sqlite --db-path /data/.geoblock.db"
+      ]
+    }
+  }
+}
