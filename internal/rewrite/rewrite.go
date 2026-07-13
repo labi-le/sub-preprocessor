@@ -139,7 +139,7 @@ func LeadingTags(s string) string {
 		pos += end + 1
 		last = pos
 	}
-	return s[:last]
+	return strings.TrimSpace(s[:last])
 }
 
 func isKnownTag(tag string) bool {

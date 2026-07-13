@@ -98,3 +98,51 @@ func TestMergeKeepsGeoTag(t *testing.T) {
 		t.Errorf("Tagged must keep the geo tag, got %q", e.Tagged)
 	}
 }
+
+func TestMergeKeepsGeoTagVmess(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("vmess://" +
+		base64.StdEncoding.EncodeToString([]byte(`{"add":"1.2.3.4","port":"443","ps":"[GEO:FI][IP:1.2.3.4] orig","id":"uuid"}`)) + "\n")
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	psOf := func(raw string) string {
+		const prefix = "vmess://"
+		decoded, err := base64.StdEncoding.DecodeString(raw[len(prefix):])
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(decoded, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		s, _ := m["ps"].(string)
+		return s
+	}
+	if got := psOf(entries[0].Raw); got != "src-001" {
+		t.Errorf("Raw ps must be the clean probe label, got %q", got)
+	}
+	if got := psOf(entries[0].Tagged); got != "[GEO:FI][IP:1.2.3.4] src-001" {
+		t.Errorf("Tagged ps must keep the geo tag, got %q", got)
+	}
+}
+
+func TestMergeUntaggedNameCleanTagged(t *testing.T) {
+	t.Parallel()
+
+	// No [GEO][IP] tag (annotation off upstream) -> Tagged == Raw (both clean).
+	body := []byte("vless://u@h.example:443#Original Name\n")
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Raw != "vless://u@h.example:443#src-001" {
+		t.Errorf("Raw must be clean, got %q", e.Raw)
+	}
+	if e.Tagged != e.Raw {
+		t.Errorf("untagged node: Tagged (%q) must equal Raw (%q)", e.Tagged, e.Raw)
+	}
+}
