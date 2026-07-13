@@ -168,7 +168,7 @@ func dedupIPv4(ips []netip.Addr) []netip.Addr {
 			}
 			if !dup {
 				seen[n] = ip
-				ips[n] = ip // write in-place
+				ips[n] = ip
 				n++
 			}
 		}
@@ -180,7 +180,7 @@ func dedupIPv4(ips []netip.Addr) []netip.Addr {
 	for _, ip := range ips {
 		if ip.Is4() && !seen[ip] {
 			seen[ip] = true
-			ips[n] = ip // write in-place
+			ips[n] = ip
 			n++
 		}
 	}

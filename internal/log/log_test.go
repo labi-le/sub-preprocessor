@@ -49,6 +49,5 @@ func TestSetLevel_GlobalAffectsNewLoggers(t *testing.T) {
 	if zerolog.GlobalLevel() != zerolog.WarnLevel {
 		t.Fatalf("expected global level warn, got %v", zerolog.GlobalLevel())
 	}
-	// reset
 	_ = ilog.SetLevel("info")
 }

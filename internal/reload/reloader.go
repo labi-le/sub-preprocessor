@@ -99,8 +99,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
 
 	// The stable worker derives its filter set from both sections, so either
-	// change requires a restart; anything else (e.g. the gemini sidecar
-	// rewriting asn.deny_patterns) must leave the worker running.
+	// change requires a restart; unrelated config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg)
 	if r.ctl != nil && subsAffected {

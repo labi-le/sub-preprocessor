@@ -90,9 +90,6 @@ func (l *indexedLookup) LookupCountry(ip netip.Addr) CountryCode {
 			if ip32 <= l.v4[idx].end {
 				return l.v4[idx].country
 			}
-			// If this entry's start < last checked entry's start, and it didn't cover,
-			// no earlier entry can cover either (all earlier entries have start <= this start).
-			// But to be safe, we just continue.
 		}
 		return CountryCode{}
 	}
