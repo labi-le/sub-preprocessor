@@ -30,7 +30,7 @@ geoblock:
     timeout: 15s
     concurrency: 8
 deadcache:
-  ttl: 2h
+  ttl: 30m
 groups:
   nato:
     - "AL"
