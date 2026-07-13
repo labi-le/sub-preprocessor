@@ -16,7 +16,6 @@ resolver:
 workflow:
   stages:
     - asn
-    - geofeed
   annotate: true # add [GEO:XX][IP:x.x.x.x] to node names (both / and /stable.txt)
 asn:
   deny_patterns: []
@@ -81,6 +80,11 @@ subscriptions:
   check:
     filters:
       - gemini
+    rounds: 2
+    timeout: 1000ms
+    max_fail: 1
+    max_avg_ms: 800
+    concurrency: 96
   sources:
     - name: mifa
       url: https://mifa.world/vless
