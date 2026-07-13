@@ -1,0 +1,60 @@
+%% sub-preprocessor - processing pipeline
+%% Two filter layers: Layer-1 = IP-metadata lookups (workflow.stages, on / and worker);
+%% Layer-2 = through-node checks (subscriptions.check.filters, worker only).
+flowchart TD
+  %% ================= Crawler (nightly) =================
+  subgraph CRAWLER["tg-sub-crawler - nightly 04:00 MSK (CRAWL_AT)"]
+    direction TB
+    CH["channels.yaml - seed channels"]
+    SCAN["scan - relevance-gated BFS over t.me reposts"]
+    CLS["classify - fetch link, is it a live subscription?"]
+    STATE["crawler-state.json - productive channels become seeds"]
+    CH --> SCAN --> CLS
+    CLS -->|live subscription| PRIV["private.yaml - tg-HASH sources"]
+    CLS -->|productive channel| STATE
+    STATE -. seeds .-> SCAN
+  end
+
+  %% ================= Source set =================
+  CFG["config.yaml - subscriptions.sources (~61)"]
+  SRC(["source set (~93)"])
+  CFG --> SRC
+  PRIV --> SRC
+  PRIV -. hot-reload .-> SRC
+
+  %% ================= Layer-1 IP filter (shared by both paths) =================
+  subgraph FILTER["svc.Filter - Layer-1, per node, by IP - shared by / and worker"]
+    direction TB
+    GBH["geoblock skip - node host in blocklist?"]
+    RES["DNS resolve host to IPs - cached"]
+    ASNF["asn stage - Cymru country in allowed set?"]
+    GEOF["geofeed stage - optional"]
+    ANN["annotate=true - add GEO:XX and IP tag to node name"]
+    GBH --> RES --> ASNF --> GEOF --> ANN
+  end
+
+  %% ================= On-demand path (/) =================
+  REQ["GET / - subscription_url + countries"] --> FILTER
+  FILTER -->|on-demand| OUT1["/ response - text/plain, annotated, no probing"]
+
+  %% ================= Stable worker =================
+  subgraph WORKER["stable worker - every 30m (subscriptions.interval)"]
+    direction TB
+    MERGE["Merge - dedup by server:port, relabel src-NNN (Raw=probe label / Tagged=output)"]
+    DEAD["dead-skip - server:port in dead cache?"]
+    LAT["latency probe - mihomo URLTest x2, concurrency 96, timeout 1000ms"]
+    SEL["SelectSurvivors - max_fail=1, max_avg_ms=800"]
+    GEM["Layer-2 (check.filters=gemini) - GET Gemini through the node, scan body"]
+    PUBL["GET /stable.txt - Tagged names (GEO+IP tag + src-NNN)"]
+    MERGE --> DEAD --> LAT --> SEL --> GEM --> PUBL
+  end
+  SRC --> FILTER
+  FILTER -->|worker| MERGE
+
+  %% ================= Stores =================
+  GEODB[("geoblock.db - SQLite, 30d TTL, key=host")]
+  DEADSET[("dead set - in-memory, 2h TTL, key=server:port")]
+  GEM -->|blocked host| GEODB
+  GEODB -. read .-> GBH
+  LAT -->|no success = dead| DEADSET
+  DEADSET -. read .-> DEAD
