@@ -88,13 +88,13 @@ Important keys:
 - `workflow.stages` (order of filter stages: `asn`, `geofeed`)
 - `asn.deny_patterns` (+ `asn.timeout`) — usually empty now; the per-host `geoblock` list replaces ASN-name denial. The ASN stage still does country filtering.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
-- `geoblock.gemini.*` (`enabled`, `model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`)
+- `geoblock.gemini.*` (`model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`) — params for the `gemini` node-filter; enabled by listing `gemini` in `subscriptions.check.filters`
 - `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
 - `subscriptions.exclude_groups`
 - `subscriptions.sources[].name` / `subscriptions.sources[].url`
-- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `concurrency`)
+- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `concurrency`, `filters`) — `filters` lists Layer-2 through-node node-filters (e.g. `gemini`) run after latency selection
 
 ## Important package map
 

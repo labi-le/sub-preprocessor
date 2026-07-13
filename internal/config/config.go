@@ -89,6 +89,7 @@ type CheckConfig struct {
 	MaxAvgMs       int           `yaml:"max_avg_ms"`
 	SourceTimeout  time.Duration `yaml:"source_timeout"`
 	Concurrency    int           `yaml:"concurrency"`
+	Filters        []string      `yaml:"filters"`
 }
 
 type SubscriptionSource struct {
@@ -143,7 +144,6 @@ func (d *DeadCacheConfig) applyDefaults() {
 // the stable probe: a real API GET whose body reveals a geo-block, which
 // mihomo's HEAD-only URLTest cannot detect.
 type GeminiConfig struct {
-	Enabled     bool          `yaml:"enabled"`
 	Endpoint    string        `yaml:"endpoint"`
 	Model       string        `yaml:"model"`
 	Marker      string        `yaml:"marker"`

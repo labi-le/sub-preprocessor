@@ -54,6 +54,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}
+	filters := buildNodeFilters(subs.Check.Filters, prober, c.store, c.logger)
 
 	checker := NewChecker(
 		subs.Sources,
@@ -65,7 +66,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		subs.Check.SourceTimeout,
 		c.filterer,
 		prober,
-		c.store,
+		filters,
 		c.dead,
 		c.holder,
 		c.logger,

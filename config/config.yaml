@@ -24,7 +24,6 @@ geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h
   gemini:
-    enabled: true
     model: gemini-2.0-flash
     key_file: /run/agenix/litellm-env
     key_var: LITELLM_GOOGLE_API_KEY
@@ -78,6 +77,9 @@ subscriptions:
   interval: 30m
   exclude_groups:
     - geo_blocked
+  check:
+    filters:
+      - gemini
   sources:
     - name: mifa
       url: https://mifa.world/vless

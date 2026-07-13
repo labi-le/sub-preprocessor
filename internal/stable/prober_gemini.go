@@ -27,7 +27,7 @@ type GeminiOutcome struct {
 // GeminiEnabled reports whether the Gemini gate is active (configured with a
 // resolved API key).
 func (m *MihomoProber) GeminiEnabled() bool {
-	return m.gemini.Enabled && m.geminiKey != ""
+	return m.geminiKey != ""
 }
 
 func (m *MihomoProber) geminiURL() string {

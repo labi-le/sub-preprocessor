@@ -52,7 +52,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `WorkflowConfig` — `stages` (sequential pipeline order; known names: `geofeed`, `asn`)
 - `ASNConfig` — `deny_patterns` + `timeout`
 - `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
-- `GeminiConfig` — `enabled`/`endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency`; `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE` env file)
+- `GeminiConfig` — `endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency` (params for the `gemini` node-filter); `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE`). Enabled by listing `gemini` in `subscriptions.check.filters`.
 - `DeadCacheConfig` — `ttl` (in-memory short-TTL cache of probe-dead nodes; skips re-probing them; default 2h)
 
 **Key functions:**
@@ -333,7 +333,7 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 ## `internal/stable`
 
-`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `checker.go`, `controller.go`, `deadset.go`
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `nodefilter.go`, `checker.go`, `controller.go`, `deadset.go`
 
 Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, then runs a **Gemini reachability gate** through each surviving node (a real API `GET`, body-inspected for the geo-block marker — the check mihomo's HEAD-only `URLTest` cannot do), records geo-blocked node hosts in the `geoblock` store (TTL) and drops them, and atomically publishes the rest for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
 
@@ -355,7 +355,8 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `SelectSurvivors(entries, results, rounds, maxFail, maxAvgMs) []Survivor` — keep `rounds-successes <= maxFail && mean <= maxAvgMs`, sort by mean ascending
 - `BuildPayload(survivors) []byte` — newline-joined URI list
 - `NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, logger) (*MihomoProber, error)` — latency `Probe` (HEAD `URLTest`) plus `GeminiCheck(ctx, payload) map[label]GeminiOutcome` + `GeminiEnabled()`; `GeminiCheck` dials the Gemini API through each node (mihomo `DialContext` + fixed-conn `http.Transport`, `GET`) and scans the body for the geo-block marker
-- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle: drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), then `SelectSurvivors` + `geminiGate` keep only Gemini-reachable survivors
+- `NodeFilter` — Layer-2 check applied after the IP-filters + latency probe, routing THROUGH each surviving node (worker-only, so it shapes `/stable.txt`, not `/`); selected by name via `subscriptions.check.filters`. `buildNodeFilters` constructs them; `geminiFilter` is the sole impl (keeps Gemini-reachable survivors, records blocked hosts in the geoblock store).
+- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle: drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), `SelectSurvivors`, then apply the configured `NodeFilter`s (e.g. `gemini`) that keep only nodes passing the through-node checks
 - `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key, builds the prober + checker (with the geo-block + dead-node stores), stops the old worker and starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
