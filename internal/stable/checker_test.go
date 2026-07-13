@@ -229,7 +229,6 @@ func TestControllerApplyAndStop(t *testing.T) {
 			ExcludeGroups:    []string{"geo_blocked"},
 			Check: config.CheckConfig{
 				Rounds:         1,
-				RoundPause:     0,
 				Timeout:        time.Second,
 				TestURL:        "https://www.gstatic.com/generate_204",
 				ExpectedStatus: "204",

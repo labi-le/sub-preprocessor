@@ -24,7 +24,6 @@ const (
 	defaultSubsInterval      = 30 * time.Minute
 	minSubsInterval          = time.Minute
 	defaultCheckRounds       = 5
-	defaultCheckRoundPause   = 3 * time.Second
 	defaultCheckTimeout      = 2 * time.Second
 	defaultCheckTestURL      = "https://www.gstatic.com/generate_204"
 	defaultCheckStatus       = "204"
@@ -84,7 +83,6 @@ type SubscriptionsConfig struct {
 
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
-	RoundPause     time.Duration `yaml:"round_pause"`
 	Timeout        time.Duration `yaml:"timeout"`
 	TestURL        string        `yaml:"test_url"`
 	ExpectedStatus string        `yaml:"expected_status"`
@@ -291,9 +289,6 @@ func (s *SubscriptionsConfig) applyDefaults() {
 	if c.Rounds == 0 {
 		c.Rounds = defaultCheckRounds
 	}
-	if c.RoundPause == 0 {
-		c.RoundPause = defaultCheckRoundPause
-	}
 	if c.Timeout == 0 {
 		c.Timeout = defaultCheckTimeout
 	}
@@ -357,8 +352,8 @@ func (c *CheckConfig) validate() error {
 	if c.Concurrency < 1 {
 		return errors.New("subscriptions.check.concurrency must be at least 1")
 	}
-	if c.Timeout <= 0 || c.RoundPause < 0 {
-		return errors.New("subscriptions.check: timeout must be positive, round_pause non-negative")
+	if c.Timeout <= 0 {
+		return errors.New("subscriptions.check.timeout must be positive")
 	}
 	if c.SourceTimeout <= 0 {
 		return errors.New("subscriptions.check.source_timeout must be positive")

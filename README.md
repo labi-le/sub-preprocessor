@@ -97,17 +97,20 @@ nix-shell --run "make lint"
 
 ## Deployment
 
-Docker Compose runs the service plus a sidecar:
+Docker Compose runs the service plus the crawler sidecar:
 
 ```bash
 docker compose up -d --build
 ```
 
-- `sub-preprocessor` — the service (published on `:7008`).
-- `gemini-block-checker` — a sidecar that detects when the host's public IP is
-  geo-blocked and appends the offending ASN to `asn.deny_patterns`. It reads its
-  API key from an agenix-decrypted secret mounted at `/run/agenix/litellm-env`,
-  so it starts without any manual environment setup.
+- `sub-preprocessor` — the HTTP service (`:7008`) and the stable worker. The
+  worker probes nodes and, via the `gemini` node-filter (`subscriptions.check.filters`),
+  keeps only nodes that can reach the Gemini API through the node, recording
+  geo-blocked hosts in a SQLite TTL store (`geoblock`). The Gemini API key is
+  read from an agenix-decrypted secret mounted at `/run/agenix/litellm-env`.
+- `tg-sub-crawler` — a sidecar that nightly crawls Telegram channels
+  (`config/channels.yaml`) and appends discovered live subscriptions to
+  `config/private.yaml`, which the service hot-reloads.
 
 ## Package map
 

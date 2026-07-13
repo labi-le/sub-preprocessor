@@ -246,7 +246,7 @@ func TestLoadSubscriptionsDefaults(t *testing.T) {
 	if c.Rounds != 5 || c.MaxFail != 0 || c.MaxAvgMs != 1000 || c.Concurrency != 16 {
 		t.Fatalf("check defaults: %+v", c)
 	}
-	if c.RoundPause != 3*time.Second || c.Timeout != 2*time.Second {
+	if c.Timeout != 2*time.Second {
 		t.Fatalf("check durations: %+v", c)
 	}
 	if c.TestURL != "https://www.gstatic.com/generate_204" || c.ExpectedStatus != "204" {
@@ -266,7 +266,6 @@ func TestLoadSubscriptionsFullBlock(t *testing.T) {
   exclude_groups: [geo_blocked]
   check:
     rounds: 3
-    round_pause: 1s
     timeout: 1500ms
     test_url: https://cp.cloudflare.com/generate_204
     expected_status: "200/204"
@@ -287,7 +286,7 @@ func TestLoadSubscriptionsFullBlock(t *testing.T) {
 		t.Fatalf("subs: %+v", s)
 	}
 	c := s.Check
-	if c.Rounds != 3 || c.RoundPause != time.Second || c.Timeout != 1500*time.Millisecond ||
+	if c.Rounds != 3 || c.Timeout != 1500*time.Millisecond ||
 		c.TestURL != "https://cp.cloudflare.com/generate_204" || c.ExpectedStatus != "200/204" ||
 		c.MaxFail != 1 || c.MaxAvgMs != 800 || c.Concurrency != 8 {
 		t.Fatalf("check: %+v", c)
