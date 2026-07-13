@@ -37,4 +37,8 @@ Thumbs.db
 # Private config (untracked)
 config/private.yaml
 
+# Runtime state (untracked)
+config/.crawler-state.json
+config/.geoblock.db*
+
 benchmarks
