@@ -31,6 +31,7 @@ const (
 	defaultCheckConcurr      = 16
 	defaultSourceTimeout     = 120 * time.Second
 	defaultDeadCacheTTL      = 2 * time.Hour
+	defaultFetchTimeout      = 3 * time.Second
 	defaultGeoBlockTTL       = 720 * time.Hour
 	defaultGeminiEndpoint    = "https://generativelanguage.googleapis.com"
 	defaultGeminiModel       = "gemini-2.0-flash"
@@ -71,6 +72,7 @@ type Config struct {
 	Subscriptions SubscriptionsConfig `yaml:"subscriptions"`
 	GeoBlock      GeoBlockConfig      `yaml:"geoblock"`
 	DeadCache     DeadCacheConfig     `yaml:"deadcache"`
+	Fetch         FetchConfig         `yaml:"fetch"`
 }
 
 type SubscriptionsConfig struct {
@@ -138,6 +140,19 @@ type DeadCacheConfig struct {
 func (d *DeadCacheConfig) applyDefaults() {
 	if d.TTL == 0 {
 		d.TTL = defaultDeadCacheTTL
+	}
+}
+
+// FetchConfig configures the HTTP client used to download subscription bodies.
+// Timeout bounds how long a single subscription fetch may wait before failing,
+// so an unresponsive source is abandoned quickly instead of stalling a cycle.
+type FetchConfig struct {
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+func (f *FetchConfig) applyDefaults() {
+	if f.Timeout == 0 {
+		f.Timeout = defaultFetchTimeout
 	}
 }
 
@@ -243,6 +258,7 @@ func Load(path string) (Config, error) {
 	cfg.Subscriptions.applyDefaults()
 	cfg.GeoBlock.applyDefaults()
 	cfg.DeadCache.applyDefaults()
+	cfg.Fetch.applyDefaults()
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}

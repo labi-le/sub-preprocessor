@@ -36,6 +36,7 @@ type Options struct {
 	PreloadedLoadedAt   time.Time
 	Blocklist           Blocklist
 	Annotate            bool
+	FetchTimeout        time.Duration
 }
 
 type FilterRequest struct {
@@ -61,6 +62,7 @@ type Processor struct {
 	filters         []Filter
 	blocklist       Blocklist
 	annotate        bool
+	fetchTimeout    time.Duration
 }
 
 type Stats struct {
@@ -130,6 +132,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		blocklist:       opts.Blocklist,
 		annotate:        opts.Annotate,
+		fetchTimeout:    opts.FetchTimeout,
 		filters:         filters,
 	}, nil
 }
@@ -152,7 +155,13 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		return Stats{}, errors.New("no allowed countries provided")
 	}
 
-	body, errLoad := subscription.Load(ctx, req.SubscriptionURL)
+	fetchCtx := ctx
+	if p.fetchTimeout > 0 {
+		var cancelFetch context.CancelFunc
+		fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
+		defer cancelFetch()
+	}
+	body, errLoad := subscription.Load(fetchCtx, req.SubscriptionURL)
 	if errLoad != nil {
 		return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 	}

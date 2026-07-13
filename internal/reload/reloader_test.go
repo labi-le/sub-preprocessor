@@ -106,6 +106,7 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.ASN.Timeout = 4 * time.Second
 	cfg.ASN.DenyPatterns = []string{"^AS1234 ", "spammy"}
 	cfg.Workflow.Stages = []string{"geofeed", "asn"}
+	cfg.Fetch.Timeout = 3 * time.Second
 
 	opts := reload.OptionsFromConfig(cfg)
 
@@ -129,6 +130,9 @@ func TestOptionsFromConfig(t *testing.T) {
 	}
 	if !slices.Equal(opts.WorkflowStages, cfg.Workflow.Stages) {
 		t.Errorf("WorkflowStages: got %v want %v", opts.WorkflowStages, cfg.Workflow.Stages)
+	}
+	if opts.FetchTimeout != cfg.Fetch.Timeout {
+		t.Errorf("FetchTimeout: got %v want %v", opts.FetchTimeout, cfg.Fetch.Timeout)
 	}
 	if opts.PreloadedGeofeed != nil {
 		t.Error("OptionsFromConfig must not set PreloadedGeofeed")

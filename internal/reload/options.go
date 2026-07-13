@@ -25,5 +25,6 @@ func OptionsFromConfig(cfg config.Config) preprocess.Options {
 		ASNDenyPatterns:     cfg.ASN.DenyPatterns,
 		WorkflowStages:      cfg.Workflow.Stages,
 		Annotate:            cfg.Workflow.Annotate == nil || *cfg.Workflow.Annotate,
+		FetchTimeout:        cfg.Fetch.Timeout,
 	}
 }

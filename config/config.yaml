@@ -31,6 +31,9 @@ geoblock:
     concurrency: 8
 deadcache:
   ttl: 30m
+fetch:
+  # HTTP fetch timeout per subscription; unresponsive sources fail fast
+  timeout: 3s
 groups:
   nato:
     - "AL"
