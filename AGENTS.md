@@ -85,7 +85,7 @@ Important keys:
 - `geofeed.sources[].type` (`raw` or `gzip`)
 - `resolver.timeout`
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
-- `workflow.stages` (order of filter stages: `asn`, `geofeed`)
+- `workflow.stages` (order of IP-filter stages: `asn`, `geofeed`) + `workflow.annotate` (default true — add `[GEO:XX][IP:]` to node names on both `/` and `/stable.txt`)
 - `asn.deny_patterns` (+ `asn.timeout`) — usually empty now; the per-host `geoblock` list replaces ASN-name denial. The ASN stage still does country filtering.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` (`model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`) — params for the `gemini` node-filter; enabled by listing `gemini` in `subscriptions.check.filters`

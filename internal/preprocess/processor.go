@@ -35,6 +35,7 @@ type Options struct {
 	PreloadedGeofeed    geofeed.CountryLookup
 	PreloadedLoadedAt   time.Time
 	Blocklist           Blocklist
+	Annotate            bool
 }
 
 type FilterRequest struct {
@@ -59,6 +60,7 @@ type Processor struct {
 	resolver        *resolver.Resolver
 	filters         []Filter
 	blocklist       Blocklist
+	annotate        bool
 }
 
 type Stats struct {
@@ -127,6 +129,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		RefreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		blocklist:       opts.Blocklist,
+		annotate:        opts.Annotate,
 		filters:         filters,
 	}, nil
 }
@@ -240,14 +243,17 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		}
 	}
 
-	chosenIP := ips[0]
-	chosenCountry := geofeed.LookupCountry(pctx.Lookup, chosenIP)
-
 	if !pctx.IsFirstNode {
 		pctx.Buffer.WriteByte('\n')
 	}
 	pctx.IsFirstNode = false
-	rewrite.NodeName(pctx.Buffer, node, chosenCountry, chosenIP)
+	if p.annotate {
+		chosenIP := ips[0]
+		chosenCountry := geofeed.LookupCountry(pctx.Lookup, chosenIP)
+		rewrite.NodeName(pctx.Buffer, node, chosenCountry, chosenIP)
+	} else {
+		pctx.Buffer.WriteString(node.Raw)
+	}
 	pctx.Stats.Kept++
 }
 

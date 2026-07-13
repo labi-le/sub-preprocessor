@@ -8,7 +8,7 @@ import (
 )
 
 func entry(label string) stable.Entry {
-	return stable.Entry{Label: label, Raw: "vless://u@" + label + ".example:443#" + label}
+	return stable.Entry{Label: label, Raw: "vless://u@" + label + ".example:443#" + label, Tagged: "vless://u@" + label + ".example:443#" + label}
 }
 
 func TestSelectSurvivorsFiltersAndSorts(t *testing.T) {
@@ -56,8 +56,8 @@ func TestBuildPayload(t *testing.T) {
 	t.Parallel()
 
 	survivors := []stable.Survivor{
-		{Entry: stable.Entry{Label: "x", Raw: "vless://u@x:443#x"}, MeanMs: 10},
-		{Entry: stable.Entry{Label: "y", Raw: "vless://u@y:443#y"}, MeanMs: 20},
+		{Entry: stable.Entry{Label: "x", Raw: "vless://u@x:443#x", Tagged: "vless://u@x:443#x"}, MeanMs: 10},
+		{Entry: stable.Entry{Label: "y", Raw: "vless://u@y:443#y", Tagged: "vless://u@y:443#y"}, MeanMs: 20},
 	}
 	want := []byte("vless://u@x:443#x\nvless://u@y:443#y\n")
 	if got := stable.BuildPayload(survivors); !bytes.Equal(got, want) {

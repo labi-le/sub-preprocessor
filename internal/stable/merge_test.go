@@ -24,9 +24,9 @@ func TestMergeDedupesAndRelabels(t *testing.T) {
 	})
 
 	want := []stable.Entry{
-		{Label: "alpha-001", Raw: "vless://uuid-a@host.example:443?type=tcp#alpha-001", Addr: "host.example:443"},
-		{Label: "alpha-002", Raw: "vless://uuid-b@other.example:8443#alpha-002", Addr: "other.example:8443"},
-		{Label: "beta-001", Raw: "vless://uuid-d@beta.example:443#beta-001", Addr: "beta.example:443"},
+		{Label: "alpha-001", Raw: "vless://uuid-a@host.example:443?type=tcp#alpha-001", Tagged: "vless://uuid-a@host.example:443?type=tcp#alpha-001", Addr: "host.example:443"},
+		{Label: "alpha-002", Raw: "vless://uuid-b@other.example:8443#alpha-002", Tagged: "vless://uuid-b@other.example:8443#alpha-002", Addr: "other.example:8443"},
+		{Label: "beta-001", Raw: "vless://uuid-d@beta.example:443#beta-001", Tagged: "vless://uuid-d@beta.example:443#beta-001", Addr: "beta.example:443"},
 	}
 
 	if len(entries) != len(want) {
@@ -79,5 +79,22 @@ func TestMergeRelabelsVmessViaPs(t *testing.T) {
 	}
 	if m["add"] != "1.2.3.4" {
 		t.Errorf("add lost: got %v", m["add"])
+	}
+}
+
+func TestMergeKeepsGeoTag(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("vless://u@h.example:443#[GEO:FI][IP:1.2.3.4] orig\n")
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Raw != "vless://u@h.example:443#src-001" {
+		t.Errorf("Raw must be the clean probe label, got %q", e.Raw)
+	}
+	if e.Tagged != "vless://u@h.example:443#[GEO:FI][IP:1.2.3.4] src-001" {
+		t.Errorf("Tagged must keep the geo tag, got %q", e.Tagged)
 	}
 }

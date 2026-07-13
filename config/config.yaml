@@ -17,6 +17,7 @@ workflow:
   stages:
     - asn
     - geofeed
+  annotate: true # add [GEO:XX][IP:x.x.x.x] to node names (both / and /stable.txt)
 asn:
   deny_patterns: []
   timeout: 5s

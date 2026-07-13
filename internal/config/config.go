@@ -45,6 +45,9 @@ var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 type WorkflowConfig struct {
 	Stages []string `yaml:"stages"`
+	// Annotate adds the [GEO:XX][IP:x.x.x.x] tag to node names. Pointer so an
+	// unset value defaults to true (annotation on) rather than false.
+	Annotate *bool `yaml:"annotate"`
 }
 
 type LogConfig struct {
@@ -234,6 +237,10 @@ func Load(path string) (Config, error) {
 	}
 	if len(cfg.Workflow.Stages) == 0 {
 		cfg.Workflow.Stages = []string{"geofeed", "asn"}
+	}
+	if cfg.Workflow.Annotate == nil {
+		on := true
+		cfg.Workflow.Annotate = &on
 	}
 	cfg.Subscriptions.applyDefaults()
 	cfg.GeoBlock.applyDefaults()

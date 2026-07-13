@@ -40,7 +40,7 @@ func SelectSurvivors(entries []Entry, res map[string]ProbeResult, rounds, maxFai
 func BuildPayload(survivors []Survivor) []byte {
 	var b []byte
 	for _, s := range survivors {
-		b = append(b, s.Raw...)
+		b = append(b, s.Tagged...)
 		b = append(b, '\n')
 	}
 	return b

@@ -49,7 +49,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `GeofeedConfig` — `sources` + `refresh_interval` with `Validate() error` method
 - `Groups` — `map[string][]string` with `Validate() error` method
 - `LogConfig` — `level` (`yaml:"level"`, default `"info"`)
-- `WorkflowConfig` — `stages` (sequential pipeline order; known names: `geofeed`, `asn`)
+- `WorkflowConfig` — `stages` (sequential IP-filter order; known names: `geofeed`, `asn`) + `annotate` (`*bool`, default true — add the `[GEO:XX][IP:x.x.x.x]` name tag)
 - `ASNConfig` — `deny_patterns` + `timeout`
 - `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
 - `GeminiConfig` — `endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency` (params for the `gemini` node-filter); `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE`). Enabled by listing `gemini` in `subscriptions.check.filters`.
@@ -272,7 +272,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns AND IPs whose Cymru-resolved country is not in `AllowedCountries` (so country filtering works without a geofeed stage)
 - `Blocklist` — interface `Blocked(host string) bool` (satisfied by `*geoblock.Store`); when set, `processNode` drops nodes whose `Server` is currently geo-blocked (`GeoBlockDrop`) before DNS resolution, on both `/` and the worker
-- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `Blocklist`, `PreloadedGeofeed`, `PreloadedLoadedAt`). The ASN resolver is now built whenever the `asn` stage is active (not only when `deny_patterns` is non-empty), so country filtering survives an empty deny list.
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `Blocklist`, `Annotate`, `PreloadedGeofeed`, `PreloadedLoadedAt`). `Annotate` gates the `[GEO:XX][IP:]` name rewrite in `processNode` (off → the node's original name passes through). The ASN resolver is built whenever the `asn` stage is active (not only when `deny_patterns` is non-empty), so country filtering survives an empty deny list.
 - `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
 **Key functions:**
@@ -341,7 +341,7 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `Stats` — `SourcesOK/SourcesTotal/Merged/Tested/Kept` counters for the `X-Stable-Stats` header
 - `Snapshot` — immutable `Payload []byte` + `UpdatedAt` + `Stats`
 - `Holder` — `atomic.Pointer[Snapshot]`; `Load()` returns nil before the first successful cycle
-- `SourceBody` / `Entry` — merge input (source name + fetched body) and output (`Label` + relabeled `Raw` URI + `Addr` server:port, the dead-cache key)
+- `SourceBody` / `Entry` — merge input (source name + fetched body) and output. `Entry.Raw` is the clean `<source>-NNN` name used for probing; `Entry.Tagged` is the published name (`Raw` plus the `[GEO][IP]` annotation carried over from the filter pass, when present); `Addr` is the server:port dead-cache key. `BuildPayload` emits `Tagged`.
 - `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
 - `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
 - `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`

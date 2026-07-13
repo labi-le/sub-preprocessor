@@ -3,6 +3,7 @@ package stable
 import (
 	"fmt"
 
+	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -12,11 +13,14 @@ type SourceBody struct {
 	Body []byte
 }
 
-// Entry is a merged node whose Raw URI is already relabeled to Label.
+// Entry is a merged node. Raw carries the clean <source>-NNN name used for
+// probing; Tagged carries the published name (the [GEO][IP] annotation from the
+// filter pass, when present, plus the same unique label).
 type Entry struct {
-	Label string
-	Raw   string
-	Addr  string // server:port, the dead-cache key
+	Label  string
+	Raw    string
+	Tagged string
+	Addr   string // server:port, the dead-cache key
 }
 
 // Merge parses all source bodies in order, dedupes nodes by Server:Port
@@ -37,9 +41,15 @@ func Merge(bodies []SourceBody) []Entry {
 			if !ok {
 				return true
 			}
+			tagged := raw
+			if tags := rewrite.LeadingTags(n.Name); tags != "" {
+				if t, tok := relabelNode(n, tags+" "+label); tok {
+					tagged = t
+				}
+			}
 			seen[key] = struct{}{}
 			kept++
-			entries = append(entries, Entry{Label: label, Raw: raw, Addr: key})
+			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key})
 			return true
 		})
 	}

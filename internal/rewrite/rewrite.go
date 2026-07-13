@@ -118,6 +118,30 @@ func StripKnownTags(s string) string {
 	return ""
 }
 
+// LeadingTags returns the contiguous run of known [KEY:VAL] tags at the start of
+// s (e.g. "[GEO:FI][IP:1.2.3.4]"), or "" if none. Complement of StripKnownTags.
+func LeadingTags(s string) string {
+	pos, last := 0, 0
+	for pos < len(s) {
+		for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
+			pos++
+		}
+		if pos >= len(s) || s[pos] != '[' {
+			break
+		}
+		end := strings.IndexByte(s[pos:], ']')
+		if end < 0 {
+			break
+		}
+		if !isKnownTag(s[pos+1 : pos+end]) {
+			break
+		}
+		pos += end + 1
+		last = pos
+	}
+	return s[:last]
+}
+
 func isKnownTag(tag string) bool {
 	if len(tag) == 0 {
 		return false

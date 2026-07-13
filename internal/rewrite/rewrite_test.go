@@ -68,3 +68,20 @@ func TestNodeNameVmessRewritesPsWithGeoIP(t *testing.T) {
 		t.Errorf("add lost: got %v", m["add"])
 	}
 }
+
+func TestLeadingTags(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"[GEO:FI][IP:1.2.3.4] my node": "[GEO:FI][IP:1.2.3.4]",
+		"[OK][GEO:DE] name":            "[OK][GEO:DE]",
+		"[GEO:LV]":                     "[GEO:LV]",
+		"plain name":                   "",
+		"[UNKNOWN:x][GEO:FI] n":        "",
+		"":                             "",
+	}
+	for in, want := range cases {
+		if got := rewrite.LeadingTags(in); got != want {
+			t.Errorf("LeadingTags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
