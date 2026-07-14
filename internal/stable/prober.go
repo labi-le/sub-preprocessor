@@ -71,12 +71,21 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	accs := make(map[string]*delayAcc, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// One semaphore shared by every round so the effective number of in-flight
+	// URL tests honors check.concurrency instead of rounds*concurrency.
+	sem := make(chan struct{}, m.cfg.Concurrency)
 	for range m.cfg.Rounds {
 		wg.Go(func() {
-			m.runRound(ctx, opLog, prog, proxies, &mu, accs)
+			m.runRound(ctx, opLog, prog, proxies, sem, &mu, accs)
 		})
 	}
 	wg.Wait()
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Partial results from a cancelled probe would masquerade as a
+		// truncated-but-successful cycle; report the cancellation instead.
+		return nil, fmt.Errorf("probe interrupted: %w", ctxErr)
+	}
 
 	res := make(map[string]ProbeResult, len(accs))
 	for name, a := range accs {
@@ -121,11 +130,11 @@ func (m *MihomoProber) runRound(
 	opLog zerolog.Logger,
 	prog *progress,
 	proxies []mihomo.Proxy,
+	sem chan struct{},
 	mu *sync.Mutex,
 	accs map[string]*delayAcc,
 ) {
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, m.cfg.Concurrency)
 	for _, px := range proxies {
 		wg.Add(1)
 		sem <- struct{}{}

@@ -14,7 +14,9 @@ import (
 	"time"
 )
 
-const userAgent = "mihomo-geofeed-preprocessor/0.1"
+// UserAgent is sent on every outbound fetch. Exported so sibling packages
+// (classify) present the same identity a real worker fetch would.
+const UserAgent = "mihomo-geofeed-preprocessor/0.1"
 
 type FileType string
 
@@ -37,6 +39,11 @@ const (
 
 var errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
 
+// sharedClient is reused across fetches: the safe client is stateless apart
+// from its connection pool, and rebuilding a Transport per request churns
+// sockets and TLS handshakes.
+var sharedClient = NewSafeHTTPClient()
+
 func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fileType FileType) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
 		return nil, err
@@ -45,13 +52,13 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 		return nil, err
 	}
 
-	client := NewSafeHTTPClient()
+	client := sharedClient
 
 	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, string(rawURL), nil)
 	if errReq != nil {
 		return nil, fmt.Errorf("create request: %w", errReq)
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, errResp := client.Do(req)
 	if errResp != nil {
@@ -167,11 +174,29 @@ func MaybeDecode(resp *http.Response, fileType FileType) (io.ReadCloser, error) 
 	return zr, nil
 }
 
+// reservedPrefixes are non-public ranges not covered by the netip.Addr
+// classification methods: CGN shared space, IETF protocol assignments,
+// benchmarking, and class E (incl. limited broadcast).
+var reservedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 func isPublicIP(ip netip.Addr) bool {
 	ip = ip.Unmap()
 	if !ip.IsValid() {
 		return false
 	}
-	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsMulticast() &&
-		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	for _, p := range reservedPrefixes {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }

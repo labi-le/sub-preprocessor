@@ -71,8 +71,11 @@ func loadState(path string) state {
 	return st
 }
 
-// saveState writes the state file atomically (temp + rename). A no-op when path
-// is empty.
+// stateFileMode: the crawler state is private to the crawler uid.
+const stateFileMode os.FileMode = 0o600
+
+// saveState writes the state file atomically (fsynced temp + rename). A no-op
+// when path is empty.
 func saveState(path string, st state) error {
 	if path == "" {
 		return nil
@@ -81,12 +84,5 @@ func saveState(path string, st state) error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	tmp := path + ".tmp"
-	if writeErr := os.WriteFile(tmp, b, 0o600); writeErr != nil {
-		return fmt.Errorf("write temp: %w", writeErr)
-	}
-	if renameErr := os.Rename(tmp, path); renameErr != nil {
-		return fmt.Errorf("rename: %w", renameErr)
-	}
-	return nil
+	return writeFileAtomic(path, b, stateFileMode)
 }

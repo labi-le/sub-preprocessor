@@ -40,6 +40,9 @@ func main() {
 			return
 		case "classify":
 			os.Exit(runClassify(os.Args[2:]))
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q\nusage: %s [crawl | classify <url>]\n", os.Args[1], os.Args[0])
+			os.Exit(exitUsageError)
 		}
 	}
 
@@ -61,14 +64,14 @@ func runCrawl() {
 		Channels:     splitList(getenv("CRAWL_CHANNELS", "")),
 		ChannelsPath: getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
 		PrivatePath:  getenv("CRAWL_PRIVATE", "/config/private.yaml"),
-		Pages:        atoiDefault(getenv("CRAWL_PAGES", "6"), defaultCrawlPages),
+		Pages:        atoiDefault(getenv("CRAWL_PAGES", ""), defaultCrawlPages),
 		Prune:        boolDefault(getenv("CRAWL_PRUNE", ""), true),
-		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", "2"), defaultCrawlDepth),
-		MaxChannels:  intDefault(getenv("CRAWL_MAX_CHANNELS", "0"), 0),
+		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", ""), defaultCrawlDepth),
+		MaxChannels:  intDefault(getenv("CRAWL_MAX_CHANNELS", ""), 0),
 		StatePath:    getenv("CRAWL_STATE", "/config/.crawler-state.json"),
-		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", "720h"), defaultCrawlStateTTL),
+		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
 	}
-	interval := durationDefault(getenv("CRAWL_INTERVAL", "30m"), defaultCrawlInterval)
+	interval := durationDefault(getenv("CRAWL_INTERVAL", ""), defaultCrawlInterval)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -123,15 +126,10 @@ func getenv(key, def string) string {
 	return def
 }
 
+// splitList splits a comma/whitespace-separated list; FieldsFunc never yields
+// empty fields, so its result is returned directly.
 func splitList(s string) []string {
-	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' })
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if f != "" {
-			out = append(out, f)
-		}
-	}
-	return out
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' })
 }
 
 func atoiDefault(s string, def int) int {

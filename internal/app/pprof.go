@@ -5,6 +5,7 @@ package app
 import (
 	"net/http"
 	"os"
+	"time"
 
 	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
 
@@ -15,7 +16,8 @@ func init() {
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
 		go func() {
 			zlog.Info().Str("addr", addr).Msg("pprof listening")
-			if err := http.ListenAndServe(addr, nil); err != nil {
+			srv := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second}
+			if err := srv.ListenAndServe(); err != nil {
 				zlog.Error().Err(err).Msg("pprof error")
 			}
 		}()

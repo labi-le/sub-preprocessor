@@ -28,6 +28,10 @@ type Server struct {
 
 const defaultBuilderCapacity = 4096
 
+// readTimeout bounds the full request read (slowloris hardening; keepalive is
+// disabled, so it caps each connection's lifetime).
+const readTimeout = 30 * time.Second
+
 func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
 		code := fiber.StatusInternalServerError
@@ -43,6 +47,7 @@ func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *sta
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		DisableKeepalive:      true,
+		ReadTimeout:           readTimeout,
 		ErrorHandler:          errorHandler,
 	})
 

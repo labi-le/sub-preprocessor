@@ -10,14 +10,14 @@ import (
 	"domains.lst/sub-preprocessor/internal/server"
 )
 
-type stubFilterer struct{ id string }
+type stubFilterer struct{}
 
 func (s *stubFilterer) Filter(_ context.Context, _ *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
 	return preprocess.Stats{}, nil
 }
 
 func TestHolder_StoreLoad(t *testing.T) {
-	snap1 := &server.Snapshot{Svc: &stubFilterer{id: "A"}, Groups: map[string][]string{"g": {"US"}}}
+	snap1 := &server.Snapshot{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"US"}}}
 	h := server.NewHolder(snap1)
 	got := h.Load()
 	if got == nil {
@@ -27,7 +27,7 @@ func TestHolder_StoreLoad(t *testing.T) {
 		t.Fatal("Load() returned wrong snapshot")
 	}
 
-	snap2 := &server.Snapshot{Svc: &stubFilterer{id: "B"}, Groups: map[string][]string{"g": {"DE"}}}
+	snap2 := &server.Snapshot{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"DE"}}}
 	h.Store(snap2)
 	got2 := h.Load()
 	if got2.Svc != snap2.Svc {
@@ -36,14 +36,14 @@ func TestHolder_StoreLoad(t *testing.T) {
 }
 
 func TestHolder_ConcurrentRace(_ *testing.T) {
-	snap := &server.Snapshot{Svc: &stubFilterer{id: "X"}, Groups: nil}
+	snap := &server.Snapshot{Svc: &stubFilterer{}, Groups: nil}
 	h := server.NewHolder(snap)
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			h.Store(&server.Snapshot{Svc: &stubFilterer{id: "Y"}})
+			h.Store(&server.Snapshot{Svc: &stubFilterer{}})
 		}()
 		go func() {
 			defer wg.Done()

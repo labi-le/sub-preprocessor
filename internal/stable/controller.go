@@ -29,10 +29,12 @@ func NewController(ctx context.Context, holder *Holder, filterer func() Filterer
 }
 
 // Apply stops any running checker and starts a new one when cfg has
-// subscription sources configured.
+// subscription sources configured. The prober and node filters are built
+// before the old worker is stopped, so a failed construction leaves the
+// previous checker running.
 func (c *Controller) Apply(cfg config.Config) error {
-	c.Stop()
 	if !cfg.SubscriptionsEnabled() {
+		c.Stop()
 		return nil
 	}
 
@@ -56,6 +58,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	}
 	filters := buildNodeFilters(subs.Check.Filters, prober, c.store, c.logger)
 
+	c.Stop()
 	checker := NewChecker(
 		subs.Sources,
 		allowed,

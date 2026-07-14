@@ -1,11 +1,21 @@
 package crawl //nolint:testpackage // exercises unexported crawl helpers
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+
+	"domains.lst/sub-preprocessor/internal/classify"
+	"domains.lst/sub-preprocessor/internal/fetch"
 )
 
 func TestExtractURLs(t *testing.T) {
@@ -14,7 +24,8 @@ func TestExtractURLs(t *testing.T) {
 	page := `<a href="https://t.me/somechan">x</a>` +
 		`<pre>https://is.wepogp.gay/bypass?payload=AbC%2Bd/e=</pre>` +
 		`<img src="https://cdn4.telesco.pe/file/abc.jpg"/>` +
-		`text https://host.example/api/filter?code=RU&amp;type=white, end`
+		`text https://host.example/api/filter?code=RU&amp;type=white, end` +
+		` nbsp https://nb.example/sub&nbsp;tail`
 
 	got := extractURLs(page)
 	want := map[string]bool{
@@ -22,6 +33,7 @@ func TestExtractURLs(t *testing.T) {
 		"https://is.wepogp.gay/bypass?payload=AbC%2Bd/e=":    true,
 		"https://cdn4.telesco.pe/file/abc.jpg":               true,
 		"https://host.example/api/filter?code=RU&type=white": true, // &amp; unescaped, trailing comma trimmed
+		"https://nb.example/sub":                             true, // &nbsp; (U+00A0) terminates the URL
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d urls %v, want %d", len(got), got, len(want))
@@ -30,6 +42,121 @@ func TestExtractURLs(t *testing.T) {
 		if !want[u] {
 			t.Errorf("unexpected url %q", u)
 		}
+	}
+}
+
+func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
+	t.Parallel()
+
+	c := &Crawler{
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			switch string(u) {
+			case "https://live.example/sub":
+				return classify.Result{Nodes: 1}, nil
+			case "https://err.example/sub":
+				return classify.Result{}, errors.New("transient network error")
+			default:
+				return classify.Result{}, nil // definitively not live
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+	live, unknown := c.classifyAll(context.Background(),
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub"})
+
+	if !live["https://live.example/sub"] || len(live) != 1 {
+		t.Errorf("live = %v, want exactly the live URL", live)
+	}
+	if !unknown["https://err.example/sub"] || len(unknown) != 1 {
+		t.Errorf("unknown = %v, want exactly the errored URL", unknown)
+	}
+}
+
+func TestClassifyAllBoundsConcurrency(t *testing.T) {
+	t.Parallel()
+
+	var cur, peak atomic.Int32
+	c := &Crawler{
+		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL) (classify.Result, error) {
+			n := cur.Add(1)
+			defer cur.Add(-1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+	urls := make([]string, 0, 4*classifyConcurrency)
+	for i := range cap(urls) {
+		urls = append(urls, fmt.Sprintf("https://h%d.example/sub", i))
+	}
+	live, unknown := c.classifyAll(context.Background(), urls)
+	if len(live) != len(urls) || len(unknown) != 0 {
+		t.Fatalf("live=%d unknown=%d, want %d/0", len(live), len(unknown), len(urls))
+	}
+	if p := peak.Load(); p > classifyConcurrency {
+		t.Fatalf("peak in-flight classifications %d exceed classifyConcurrency %d", p, classifyConcurrency)
+	}
+}
+
+func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlHand = "https://hand.example/sub"
+		urlLive = "https://live.example/sub"
+		urlDead = "https://dead.example/sub"
+		urlErr  = "https://err.example/sub"
+	)
+	c := &Crawler{
+		opts: Options{Prune: true},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			switch string(u) {
+			case urlLive:
+				return classify.Result{Nodes: 1}, nil
+			case urlErr:
+				return classify.Result{}, errors.New("transient network error")
+			default:
+				return classify.Result{}, nil // definitively not live
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{
+		{Name: "hand-added", URL: urlHand},
+		{Name: managedName(urlLive), URL: urlLive},
+		{Name: managedName(urlDead), URL: urlDead},
+		{Name: managedName(urlErr), URL: urlErr},
+	}
+
+	live := map[string]bool{}
+	managedURL, unknown := c.recheckManaged(context.Background(), pf, live)
+	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
+
+	byURL := map[string]bool{}
+	for _, s := range next {
+		byURL[s.URL] = true
+	}
+	if !byURL[urlHand] {
+		t.Error("hand-added source must be preserved")
+	}
+	if !byURL[urlLive] {
+		t.Error("still-live managed source must be kept")
+	}
+	if byURL[urlDead] {
+		t.Error("definitively dead managed source must be pruned")
+	}
+	if !byURL[urlErr] {
+		t.Error("managed source with unknown (errored) status must be retained, not pruned")
+	}
+	if len(managed) != 2 {
+		t.Errorf("managed = %v, want live+unknown (2 entries)", managed)
 	}
 }
 
@@ -139,7 +266,9 @@ func TestExtractChannels(t *testing.T) {
 			`self <a href="https://t.me/o00000000i/3631">x</a>` +
 			`canon <a href="https://t.me/s/o00000000i">s</a>` +
 			`share <a href="https://t.me/share/url?url=x">s</a>` +
-			`dup <a href="https://t.me/rap_ex/12">again</a>`,
+			`dup <a href="https://t.me/rap_ex/12">again</a>` +
+			`lookalike <a href="https://shortcut.me/abcdef">not telegram</a>` +
+			`bare lookalike shortcut.me/ghijkl end`,
 	}
 	got := extractChannels(pages, "o00000000i")
 
@@ -232,7 +361,7 @@ func TestLoadChannels(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := loadChannels(path)
+	got := loadChannels(path, zerolog.Nop())
 	want := []string{"o00000000i", "@rap_ex", "https://t.me/remiuc"}
 	if len(got) != len(want) {
 		t.Fatalf("loadChannels = %v, want %v", got, want)
@@ -243,14 +372,14 @@ func TestLoadChannels(t *testing.T) {
 		}
 	}
 
-	if c := loadChannels(filepath.Join(dir, "nope.yaml")); c != nil {
+	if c := loadChannels(filepath.Join(dir, "nope.yaml"), zerolog.Nop()); c != nil {
 		t.Errorf("missing file should yield nil, got %v", c)
 	}
 	bad := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(bad, []byte("channels: [not: valid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if c := loadChannels(bad); c != nil {
+	if c := loadChannels(bad, zerolog.Nop()); c != nil {
 		t.Errorf("malformed file should yield nil, got %v", c)
 	}
 }

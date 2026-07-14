@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -135,7 +136,9 @@ func (r *Resolver) storeCache(host string, ips []netip.Addr, ttl time.Duration) 
 	if len(r.cache) >= maxCacheEntries {
 		r.evictExpiredLocked(now)
 	}
-	r.cache[host] = cacheEntry{ips: ips, expires: now.Add(ttl)}
+	// Clone: host is often a substring of a fetched subscription body; using it
+	// directly as a key would pin the whole body in memory for the cache TTL.
+	r.cache[strings.Clone(host)] = cacheEntry{ips: ips, expires: now.Add(ttl)}
 }
 
 // evictExpiredLocked drops expired entries; when everything is still fresh it

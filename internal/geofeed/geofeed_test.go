@@ -3,6 +3,7 @@ package geofeed_test
 import (
 	"context"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,9 @@ func TestParseAndLookupCountry(t *testing.T) {
 func TestGstaticGeofeedLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live test in short mode")
+	}
+	if os.Getenv("LIVE_TESTS") == "" {
+		t.Skip("skipping live test; set LIVE_TESTS to enable")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -69,6 +73,9 @@ func TestGstaticGeofeedLive(t *testing.T) {
 func TestExtraGeofeedsLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live test in short mode")
+	}
+	if os.Getenv("LIVE_TESTS") == "" {
+		t.Skip("skipping live test; set LIVE_TESTS to enable")
 	}
 
 	urls := []struct {

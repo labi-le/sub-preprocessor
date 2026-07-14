@@ -10,6 +10,8 @@ import (
 )
 
 func TestSetLevel_LiveChange(t *testing.T) {
+	prev := zerolog.GlobalLevel()
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
 	// InitLogger("info") → Debug suppressed → SetLevel("debug") → Debug appears
 	var buf bytes.Buffer
 	logger := ilog.InitLogger("info")
@@ -28,19 +30,30 @@ func TestSetLevel_LiveChange(t *testing.T) {
 }
 
 func TestSetLevel_InvalidLevel(t *testing.T) {
+	prev := zerolog.GlobalLevel()
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
+
 	if err := ilog.SetLevel("not-a-level"); err == nil {
 		t.Fatal("expected error for invalid level")
 	}
-	// level should remain unchanged (debug from previous test or info)
+	if zerolog.GlobalLevel() != prev {
+		t.Fatalf("level should remain %v after invalid SetLevel, got %v", prev, zerolog.GlobalLevel())
+	}
 }
 
-func TestInitLogger_ReturnsLogger(_ *testing.T) {
+func TestInitLogger_ReturnsLogger(t *testing.T) {
+	prev := zerolog.GlobalLevel()
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
+
 	logger := ilog.InitLogger("warn")
 	// zerolog.Logger is a value type; just verify it's usable
 	_ = logger.With().Str("k", "v").Logger()
 }
 
 func TestSetLevel_GlobalAffectsNewLoggers(t *testing.T) {
+	prev := zerolog.GlobalLevel()
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
+
 	_ = ilog.InitLogger("info")
 	if err := ilog.SetLevel("warn"); err != nil {
 		t.Fatalf("SetLevel: %v", err)
@@ -49,5 +62,4 @@ func TestSetLevel_GlobalAffectsNewLoggers(t *testing.T) {
 	if zerolog.GlobalLevel() != zerolog.WarnLevel {
 		t.Fatalf("expected global level warn, got %v", zerolog.GlobalLevel())
 	}
-	_ = ilog.SetLevel("info")
 }

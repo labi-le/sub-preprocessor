@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,8 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/geofeed"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
 
@@ -298,7 +301,9 @@ func Load(path string) (Config, error) {
 	}
 
 	privatePath := filepath.Join(filepath.Dir(path), "private.yaml")
-	if privBytes, readErr := os.ReadFile(privatePath); readErr == nil {
+	privBytes, readErr := os.ReadFile(privatePath)
+	switch {
+	case readErr == nil:
 		var priv privateConfig
 		if unmarshalErr := yaml.Unmarshal(privBytes, &priv); unmarshalErr != nil {
 			return Config{}, fmt.Errorf("unmarshal private config: %w", unmarshalErr)
@@ -307,17 +312,58 @@ func Load(path string) (Config, error) {
 		if validateErr := cfg.Subscriptions.Validate(cfg.Groups); validateErr != nil {
 			return Config{}, fmt.Errorf("private config: %w", validateErr)
 		}
+	case errors.Is(readErr, fs.ErrNotExist):
+		// No private overlay to merge.
+	default:
+		// A permission or I/O error must fail loudly: silently skipping the
+		// overlay would drop the crawler-managed sources from the output.
+		return Config{}, fmt.Errorf("read private config: %w", readErr)
 	}
 
 	return cfg, nil
 }
 
 func (cfg *Config) Validate() error {
+	if cfg.Log.Level != "" {
+		if _, err := zerolog.ParseLevel(cfg.Log.Level); err != nil {
+			return fmt.Errorf("log.level: %w", err)
+		}
+	}
+	if cfg.Resolver.Timeout < 0 {
+		return errors.New("resolver.timeout must not be negative")
+	}
 	if cfg.Resolver.CacheTTL < 0 {
 		return errors.New("resolver.cache_ttl must not be negative")
 	}
 	if cfg.Resolver.CacheNegativeTTL < 0 {
 		return errors.New("resolver.cache_negative_ttl must not be negative")
+	}
+	if cfg.ASN.Timeout < 0 {
+		return errors.New("asn.timeout must not be negative")
+	}
+	if cfg.Fetch.Timeout < 0 {
+		return errors.New("fetch.timeout must not be negative")
+	}
+	if cfg.DeadCache.TTL < 0 {
+		return errors.New("deadcache.ttl must not be negative")
+	}
+	if cfg.Geofeed.RefreshInterval < 0 {
+		return errors.New("geofeed.refresh_interval must not be negative")
+	}
+	if cfg.Subscriptions.Interval < 0 {
+		return errors.New("subscriptions.interval must not be negative")
+	}
+	if cfg.Subscriptions.Check.Timeout < 0 {
+		return errors.New("subscriptions.check.timeout must not be negative")
+	}
+	if cfg.Subscriptions.Check.SourceTimeout < 0 {
+		return errors.New("subscriptions.check.source_timeout must not be negative")
+	}
+	if err := cfg.Workflow.validate(); err != nil {
+		return err
+	}
+	if err := cfg.GeoBlock.validate(); err != nil {
+		return err
 	}
 	if err := cfg.Geofeed.Validate(); err != nil {
 		return err
@@ -327,6 +373,37 @@ func (cfg *Config) Validate() error {
 	}
 	if err := cfg.Subscriptions.Validate(cfg.Groups); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (w *WorkflowConfig) validate() error {
+	for _, stage := range w.Stages {
+		if stage != "geofeed" && stage != "asn" {
+			return fmt.Errorf("workflow.stages: unknown stage %q (must be \"geofeed\" or \"asn\")", stage)
+		}
+	}
+	return nil
+}
+
+// validate rejects values that would panic or misbehave downstream: a negative
+// concurrency reaches make(chan struct{}, n) in the prober workers, and
+// negative timeouts/TTLs bypass the ==0 default guards.
+func (g *GeoBlockConfig) validate() error {
+	if g.TTL < 0 {
+		return errors.New("geoblock.ttl must not be negative")
+	}
+	if g.Gemini.Timeout < 0 {
+		return errors.New("geoblock.gemini.timeout must not be negative")
+	}
+	if g.Gemini.Concurrency < 0 {
+		return errors.New("geoblock.gemini.concurrency must not be negative")
+	}
+	if g.Claude.Timeout < 0 {
+		return errors.New("geoblock.claude.timeout must not be negative")
+	}
+	if g.Claude.Concurrency < 0 {
+		return errors.New("geoblock.claude.concurrency must not be negative")
 	}
 	return nil
 }
@@ -414,6 +491,16 @@ func (c *CheckConfig) validate() error {
 	if c.MaxAvgMs < 1 {
 		return errors.New("subscriptions.check.max_avg_ms must be at least 1")
 	}
+	// Same parser the prober uses (stable.NewMihomoProber), so a value that
+	// loads is guaranteed to build — zero drift between Load and Apply.
+	if _, err := utils.NewUnsignedRanges[uint16](c.ExpectedStatus); err != nil {
+		return fmt.Errorf("subscriptions.check.expected_status %q: %w", c.ExpectedStatus, err)
+	}
+	if c.TestURL != "" {
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(c.TestURL)); err != nil {
+			return fmt.Errorf("subscriptions.check.test_url: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -423,6 +510,19 @@ func SubscriptionsChanged(old, newCfg Config) bool {
 
 func GroupsChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Groups, newCfg.Groups)
+}
+
+func GeoBlockChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.GeoBlock, newCfg.GeoBlock)
+}
+
+// StoresChanged reports whether a setting baked into the stores built once at
+// startup changed: geoblock.db_path / geoblock.ttl (SQLite blocklist) or
+// deadcache.ttl. Such a change requires a restart to take effect.
+func StoresChanged(old, newCfg Config) bool {
+	return old.GeoBlock.DBPath != newCfg.GeoBlock.DBPath ||
+		old.GeoBlock.TTL != newCfg.GeoBlock.TTL ||
+		old.DeadCache.TTL != newCfg.DeadCache.TTL
 }
 
 func (g *GeofeedConfig) Validate() error {

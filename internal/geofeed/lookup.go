@@ -18,7 +18,11 @@ type ipRange struct {
 
 type indexedLookup struct {
 	v4 []ipRange
-	v6 []Entry
+	// v4MaxEnd[i] is the maximum range end among v4[0..i]. Non-decreasing, so
+	// the backward walk in LookupCountry can stop as soon as no earlier range
+	// can still cover the IP, making misses O(log n) instead of O(n).
+	v4MaxEnd []uint32
+	v6       []Entry
 }
 
 func newIndexedLookup(entries []Entry) *indexedLookup {
@@ -52,6 +56,17 @@ func newIndexedLookup(entries []Entry) *indexedLookup {
 	sort.Slice(lookup.v6, func(i, j int) bool {
 		return lookup.v6[i].Prefix.Bits() > lookup.v6[j].Prefix.Bits()
 	})
+
+	if len(lookup.v4) > 0 {
+		lookup.v4MaxEnd = make([]uint32, len(lookup.v4))
+		maxEnd := uint32(0)
+		for i, r := range lookup.v4 {
+			if r.end > maxEnd {
+				maxEnd = r.end
+			}
+			lookup.v4MaxEnd[i] = maxEnd
+		}
+	}
 
 	return lookup
 }
@@ -87,6 +102,10 @@ func (l *indexedLookup) LookupCountry(ip netip.Addr) CountryCode {
 		// The first one whose range covers ip32 wins (most specific due to sort order).
 		for idx > 0 {
 			idx--
+			if l.v4MaxEnd[idx] < ip32 {
+				// No range at or before idx reaches ip32 — a miss.
+				break
+			}
 			if ip32 <= l.v4[idx].end {
 				return l.v4[idx].country
 			}

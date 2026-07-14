@@ -108,10 +108,6 @@ func TestAllAllowed(t *testing.T) {
 	if got[1] != netip.MustParseAddr("198.51.100.20") {
 		t.Fatalf("unexpected second ip: %s", got[1])
 	}
-	if cap(got) < len(got) {
-		t.Fatal("unexpected slice capacity")
-	}
-	_ = cap(got)
 }
 
 func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
@@ -132,6 +128,9 @@ func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
 
 	if len(got) != 2 {
 		t.Fatalf("unexpected allowed count: %d", len(got))
+	}
+	if &got[0] != &input[0] {
+		t.Fatal("expected result to alias the input backing array")
 	}
 	if got[0] != input[0] || got[1] != input[2] {
 		t.Fatalf("unexpected filtered values: %v", got)

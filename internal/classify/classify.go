@@ -17,6 +17,9 @@ import (
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
+// maxSubscriptionSize mirrors the worker's cap (internal/subscription's
+// unexported maxSubscriptionSize, 10 MiB) so a "live" verdict here matches
+// what the worker would accept; keep the two values in sync.
 const maxSubscriptionSize = 10 << 20
 
 // proxySchemes are the URI schemes a Mihomo-compatible subscription is built
@@ -47,8 +50,9 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 	subscription.Parse(subscription.Normalize(body), func(n subscription.Node) bool {
 		// Only real proxy schemes count. parseNode is deliberately generic and
 		// even defaults a missing port to 443, so an HTML page full of
-		// https:// links would otherwise look like a subscription.
-		if n.Server != "" && proxySchemes[string(n.Scheme)] {
+		// https:// links would otherwise look like a subscription. Schemes are
+		// case-insensitive (RFC 3986), so lowercase before the lookup.
+		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] {
 			r.Nodes++
 		}
 		return true
@@ -61,11 +65,15 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 func parseExpire(h string) (int64, bool) {
 	for part := range strings.SplitSeq(h, ";") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "expire="); ok {
-			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if err != nil {
-				return 0, false
+			v = strings.TrimSpace(v)
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				return n, true
 			}
-			return n, true
+			// Some panels emit a float ("expire=1786085295.0"); truncate.
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return int64(f), true
+			}
+			return 0, false
 		}
 	}
 	return 0, false
@@ -82,6 +90,9 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("create request: %w", err)
 	}
+	// Present the same identity a worker fetch would, so the verdict matches
+	// what the worker sees (some panels vary the response by User-Agent).
+	req.Header.Set("User-Agent", fetch.UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, fmt.Errorf("do request: %w", err)

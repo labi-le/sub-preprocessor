@@ -146,3 +146,22 @@ func TestMergeUntaggedNameCleanTagged(t *testing.T) {
 		t.Errorf("untagged node: Tagged (%q) must equal Raw (%q)", e.Tagged, e.Raw)
 	}
 }
+
+func TestMergeMixedCaseHostsCollapse(t *testing.T) {
+	t.Parallel()
+
+	// Hostnames are case-insensitive: mixed-case duplicates must collapse and
+	// share one lowercased dead-cache key, while Raw keeps the original casing.
+	body := []byte("vless://a@HOST.Example:443#one\nvless://b@host.EXAMPLE:443#two\n")
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
+	if len(entries) != 1 {
+		t.Fatalf("mixed-case duplicates must collapse to 1 entry, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Addr != "host.example:443" {
+		t.Errorf("Addr must be the lowercased dead-cache key, got %q", e.Addr)
+	}
+	if e.Raw != "vless://a@HOST.Example:443#src-001" {
+		t.Errorf("Raw must keep original casing (first source wins), got %q", e.Raw)
+	}
+}

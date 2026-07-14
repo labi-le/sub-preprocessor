@@ -9,8 +9,13 @@ import (
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/server"
-	"domains.lst/sub-preprocessor/internal/stable"
 )
+
+// Applier restarts the stable subscription worker from a validated config.
+// Implemented by *stable.Controller.
+type Applier interface {
+	Apply(cfg config.Config) error
+}
 
 // Reloader rebuilds the processing pipeline from a config file on demand and
 // atomically swaps it into the server Holder. On any load, validation, or build
@@ -26,7 +31,7 @@ type Reloader struct {
 	logger      zerolog.Logger
 	currentCfg  config.Config
 	currentProc *preprocess.Processor
-	ctl         *stable.Controller
+	ctl         Applier
 	blocklist   preprocess.Blocklist
 }
 
@@ -38,7 +43,7 @@ func NewReloader(
 	logger zerolog.Logger,
 	cfg config.Config,
 	proc *preprocess.Processor,
-	ctl *stable.Controller,
+	ctl Applier,
 	blocklist preprocess.Blocklist,
 ) *Reloader {
 	return &Reloader{
@@ -96,14 +101,23 @@ func (r *Reloader) Reload(ctx context.Context) {
 			Msg("server.listen change requires restart; ignoring")
 	}
 
+	if config.StoresChanged(r.currentCfg, newCfg) {
+		r.logger.Warn().
+			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl change requires restart; stores are built once at startup")
+	}
+
 	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
 
-	// The stable worker derives its filter set from both sections, so either
-	// change requires a restart; unrelated config edits must leave it running.
+	// The stable worker derives its filter set from subscriptions, groups, and
+	// the geoblock prober settings (gemini/claude), so a change to any of them
+	// requires a restart; unrelated config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
-		config.GroupsChanged(r.currentCfg, newCfg)
+		config.GroupsChanged(r.currentCfg, newCfg) ||
+		config.GeoBlockChanged(r.currentCfg, newCfg)
+	applied := true
 	if r.ctl != nil && subsAffected {
 		if applyErr := r.ctl.Apply(newCfg); applyErr != nil {
+			applied = false
 			r.logger.Error().Err(applyErr).
 				Msg("applying subscriptions config failed; stable worker stopped")
 		} else {
@@ -111,7 +125,15 @@ func (r *Reloader) Reload(ctx context.Context) {
 		}
 	}
 
-	r.currentCfg = newCfg
 	r.currentProc = newProc
+	if !applied {
+		// Do not commit newCfg: keeping the old config means a re-save of the
+		// same file diffs as changed and retries ctl.Apply instead of hitting
+		// the config.Equal fast path. The processor/holder swap above
+		// intentionally stays applied — it already serves the new settings and
+		// rebuilding it on the retry is harmless.
+		return
+	}
+	r.currentCfg = newCfg
 	r.logger.Info().Msg("config reloaded")
 }

@@ -9,8 +9,11 @@ import (
 
 // channelRe matches a t.me channel reference and captures the username slug and
 // any trailing query. Telegram usernames are 5-32 chars, start with a letter,
-// and contain only letters/digits/underscore.
-var channelRe = regexp.MustCompile(`(?:https?://)?t\.me/([a-zA-Z][a-zA-Z0-9_]{4,31})(?:/\d+)?(\?[^\s"'<>]*)?`)
+// and contain only letters/digits/underscore. The host is anchored: it must be
+// preceded by the start of input or a non-hostname character, so hostnames that
+// merely end in "t.me" (e.g. shortcut.me) don't match; a scheme still works
+// because "/" is not a hostname character.
+var channelRe = regexp.MustCompile(`(?:^|[^a-zA-Z0-9.-])t\.me/([a-zA-Z][a-zA-Z0-9_]{4,31})(?:/\d+)?(\?[^\s"'<>]*)?`)
 
 // reservedSlugs are t.me paths that are not channels.
 var reservedSlugs = map[string]bool{
@@ -88,7 +91,7 @@ func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
 	for _, s := range c.opts.Channels {
 		addSeed(s)
 	}
-	for _, s := range loadChannels(c.opts.ChannelsPath) {
+	for _, s := range loadChannels(c.opts.ChannelsPath, c.logger) {
 		addSeed(s)
 	}
 	for _, slug := range st.seeds() {
@@ -114,7 +117,7 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 			}
 		}
 	}
-	found := c.classifyAll(ctx, keys(cand))
+	found, _ := c.classifyAll(ctx, keys(cand))
 	for u := range found {
 		live[u] = true
 	}
@@ -144,7 +147,11 @@ func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) 
 			u += "?before=" + before
 		}
 		page, err := c.client.page(ctx, u)
-		if err != nil || page == "" {
+		if err != nil {
+			c.logger.Warn().Err(err).Str("channel", channel).Msg("channel page fetch failed")
+			break
+		}
+		if page == "" {
 			break
 		}
 		out = append(out, page)

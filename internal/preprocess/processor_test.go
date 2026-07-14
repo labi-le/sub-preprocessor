@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -68,25 +69,6 @@ func TestFormatStats(t *testing.T) {
 	}
 }
 
-func TestShouldReloadGeofeed(t *testing.T) {
-	t.Parallel()
-
-	svc := &preprocess.Processor{RefreshInterval: time.Hour, LoadedAt: time.Now().Add(-2 * time.Hour)}
-	if !svc.ShouldReloadGeofeed(time.Now()) {
-		t.Fatal("expected geofeed reload")
-	}
-
-	svc = &preprocess.Processor{RefreshInterval: time.Hour, LoadedAt: time.Now().Add(-30 * time.Minute)}
-	if svc.ShouldReloadGeofeed(time.Now()) {
-		t.Fatal("did not expect geofeed reload")
-	}
-
-	svc = &preprocess.Processor{RefreshInterval: 0, LoadedAt: time.Now().Add(-24 * time.Hour)}
-	if svc.ShouldReloadGeofeed(time.Now()) {
-		t.Fatal("did not expect geofeed reload when refresh interval disabled")
-	}
-}
-
 type fakeCountryLookup struct{}
 
 func (fakeCountryLookup) LookupCountry(_ netip.Addr) geofeed.CountryCode {
@@ -119,8 +101,8 @@ func TestNewProcessorUsesPreloadedGeofeed(t *testing.T) {
 }
 
 func TestNewProcessorLoadsGeofeedWhenNotPreloaded(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping network-dependent geofeed load in short mode")
+	if os.Getenv("LIVE_TESTS") == "" {
+		t.Skip("live network test; set LIVE_TESTS=1 to run")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

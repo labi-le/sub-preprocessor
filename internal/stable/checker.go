@@ -3,6 +3,8 @@ package stable
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -83,7 +85,7 @@ func NewChecker(
 
 // Run blocks: one cycle immediately, then one per interval, until ctx is done.
 func (c *Checker) Run(ctx context.Context) {
-	c.RunOnce(ctx)
+	_ = c.RunOnce(ctx)
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
@@ -92,25 +94,26 @@ func (c *Checker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.RunOnce(ctx)
+			_ = c.RunOnce(ctx)
 		}
 	}
 }
 
 // RunOnce executes a single check cycle. On any failure the previously
-// published snapshot is kept untouched.
-func (c *Checker) RunOnce(ctx context.Context) {
+// published snapshot is kept untouched; a probe error (including context
+// cancellation) is returned and aborts the cycle before any cache write.
+func (c *Checker) RunOnce(ctx context.Context) error {
 	bodies := c.fetchSources(ctx)
 
 	entries := Merge(bodies)
 	if len(entries) == 0 {
 		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
-		return
+		return nil
 	}
 
 	probe, deadSkipped, ok := c.filterDead(entries)
 	if !ok {
-		return
+		return nil
 	}
 
 	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", deadSkipped).
@@ -118,18 +121,26 @@ func (c *Checker) RunOnce(ctx context.Context) {
 	res, err := c.prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
-		return
+		return fmt.Errorf("probe: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		c.logger.Warn().Err(err).Msg("cycle cancelled after probe; keeping previous stable list")
+		return fmt.Errorf("cycle cancelled after probe: %w", err)
 	}
 
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
 	for _, f := range c.filters {
-		survivors = f.apply(ctx, probe, survivors)
+		survivors = f.apply(ctx, survivors)
+	}
+	if err = ctx.Err(); err != nil {
+		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
+		return fmt.Errorf("cycle cancelled during node filters: %w", err)
 	}
 	if len(survivors) == 0 {
 		c.logger.Warn().Msg("no survivors; keeping previous stable list")
-		return
+		return nil
 	}
 
 	c.holder.Store(&Snapshot{
@@ -150,26 +161,31 @@ func (c *Checker) RunOnce(ctx context.Context) {
 		Int("probed", len(probe)).
 		Int("kept", len(survivors)).
 		Msg("stable list updated")
+
+	return nil
 }
 
 // fetchSources fetches every configured source concurrently through the
-// preprocess pipeline and returns the successfully-filtered bodies.
+// preprocess pipeline and returns the successfully-filtered bodies in
+// configuration order, so Merge's first-source-wins dedupe is deterministic.
 func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
 	svc := c.filterer()
 
 	type result struct {
-		name string
 		body SourceBody
 		err  error
 	}
 
 	const fetchConcurrency = 16
 	sem := make(chan struct{}, fetchConcurrency)
-	results := make(chan result, len(c.sources))
+	results := make([]result, len(c.sources))
 
-	for _, src := range c.sources {
-		go func(src config.SubscriptionSource) {
-			sem <- struct{}{}
+	var wg sync.WaitGroup
+	for i, src := range c.sources {
+		sem <- struct{}{} // bound goroutine creation, not just execution
+		wg.Add(1)
+		go func(i int, src config.SubscriptionSource) {
+			defer wg.Done()
 			defer func() { <-sem }()
 
 			c.logger.Debug().Str("source", src.Name).Msg("fetching source")
@@ -183,18 +199,18 @@ func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
 				AllowedCountries: c.allowed,
 			})
 			if err != nil {
-				results <- result{name: src.Name, err: err}
+				results[i] = result{err: err}
 				return
 			}
-			results <- result{name: src.Name, body: SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)}}
-		}(src)
+			results[i] = result{body: SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)}}
+		}(i, src)
 	}
+	wg.Wait()
 
 	bodies := make([]SourceBody, 0, len(c.sources))
-	for range c.sources {
-		r := <-results
+	for i, r := range results {
 		if r.err != nil {
-			c.logger.Warn().Str("source", r.name).Err(r.err).Msg("source fetch failed")
+			c.logger.Warn().Str("source", c.sources[i].Name).Err(r.err).Msg("source fetch failed")
 			continue
 		}
 		bodies = append(bodies, r.body)

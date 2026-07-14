@@ -3,7 +3,6 @@ package subscription
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -58,13 +57,16 @@ func Parse(body []byte, yield func(Node) bool) {
 	}
 }
 
+// schemeSep separates the URI scheme from the authority.
+const schemeSep = "://"
+
 // parseNode extracts node fields from a URI string using a lightweight parser.
 // It replaces url.Parse to avoid per-node heap allocations.
 // One string alloc per call (for Node.Raw, reused by all string fields via substrings).
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {
-	idx := strings.Index(line, "://")
+	idx := strings.Index(line, schemeSep)
 	if idx <= 0 {
 		return Node{}, false
 	}
@@ -73,10 +75,11 @@ func parseNode(line string) (Node, bool) {
 	if scheme == SchemeVmess {
 		return parseVmess(line, idx)
 	}
-	rest := line[idx+3:] // after "://"
+	rest := line[idx+len(schemeSep):] // after "://"
 
 	// Find end of authority section: '/', '?', '#', or end of string.
 	// Explicit IndexByte calls are faster than IndexAny for short authority strings.
+	hash := strings.IndexByte(rest, '#')
 	authEnd := len(rest)
 	if j := strings.IndexByte(rest, '/'); j >= 0 && j < authEnd {
 		authEnd = j
@@ -84,8 +87,8 @@ func parseNode(line string) (Node, bool) {
 	if j := strings.IndexByte(rest, '?'); j >= 0 && j < authEnd {
 		authEnd = j
 	}
-	if j := strings.IndexByte(rest, '#'); j >= 0 && j < authEnd {
-		authEnd = j
+	if hash >= 0 && hash < authEnd {
+		authEnd = hash
 	}
 
 	authority := rest[:authEnd]
@@ -101,13 +104,14 @@ func parseNode(line string) (Node, bool) {
 		port = "443"
 	}
 
-	// Extract fragment (node name) from the original line.
+	// Extract fragment (node name): everything after the FIRST '#' at or
+	// after the authority. A later '#' inside the fragment stays part of the
+	// name; a '#' before the scheme (e.g. commentary) is never a fragment.
 	name := ""
-	hashIdx := strings.LastIndexByte(line, '#')
-	if hashIdx >= 0 {
+	hashIdx := -1
+	if hash >= 0 {
+		hashIdx = idx + len(schemeSep) + hash
 		name = strings.TrimSpace(line[hashIdx+1:])
-	} else {
-		hashIdx = -1
 	}
 	if name == "" {
 		name = server
@@ -126,10 +130,11 @@ func splitHostPort(authority string) (host, port string) {
 		return "", ""
 	}
 
-	// Handle IPv6: [::1]:port
+	// Handle IPv6: [::1]:port. The returned host carries no brackets so it
+	// can feed the resolver and blocklist directly.
 	if authority[0] == '[' {
 		if j := strings.IndexByte(authority, ']'); j >= 0 {
-			host = authority[:j+1]
+			host = authority[1:j]
 			if j+1 < len(authority) && authority[j+1] == ':' {
 				port = authority[j+2:]
 			}
@@ -138,12 +143,13 @@ func splitHostPort(authority string) (host, port string) {
 		return "", "" // malformed IPv6
 	}
 
-	// Regular host:port. LastIndexByte is safe here because IPv6 with
-	// brackets was handled above.
 	if j := strings.LastIndexByte(authority, ':'); j >= 0 {
-		host = authority[:j]
-		port = authority[j+1:]
-		return host, port
+		// Multiple colons without brackets mean a bare IPv6 address, which
+		// cannot carry a port; splitting at the last colon would truncate it.
+		if strings.IndexByte(authority[:j], ':') >= 0 {
+			return authority, ""
+		}
+		return authority[:j], authority[j+1:]
 	}
 
 	return authority, ""
@@ -157,10 +163,7 @@ func Normalize(body []byte) []byte {
 
 	s := stripWhitespace(ioutil.UnsafeString(body))
 
-	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil && bytes.Contains(decoded, doubleSlash) {
-		return bytes.TrimSpace(decoded)
-	}
-	if decoded, err := base64.RawStdEncoding.DecodeString(s); err == nil && bytes.Contains(decoded, doubleSlash) {
+	if decoded, ok := decodeBase64Tolerant(s); ok && bytes.Contains(decoded, doubleSlash) {
 		return bytes.TrimSpace(decoded)
 	}
 

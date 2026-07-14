@@ -78,10 +78,27 @@ func TestLeadingTags(t *testing.T) {
 		"plain name":                   "",
 		"[UNKNOWN:x][GEO:FI] n":        "",
 		"":                             "",
+		"[BAD][GEO:FI] x":              "[BAD][GEO:FI]",
 	}
 	for in, want := range cases {
 		if got := rewrite.LeadingTags(in); got != want {
 			t.Errorf("LeadingTags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestStripKnownTags(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"[BAD] node":                   "node",
+		"[OK] node":                    "node",
+		"[GEO:FI][IP:1.2.3.4] my node": "my node",
+		"[UNKNOWN:x] n":                "[UNKNOWN:x] n",
+		"plain name":                   "plain name",
+	}
+	for in, want := range cases {
+		if got := rewrite.StripKnownTags(in); got != want {
+			t.Errorf("StripKnownTags(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

@@ -56,8 +56,8 @@ type Processor struct {
 	logger          zerolog.Logger
 	countryLookup   geofeed.CountryLookup
 	sources         []geofeed.Source
-	LoadedAt        time.Time
-	RefreshInterval time.Duration
+	loadedAt        time.Time
+	refreshInterval time.Duration
 	resolver        *resolver.Resolver
 	filters         []Filter
 	blocklist       Blocklist
@@ -77,11 +77,14 @@ type Stats struct {
 
 // PipelineContext holds request-scoped state shared across the processing pipeline.
 type PipelineContext struct {
-	Buffer      *bytes.Buffer
-	Lookup      geofeed.CountryLookup
-	Allowed     filter.CountrySet
-	Resolved    map[string][]netip.Addr
-	Stats       *Stats
+	Buffer   *bytes.Buffer
+	Lookup   geofeed.CountryLookup
+	Allowed  filter.CountrySet
+	Resolved map[string][]netip.Addr
+	Stats    *Stats
+	// Scratch is a per-request buffer reused across nodes so filters can
+	// compact IPs in place without dirtying the cached Resolved slices.
+	Scratch     []netip.Addr
 	IsFirstNode bool
 }
 
@@ -127,8 +130,8 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		logger:          logger,
 		countryLookup:   lookup,
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
-		LoadedAt:        loadedAt,
-		RefreshInterval: opts.RefreshInterval,
+		loadedAt:        loadedAt,
+		refreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		blocklist:       opts.Blocklist,
 		annotate:        opts.Annotate,
@@ -180,15 +183,9 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		IsFirstNode: true,
 	}
 
-	subscription.Parse(body, func(node subscription.Node) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-		}
-		p.processNode(ctx, node, pctx)
-		return true
-	})
+	if err := p.processBody(ctx, body, pctx); err != nil {
+		return stats, err
+	}
 
 	if stats.Total == 0 {
 		return stats, errors.New("no supported URI nodes found")
@@ -206,6 +203,25 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		Msg("subscription processed")
 
 	return stats, nil
+}
+
+// processBody parses the subscription body and runs each node through the
+// pipeline. It returns the context error when the request was cancelled so a
+// truncated node list is never served as success.
+func (p *Processor) processBody(ctx context.Context, body []byte, pctx *PipelineContext) error {
+	subscription.Parse(body, func(node subscription.Node) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+		p.processNode(ctx, node, pctx)
+		return true
+	})
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("preprocess cancelled: %w", err)
+	}
+	return nil
 }
 
 func (p *Processor) resolveNode(ctx context.Context, server string, resolved map[string][]netip.Addr) []netip.Addr {
@@ -239,11 +255,15 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		return
 	}
 
-	ips := p.resolveNode(ctx, node.Server, pctx.Resolved)
-	if len(ips) == 0 {
+	cached := p.resolveNode(ctx, node.Server, pctx.Resolved)
+	if len(cached) == 0 {
 		pctx.Stats.DNSDrop++
 		return
 	}
+	// Hand filters a scratch copy: they compact in place, and the cached
+	// slice must stay pristine for later nodes on the same server.
+	pctx.Scratch = append(pctx.Scratch[:0], cached...)
+	ips := pctx.Scratch
 
 	for _, f := range p.filters {
 		ips = f.Process(ctx, ips, pctx)
@@ -270,7 +290,7 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	p.mu.RLock()
 	lookup := p.countryLookup
-	needsReload := p.ShouldReloadGeofeed(time.Now())
+	needsReload := p.shouldReloadGeofeedLocked(time.Now())
 	p.mu.RUnlock()
 
 	if needsReload {
@@ -292,7 +312,7 @@ func (p *Processor) doReload(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.LoadedAt = time.Now()
+	p.loadedAt = time.Now()
 
 	if err != nil {
 		p.logger.Error().Err(err).Msg("background geofeed reload failed, keeping stale data")
@@ -303,21 +323,23 @@ func (p *Processor) doReload(ctx context.Context) {
 	p.logger.Info().Int("entries", len(entries)).Msg("geofeed reloaded in background")
 }
 
-func (p *Processor) ShouldReloadGeofeed(now time.Time) bool {
-	if p.RefreshInterval <= 0 {
+// shouldReloadGeofeedLocked reports whether the geofeed is stale. Callers must
+// hold p.mu (read or write).
+func (p *Processor) shouldReloadGeofeedLocked(now time.Time) bool {
+	if p.refreshInterval <= 0 {
 		return false
 	}
-	if p.LoadedAt.IsZero() {
+	if p.loadedAt.IsZero() {
 		return true
 	}
-	return now.Sub(p.LoadedAt) >= p.RefreshInterval
+	return now.Sub(p.loadedAt) >= p.refreshInterval
 }
 
 //nolint:ireturn // returns the countryLookup interface so callers can carry geofeed state across reloads
 func (p *Processor) GeofeedState() (geofeed.CountryLookup, time.Time) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.countryLookup, p.LoadedAt
+	return p.countryLookup, p.loadedAt
 }
 
 func FormatStats(stats Stats) string {

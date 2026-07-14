@@ -43,7 +43,7 @@ const (
 )
 
 var (
-	urlRe    = regexp.MustCompile(`https://[^\s"'<>]+`)
+	urlRe    = regexp.MustCompile(`https://[^\s"'<>\p{Z}]+`) // \p{Z}: URLs never contain unicode whitespace (e.g. &nbsp; adjacent to a link)
 	cursorRe = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
 	trimSet  = ".,;:!?)]}'\""
 )
@@ -74,9 +74,11 @@ type privateFile struct {
 
 // Crawler runs crawl cycles.
 type Crawler struct {
-	opts   Options
-	client fetchClient
-	logger zerolog.Logger
+	opts       Options
+	client     fetchClient
+	httpClient *http.Client
+	classifyFn func(ctx context.Context, client *http.Client, u fetch.SubscriptionURL) (classify.Result, error)
+	logger     zerolog.Logger
 }
 
 // fetchClient fetches a channel page; an interface so tests can avoid the network.
@@ -86,9 +88,9 @@ type fetchClient interface {
 
 // httpFetcher fetches a page with the SSRF-safe client (t.me is public so it
 // passes the gate) and a browser User-Agent.
-type httpFetcher struct{}
+type httpFetcher struct{ client *http.Client }
 
-func (httpFetcher) page(ctx context.Context, u string) (string, error) {
+func (f httpFetcher) page(ctx context.Context, u string) (string, error) {
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, u, nil)
@@ -96,7 +98,7 @@ func (httpFetcher) page(ctx context.Context, u string) (string, error) {
 		return "", fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := fetch.NewSafeHTTPClient().Do(req)
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)
 	}
@@ -112,7 +114,8 @@ func (httpFetcher) page(ctx context.Context, u string) (string, error) {
 }
 
 func New(opts Options, logger zerolog.Logger) *Crawler {
-	return &Crawler{opts: opts, client: httpFetcher{}, logger: logger}
+	client := fetch.NewSafeHTTPClient()
+	return &Crawler{opts: opts, client: httpFetcher{client: client}, httpClient: client, classifyFn: classify.URL, logger: logger}
 }
 
 // Run executes RunOnce immediately, then every interval until ctx is done.
@@ -174,6 +177,10 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// records freshly productive channels into st; stale ones are pruned.
 	st := loadState(c.opts.StatePath)
 	live := c.scan(ctx, &st)
+	if ctx.Err() != nil {
+		c.logger.Info().Msg("shutdown mid-scan; skipping state save and merge")
+		return
+	}
 	st.prune(time.Now().Add(-c.opts.StateTTL))
 	if saveErr := saveState(c.opts.StatePath, st); saveErr != nil {
 		c.logger.Warn().Err(saveErr).Msg("save crawler state failed")
@@ -181,8 +188,19 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	c.logger.Info().Int("discovered", len(live)).Int("productive", len(st.Productive)).
 		Msg("live subscriptions discovered")
 
-	managedURL := c.recheckManaged(ctx, pf, live)
-	next, managed := c.mergeManaged(pf, live, managedURL)
+	managedURL, unknown := c.recheckManaged(ctx, pf, live)
+	if ctx.Err() != nil {
+		c.logger.Info().Msg("shutdown mid-recheck; skipping merge")
+		return
+	}
+	// A cycle takes minutes to hours; re-load private.yaml so the merge sees
+	// concurrent hand edits instead of clobbering them with a stale snapshot.
+	pf, err = loadPrivate(c.opts.PrivatePath)
+	if err != nil {
+		c.logger.Error().Err(err).Str("path", c.opts.PrivatePath).Msg("re-read private.yaml failed")
+		return
+	}
+	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
 	if sameSources(pf.Subscriptions.Sources, next) {
 		c.logger.Info().Int("managed", len(managed)).Msg("no change")
 		return
@@ -197,9 +215,11 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 
 // recheckManaged records the URLs of existing managed sources and re-classifies
 // the ones not rediscovered this cycle, marking any still live in live so prune
-// can drop the dead ones (and !Prune can retain the still-live ones).
-func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]bool) map[string]bool {
-	managedURL := map[string]bool{}
+// can drop the dead ones. URLs whose recheck errored land in unknown: their
+// status is undetermined (transient failure), so they must be retained rather
+// than pruned.
+func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]bool) (managedURL, unknown map[string]bool) {
+	managedURL = map[string]bool{}
 	var recheck []string
 	for _, s := range pf.Subscriptions.Sources {
 		if strings.HasPrefix(s.Name, managedPrefix) {
@@ -209,16 +229,19 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 			}
 		}
 	}
-	for u := range c.classifyAll(ctx, recheck) {
+	relive, unknown := c.classifyAll(ctx, recheck)
+	for u := range relive {
 		live[u] = true
 	}
-	return managedURL
+	return managedURL, unknown
 }
 
 // mergeManaged combines the retained hand-added sources with the current managed
 // set (deduped and sorted by name) and returns the full next source list plus
-// the managed subset for logging.
-func (c *Crawler) mergeManaged(pf privateFile, live, managedURL map[string]bool) (kept, managed []source) {
+// the managed subset for logging. Managed sources that are not live are still
+// retained when their status is unknown (transient recheck error) or pruning is
+// disabled; only a definitive not-live verdict prunes.
+func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[string]bool) (kept, managed []source) {
 	all := map[string]struct{}{}
 	for _, s := range pf.Subscriptions.Sources {
 		if strings.HasPrefix(s.Name, managedPrefix) {
@@ -230,14 +253,12 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL map[string]bool)
 	for u := range live {
 		all[u] = struct{}{}
 	}
-	seen := map[string]bool{}
 	for u := range all {
 		keep := live[u]
-		if !c.opts.Prune && managedURL[u] && !keep {
+		if !keep && managedURL[u] && (unknown[u] || !c.opts.Prune) {
 			keep = true
 		}
-		if keep && !seen[u] {
-			seen[u] = true
+		if keep {
 			managed = append(managed, source{Name: managedName(u), URL: u})
 		}
 	}
@@ -246,30 +267,36 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL map[string]bool)
 	return kept, managed
 }
 
-func (c *Crawler) classifyAll(ctx context.Context, urls []string) map[string]bool {
-	live := make(map[string]bool, len(urls))
+// classifyAll classifies urls with bounded concurrency, returning the set that
+// classify as live and the set whose classification errored (status unknown).
+// A URL in neither set is definitively not a live subscription.
+func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown map[string]bool) {
+	live = make(map[string]bool, len(urls))
+	unknown = map[string]bool{}
 	var mu sync.Mutex
 	sem := make(chan struct{}, classifyConcurrency)
 	var wg sync.WaitGroup
-	client := fetch.NewSafeHTTPClient()
 	for _, u := range urls {
+		sem <- struct{}{} // acquire before spawning so goroutines stay bounded
 		wg.Add(1)
 		go func(u string) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			cctx, cancel := context.WithTimeout(ctx, classifyTimeout)
 			defer cancel()
-			res, err := classify.URL(cctx, client, fetch.SubscriptionURL(u))
-			if err == nil && res.Live() {
-				mu.Lock()
+			res, err := c.classifyFn(cctx, c.httpClient, fetch.SubscriptionURL(u))
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				unknown[u] = true
+			case res.Live():
 				live[u] = true
-				mu.Unlock()
 			}
 		}(u)
 	}
 	wg.Wait()
-	return live
+	return live, unknown
 }
 
 // extractURLs returns every https URL in an HTML page, HTML-unescaped and
@@ -344,11 +371,38 @@ func writePrivate(path string, pf privateFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal private.yaml: %w", err)
 	}
+	return writeFileAtomic(path, b, privateFileMode)
+}
+
+// privateFileMode keeps private.yaml world-readable: the service reads it
+// under another uid.
+const privateFileMode os.FileMode = 0o644
+
+// writeFileAtomic writes b to path via a same-directory temp file that is
+// fsynced before the rename, so a crash mid-write never leaves a truncated
+// file behind. The temp file is removed when any step after its creation fails.
+func writeFileAtomic(path string, b []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
-	if writeErr := os.WriteFile(tmp, b, 0o644); writeErr != nil { //nolint:gosec // private.yaml is read by the service under another uid; 0644 required
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return fmt.Errorf("open temp: %w", err)
+	}
+	if _, writeErr := f.Write(b); writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp: %w", writeErr)
 	}
+	if syncErr := f.Sync(); syncErr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync temp: %w", syncErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp: %w", closeErr)
+	}
 	if renameErr := os.Rename(tmp, path); renameErr != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename: %w", renameErr)
 	}
 	return nil

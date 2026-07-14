@@ -82,7 +82,7 @@ func TestCheckerStoresSnapshot(t *testing.T) {
 	}}
 	holder := stable.NewHolder()
 
-	newTestChecker(filterer, prober, holder).RunOnce(context.Background())
+	_ = newTestChecker(filterer, prober, holder).RunOnce(context.Background())
 
 	snap := holder.Load()
 	if snap == nil {
@@ -117,7 +117,7 @@ func TestCheckerPartialSourceFailure(t *testing.T) {
 	}}
 	holder := stable.NewHolder()
 
-	newTestChecker(filterer, prober, holder).RunOnce(context.Background())
+	_ = newTestChecker(filterer, prober, holder).RunOnce(context.Background())
 
 	snap := holder.Load()
 	if snap == nil {
@@ -135,7 +135,7 @@ func TestCheckerAllSourcesFailKeepsHolder(t *testing.T) {
 	prober := &fakeProber{}
 	holder := stable.NewHolder()
 
-	newTestChecker(fakeFilterer{}, prober, holder).RunOnce(context.Background())
+	_ = newTestChecker(fakeFilterer{}, prober, holder).RunOnce(context.Background())
 
 	if holder.Load() != nil {
 		t.Error("expected nil snapshot after all sources failed")
@@ -157,7 +157,7 @@ func TestCheckerZeroSurvivorsKeepsPrevious(t *testing.T) {
 	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
 	holder.Store(previous)
 
-	newTestChecker(filterer, prober, holder).RunOnce(context.Background())
+	_ = newTestChecker(filterer, prober, holder).RunOnce(context.Background())
 
 	if holder.Load() != previous {
 		t.Error("expected previous snapshot to be kept")
@@ -174,7 +174,7 @@ func TestCheckerProberErrorKeepsHolder(t *testing.T) {
 	prober := &fakeProber{err: errors.New("probe blew up")}
 	holder := stable.NewHolder()
 
-	newTestChecker(filterer, prober, holder).RunOnce(context.Background())
+	_ = newTestChecker(filterer, prober, holder).RunOnce(context.Background())
 
 	if holder.Load() != nil {
 		t.Error("expected nil snapshot after prober error")
@@ -308,7 +308,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	)
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
-	c.RunOnce(context.Background())
+	_ = c.RunOnce(context.Background())
 	if !dead.blocked["1.1.1.1:443"] {
 		t.Fatalf("dead alpha should be recorded, got %v", dead.recorded)
 	}
@@ -318,11 +318,129 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 
 	// Cycle 2: alpha is now known-dead -> skipped before probing; beta still probed.
 	prober.gotPayload = nil
-	c.RunOnce(context.Background())
+	_ = c.RunOnce(context.Background())
 	if strings.Contains(string(prober.gotPayload), "1.1.1.1:443") {
 		t.Errorf("cycle 2 must skip known-dead alpha, probed %q", prober.gotPayload)
 	}
 	if !strings.Contains(string(prober.gotPayload), "2.2.2.2:443") {
 		t.Errorf("cycle 2 must still probe beta, probed %q", prober.gotPayload)
+	}
+}
+
+// cancellingProber returns results but cancels the cycle context first,
+// simulating a shutdown racing the end of a probe.
+type cancellingProber struct {
+	cancel context.CancelFunc
+	res    map[string]stable.ProbeResult
+}
+
+func (p *cancellingProber) Probe(context.Context, []byte) (map[string]stable.ProbeResult, error) {
+	p.cancel()
+	return p.res, nil
+}
+
+func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	prober := &fakeProber{err: context.Canceled}
+	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	holder := stable.NewHolder()
+	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
+	holder.Store(previous)
+
+	c := stable.NewChecker(
+		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+	)
+	err := c.RunOnce(context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce must return the probe error, got %v", err)
+	}
+	if holder.Load() != previous {
+		t.Error("previous snapshot must be kept after a probe error")
+	}
+	if len(dead.recorded) != 0 {
+		t.Errorf("dead cache must not be written after a probe error, recorded %v", dead.recorded)
+	}
+}
+
+func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// beta absent from results: without the ctx gate it would be recorded dead.
+	prober := &cancellingProber{cancel: cancel, res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+	}}
+	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	holder := stable.NewHolder()
+	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
+	holder.Store(previous)
+
+	c := stable.NewChecker(
+		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+	)
+	err := c.RunOnce(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce must surface the cancellation, got %v", err)
+	}
+	if holder.Load() != previous {
+		t.Error("previous snapshot must be kept after cancellation")
+	}
+	if len(dead.recorded) != 0 {
+		t.Errorf("dead cache must not be written after cancellation, recorded %v", dead.recorded)
+	}
+}
+
+// slowFilterer delays configured sources to force out-of-config-order
+// completion.
+type slowFilterer struct {
+	fakeFilterer
+	delays map[fetch.SubscriptionURL]time.Duration
+}
+
+func (f slowFilterer) Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error) {
+	time.Sleep(f.delays[req.SubscriptionURL])
+	return f.fakeFilterer.Filter(ctx, b, req)
+}
+
+func TestCheckerMergeOrderIgnoresFetchCompletion(t *testing.T) {
+	t.Parallel()
+
+	// Both sources carry the same host. First-source-wins must follow config
+	// order (alpha), even though alpha finishes last.
+	filterer := slowFilterer{
+		fakeFilterer: fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+			"https://beta.example/sub":  "vless://u@1.1.1.1:443#b\n",
+		}},
+		delays: map[fetch.SubscriptionURL]time.Duration{
+			"https://alpha.example/sub": 150 * time.Millisecond,
+		},
+	}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+	}}
+	holder := stable.NewHolder()
+
+	if err := newTestChecker(filterer, prober, holder).RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	snap := holder.Load()
+	if snap == nil {
+		t.Fatal("expected snapshot, got nil")
+	}
+	if got, want := string(snap.Payload), "vless://u@1.1.1.1:443#alpha-001\n"; got != want {
+		t.Errorf("payload:\ngot  %q\nwant %q (first configured source must win)", got, want)
 	}
 }

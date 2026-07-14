@@ -31,6 +31,32 @@ func TestBodyPlainNotBase64(t *testing.T) {
 	}
 }
 
+func TestBodyUppercaseSchemeCounts(t *testing.T) {
+	t.Parallel()
+
+	// Schemes are case-insensitive (RFC 3986); VLESS:// must count as vless.
+	body := []byte("VLESS://u@1.1.1.1:443#a\n")
+	if got := classify.Body(body, "", 1000); got.Nodes != 1 || !got.Live() {
+		t.Fatalf("uppercase scheme: got %+v, want 1 live node", got)
+	}
+}
+
+func TestBodyFloatExpire(t *testing.T) {
+	t.Parallel()
+
+	// Some panels emit expire as a float ("expire=1786085295.0"); it must
+	// still be parsed (truncated) instead of being ignored.
+	body := []byte("vless://u@1.1.1.1:443#a\n")
+	got := classify.Body(body, "upload=0; download=0; total=0; expire=500.0", 1000)
+	if !got.Expired || got.Live() {
+		t.Fatalf("past float expiry: got %+v, want expired not live", got)
+	}
+	got = classify.Body(body, "expire=2000.5", 1000)
+	if got.Expired || !got.Live() {
+		t.Fatalf("future float expiry: got %+v, want live non-expired", got)
+	}
+}
+
 func TestBodyExpiredNotLive(t *testing.T) {
 	t.Parallel()
 

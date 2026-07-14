@@ -82,7 +82,8 @@ func decodeVmessJSON(payload string) (map[string]json.RawMessage, bool) {
 }
 
 // decodeBase64Tolerant tries the standard and URL base64 alphabets, padded and
-// unpadded, because vmess producers are inconsistent about which they emit.
+// unpadded, because subscription and vmess producers are inconsistent about
+// which they emit. Shared by Normalize and decodeVmessJSON.
 func decodeBase64Tolerant(s string) ([]byte, bool) {
 	for _, enc := range []*base64.Encoding{
 		base64.StdEncoding,

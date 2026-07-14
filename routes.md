@@ -31,7 +31,7 @@ Application bootstrap: loads config, creates `Processor`, wires the config watch
 - Creates `server.New(logger, listen, holder)` (no longer passes `svc`/`groupsMap` directly)
 - Creates `reload.NewReloader` seeded with startup `cfg` + `svc`
 - Creates `reload.NewWatcher` with `reloader.Reload` as the `onChange` callback
-- Runs watcher in a goroutine; joins it via `watcherDone` channel before returning from shutdown
+- Runs watcher in a goroutine under a derived cancellable context; a deferred cancel+join (`<-watcherDone`) runs before the `ctl.Stop()`/`gbStore.Close()` defers on EVERY return path (incl. listen error), so an in-flight reload can never race teardown
 
 **Uses:** `config`, `geoblock`, `log`, `preprocess`, `reload`, `server`, `stable`
 **Tags:** `bootstrap`, `wire`, `shutdown`, `lifecycle`, `hot-reload`
@@ -42,29 +42,34 @@ Application bootstrap: loads config, creates `Processor`, wires the config watch
 
 `./internal/config/config.go`
 
-YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema. Also provides diff helpers used by the reloader to decide what changed.
+YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema. `Load` merges a sibling `private.yaml` overlay (crawler-managed sources) when present — a read error other than not-exist fails the load. Also provides diff helpers used by the reloader to decide what changed.
 
 **Key types:**
-- `Config` — root config struct (`log`, `server`, `geofeed`, `resolver`, `workflow`, `asn`, `groups`)
+- `Config` — root config struct (`log`, `server`, `fetch`, `geofeed`, `resolver`, `workflow`, `asn`, `geoblock`, `deadcache`, `groups`, `subscriptions`)
 - `GeofeedConfig` — `sources` + `refresh_interval` with `Validate() error` method
 - `Groups` — `map[string][]string` with `Validate() error` method
 - `LogConfig` — `level` (`yaml:"level"`, default `"info"`)
 - `WorkflowConfig` — `stages` (sequential IP-filter order; known names: `geofeed`, `asn`) + `annotate` (`*bool`, default true — add the `[GEO:XX][IP:x.x.x.x]` name tag)
 - `ASNConfig` — `deny_patterns` + `timeout`
-- `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` (per-node Gemini geo-block list)
+- `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` + `Claude ClaudeConfig` (per-node geo-block list); own `validate()` rejects negative ttl/timeouts/concurrency
 - `GeminiConfig` — `endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency` (params for the `gemini` node-filter); `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE`). Enabled by listing `gemini` in `subscriptions.check.filters`.
+- `ClaudeConfig` — keyless counterpart for the `claude` node-filter (`endpoint`/`marker`/`version`/`timeout`/`concurrency`)
+- `FetchConfig` — `timeout` (per-subscription fetch deadline, default 3s)
+- `SubscriptionsConfig` / `CheckConfig` — `/stable.txt` worker settings (`interval`, `sources`, `exclude_*`, `check.*`); `CheckConfig.validate` parses `expected_status` with mihomo's `utils.NewUnsignedRanges` (same parser the prober uses) and validates `test_url` via `fetch.ValidatePublicHTTPSURL`
 - `DeadCacheConfig` — `ttl` (in-memory short-TTL cache of probe-dead nodes; skips re-probing them; default 2h)
 
 **Key functions:**
 - `Load(path) (Config, error)` — read + unmarshal + apply defaults + call `cfg.Validate()`
-- `(*Config).Validate() error` — validates geofeed sources and groups
+- `(*Config).Validate() error` — validates geofeed sources, groups, subscriptions/check, geoblock, log level (`zerolog.ParseLevel`), workflow stage names (`geofeed`/`asn` only), and rejects negative durations across all sections
 - `(*GeofeedConfig).Validate() error` — validates sources are non-empty with valid types
 - `(Groups).Validate() error` — validates group names and 2-letter country codes
 - `Equal(a, b Config) bool` — deep equality check via `reflect.DeepEqual`; used by reloader to skip no-op reloads
 - `GeofeedSourcesChanged(old, newCfg Config) bool` — true when `geofeed.sources` differ; reloader uses this to decide whether to carry over the existing lookup
 - `ListenChanged(old, newCfg Config) bool` — true when `server.listen` changed; reloader logs a warning and ignores the change (restart required)
+- `SubscriptionsChanged` / `GroupsChanged` / `GeoBlockChanged(old, newCfg Config) bool` — reloader re-applies the stable worker when any is true
+- `StoresChanged(old, newCfg Config) bool` — true when `geoblock.db_path`/`geoblock.ttl`/`deadcache.ttl` changed; stores are built once at startup, so the reloader logs a restart-required warning
 
-**Uses:** `fetch`, `geofeed`
+**Uses:** `fetch`, `geofeed`, `mihomo/common/utils`, `zerolog`
 **Tags:** `config`, `yaml`, `validation`, `startup`, `defaults`, `diff`, `reload`
 
 ---
@@ -73,18 +78,21 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 
 `./internal/fetch/fetch.go`
 
-Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no private IPs, no proxy.
+Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no private IPs (dial-time guard, incl. CGN/benchmarking/class-E reserved ranges), no proxy. One shared `http.Client` is reused across fetches.
 
 **Key types:**
 - `FileType` — `"raw"` | `"gzip"`
 - `SubscriptionURL` — lightweight `string` type for subscription URLs
 
 **Key functions:**
-- `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body
+- `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body (uses the shared client)
 - `ValidatePublicHTTPSURL(url SubscriptionURL) error` — SSRF guard
-- `NewSafeHTTPClient() *http.Client` — transport with private-IP blocking
+- `NewSafeHTTPClient() *http.Client` — transport with private-IP blocking at dial time
 - `MaybeDecode(resp, fileType) (io.ReadCloser, error)` — wrap gzip if needed
 - `ValidateFileType(fileType) error` — must be `raw` or `gzip`
+
+**Constants:**
+- `UserAgent` — sent on every outbound fetch; exported so `classify` presents the same identity a worker fetch would
 
 **Tags:** `http`, `fetch`, `ssrf`, `security`, `gzip`, `download`, `client`, `redirect`
 
@@ -94,7 +102,7 @@ Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no priv
 
 `./internal/geofeed/geofeed.go`, `lookup.go`
 
-Geofeed CSV parsing, lookup, and data source management. Default country lookup uses a flat sorted slice with binary search for IPv4 and linear scan for IPv6.
+Geofeed CSV parsing, lookup, and data source management. Default country lookup uses a flat sorted slice with binary search for IPv4 (a prefix-max array of range ends bounds the most-specific backward walk, so misses are O(log n)) and linear scan for IPv6.
 
 **Key types:**
 - `CountryCode` — strict 2-byte ISO country code (`[2]byte`) with `String()`
@@ -173,7 +181,7 @@ When no `countries`/`groups` are provided, the server can start with `All()` and
 
 `./internal/resolver/resolver.go`
 
-DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Process-wide TTL cache (RWMutex map): positive hits cached for `resolver.cache_ttl`, failed/empty lookups negative-cached for `resolver.cache_negative_ttl` (returned as empty result without error); zero TTLs disable caching entirely. Cache is capped at 16384 entries — on overflow expired entries are evicted, or the map is reset when everything is still fresh. preprocess still isolates results once per request/hostname via a pooled resolved-map. When a custom `resolver.address` is configured, `PreferGo: true` is set on the `net.Resolver` so the custom `Dial` function is actually used (the cgo resolver ignores `Dial`).
+DNS resolver for subscription node hostnames. Uses system DNS or custom address. Deduplicates IPv4 results. Process-wide TTL cache (RWMutex map): positive hits cached for `resolver.cache_ttl`, failed/empty lookups negative-cached for `resolver.cache_negative_ttl` (returned as empty result without error); zero TTLs disable caching entirely. Cache keys are cloned (`strings.Clone`) so they never pin the fetched subscription body backing array. Cache is capped at 16384 entries — on overflow expired entries are evicted, or the map is reset when everything is still fresh. preprocess still isolates results once per request/hostname via a pooled resolved-map. When a custom `resolver.address` is configured, `PreferGo: true` is set on the `net.Resolver` so the custom `Dial` function is actually used (the cgo resolver ignores `Dial`).
 
 **Key types:**
 - `Resolver` — `timeout` + `dialer` + TTL cache (`map[string]cacheEntry` under `sync.RWMutex`) + `sync.Pool` for resolved maps
@@ -192,7 +200,7 @@ DNS resolver for subscription node hostnames. Uses system DNS or custom address.
 
 `./internal/asn/resolver.go`
 
-ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Results are cached in memory with a 6h TTL (`cacheTTL`), so repeated IPs across nodes/cycles skip the lookup; `CacheLen()` exposes the size. Currently IPv4-only.
+ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Results are cached in memory with a 6h TTL (`cacheTTL`); failures are negative-cached for 5m (`negativeCacheTTL`, cancellation errors excluded) so an unreachable Cymru doesn't serialize per-node timeouts. The cache is capped at 16384 entries with evict-expired-on-insert (same pattern as `internal/resolver`). `CacheLen()` exposes the size. Currently IPv4-only.
 
 **Key types:**
 - `Result` — `Country` (`geofeed.CountryCode`) + `Name`
@@ -211,7 +219,7 @@ ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Re
 
 `./internal/subscription/subscription.go`
 
-Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations. `Normalize` trims, uses a fast-path single-pass ASCII whitespace stripper, then attempts base64 decode.
+Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations. `Normalize` trims, uses a fast-path single-pass ASCII whitespace stripper, then attempts a tolerant base64 decode (all four alphabets, shared with the vmess decoder).
 
 **Key types:**
 - `Scheme` — strict URI scheme type alias
@@ -221,7 +229,7 @@ Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight nod
 - `Load(ctx, url fetch.SubscriptionURL) ([]byte, error)` — fetch + normalize
 - `Parse(body, yield)` — iterate lines via `ioutil.Lines`, parse URIs containing `://`
 - `Normalize(body) []byte` — trim + strip ASCII whitespace + base64 decode + URI detection
-- `parseNode(line) (Node, bool)` — scheme → authority → host:port → fragment
+- `parseNode(line) (Node, bool)` — scheme → authority → host:port → fragment; the fragment is the FIRST `#` after the authority (later `#`s stay in the name); bracketed IPv6 hosts are returned without brackets, unbracketed multi-colon authorities are treated as a portless IPv6 host
 
 **Uses:** `fetch`, `ioutil`
 **Tags:** `subscription`, `uri`, `parse`, `node`, `normalize`, `base64`, `vless`, `trojan`
@@ -267,25 +275,25 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 **Key types:**
 - `Processor` — country lookup (with async background reload via `TryLock`) + DNS resolver + sequential filter pipeline (no country cache, no groups map)
 - `Stats` — `Total` / `Kept` / `DNSDrop` / `GeoDrop` / `ASNDrop` / `GeoBlockDrop` / `Unsupported`
-- `PipelineContext` — request-scoped state shared across filters (`Buffer`, `Lookup`, `Allowed`, `Resolved`, `Stats`, `IsFirstNode`)
+- `PipelineContext` — request-scoped state shared across filters (`Buffer`, `Lookup`, `Allowed`, `Resolved`, `Scratch`, `Stats`, `IsFirstNode`); `Scratch` is the per-node IP slice handed to filters (they compact in place), keeping the `Resolved` cache pristine across nodes sharing a server
 - `Filter` — interface for workflow stages; `Process(ctx, ips, pctx)`
 - `GeofeedFilter` — returns IPs in allowed geofeed countries
 - `ASNFilter` — drops IPs matching ASN deny patterns AND IPs whose Cymru-resolved country is not in `AllowedCountries` (so country filtering works without a geofeed stage)
 - `Blocklist` — interface `Blocked(host string) bool` (satisfied by `*geoblock.Store`); when set, `processNode` drops nodes whose `Server` is currently geo-blocked (`GeoBlockDrop`) before DNS resolution, on both `/` and the worker
-- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `Blocklist`, `Annotate`, `PreloadedGeofeed`, `PreloadedLoadedAt`). `Annotate` gates the `[GEO:XX][IP:]` name rewrite in `processNode` (off → the node's original name passes through). The ASN resolver is built whenever the `asn` stage is active (not only when `deny_patterns` is non-empty), so country filtering survives an empty deny list.
+- `Options` — configuration struct for `NewProcessor` (`GeofeedSources`, `RefreshInterval`, `DNSTimeout`, `DNSAddress`, `DNSCacheTTL`, `DNSCacheNegativeTTL`, `FetchTimeout`, `ASNTimeout`, `ASNDenyPatterns`, `WorkflowStages`, `Blocklist`, `Annotate`, `PreloadedGeofeed`, `PreloadedLoadedAt`). `Annotate` gates the `[GEO:XX][IP:]` name rewrite in `processNode` (off → the node's original name passes through). The ASN resolver is built whenever the `asn` stage is active (not only when `deny_patterns` is non-empty), so country filtering survives an empty deny list.
 - `FilterRequest` — request struct for `Filter` (`SubscriptionURL fetch.SubscriptionURL`, `AllowedCountries filter.CountrySet`)
 
 **Key functions:**
 - `NewProcessor(ctx, logger, opts Options) (*Processor, error)` — load geofeed (or use `opts.PreloadedGeofeed` when set), build filter chain
-- `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`
-- `(*Processor).GeofeedState() (geofeed.CountryLookup, time.Time)` — returns the current lookup and `LoadedAt` under read lock; used by the reloader to carry geofeed state across config reloads when sources are unchanged
+- `(*Processor).Filter(ctx, b, req FilterRequest) (Stats, error)` — main pipeline writing into caller-owned `bytes.Buffer`; a cancelled request returns `ctx.Err()` instead of a truncated list
+- `(*Processor).GeofeedState() (geofeed.CountryLookup, time.Time)` — returns the current lookup and load time under read lock; used by the reloader to carry geofeed state across config reloads when sources are unchanged (the underlying `loadedAt`/`refreshInterval` fields are unexported; `shouldReloadGeofeedLocked` requires `p.mu`)
 - `(*Processor).resolveNode(ctx, server, resolved) []netip.Addr` — resolve once per request/hostname and copy resolver results into request-local storage
 - `buildFilters(stages, asnR, patterns) []Filter` — construct filter pipeline; always appends a `GeofeedFilter` last even when `"geofeed"` is not explicitly listed, so that `AllowedCountries` (from `countries`/`groups`/`exclude_*`) is always enforced
 - `FormatStats(stats) string` — `done: total=N kept=N …`
 
 **Options fields added for hot-reload:**
 - `PreloadedGeofeed geofeed.CountryLookup` — when non-nil, `NewProcessor` skips the initial geofeed fetch and uses this lookup directly
-- `PreloadedLoadedAt time.Time` — paired with `PreloadedGeofeed`; sets `Processor.LoadedAt` so the background refresh timer is not reset unnecessarily
+- `PreloadedLoadedAt time.Time` — paired with `PreloadedGeofeed`; sets the processor's load timestamp so the background refresh timer is not reset unnecessarily
 
 **Uses:** `asn`, `config`, `filter`, `geofeed`, `log`, `resolver`, `rewrite`, `subscription`
 **Tags:** `orchestrator`, `pipeline`, `filter`, `geo`, `asn`, `stats`, `workflow`, `hot-reload`
@@ -296,7 +304,7 @@ Core processing. Orchestrates subscription loading, DNS resolution, geofeed/ASN 
 
 `./internal/server/server.go`, `holder.go`
 
-HTTP layer using Fiber. Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription, `GET /stable.txt` → latest stability-tested node list. The active `Processor` and groups map are held in an atomic `Holder` so the reloader can swap them without restarting the server.
+HTTP layer using Fiber (`ReadTimeout` 30s, keepalive disabled). Routes: `GET /healthz` → `ok`, `GET /` → preprocess subscription, `GET /stable.txt` → latest stability-tested node list. The active `Processor` and groups map are held in an atomic `Holder` so the reloader can swap them without restarting the server.
 
 The root handler now accepts:
 - `subscription_url` (required)
@@ -351,13 +359,13 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads
 
 **Key functions:**
-- `Merge(bodies []SourceBody) []Entry` — dedupe by `Server:Port` first-wins in source order; relabel fragments to `<source>-NNN`
+- `Merge(bodies []SourceBody) []Entry` — dedupe by lowercased `server:port` first-wins in source order (`Entry.Addr` shares the lowercased key); relabel fragments to `<source>-NNN`
 - `SelectSurvivors(entries, results, rounds, maxFail, maxAvgMs) []Survivor` — keep `rounds-successes <= maxFail && mean <= maxAvgMs`, sort by mean ascending
 - `BuildPayload(survivors) []byte` — newline-joined URI list
 - `NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, claude config.ClaudeConfig, logger) (*MihomoProber, error)` — latency `Probe` (HEAD `URLTest`) plus through-node API checks: `GeminiCheck(ctx, payload) map[label]APIOutcome` + `GeminiEnabled()` (needs a key) and keyless `ClaudeCheck(ctx, payload) map[label]APIOutcome`; both run through the shared `apiCheck` fan-out (mihomo `DialContext` + fixed-conn `http.Transport`, `GET` via `apiProbeOne`) and scan the body for the geo-block marker (Gemini: location marker; Claude: 403 `Request not allowed`, which fires before auth). Probe and the API checks log every node outcome at debug (`op=stable.Probe|GeminiCheck|ClaudeCheck`, fields `node`, `n`/`of`, `delay_ms`/`reachable`/`blocked`) and a `... progress` info milestone per completed 10% decade (`progress` helper).
-- `NodeFilter` — Layer-2 check applied after the IP-filters + latency probe, routing THROUGH each surviving node (worker-only, so it shapes `/stable.txt`, not `/`); selected by name via `subscriptions.check.filters`. `buildNodeFilters` constructs them; impls: `geminiFilter` (key-gated) and `claudeFilter` (keyless), each keeping API-reachable survivors and recording blocked hosts in the geoblock store.
-- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx)` is one cycle: drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), `SelectSurvivors`, then apply the configured `NodeFilter`s (e.g. `gemini`) that keep only nodes passing the through-node checks
-- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key, builds the prober (Gemini + Claude configs) + checker (with the geo-block + dead-node stores), stops the old worker and starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
+- `NodeFilter` — Layer-2 check applied after the IP-filters + latency probe, routing THROUGH each surviving node (worker-only, so it shapes `/stable.txt`, not `/`); selected by name via `subscriptions.check.filters`. `buildNodeFilters` constructs them; one generic `apiFilter{name, enabled, check, store}` implements the interface, instantiated for gemini (key-gated) and claude (keyless), each keeping API-reachable survivors and recording blocked hosts in the geoblock store.
+- `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx) error` is one cycle: fetch sources concurrently (results kept in config order so first-source-wins is deterministic), drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), `SelectSurvivors`, then apply the configured `NodeFilter`s. A cancelled/failed probe aborts the cycle: the previous snapshot is kept and nothing is recorded dead (a reload/shutdown mid-probe can't poison the dead cache). `Probe` shares ONE semaphore across rounds, so `check.concurrency` caps total in-flight URL tests.
+- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key and builds the prober + filters BEFORE stopping the old worker (a failed construction leaves the previous worker running), then starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
 **Tags:** `stable`, `probe`, `url-test`, `gemini`, `claude`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`
@@ -372,11 +380,12 @@ Config hot-reload. Watches the config file **and its `private.yaml` overlay sibl
 
 **Key types:**
 - `Reloader` — holds `path`, `*server.Holder`, `zerolog.Logger`, and the last-applied `config.Config` + `*preprocess.Processor` for diffing
+- `Applier` — interface `Apply(config.Config) error`; satisfied by `*stable.Controller` (enables fake controllers in tests)
 - `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; fires `onChange` for events on either `config.yaml` or its `private.yaml` sibling; debounces events with a 200 ms window
 
 **Key functions:**
-- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl *stable.Controller, blocklist preprocess.Blocklist) *Reloader` — seed with startup state so the first reload can diff against it; injects the shared geo-block store into every rebuilt `Processor`
-- `(*Reloader).Reload(ctx context.Context)` — load config → skip if `Equal` → build `OptionsFromConfig` (+ inject `Blocklist`) → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` → `holder.Store` new snapshot → `ctl.Apply(newCfg)` only when `SubscriptionsChanged || GroupsChanged`
+- `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl Applier, blocklist preprocess.Blocklist) *Reloader` — seed with startup state so the first reload can diff against it; injects the shared geo-block store into every rebuilt `Processor`
+- `(*Reloader).Reload(ctx context.Context)` — load config → skip if `Equal` → build `OptionsFromConfig` (+ inject `Blocklist`) → carry geofeed state if `!GeofeedSourcesChanged` → `NewProcessor` → `SetLevel` → warn if `ListenChanged` or `StoresChanged` (restart required) → `holder.Store` new snapshot → `ctl.Apply(newCfg)` when `SubscriptionsChanged || GroupsChanged || GeoBlockChanged`. On a failed `Apply`, `currentCfg` is NOT committed, so re-saving the file retries instead of hitting the `Equal` fast path.
 - `NewWatcher(configPath string, onChange func(context.Context), logger zerolog.Logger) (*Watcher, error)` — register fsnotify watch on parent directory; return error if watcher or directory watch fails
 - `(*Watcher).Run(ctx context.Context) error` — event loop: debounce matching events, call `onChange` once per burst; close fsnotify watcher on ctx cancellation and return nil (callers use the return as a join point)
 - `OptionsFromConfig(cfg config.Config) preprocess.Options` — single source of truth for mapping `config.Config` to `preprocess.Options`; leaves `PreloadedGeofeed`/`PreloadedLoadedAt` unset (callers decide whether to carry over geofeed state)
@@ -408,7 +417,7 @@ Decides whether a URL serves a usable Mihomo-compatible subscription, reusing th
 
 `./internal/crawl/crawl.go`, `discover.go`, `state.go`, `channels.go`
 
-Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service.
+Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service. One SSRF-safe `http.Client` is held on the `Crawler` and reused for pages + classify batches. Cycle hygiene: a cancelled ctx aborts before any state/private.yaml write; private.yaml is re-loaded right before the merge/write (narrow lost-update window); both private.yaml and the state file are written atomically (fsynced temp + rename). Classify errors are treated as *unknown* — managed sources with unknown status are retained, only definitive not-live verdicts prune.
 
 **Key types:**
 - `Options{Channels []string, ChannelsPath string, PrivatePath string, Pages int, Prune bool, MaxDepth int, MaxChannels int, StatePath string, StateTTL time.Duration}`

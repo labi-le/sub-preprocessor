@@ -143,10 +143,7 @@ func LeadingTags(s string) string {
 }
 
 func isKnownTag(tag string) bool {
-	if len(tag) == 0 {
-		return false
-	}
-	if len(tag) == 2 && (tag == "OK" || tag == "BAD") {
+	if tag == "OK" || tag == "BAD" {
 		return true
 	}
 	if len(tag) >= 4 && tag[:4] == "GEO:" {

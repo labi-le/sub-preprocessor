@@ -114,12 +114,21 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
+	// Watcher runs under a derived context; the deferred cancel+join is
+	// registered AFTER the ctl.Stop/gbStore.Close defers so (LIFO) the watcher
+	// is joined FIRST on every return path — an in-flight Reload→ctl.Apply can
+	// never race controller/store teardown.
+	watcherCtx, cancelWatcher := context.WithCancel(ctx)
 	watcherDone := make(chan struct{})
 	go func() {
 		defer close(watcherDone)
-		if watchErr := watcher.Run(ctx); watchErr != nil {
+		if watchErr := watcher.Run(watcherCtx); watchErr != nil {
 			logger.Error().Err(watchErr).Msg("config watcher error")
 		}
+	}()
+	defer func() {
+		cancelWatcher()
+		<-watcherDone
 	}()
 
 	errCh := make(chan error, 1)

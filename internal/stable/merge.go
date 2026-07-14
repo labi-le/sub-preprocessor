@@ -2,6 +2,7 @@ package stable
 
 import (
 	"fmt"
+	"strings"
 
 	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
@@ -23,16 +24,19 @@ type Entry struct {
 	Addr   string // server:port, the dead-cache key
 }
 
-// Merge parses all source bodies in order, dedupes nodes by Server:Port
-// (first source wins) and relabels each kept node to <source>-NNN so probe
-// results map back to entries unambiguously. NNN counts kept nodes per source.
+// Merge parses all source bodies in order, dedupes nodes by lowercased
+// Server:Port (hostnames are case-insensitive; first source wins) and relabels
+// each kept node to <source>-NNN so probe results map back to entries
+// unambiguously. NNN counts kept nodes per source. Entry.Addr carries the
+// lowercased key so mixed-case duplicates share one dead-cache entry; Raw and
+// Tagged keep the original casing.
 func Merge(bodies []SourceBody) []Entry {
 	seen := make(map[string]struct{})
 	var entries []Entry
 	for _, src := range bodies {
 		kept := 0
 		subscription.Parse(src.Body, func(n subscription.Node) bool {
-			key := n.Server + ":" + n.Port
+			key := strings.ToLower(n.Server) + ":" + n.Port
 			if _, dup := seen[key]; dup {
 				return true
 			}

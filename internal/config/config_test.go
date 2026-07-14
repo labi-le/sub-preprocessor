@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -366,5 +367,174 @@ func TestGroupsChanged(t *testing.T) {
 	b.Groups = config.Groups{"geo_blocked": {"RU"}}
 	if !config.GroupsChanged(a, b) {
 		t.Fatal("groups change must be detected")
+	}
+}
+
+// loadRaw writes content verbatim as config.yaml in a fresh temp dir and loads it.
+func loadRaw(t *testing.T, content string) (config.Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return config.Load(path)
+}
+
+func TestLoadRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+
+	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	const subs = "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"negative gemini concurrency":   {base + "geoblock:\n  gemini:\n    concurrency: -1\n", "geoblock.gemini.concurrency"},
+		"negative claude concurrency":   {base + "geoblock:\n  claude:\n    concurrency: -1\n", "geoblock.claude.concurrency"},
+		"negative gemini timeout":       {base + "geoblock:\n  gemini:\n    timeout: -1s\n", "geoblock.gemini.timeout"},
+		"negative claude timeout":       {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
+		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
+		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
+		"negative asn timeout":          {base + "asn:\n  timeout: -1s\n", "asn.timeout"},
+		"negative fetch timeout":        {base + "fetch:\n  timeout: -1s\n", "fetch.timeout"},
+		"negative deadcache ttl":        {base + "deadcache:\n  ttl: -1h\n", "deadcache.ttl"},
+		"negative geofeed refresh":      {"geofeed:\n  refresh_interval: -1m\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n", "geofeed.refresh_interval"},
+		"negative subs interval":        {base + "subscriptions:\n  interval: -1m\n", "subscriptions.interval"},
+		"negative check timeout":        {base + "subscriptions:\n  check:\n    timeout: -1s\n", "subscriptions.check.timeout"},
+		"negative check source timeout": {base + "subscriptions:\n  check:\n    source_timeout: -1s\n", "subscriptions.check.source_timeout"},
+		"unknown workflow stage":        {base + "workflow:\n  stages: [geofeed, dns]\n", `workflow.stages: unknown stage "dns"`},
+		"bad log level":                 {base + "log:\n  level: verbose\n", "log.level"},
+		"bad expected status":           {base + subs + "  check:\n    expected_status: not-a-range\n", "expected_status"},
+		"http test url":                 {base + subs + "  check:\n    test_url: http://example.com/generate_204\n", "test_url"},
+		"private-ip test url":           {base + subs + "  check:\n    test_url: https://192.168.1.1/generate_204\n", "test_url"},
+	}
+	for name, tc := range cases {
+		_, err := loadRaw(t, tc.yaml)
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: error %q does not name %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestLoadAcceptsValidNewKnobs(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadRaw(t, "log:\n  level: WARN\n"+
+		"workflow:\n  stages: [geofeed]\n"+
+		"geoblock:\n  gemini:\n    concurrency: 4\n    timeout: 20s\n"+
+		"geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"+
+		"subscriptions:\n  check:\n    expected_status: 200/204\n  sources:\n    - name: a\n      url: https://a.example.com/s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "WARN" {
+		t.Fatalf("log level: %q", cfg.Log.Level)
+	}
+	if cfg.GeoBlock.Gemini.Concurrency != 4 || cfg.GeoBlock.Gemini.Timeout != 20*time.Second {
+		t.Fatalf("gemini: %+v", cfg.GeoBlock.Gemini)
+	}
+}
+
+func TestLoadMergesPrivateConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: b\n      url: https://b.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Subscriptions.Sources) != 2 || cfg.Subscriptions.Sources[1].Name != "b" {
+		t.Fatalf("private sources not merged: %+v", cfg.Subscriptions.Sources)
+	}
+}
+
+// TestLoadFailsOnUnreadablePrivateConfig: a private.yaml that exists but cannot
+// be read must fail Load — silently skipping it would drop the crawler-managed
+// sources from the output. Only fs.ErrNotExist skips the overlay.
+func TestLoadFailsOnUnreadablePrivateConfig(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission bits are not enforced")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte("subscriptions: {}\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error for unreadable private.yaml")
+	} else if !strings.Contains(err.Error(), "read private config") {
+		t.Fatalf("error %q does not name the private config read", err)
+	}
+}
+
+func TestGeoBlockChanged(t *testing.T) {
+	t.Parallel()
+
+	a, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	if config.GeoBlockChanged(a, b) {
+		t.Fatal("identical configs must not differ")
+	}
+	b.GeoBlock.Gemini.Timeout = 42 * time.Second
+	if !config.GeoBlockChanged(a, b) {
+		t.Fatal("gemini sub-config change must be detected")
+	}
+	c := a
+	c.ASN.DenyPatterns = []string{"changed"}
+	if config.GeoBlockChanged(a, c) {
+		t.Fatal("asn change must not affect geoblock diff")
+	}
+}
+
+func TestStoresChanged(t *testing.T) {
+	t.Parallel()
+
+	a, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	if config.StoresChanged(a, b) {
+		t.Fatal("identical configs must not differ")
+	}
+	for name, mut := range map[string]func(*config.Config){
+		"db_path":       func(c *config.Config) { c.GeoBlock.DBPath = "/new/path.db" },
+		"geoblock ttl":  func(c *config.Config) { c.GeoBlock.TTL = time.Hour },
+		"deadcache ttl": func(c *config.Config) { c.DeadCache.TTL = time.Hour },
+	} {
+		m := a
+		mut(&m)
+		if !config.StoresChanged(a, m) {
+			t.Fatalf("%s change must be detected", name)
+		}
+	}
+	c := a
+	c.GeoBlock.Gemini.Timeout = 42 * time.Second
+	if config.StoresChanged(a, c) {
+		t.Fatal("gemini change must not require restart")
 	}
 }

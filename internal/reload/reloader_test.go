@@ -65,7 +65,7 @@ func setupReloader(
 	t *testing.T,
 	logger zerolog.Logger,
 	loadedAt time.Time,
-	ctl *stable.Controller,
+	ctl reload.Applier,
 ) (*reload.Reloader, *server.Holder, string) {
 	t.Helper()
 	ctx := t.Context()
@@ -329,5 +329,91 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 	}
 	if logs := logBuf.String(); strings.Contains(logs, "subscriptions config applied") {
 		t.Fatalf("unrelated change must not re-apply subscriptions, got:\n%s", logs)
+	}
+}
+
+// fakeApplier implements reload.Applier: the first `failures` Apply calls
+// error, later ones succeed; calls counts every invocation.
+type fakeApplier struct {
+	calls    int
+	failures int
+}
+
+func (f *fakeApplier) Apply(config.Config) error {
+	f.calls++
+	if f.calls <= f.failures {
+		return errors.New("fake apply failure")
+	}
+	return nil
+}
+
+// TestReloadRetriesApplyAfterFailure: a failed ctl.Apply must not commit the
+// new config as current — re-saving the identical file must diff as changed
+// and retry Apply instead of hitting the config.Equal fast path. Once Apply
+// succeeds the config is committed and a further identical save is a no-op.
+func TestReloadRetriesApplyAfterFailure(t *testing.T) {
+	fake := &fakeApplier{failures: 1}
+	loadedAt := time.Now().Add(-time.Hour)
+	r, _, path := setupReloader(t, zerolog.Nop(), loadedAt, fake)
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("first reload: expected 1 Apply call, got %d", fake.calls)
+	}
+
+	r.Reload(t.Context()) // identical file re-saved after the failure
+	if fake.calls != 2 {
+		t.Fatalf("re-save after failed Apply must retry: expected 2 calls, got %d", fake.calls)
+	}
+
+	r.Reload(t.Context()) // committed now; identical config is a no-op
+	if fake.calls != 2 {
+		t.Fatalf("identical config after successful Apply must not re-apply, got %d calls", fake.calls)
+	}
+}
+
+// TestReloadAppliesOnGeoBlockChange: a geoblock-only edit (gemini/claude prober
+// settings) must reach ctl.Apply even though subscriptions and groups are
+// unchanged — the prober is rebuilt from geoblock config on Apply.
+func TestReloadAppliesOnGeoBlockChange(t *testing.T) {
+	fake := &fakeApplier{}
+	loadedAt := time.Now().Add(-time.Hour)
+	r, _, path := setupReloader(t, zerolog.Nop(), loadedAt, fake)
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("adding subscriptions: expected 1 Apply call, got %d", fake.calls)
+	}
+
+	writeConfig(t, path, subsYAML+"geoblock:\n  gemini:\n    timeout: 30s\n")
+	r.Reload(t.Context())
+	if fake.calls != 2 {
+		t.Fatalf("geoblock edit must trigger Apply: expected 2 calls, got %d", fake.calls)
+	}
+}
+
+// TestReloadStoresChangeWarns: a deadcache.ttl edit must log a restart-required
+// WARN (the stores are built once at startup) while the snapshot still swaps.
+func TestReloadStoresChangeWarns(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	loadedAt := time.Now().Add(-time.Hour)
+	r, holder, path := setupReloader(t, logger, loadedAt, nil)
+
+	before := holder.Load()
+	logBuf.Reset()
+
+	writeConfig(t, path, baseGeofeedYAML+"deadcache:\n  ttl: 4h\n")
+	r.Reload(t.Context())
+
+	if holder.Load() == before {
+		t.Fatal("valid deadcache edit must still swap the snapshot")
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "requires restart") || !strings.Contains(logs, "deadcache.ttl") {
+		t.Fatalf("expected restart-required warning naming deadcache.ttl, got:\n%s", logs)
 	}
 }

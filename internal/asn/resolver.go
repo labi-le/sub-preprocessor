@@ -22,6 +22,11 @@ const (
 	// cacheTTL is how long Cymru results are cached in memory.
 	// Cymru data is static (RIR allocations), so 6h is conservative.
 	cacheTTL = 6 * time.Hour
+	// negativeCacheTTL is how long a failed lookup is remembered so an
+	// unreachable Cymru does not serialize one timeout per node per request.
+	negativeCacheTTL = 5 * time.Minute
+	// maxCacheEntries caps the cache; expired entries are evicted on insert.
+	maxCacheEntries = 16384
 )
 
 type Result struct {
@@ -31,6 +36,7 @@ type Result struct {
 
 type cachedResult struct {
 	result    Result
+	err       error
 	expiresAt time.Time
 }
 
@@ -38,6 +44,8 @@ type Resolver struct {
 	timeout time.Duration
 	cache   map[netip.Addr]cachedResult
 	mu      sync.Mutex
+	// lookupFn overrides the Cymru DNS lookup in tests; nil means r.lookup.
+	lookupFn func(ctx context.Context, ip netip.Addr) (Result, error)
 }
 
 func New(timeout time.Duration) *Resolver {
@@ -55,20 +63,49 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 	r.mu.Lock()
 	if cached, ok := r.cache[ip]; ok && time.Now().Before(cached.expiresAt) {
 		r.mu.Unlock()
-		return cached.result, nil
+		return cached.result, cached.err
 	}
 	r.mu.Unlock()
 
-	result, err := r.lookup(ctx, ip)
+	lookup := r.lookupFn
+	if lookup == nil {
+		lookup = r.lookup
+	}
+	result, err := lookup(ctx, ip)
 	if err != nil {
+		// Negative-cache the failure unless the caller's context is done —
+		// a cancellation says nothing about Cymru's reachability.
+		if ctx.Err() == nil {
+			r.storeCache(ip, cachedResult{err: err, expiresAt: time.Now().Add(negativeCacheTTL)})
+		}
 		return Result{}, err
 	}
 
-	r.mu.Lock()
-	r.cache[ip] = cachedResult{result: result, expiresAt: time.Now().Add(cacheTTL)}
-	r.mu.Unlock()
+	r.storeCache(ip, cachedResult{result: result, expiresAt: time.Now().Add(cacheTTL)})
 
 	return result, nil
+}
+
+func (r *Resolver) storeCache(ip netip.Addr, entry cachedResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.cache) >= maxCacheEntries {
+		r.evictExpiredLocked(time.Now())
+	}
+	r.cache[ip] = entry
+}
+
+// evictExpiredLocked drops expired entries; when everything is still fresh it
+// resets the whole map so the cache never grows past maxCacheEntries.
+func (r *Resolver) evictExpiredLocked(now time.Time) {
+	for ip, entry := range r.cache {
+		if now.After(entry.expiresAt) {
+			delete(r.cache, ip)
+		}
+	}
+	if len(r.cache) >= maxCacheEntries {
+		clear(r.cache)
+	}
 }
 
 func reverseIP(ip netip.Addr) string {
@@ -108,7 +145,7 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 
 	asTXT, err := netR.LookupTXT(resolveCtx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
 	if err != nil {
-		return Result{Country: country}, fmt.Errorf("cymru as lookup: %w", err)
+		return Result{}, fmt.Errorf("cymru as lookup: %w", err)
 	}
 
 	name := ""
@@ -125,9 +162,6 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 func parseOriginRecord(txt string) (uint32, geofeed.CountryCode, error) {
 	// "216071 | 146.103.121.0/24 | AE | ripencc | 1992-10-23"
 	parts := strings.Split(txt, "|")
-	if len(parts) < 1 {
-		return 0, geofeed.CountryCode{}, fmt.Errorf("unexpected origin format: %q", txt)
-	}
 	asnStr := strings.TrimSpace(parts[0])
 	asn, err := strconv.ParseUint(asnStr, 10, 32)
 	if err != nil {
