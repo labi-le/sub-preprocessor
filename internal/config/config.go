@@ -39,6 +39,11 @@ const (
 	defaultGeminiKeyVar      = "LITELLM_GOOGLE_API_KEY"
 	defaultGeminiTimeout     = 15 * time.Second
 	defaultGeminiConcurrency = 8
+	defaultClaudeEndpoint    = "https://api.anthropic.com"
+	defaultClaudeMarker      = "Request not allowed"
+	defaultClaudeVersion     = "2023-06-01"
+	defaultClaudeTimeout     = 15 * time.Second
+	defaultClaudeConcurrency = 8
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -122,12 +127,13 @@ type ASNConfig struct {
 	Timeout      time.Duration `yaml:"timeout"`
 }
 
-// GeoBlockConfig configures the per-node Gemini geo-block list: a SQLite TTL
-// store of node hosts that failed the Gemini reachability check.
+// GeoBlockConfig configures the per-node geo-block list: a SQLite TTL store of
+// node hosts that failed a through-node API reachability check (Gemini, Claude).
 type GeoBlockConfig struct {
 	DBPath string        `yaml:"db_path"`
 	TTL    time.Duration `yaml:"ttl"`
 	Gemini GeminiConfig  `yaml:"gemini"`
+	Claude ClaudeConfig  `yaml:"claude"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -170,6 +176,18 @@ type GeminiConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
+// ClaudeConfig configures the through-node Anthropic API reachability check.
+// Anthropic geo-blocks before authentication (HTTP 403 "Request not allowed"),
+// so no API key is needed: a keyless GET /v1/models from an allowed region
+// returns an authentication error instead of the block marker.
+type ClaudeConfig struct {
+	Endpoint    string        `yaml:"endpoint"`
+	Marker      string        `yaml:"marker"`
+	Version     string        `yaml:"version"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
@@ -192,6 +210,22 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if gm.Concurrency == 0 {
 		gm.Concurrency = defaultGeminiConcurrency
+	}
+	cl := &g.Claude
+	if cl.Endpoint == "" {
+		cl.Endpoint = defaultClaudeEndpoint
+	}
+	if cl.Marker == "" {
+		cl.Marker = defaultClaudeMarker
+	}
+	if cl.Version == "" {
+		cl.Version = defaultClaudeVersion
+	}
+	if cl.Timeout == 0 {
+		cl.Timeout = defaultClaudeTimeout
+	}
+	if cl.Concurrency == 0 {
+		cl.Concurrency = defaultClaudeConcurrency
 	}
 }
 

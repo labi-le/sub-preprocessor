@@ -11,7 +11,7 @@ import (
 func TestBuildNodeFilters(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.GeminiConfig{}, "KEY", zerolog.Nop())
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.GeminiConfig{}, "KEY", config.ClaudeConfig{}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,11 +20,14 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "bogus"}, prober, nil, zerolog.Nop())
-	if len(fs) != 1 {
-		t.Fatalf("gemini + unknown -> 1 filter, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "bogus"}, prober, nil, zerolog.Nop())
+	if len(fs) != 2 {
+		t.Fatalf("gemini + claude + unknown -> 2 filters, got %d", len(fs))
 	}
 	if fs[0].name() != "gemini" {
-		t.Fatalf("expected gemini filter, got %q", fs[0].name())
+		t.Fatalf("expected gemini filter first, got %q", fs[0].name())
+	}
+	if fs[1].name() != "claude" {
+		t.Fatalf("expected claude filter second, got %q", fs[1].name())
 	}
 }

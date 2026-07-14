@@ -44,17 +44,19 @@ flowchart TD
     DEAD["dead-skip - server:port in dead cache?"]
     LAT["latency probe - mihomo URLTest x2, concurrency 96, timeout 1000ms"]
     SEL["SelectSurvivors - max_fail=1, max_avg_ms=800"]
-    GEM["Layer-2 (check.filters=gemini) - GET Gemini through the node, scan body"]
+    GEM["Layer-2 (check.filters=gemini,claude) - GET Gemini through the node, scan body"]
+    CLA["claude - keyless GET api.anthropic.com/v1/models through the node, scan body"]
     PUBL["GET /stable.txt - Tagged names (GEO+IP tag + src-NNN)"]
-    MERGE --> DEAD --> LAT --> SEL --> GEM --> PUBL
+    MERGE --> DEAD --> LAT --> SEL --> GEM --> CLA --> PUBL
   end
   SRC --> FILTER
   FILTER -->|worker| MERGE
 
   %% ================= Stores =================
   GEODB[("geoblock.db - SQLite, 30d TTL, key=host")]
-  DEADSET[("dead set - in-memory, 2h TTL, key=server:port")]
+  DEADSET[("dead set - in-memory, 30m TTL, key=server:port")]
   GEM -->|blocked host| GEODB
+  CLA -->|blocked host| GEODB
   GEODB -. read .-> GBH
   LAT -->|no success = dead| DEADSET
   DEADSET -. read .-> DEAD

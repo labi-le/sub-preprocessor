@@ -50,7 +50,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if keyErr != nil {
 		c.logger.Warn().Err(keyErr).Msg("gemini key unavailable; geo-block check disabled")
 	}
-	prober, err := NewMihomoProber(subs.Check, cfg.GeoBlock.Gemini, geminiKey, c.logger)
+	prober, err := NewMihomoProber(subs.Check, cfg.GeoBlock.Gemini, geminiKey, cfg.GeoBlock.Claude, c.logger)
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}

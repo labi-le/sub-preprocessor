@@ -29,6 +29,9 @@ geoblock:
     key_var: LITELLM_GOOGLE_API_KEY
     timeout: 15s
     concurrency: 8
+  claude:
+    timeout: 15s
+    concurrency: 8
 deadcache:
   ttl: 30m
 fetch:
@@ -82,7 +85,8 @@ subscriptions:
     - geo_blocked
   check:
     filters:
-      - gemini
+      # - gemini
+      - claude
     rounds: 2
     timeout: 1000ms
     max_fail: 1

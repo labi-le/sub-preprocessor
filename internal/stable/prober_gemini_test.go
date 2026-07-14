@@ -30,6 +30,7 @@ func TestGeminiURLAndEnabled(t *testing.T) {
 		config.CheckConfig{ExpectedStatus: "204"},
 		config.GeminiConfig{Endpoint: "https://generativelanguage.googleapis.com/", Model: "gemini-2.0-flash"},
 		"SECRET",
+		config.ClaudeConfig{},
 		zerolog.Nop(),
 	)
 	if err != nil {
@@ -43,7 +44,7 @@ func TestGeminiURLAndEnabled(t *testing.T) {
 		t.Fatalf("geminiURL = %q, want %q", got, want)
 	}
 
-	off, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.GeminiConfig{}, "", zerolog.Nop())
+	off, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -77,9 +77,63 @@ func (g *geminiFilter) apply(ctx context.Context, _ []Entry, survivors []Survivo
 	return kept
 }
 
+// claudeChecker is the through-node Anthropic capability of a Prober.
+type claudeChecker interface {
+	ClaudeCheck(ctx context.Context, payload []byte) map[string]ClaudeOutcome
+}
+
+// claudeFilterName is the configuration name of the through-node Anthropic filter.
+const claudeFilterName = "claude"
+
+// claudeFilter keeps only survivors that can reach the Anthropic API through
+// their own node, and records geo-blocked node hosts in the store (TTL) so
+// later cycles skip them before probing. Anthropic geo-blocks before
+// authentication, so the check is keyless and always active when configured.
+type claudeFilter struct {
+	prober claudeChecker
+	store  Blocklist
+	logger zerolog.Logger
+}
+
+func (c *claudeFilter) name() string { return claudeFilterName }
+
+func (c *claudeFilter) apply(ctx context.Context, _ []Entry, survivors []Survivor) []Survivor {
+	subset := make([]Entry, 0, len(survivors))
+	for _, s := range survivors {
+		subset = append(subset, s.Entry)
+	}
+	outcomes := c.prober.ClaudeCheck(ctx, entriesPayload(subset))
+	if outcomes == nil {
+		c.logger.Warn().Msg("claude filter skipped: no outcomes")
+		return survivors
+	}
+
+	kept := make([]Survivor, 0, len(survivors))
+	var blocked, unreachable int
+	for _, s := range survivors {
+		o := outcomes[s.Label]
+		switch {
+		case o.Blocked:
+			blocked++
+			if c.store != nil {
+				if err := c.store.Block(o.Server); err != nil {
+					c.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
+				}
+			}
+		case !o.Reachable:
+			unreachable++
+		default:
+			kept = append(kept, s)
+		}
+	}
+	c.logger.Info().Int("survivors", len(survivors)).Int("kept", len(kept)).
+		Int("claude_blocked", blocked).Int("claude_unreachable", unreachable).Msg("claude filter")
+	return kept
+}
+
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key).
+// support (a resolved API key); the claude filter is keyless.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -91,6 +145,13 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				continue
 			}
 			filters = append(filters, &geminiFilter{prober: gc, store: store, logger: logger})
+		case claudeFilterName:
+			cc, ok := prober.(claudeChecker)
+			if !ok {
+				logger.Warn().Msg("claude filter requested but prober lacks Claude support; skipping")
+				continue
+			}
+			filters = append(filters, &claudeFilter{prober: cc, store: store, logger: logger})
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")
 		}
