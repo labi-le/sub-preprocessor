@@ -113,6 +113,8 @@ func (c *Checker) RunOnce(ctx context.Context) {
 		return
 	}
 
+	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", deadSkipped).
+		Int("rounds", c.rounds).Msg("probing merged nodes")
 	res, err := c.prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")

@@ -20,7 +20,7 @@ type NodeFilter interface {
 // geminiChecker is the through-node Gemini capability of a Prober.
 type geminiChecker interface {
 	GeminiEnabled() bool
-	GeminiCheck(ctx context.Context, payload []byte) map[string]GeminiOutcome
+	GeminiCheck(ctx context.Context, payload []byte) map[string]APIOutcome
 }
 
 // geminiFilterName is the configuration name of the through-node Gemini filter.
@@ -79,7 +79,7 @@ func (g *geminiFilter) apply(ctx context.Context, _ []Entry, survivors []Survivo
 
 // claudeChecker is the through-node Anthropic capability of a Prober.
 type claudeChecker interface {
-	ClaudeCheck(ctx context.Context, payload []byte) map[string]ClaudeOutcome
+	ClaudeCheck(ctx context.Context, payload []byte) map[string]APIOutcome
 }
 
 // claudeFilterName is the configuration name of the through-node Anthropic filter.

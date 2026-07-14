@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/log"
 )
 
 // Prober measures reachability of the proxy nodes in a subscription payload.
@@ -64,12 +65,15 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 		}
 	}()
 
+	opLog := log.Op(m.logger, "stable.Probe")
+	prog := newProgress(opLog, "url-test progress", m.cfg.Rounds*len(proxies))
+
 	accs := make(map[string]*delayAcc, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for range m.cfg.Rounds {
 		wg.Go(func() {
-			m.runRound(ctx, proxies, &mu, accs)
+			m.runRound(ctx, opLog, prog, proxies, &mu, accs)
 		})
 	}
 	wg.Wait()
@@ -114,6 +118,8 @@ func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, error) {
 
 func (m *MihomoProber) runRound(
 	ctx context.Context,
+	opLog zerolog.Logger,
+	prog *progress,
 	proxies []mihomo.Proxy,
 	mu *sync.Mutex,
 	accs map[string]*delayAcc,
@@ -131,9 +137,13 @@ func (m *MihomoProber) runRound(
 			defer cancel()
 
 			delay, testErr := px.URLTest(tctx, m.cfg.TestURL, m.expected)
+			n := prog.step()
+			ev := opLog.Debug().Str("node", px.Name()).Int64("n", n).Int64("of", prog.total)
 			if testErr != nil {
+				ev.Err(testErr).Msg("url-test")
 				return
 			}
+			ev.Uint16("delay_ms", delay).Msg("url-test")
 			mu.Lock()
 			defer mu.Unlock()
 			a := accs[px.Name()]
