@@ -406,8 +406,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"unknown workflow stage":        {base + "workflow:\n  stages: [geofeed, dns]\n", `workflow.stages: unknown stage "dns"`},
 		"bad log level":                 {base + "log:\n  level: verbose\n", "log.level"},
 		"bad expected status":           {base + subs + "  check:\n    expected_status: not-a-range\n", "expected_status"},
-		"http test url":                 {base + subs + "  check:\n    test_url: http://example.com/generate_204\n", "test_url"},
-		"private-ip test url":           {base + subs + "  check:\n    test_url: https://192.168.1.1/generate_204\n", "test_url"},
+		"non-http test url":             {base + subs + "  check:\n    test_url: ftp://example.com/generate_204\n", "test_url"},
+		"hostless test url":             {base + subs + "  check:\n    test_url: ./relative\n", "test_url"},
 	}
 	for name, tc := range cases {
 		_, err := loadRaw(t, tc.yaml)
@@ -427,7 +427,7 @@ func TestLoadAcceptsValidNewKnobs(t *testing.T) {
 		"workflow:\n  stages: [geofeed]\n"+
 		"geoblock:\n  gemini:\n    concurrency: 4\n    timeout: 20s\n"+
 		"geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"+
-		"subscriptions:\n  check:\n    expected_status: 200/204\n  sources:\n    - name: a\n      url: https://a.example.com/s\n")
+		"subscriptions:\n  check:\n    expected_status: 200/204\n    test_url: http://www.gstatic.com/generate_204\n  sources:\n    - name: a\n      url: https://a.example.com/s\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,6 +436,11 @@ func TestLoadAcceptsValidNewKnobs(t *testing.T) {
 	}
 	if cfg.GeoBlock.Gemini.Concurrency != 4 || cfg.GeoBlock.Gemini.Timeout != 20*time.Second {
 		t.Fatalf("gemini: %+v", cfg.GeoBlock.Gemini)
+	}
+	// The URL test egresses through the proxy node; plain http is legitimate
+	// there and must not be rejected by host-side SSRF rules.
+	if cfg.Subscriptions.Check.TestURL != "http://www.gstatic.com/generate_204" {
+		t.Fatalf("test_url: %q", cfg.Subscriptions.Check.TestURL)
 	}
 }
 
@@ -488,7 +493,7 @@ func TestLoadFailsOnUnreadablePrivateConfig(t *testing.T) {
 	}
 }
 
-func TestGeoBlockChanged(t *testing.T) {
+func TestProberChanged(t *testing.T) {
 	t.Parallel()
 
 	a, err := writeConfig(t, "")
@@ -496,17 +501,23 @@ func TestGeoBlockChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := a
-	if config.GeoBlockChanged(a, b) {
+	if config.ProberChanged(a, b) {
 		t.Fatal("identical configs must not differ")
 	}
 	b.GeoBlock.Gemini.Timeout = 42 * time.Second
-	if !config.GeoBlockChanged(a, b) {
+	if !config.ProberChanged(a, b) {
 		t.Fatal("gemini sub-config change must be detected")
 	}
 	c := a
 	c.ASN.DenyPatterns = []string{"changed"}
-	if config.GeoBlockChanged(a, c) {
-		t.Fatal("asn change must not affect geoblock diff")
+	if config.ProberChanged(a, c) {
+		t.Fatal("asn change must not affect prober diff")
+	}
+	d := a
+	d.GeoBlock.DBPath = "/elsewhere.db"
+	d.GeoBlock.TTL = 99 * time.Hour
+	if config.ProberChanged(a, d) {
+		t.Fatal("store-only geoblock fields (db_path/ttl) must not restart the worker; StoresChanged covers them")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -497,8 +498,14 @@ func (c *CheckConfig) validate() error {
 		return fmt.Errorf("subscriptions.check.expected_status %q: %w", c.ExpectedStatus, err)
 	}
 	if c.TestURL != "" {
-		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(c.TestURL)); err != nil {
+		// The URL test egresses THROUGH the remote proxy node, so host-side
+		// SSRF rules don't apply; only require a well-formed http(s) URL.
+		u, err := url.Parse(c.TestURL)
+		if err != nil {
 			return fmt.Errorf("subscriptions.check.test_url: %w", err)
+		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("subscriptions.check.test_url: must be an absolute http(s) URL, got %q", c.TestURL)
 		}
 	}
 	return nil
@@ -512,8 +519,12 @@ func GroupsChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Groups, newCfg.Groups)
 }
 
-func GeoBlockChanged(old, newCfg Config) bool {
-	return !reflect.DeepEqual(old.GeoBlock, newCfg.GeoBlock)
+// ProberChanged reports whether the through-node prober settings (gemini/claude)
+// differ; the stable worker must be re-applied when they do. The store-only
+// geoblock fields (db_path, ttl) are covered by StoresChanged instead.
+func ProberChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
+		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude)
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at

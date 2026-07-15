@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -215,9 +216,10 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 
 // recheckManaged records the URLs of existing managed sources and re-classifies
 // the ones not rediscovered this cycle, marking any still live in live so prune
-// can drop the dead ones. URLs whose recheck errored land in unknown: their
-// status is undetermined (transient failure), so they must be retained rather
-// than pruned.
+// can drop the dead ones. URLs whose recheck failed on transport (DNS, timeout,
+// TLS, read) land in unknown: their status is undetermined, so they must be
+// retained rather than pruned. A definitive non-2xx answer (classify.StatusError)
+// is NOT unknown — the host is alive and the subscription is gone.
 func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]bool) (managedURL, unknown map[string]bool) {
 	managedURL = map[string]bool{}
 	var recheck []string
@@ -239,7 +241,8 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 // mergeManaged combines the retained hand-added sources with the current managed
 // set (deduped and sorted by name) and returns the full next source list plus
 // the managed subset for logging. Managed sources that are not live are still
-// retained when their status is unknown (transient recheck error) or pruning is
+// retained when their status is unknown (transient recheck error), when they
+// appeared in the re-loaded file mid-cycle (never checked), or when pruning is
 // disabled; only a definitive not-live verdict prunes.
 func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[string]bool) (kept, managed []source) {
 	all := map[string]struct{}{}
@@ -255,6 +258,11 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[str
 	}
 	for u := range all {
 		keep := live[u]
+		if !keep && !managedURL[u] {
+			// In the re-loaded file but absent from the cycle-start snapshot:
+			// added mid-cycle, never checked — retain rather than drop unseen.
+			keep = true
+		}
 		if !keep && managedURL[u] && (unknown[u] || !c.opts.Prune) {
 			keep = true
 		}
@@ -268,8 +276,9 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[str
 }
 
 // classifyAll classifies urls with bounded concurrency, returning the set that
-// classify as live and the set whose classification errored (status unknown).
-// A URL in neither set is definitively not a live subscription.
+// classify as live and the set whose verdict is undetermined (transport-level
+// error). A URL in neither set is definitively not a live subscription: it
+// either classified dead or the origin answered non-2xx (classify.StatusError).
 func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown map[string]bool) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
@@ -287,10 +296,11 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown
 			res, err := c.classifyFn(cctx, c.httpClient, fetch.SubscriptionURL(u))
 			mu.Lock()
 			defer mu.Unlock()
+			var statusErr *classify.StatusError
 			switch {
-			case err != nil:
+			case err != nil && !errors.As(err, &statusErr):
 				unknown[u] = true
-			case res.Live():
+			case err == nil && res.Live():
 				live[u] = true
 			}
 		}(u)

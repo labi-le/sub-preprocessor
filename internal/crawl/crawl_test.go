@@ -55,6 +55,8 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 				return classify.Result{Nodes: 1}, nil
 			case "https://err.example/sub":
 				return classify.Result{}, errors.New("transient network error")
+			case "https://gone.example/sub":
+				return classify.Result{}, fmt.Errorf("wrap: %w", &classify.StatusError{Code: 404, Status: "404 Not Found"})
 			default:
 				return classify.Result{}, nil // definitively not live
 			}
@@ -62,13 +64,16 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 		logger: zerolog.Nop(),
 	}
 	live, unknown := c.classifyAll(context.Background(),
-		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub"})
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"})
 
 	if !live["https://live.example/sub"] || len(live) != 1 {
 		t.Errorf("live = %v, want exactly the live URL", live)
 	}
 	if !unknown["https://err.example/sub"] || len(unknown) != 1 {
-		t.Errorf("unknown = %v, want exactly the errored URL", unknown)
+		t.Errorf("unknown = %v, want exactly the transport-errored URL", unknown)
+	}
+	if unknown["https://gone.example/sub"] {
+		t.Error("a definitive non-2xx answer (StatusError) must not be treated as unknown")
 	}
 }
 
@@ -112,6 +117,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		urlLive = "https://live.example/sub"
 		urlDead = "https://dead.example/sub"
 		urlErr  = "https://err.example/sub"
+		urlGone = "https://gone.example/sub"
 	)
 	c := &Crawler{
 		opts: Options{Prune: true},
@@ -121,6 +127,8 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 				return classify.Result{Nodes: 1}, nil
 			case urlErr:
 				return classify.Result{}, errors.New("transient network error")
+			case urlGone:
+				return classify.Result{}, &classify.StatusError{Code: 410, Status: "410 Gone"}
 			default:
 				return classify.Result{}, nil // definitively not live
 			}
@@ -133,6 +141,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		{Name: managedName(urlLive), URL: urlLive},
 		{Name: managedName(urlDead), URL: urlDead},
 		{Name: managedName(urlErr), URL: urlErr},
+		{Name: managedName(urlGone), URL: urlGone},
 	}
 
 	live := map[string]bool{}
@@ -152,11 +161,37 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	if byURL[urlDead] {
 		t.Error("definitively dead managed source must be pruned")
 	}
+	if byURL[urlGone] {
+		t.Error("managed source answering non-2xx must be pruned (host alive, subscription gone)")
+	}
 	if !byURL[urlErr] {
 		t.Error("managed source with unknown (errored) status must be retained, not pruned")
 	}
 	if len(managed) != 2 {
 		t.Errorf("managed = %v, want live+unknown (2 entries)", managed)
+	}
+}
+
+// TestMergeRetainsMidCycleAdditions covers the lost-update guard: a managed
+// (tg-*) source that appears in the re-loaded private.yaml but was absent from
+// the cycle-start snapshot was never checked this cycle and must be retained,
+// even with pruning enabled.
+func TestMergeRetainsMidCycleAdditions(t *testing.T) {
+	t.Parallel()
+
+	const urlNew = "https://midcycle.example/sub"
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+
+	// Re-loaded file contains a managed source unknown to the cycle snapshot.
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
+
+	next, managed := c.mergeManaged(pf, map[string]bool{}, map[string]bool{}, map[string]bool{})
+	if len(next) != 1 || next[0].URL != urlNew {
+		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
+	}
+	if len(managed) != 1 {
+		t.Fatalf("managed = %v, want 1 entry", managed)
 	}
 }
 

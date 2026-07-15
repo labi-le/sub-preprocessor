@@ -23,14 +23,14 @@ func TestHolder_StoreLoad(t *testing.T) {
 	if got == nil {
 		t.Fatal("Load() returned nil after NewHolder")
 	}
-	if got.Svc != snap1.Svc {
+	if got != snap1 {
 		t.Fatal("Load() returned wrong snapshot")
 	}
 
 	snap2 := &server.Snapshot{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"DE"}}}
 	h.Store(snap2)
 	got2 := h.Load()
-	if got2.Svc != snap2.Svc {
+	if got2 != snap2 {
 		t.Fatal("Load() should return the new snapshot after Store()")
 	}
 }

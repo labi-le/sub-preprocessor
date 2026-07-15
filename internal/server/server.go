@@ -28,8 +28,8 @@ type Server struct {
 
 const defaultBuilderCapacity = 4096
 
-// readTimeout bounds the full request read (slowloris hardening; keepalive is
-// disabled, so it caps each connection's lifetime).
+// readTimeout bounds reading the full request (slowloris hardening); handler
+// execution and the response write are not covered by it.
 const readTimeout = 30 * time.Second
 
 func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server {

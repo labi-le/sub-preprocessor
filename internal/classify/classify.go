@@ -79,9 +79,19 @@ func parseExpire(h string) (int64, bool) {
 	return 0, false
 }
 
+// StatusError reports that the origin answered with a definitive non-2xx
+// status: the host is alive and the URL is NOT a subscription (as opposed to
+// transport errors, whose verdict is unknown).
+type StatusError struct {
+	Code   int
+	Status string
+}
+
+func (e *StatusError) Error() string { return "bad status: " + e.Status }
+
 // URL fetches rawURL with the SSRF-safe client and classifies the response.
-// A non-2xx status, oversize body, or read error is returned as an error;
-// callers treat any error as "not a subscription".
+// A non-2xx status is returned as *StatusError (definitively not a
+// subscription); any other error means the verdict is undetermined.
 func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error) {
 	if err := fetch.ValidatePublicHTTPSURL(rawURL); err != nil {
 		return Result{}, fmt.Errorf("validate url: %w", err)
@@ -99,7 +109,7 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("bad status: %s", resp.Status)
+		return Result{}, &StatusError{Code: resp.StatusCode, Status: resp.Status}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionSize+1))
 	if err != nil {

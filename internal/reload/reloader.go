@@ -22,17 +22,20 @@ type Applier interface {
 // error it logs the failure and keeps the previously applied settings (the
 // holder is never mutated on a failed reload).
 //
-// currentCfg and currentProc track the last successfully applied state. They are
-// mutated only from the single watcher goroutine that drives Reload, so they
-// need no additional locking.
+// currentCfg and currentProc track the last successfully applied state;
+// currentProcCfg records the config that BUILT currentProc (they diverge when
+// ctl.Apply fails: the processor swap stays, the config commit does not). All
+// three are mutated only from the single watcher goroutine that drives Reload,
+// so they need no additional locking.
 type Reloader struct {
-	path        string
-	holder      *server.Holder
-	logger      zerolog.Logger
-	currentCfg  config.Config
-	currentProc *preprocess.Processor
-	ctl         Applier
-	blocklist   preprocess.Blocklist
+	path           string
+	holder         *server.Holder
+	logger         zerolog.Logger
+	currentCfg     config.Config
+	currentProc    *preprocess.Processor
+	currentProcCfg config.Config
+	ctl            Applier
+	blocklist      preprocess.Blocklist
 }
 
 // NewReloader creates a Reloader seeded with the settings already applied at
@@ -47,13 +50,14 @@ func NewReloader(
 	blocklist preprocess.Blocklist,
 ) *Reloader {
 	return &Reloader{
-		path:        path,
-		holder:      holder,
-		logger:      logger,
-		currentCfg:  cfg,
-		currentProc: proc,
-		ctl:         ctl,
-		blocklist:   blocklist,
+		path:           path,
+		holder:         holder,
+		logger:         logger,
+		currentCfg:     cfg,
+		currentProc:    proc,
+		currentProcCfg: cfg,
+		ctl:            ctl,
+		blocklist:      blocklist,
 	}
 }
 
@@ -76,7 +80,10 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	opts := OptionsFromConfig(newCfg)
 	opts.Blocklist = r.blocklist
-	if !config.GeofeedSourcesChanged(r.currentCfg, newCfg) {
+	// Diff against the config that built currentProc (not currentCfg): after a
+	// failed Apply the two diverge, and carrying geofeed data across the wrong
+	// source set would serve stale countries.
+	if !config.GeofeedSourcesChanged(r.currentProcCfg, newCfg) {
 		lookup, at := r.currentProc.GeofeedState()
 		opts.PreloadedGeofeed = lookup
 		opts.PreloadedLoadedAt = at
@@ -113,19 +120,20 @@ func (r *Reloader) Reload(ctx context.Context) {
 	// requires a restart; unrelated config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
-		config.GeoBlockChanged(r.currentCfg, newCfg)
+		config.ProberChanged(r.currentCfg, newCfg)
 	applied := true
 	if r.ctl != nil && subsAffected {
 		if applyErr := r.ctl.Apply(newCfg); applyErr != nil {
 			applied = false
 			r.logger.Error().Err(applyErr).
-				Msg("applying subscriptions config failed; stable worker stopped")
+				Msg("applying subscriptions config failed; stable worker keeps previous settings")
 		} else {
 			r.logger.Info().Msg("subscriptions config applied")
 		}
 	}
 
 	r.currentProc = newProc
+	r.currentProcCfg = newCfg
 	if !applied {
 		// Do not commit newCfg: keeping the old config means a re-save of the
 		// same file diffs as changed and retries ctl.Apply instead of hitting
