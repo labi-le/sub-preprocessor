@@ -179,7 +179,7 @@ func annotateSpeed(line string, mbps int) string {
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
 // support (a resolved API key); the claude filter is keyless.
-func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
+func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
 		switch n {
@@ -207,6 +207,18 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				check:      cc.ClaudeCheck,
 				store:      store,
 				logger:     logger,
+			})
+		case bandwidthFilterName:
+			bc, ok := prober.(bandwidthChecker)
+			if !ok {
+				logger.Warn().Msg("bandwidth filter requested but prober lacks bandwidth support; skipping")
+				continue
+			}
+			filters = append(filters, &bandwidthFilter{
+				minMbps:  bc.BandwidthMinMbps(),
+				annotate: annotate,
+				check:    bc.BandwidthCheck,
+				logger:   logger,
 			})
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")

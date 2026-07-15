@@ -56,7 +56,8 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}
-	filters := buildNodeFilters(subs.Check.Filters, prober, c.store, c.logger)
+	annotate := cfg.Workflow.Annotate == nil || *cfg.Workflow.Annotate
+	filters := buildNodeFilters(subs.Check.Filters, prober, c.store, annotate, c.logger)
 
 	c.Stop()
 	checker := NewChecker(

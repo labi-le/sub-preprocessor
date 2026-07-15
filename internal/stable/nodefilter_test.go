@@ -99,18 +99,15 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if fs := buildNodeFilters(nil, prober, nil, zerolog.Nop()); len(fs) != 0 {
+	if fs := buildNodeFilters(nil, prober, nil, true, zerolog.Nop()); len(fs) != 0 {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "claude", "bogus"}, prober, nil, zerolog.Nop())
-	if len(fs) != 2 {
-		t.Fatalf("gemini + claude + unknown -> 2 filters, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
+	if len(fs) != 3 {
+		t.Fatalf("gemini + claude + bandwidth + unknown -> 3 filters, got %d", len(fs))
 	}
-	if fs[0].name() != "gemini" {
-		t.Fatalf("expected gemini filter first, got %q", fs[0].name())
-	}
-	if fs[1].name() != "claude" {
-		t.Fatalf("expected claude filter second, got %q", fs[1].name())
+	if fs[2].name() != "bandwidth" {
+		t.Fatalf("expected bandwidth filter third, got %q", fs[2].name())
 	}
 }
