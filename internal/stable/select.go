@@ -15,6 +15,7 @@ type ProbeResult struct {
 type Survivor struct {
 	Entry
 	MeanMs int
+	Mbps   int
 }
 
 // SelectSurvivors keeps entries with at most maxFail failed rounds and mean
