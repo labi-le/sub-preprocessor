@@ -537,6 +537,13 @@ func (c *CheckConfig) validate() error {
 			return fmt.Errorf("subscriptions.check.test_url: must be an absolute http(s) URL, got %q", c.TestURL)
 		}
 	}
+	if err := c.validateBandwidth(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *CheckConfig) validateBandwidth() error {
 	b := c.Bandwidth
 	if b.MinMbps != nil && *b.MinMbps < 0 {
 		return errors.New("subscriptions.check.bandwidth.min_mbps must not be negative")

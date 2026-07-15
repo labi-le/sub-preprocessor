@@ -18,6 +18,9 @@ import (
 // endpoint that streams forever. Normal test payloads (a few MB) are far below.
 const maxBandwidthBody = 256 << 20
 
+// bitsPerMegabit converts a bits-per-second rate to megabits per second.
+const bitsPerMegabit = 1e6
+
 // BandwidthOutcome is the per-node result of a through-node download-speed test.
 // Reachable is false when the dial/GET failed; a reachable-but-slow node has
 // Reachable=true and a low Mbps.
@@ -34,7 +37,7 @@ func computeMbps(bytesRead int64, elapsed time.Duration) int {
 	if bytesRead <= 0 || elapsed <= 0 {
 		return 0
 	}
-	return int(float64(bytesRead) * 8 / elapsed.Seconds() / 1e6)
+	return int(float64(bytesRead) * 8 / elapsed.Seconds() / bitsPerMegabit)
 }
 
 // measure issues a GET to target through the supplied client, forcing

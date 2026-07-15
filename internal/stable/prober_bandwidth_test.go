@@ -16,11 +16,11 @@ func TestComputeMbps(t *testing.T) {
 		elapsed time.Duration
 		want    int
 	}{
-		{2_500_000, time.Second, 20},       // 2.5MB*8/1s = 20 Mbps
-		{1_250_000, time.Second, 10},       // 10 Mbps
+		{2_500_000, time.Second, 20}, // 2.5MB*8/1s = 20 Mbps
+		{1_250_000, time.Second, 10}, // 10 Mbps
 		{1_000_000, 100 * time.Millisecond, 80},
-		{0, time.Second, 0},                // no bytes
-		{2_000_000, 0, 0},                  // zero elapsed guarded (no divide/panic)
+		{0, time.Second, 0}, // no bytes
+		{2_000_000, 0, 0},   // zero elapsed guarded (no divide/panic)
 	}
 	for _, c := range cases {
 		if got := computeMbps(c.bytes, c.elapsed); got != c.want {
