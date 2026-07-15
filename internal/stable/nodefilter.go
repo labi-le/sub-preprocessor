@@ -178,7 +178,8 @@ func annotateSpeed(line string, mbps int) string {
 
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key); the claude filter is keyless.
+// support (a resolved API key); the claude filter is keyless; the bandwidth
+// filter needs a prober with bandwidth support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {

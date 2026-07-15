@@ -71,12 +71,8 @@ func bandwidthProbeOne(ctx context.Context, px mihomo.Proxy, target string, time
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	host, port, err := net.SplitHostPort(hostPort(target))
-	if err != nil {
-		return false, 0
-	}
 	var meta mihomo.Metadata
-	if addrErr := meta.SetRemoteAddress(net.JoinHostPort(host, port)); addrErr != nil {
+	if addrErr := meta.SetRemoteAddress(hostPort(target)); addrErr != nil {
 		return false, 0
 	}
 	conn, err := px.DialContext(tctx, &meta)
