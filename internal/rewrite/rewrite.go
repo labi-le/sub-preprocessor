@@ -155,5 +155,8 @@ func isKnownTag(tag string) bool {
 	if len(tag) >= 4 && tag[:4] == "JUR:" {
 		return true
 	}
+	if len(tag) >= 4 && tag[:4] == "SPD:" {
+		return true
+	}
 	return false
 }

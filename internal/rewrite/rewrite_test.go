@@ -102,3 +102,17 @@ func TestStripKnownTags(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownTagsIncludeSPD(t *testing.T) {
+	t.Parallel()
+
+	if got := rewrite.StripKnownTags("[SPD:45M] Tokyo"); got != "Tokyo" {
+		t.Fatalf("StripKnownTags dropped SPD wrong: %q", got)
+	}
+	if got := rewrite.StripKnownTags("[GEO:FI][IP:1.2.3.4][SPD:5M] node"); got != "node" {
+		t.Fatalf("StripKnownTags mixed tags: %q", got)
+	}
+	if got := rewrite.LeadingTags("[SPD:12M] node"); got != "[SPD:12M]" {
+		t.Fatalf("LeadingTags = %q, want [SPD:12M]", got)
+	}
+}
