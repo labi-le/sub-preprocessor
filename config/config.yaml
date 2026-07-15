@@ -87,12 +87,20 @@ subscriptions:
     filters:
       # - gemini
       - claude
+      # - bandwidth # drop nodes slower than check.bandwidth.min_mbps (uncomment to enable; keep last so it runs on the fewest nodes)
     rounds: 2
     timeout: 1000ms
     max_fail: 1
     max_avg_ms: 800
     concurrency: 96
     source_timeout: 300s
+    # bandwidth: through-node download-speed gate (only active when "bandwidth" is listed in filters above).
+    # Measures each survivor by pulling test_url through the node; drops those below min_mbps.
+    bandwidth:
+      test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
+      min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
+      timeout: 20s # per-node download deadline
+      concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
   sources:
     - name: mifa
       url: https://mifa.world/vless

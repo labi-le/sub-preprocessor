@@ -54,6 +54,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 - `GeoBlockConfig` — `db_path` + `ttl` + `Gemini GeminiConfig` + `Claude ClaudeConfig` (per-node geo-block list); own `validate()` rejects negative ttl/timeouts/concurrency
 - `GeminiConfig` — `endpoint`/`model`/`marker`/`api_key`/`key_file`/`key_var`/`timeout`/`concurrency` (params for the `gemini` node-filter); `APIKeyResolved()` reads the key inline or from `key_file` (agenix `KEY=VALUE`). Enabled by listing `gemini` in `subscriptions.check.filters`.
 - `ClaudeConfig` — keyless counterpart for the `claude` node-filter (`endpoint`/`marker`/`version`/`timeout`/`concurrency`)
+- `BandwidthConfig` — through-node download-speed gate (`test_url`/`min_mbps *int`/`timeout`/`concurrency`); enabled by listing `bandwidth` in `subscriptions.check.filters`. Unset `min_mbps` defaults to 5; explicit `0` = no floor (annotate only).
 - `FetchConfig` — `timeout` (per-subscription fetch deadline, default 3s)
 - `SubscriptionsConfig` / `CheckConfig` — `/stable.txt` worker settings (`interval`, `sources`, `exclude_*`, `check.*`); `CheckConfig.validate` parses `expected_status` with mihomo's `utils.NewUnsignedRanges` (same parser the prober uses) and requires `test_url` to be an absolute http(s) URL (the URL test egresses through the proxy node, so host-side SSRF rules don't apply)
 - `DeadCacheConfig` — `ttl` (in-memory short-TTL cache of probe-dead nodes; skips re-probing them; default 2h)
@@ -244,7 +245,7 @@ Node output rewriting. Prepends `[GEO:XX][IP:x.x.x.x]` tags before node name. St
 
 **Key functions:**
 - `NodeName(b, node, country CountryCode, ip)` — write rewritten URI fragment into a reusable `bytes.Buffer`
-- `StripKnownTags(s) string` — remove `[GEO:…]`, `[IP:…]`, `[OK]`, `[BAD]`, `[JUR:…]`
+- `StripKnownTags(s) string` / `LeadingTags(s) string` — remove / return the leading `[GEO:…]`, `[IP:…]`, `[SPD:…]`, `[OK]`, `[BAD]`, `[JUR:…]` tags
 - `writeOctet(b, n)` — 1–3 digit IPv4 octet without `fmt.Sprintf`
 
 **Uses:** `subscription`
@@ -341,7 +342,7 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 ## `internal/stable`
 
-`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_gemini.go`, `nodefilter.go`, `checker.go`, `controller.go`, `deadset.go`
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_api.go`, `prober_gemini.go`, `prober_claude.go`, `prober_bandwidth.go`, `nodefilter.go`, `checker.go`, `controller.go`, `progress.go`, `deadset.go`
 
 Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, then runs a **Gemini reachability gate** through each surviving node (a real API `GET`, body-inspected for the geo-block marker — the check mihomo's HEAD-only `URLTest` cannot do), records geo-blocked node hosts in the `geoblock` store (TTL) and drops them, and atomically publishes the rest for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
 
@@ -350,7 +351,7 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `Snapshot` — immutable `Payload []byte` + `UpdatedAt` + `Stats`
 - `Holder` — `atomic.Pointer[Snapshot]`; `Load()` returns nil before the first successful cycle
 - `SourceBody` / `Entry` — merge input (source name + fetched body) and output. `Entry.Raw` is the clean `<source>-NNN` name used for probing; `Entry.Tagged` is the published name (`Raw` plus the `[GEO][IP]` annotation carried over from the filter pass, when present); `Addr` is the server:port dead-cache key. `BuildPayload` emits `Tagged`.
-- `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay
+- `ProbeResult` / `Survivor` — per-node probe aggregate and selected node with mean delay; `Survivor.Mbps` holds the bandwidth filter's measured speed (0 when the filter is off)
 - `Filterer` — local copy of `server.Filterer` (avoids an import cycle); satisfied by `*preprocess.Processor`
 - `Prober` — `Probe(ctx, payload) (map[string]ProbeResult, error)`; implemented by `MihomoProber`
 - `Blocklist` — `Block(host)`, the gemini geo-block store (`*geoblock.Store`, SQLite/30d). `DeadCache` — `Blocked(key)/Block(key)/Prune()`, the dead-node cache; satisfied by `*DeadSet` (in-memory, not persisted — dead nodes are cheap to re-probe after a restart)
@@ -364,11 +365,12 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `BuildPayload(survivors) []byte` — newline-joined URI list
 - `NewMihomoProber(cfg config.CheckConfig, gemini config.GeminiConfig, geminiKey string, claude config.ClaudeConfig, logger) (*MihomoProber, error)` — latency `Probe` (HEAD `URLTest`) plus through-node API checks: `GeminiCheck(ctx, payload) map[label]APIOutcome` + `GeminiEnabled()` (needs a key) and keyless `ClaudeCheck(ctx, payload) map[label]APIOutcome`; both run through the shared `apiCheck` fan-out (mihomo `DialContext` + fixed-conn `http.Transport`, `GET` via `apiProbeOne`) and scan the body for the geo-block marker (Gemini: location marker; Claude: 403 `Request not allowed`, which fires before auth). Probe and the API checks log every node outcome at debug (`op=stable.Probe|GeminiCheck|ClaudeCheck`, fields `node`, `n`/`of`, `delay_ms`/`reachable`/`blocked`) and a `... progress` info milestone per completed 10% decade (`progress` helper).
 - `NodeFilter` — Layer-2 check applied after the IP-filters + latency probe, routing THROUGH each surviving node (worker-only, so it shapes `/stable.txt`, not `/`); selected by name via `subscriptions.check.filters`. `buildNodeFilters` constructs them; one generic `apiFilter{name, enabled, check, store}` implements the interface, instantiated for gemini (key-gated) and claude (keyless), each keeping API-reachable survivors and recording blocked hosts in the geoblock store.
+- The `bandwidth` `NodeFilter` (`bandwidthFilter`) downloads `check.bandwidth.test_url` through each survivor (`BandwidthCheck` → `bandwidthProbeOne`, mirroring `apiProbeOne` with `Accept-Encoding: identity` and body-transfer timing; `computeMbps` guards divide-by-zero), drops nodes below `min_mbps` and unreachable ones, records `Survivor.Mbps`, and — when `workflow.annotate` — prepends `[SPD:<n>M]` to the published name via the vmess-aware `relabelNode`. No store: results are never cached.
 - `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx) error` is one cycle: fetch sources concurrently (results kept in config order so first-source-wins is deterministic), drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), `SelectSurvivors`, then apply the configured `NodeFilter`s. A cancelled/failed probe aborts the cycle: the previous snapshot is kept and nothing is recorded dead (a reload/shutdown mid-probe can't poison the dead cache). `Probe` shares ONE semaphore across rounds, so `check.concurrency` caps total in-flight URL tests.
 - `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` resolves the Gemini key and builds the prober + filters BEFORE stopping the old worker (a failed construction leaves the previous worker running), then starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
-**Tags:** `stable`, `probe`, `url-test`, `gemini`, `claude`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`
+**Tags:** `stable`, `probe`, `url-test`, `gemini`, `claude`, `bandwidth`, `speed`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`
 
 ---
 
