@@ -112,7 +112,7 @@ Geofeed CSV parsing, lookup, and data source management. Default country lookup 
 - `CountryLookup` — interface with `LookupCountry(ip) CountryCode`
 
 **Key functions:**
-- `LoadAll(ctx, sources) ([]Entry, error)` — fetch + parse (sorting handled by lookup constructor)
+- `LoadAll(ctx, sources, logger) ([]Entry, error)` — fetch + parse; skips a source that fails to fetch/parse (logs a warning) and errors only when NO source yields entries, so one flaky feed can't crash-loop startup
 - `parsePrefixOrAddr` uses `addr.BitLen()` instead of hardcoded `bitsV4`/`bitsV6`
 - `Parse(body) ([]Entry, error)` — parse CSV body
 - `NewLookup(entries) CountryLookup` — default indexed lookup builder

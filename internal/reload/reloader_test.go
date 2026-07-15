@@ -417,3 +417,24 @@ func TestReloadStoresChangeWarns(t *testing.T) {
 		t.Fatalf("expected restart-required warning naming deadcache.ttl, got:\n%s", logs)
 	}
 }
+
+// TestReloadAppliesOnAnnotateChange: a workflow.annotate-only edit must reach
+// ctl.Apply, because the stable worker bakes annotate into the bandwidth
+// [SPD:] tag; otherwise the published tag goes stale until an unrelated change.
+func TestReloadAppliesOnAnnotateChange(t *testing.T) {
+	fake := &fakeApplier{}
+	loadedAt := time.Now().Add(-time.Hour)
+	r, _, path := setupReloader(t, zerolog.Nop(), loadedAt, fake)
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("adding subscriptions: expected 1 Apply call, got %d", fake.calls)
+	}
+
+	writeConfig(t, path, subsYAML+"workflow:\n  annotate: false\n")
+	r.Reload(t.Context())
+	if fake.calls != 2 {
+		t.Fatalf("annotate-only edit must trigger Apply: expected 2 calls, got %d", fake.calls)
+	}
+}

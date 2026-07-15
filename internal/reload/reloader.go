@@ -115,12 +115,14 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
 
-	// The stable worker derives its filter set from subscriptions, groups, and
-	// the geoblock prober settings (gemini/claude), so a change to any of them
-	// requires a restart; unrelated config edits must leave it running.
+	// The stable worker derives its filter set from subscriptions, groups, the
+	// geoblock prober settings (gemini/claude), and workflow.annotate (baked
+	// into the bandwidth [SPD:] tag), so a change to any of them re-applies it;
+	// unrelated config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
-		config.ProberChanged(r.currentCfg, newCfg)
+		config.ProberChanged(r.currentCfg, newCfg) ||
+		config.AnnotateChanged(r.currentCfg, newCfg)
 	applied := true
 	if r.ctl != nil && subsAffected {
 		if applyErr := r.ctl.Apply(newCfg); applyErr != nil {

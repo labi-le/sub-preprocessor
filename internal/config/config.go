@@ -601,6 +601,18 @@ func StoresChanged(old, newCfg Config) bool {
 		old.DeadCache.TTL != newCfg.DeadCache.TTL
 }
 
+// AnnotateChanged reports whether workflow.annotate differs. The stable worker
+// bakes it into the bandwidth node filter's [SPD:] tag via Controller.Apply, so
+// the reloader must re-apply the worker when it flips; otherwise the published
+// [SPD:] annotation stays stale until an unrelated subs/prober change.
+func AnnotateChanged(old, newCfg Config) bool {
+	return annotateEnabled(old) != annotateEnabled(newCfg)
+}
+
+func annotateEnabled(cfg Config) bool {
+	return cfg.Workflow.Annotate == nil || *cfg.Workflow.Annotate
+}
+
 func (g *GeofeedConfig) Validate() error {
 	if len(g.Sources) == 0 {
 		return errors.New("geofeed.sources must contain at least one source")

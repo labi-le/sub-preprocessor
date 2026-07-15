@@ -102,7 +102,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		loadedAt = opts.PreloadedLoadedAt
 	} else {
 		initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
-		entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources)
+		entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
 		if err != nil {
 			return nil, fmt.Errorf("load geofeed: %w", err)
 		}
@@ -308,7 +308,7 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 }
 
 func (p *Processor) doReload(ctx context.Context) {
-	entries, err := geofeed.LoadAll(ctx, p.sources)
+	entries, err := geofeed.LoadAll(ctx, p.sources, p.logger)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()

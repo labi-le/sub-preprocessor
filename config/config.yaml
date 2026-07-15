@@ -1,5 +1,5 @@
 log:
-  level: debug
+  level: info # debug is verbose (per-node/DNS/probe); it is hot-reloadable, so turn it on live only when troubleshooting
 server:
   listen: :8080
 geofeed:
@@ -15,10 +15,10 @@ resolver:
   cache_negative_ttl: 10m
 workflow:
   stages:
-    - asn
+    - asn # note: the geofeed country-filter is always appended last, even when omitted here
   annotate: true # add [GEO:XX][IP:x.x.x.x] to node names (both / and /stable.txt)
 asn:
-  deny_patterns: []
+  deny_patterns: [] # empty: per-host geoblock list replaced ASN-name denial; the asn stage still does IP->country filtering
   timeout: 5s
   cache_ttl: 24h # in-memory cache of Cymru ASN lookups; geolocations rarely change (0 = default 24h)
 geoblock:
@@ -94,7 +94,9 @@ subscriptions:
     max_fail: 1
     max_avg_ms: 800
     concurrency: 96
-    source_timeout: 300s
+    source_timeout: 5m
+    # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
+    # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax
     # bandwidth: through-node download-speed gate (only active when "bandwidth" is listed in filters above).
     # Measures each survivor by pulling test_url through the node; drops those below min_mbps.
     bandwidth:
@@ -102,6 +104,7 @@ subscriptions:
       min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
       timeout: 20s # per-node download deadline
       concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
+  # ===== curated subscription sources (largest section; operational knobs are all above) =====
   sources:
     - name: mifa
       url: https://mifa.world/vless

@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/rs/zerolog"
+
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/ioutil"
 )
@@ -15,6 +17,10 @@ import (
 const (
 	maxGeofeedSize = 256 << 20
 )
+
+// fetchBytes fetches a source body. It is a package var so tests can stub the
+// network fetch (LoadAll otherwise goes through the SSRF-guarded real client).
+var fetchBytes = fetch.BytesWithType
 
 // CountryCode is a strict 2-byte ISO country code.
 type CountryCode [2]byte
@@ -34,27 +40,35 @@ type Source struct {
 	Type fetch.FileType `yaml:"type"`
 }
 
-func LoadAll(ctx context.Context, sources []Source) ([]Entry, error) {
+// LoadAll fetches and parses every source, skipping (with a warning) any single
+// source that fails to fetch or parse so one flaky third-party feed cannot take
+// down startup. It fails only when NO source yields entries.
+func LoadAll(ctx context.Context, sources []Source, logger zerolog.Logger) ([]Entry, error) {
 	var entries []Entry
+	var failed int
 	for _, source := range sources {
 		if source.URL == "" {
 			continue
 		}
 
-		body, err := fetch.BytesWithType(ctx, fetch.SubscriptionURL(source.URL), maxGeofeedSize, source.Type)
+		body, err := fetchBytes(ctx, fetch.SubscriptionURL(source.URL), maxGeofeedSize, source.Type)
 		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", source.URL, err)
+			failed++
+			logger.Warn().Err(err).Str("url", source.URL).Msg("geofeed source fetch failed; skipping")
+			continue
 		}
 
 		part, err := Parse(body)
 		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", source.URL, err)
+			failed++
+			logger.Warn().Err(err).Str("url", source.URL).Msg("geofeed source parse failed; skipping")
+			continue
 		}
 		entries = append(entries, part...)
 	}
 
 	if len(entries) == 0 {
-		return nil, errors.New("no geofeed entries loaded")
+		return nil, fmt.Errorf("no geofeed entries loaded (%d source(s) failed)", failed)
 	}
 
 	return entries, nil
