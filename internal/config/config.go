@@ -33,6 +33,10 @@ const (
 	defaultCheckStatus       = "204"
 	defaultCheckMaxAvgMs     = 1000
 	defaultCheckConcurr      = 16
+	defaultBandwidthTestURL  = "https://speed.cloudflare.com/__down?bytes=2000000"
+	defaultBandwidthMinMbps  = 5
+	defaultBandwidthTimeout  = 20 * time.Second
+	defaultBandwidthConcurr  = 4
 	defaultSourceTimeout     = 120 * time.Second
 	defaultDeadCacheTTL      = 2 * time.Hour
 	defaultFetchTimeout      = 3 * time.Second
@@ -93,15 +97,27 @@ type SubscriptionsConfig struct {
 }
 
 type CheckConfig struct {
-	Rounds         int           `yaml:"rounds"`
-	Timeout        time.Duration `yaml:"timeout"`
-	TestURL        string        `yaml:"test_url"`
-	ExpectedStatus string        `yaml:"expected_status"`
-	MaxFail        int           `yaml:"max_fail"`
-	MaxAvgMs       int           `yaml:"max_avg_ms"`
-	SourceTimeout  time.Duration `yaml:"source_timeout"`
-	Concurrency    int           `yaml:"concurrency"`
-	Filters        []string      `yaml:"filters"`
+	Rounds         int             `yaml:"rounds"`
+	Timeout        time.Duration   `yaml:"timeout"`
+	TestURL        string          `yaml:"test_url"`
+	ExpectedStatus string          `yaml:"expected_status"`
+	MaxFail        int             `yaml:"max_fail"`
+	MaxAvgMs       int             `yaml:"max_avg_ms"`
+	SourceTimeout  time.Duration   `yaml:"source_timeout"`
+	Concurrency    int             `yaml:"concurrency"`
+	Filters        []string        `yaml:"filters"`
+	Bandwidth      BandwidthConfig `yaml:"bandwidth"`
+}
+
+// BandwidthConfig configures the through-node download-speed gate (the
+// "bandwidth" node filter). Enabled by listing "bandwidth" in check.filters.
+// MinMbps is a pointer so an unset value defaults to defaultBandwidthMinMbps
+// while an explicit 0 means "no speed floor" (annotate + drop-unreachable only).
+type BandwidthConfig struct {
+	TestURL     string        `yaml:"test_url"`
+	MinMbps     *int          `yaml:"min_mbps"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
 }
 
 type SubscriptionSource struct {
@@ -435,6 +451,19 @@ func (s *SubscriptionsConfig) applyDefaults() {
 	if c.Concurrency == 0 {
 		c.Concurrency = defaultCheckConcurr
 	}
+	if c.Bandwidth.TestURL == "" {
+		c.Bandwidth.TestURL = defaultBandwidthTestURL
+	}
+	if c.Bandwidth.MinMbps == nil {
+		mbps := defaultBandwidthMinMbps
+		c.Bandwidth.MinMbps = &mbps
+	}
+	if c.Bandwidth.Timeout == 0 {
+		c.Bandwidth.Timeout = defaultBandwidthTimeout
+	}
+	if c.Bandwidth.Concurrency == 0 {
+		c.Bandwidth.Concurrency = defaultBandwidthConcurr
+	}
 }
 
 func (s *SubscriptionsConfig) Validate(groups Groups) error {
@@ -506,6 +535,27 @@ func (c *CheckConfig) validate() error {
 		}
 		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("subscriptions.check.test_url: must be an absolute http(s) URL, got %q", c.TestURL)
+		}
+	}
+	b := c.Bandwidth
+	if b.MinMbps != nil && *b.MinMbps < 0 {
+		return errors.New("subscriptions.check.bandwidth.min_mbps must not be negative")
+	}
+	if b.Timeout <= 0 {
+		return errors.New("subscriptions.check.bandwidth.timeout must be positive")
+	}
+	if b.Concurrency < 1 {
+		return errors.New("subscriptions.check.bandwidth.concurrency must be at least 1")
+	}
+	if b.TestURL != "" {
+		// Egresses THROUGH the proxy node, so host-side SSRF rules don't apply;
+		// only require a well-formed absolute http(s) URL.
+		u, err := url.Parse(b.TestURL)
+		if err != nil {
+			return fmt.Errorf("subscriptions.check.bandwidth.test_url: %w", err)
+		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("subscriptions.check.bandwidth.test_url: must be an absolute http(s) URL, got %q", b.TestURL)
 		}
 	}
 	return nil

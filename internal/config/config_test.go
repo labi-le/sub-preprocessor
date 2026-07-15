@@ -549,3 +549,53 @@ func TestStoresChanged(t *testing.T) {
 		t.Fatal("gemini change must not require restart")
 	}
 }
+
+func TestLoadBandwidthDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := cfg.Subscriptions.Check.Bandwidth
+	if b.TestURL != "https://speed.cloudflare.com/__down?bytes=2000000" {
+		t.Fatalf("test_url default = %q", b.TestURL)
+	}
+	if b.MinMbps == nil || *b.MinMbps != 5 {
+		t.Fatalf("min_mbps default = %v, want 5", b.MinMbps)
+	}
+	if b.Timeout != 20*time.Second {
+		t.Fatalf("timeout default = %v, want 20s", b.Timeout)
+	}
+	if b.Concurrency != 4 {
+		t.Fatalf("concurrency default = %d, want 4", b.Concurrency)
+	}
+
+	// An explicit min_mbps: 0 means "no floor" and must survive defaulting.
+	cfg0, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\n  check:\n    bandwidth:\n      min_mbps: 0\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := cfg0.Subscriptions.Check.Bandwidth.MinMbps; m == nil || *m != 0 {
+		t.Fatalf("explicit min_mbps=0 must be preserved, got %v", m)
+	}
+}
+
+func TestLoadRejectsInvalidBandwidth(t *testing.T) {
+	t.Parallel()
+
+	// Negative values survive the "==0 -> default" coercion and reach validation.
+	const subs = "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n  check:\n    bandwidth:\n"
+	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	cases := map[string]string{
+		"negative timeout":     subs + "      timeout: -1s\n",
+		"negative concurrency": subs + "      concurrency: -1\n",
+		"negative min_mbps":    subs + "      min_mbps: -1\n",
+		"non-http test_url":    subs + "      test_url: ftp://example.com/x\n",
+	}
+	for name, block := range cases {
+		if _, err := loadRaw(t, base+block); err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+	}
+}
