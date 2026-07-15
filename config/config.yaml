@@ -20,6 +20,7 @@ workflow:
 asn:
   deny_patterns: []
   timeout: 5s
+  cache_ttl: 24h # in-memory cache of Cymru ASN lookups; geolocations rarely change (0 = default 24h)
 geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h

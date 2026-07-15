@@ -201,14 +201,14 @@ DNS resolver for subscription node hostnames. Uses system DNS or custom address.
 
 `./internal/asn/resolver.go`
 
-ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Results are cached in memory with a 6h TTL (`cacheTTL`); failures are negative-cached for 5m (`negativeCacheTTL`, cancellation errors excluded) so an unreachable Cymru doesn't serialize per-node timeouts. The cache is capped at 16384 entries with evict-expired-on-insert (same pattern as `internal/resolver`). `CacheLen()` exposes the size. Currently IPv4-only.
+ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Results are cached in memory with a configurable TTL (`asn.cache_ttl`, default 24h; a zero/negative value falls back to `defaultCacheTTL`); failures are negative-cached for 5m (`negativeCacheTTL`, cancellation errors excluded) so an unreachable Cymru doesn't serialize per-node timeouts. The cache is capped at 16384 entries with evict-expired-on-insert (same pattern as `internal/resolver`). `CacheLen()` exposes the size. Currently IPv4-only.
 
 **Key types:**
 - `Result` — `Country` (`geofeed.CountryCode`) + `Name`
-- `Resolver` — `timeout`
+- `Resolver` — `timeout` + `cacheTTL`
 
 **Key functions:**
-- `New(timeout) *Resolver`
+- `New(timeout, cacheTTL) *Resolver` — a zero/negative `cacheTTL` falls back to the 24h default
 - `(*Resolver).Resolve(ctx, ip) (Result, error)` — fresh Cymru lookup (IPv6 rejected)
 
 **Uses:** `net` (stdlib, not internal resolver)

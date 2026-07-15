@@ -15,7 +15,7 @@ func BenchmarkResolveASN(b *testing.B) {
 		b.Skip("skipping live ASN benchmark in short mode")
 	}
 
-	resolver := asn.New(5 * time.Second)
+	resolver := asn.New(5*time.Second, time.Hour)
 	ip := netip.MustParseAddr("8.8.8.8")
 	ctx := context.Background()
 

@@ -24,6 +24,7 @@ const (
 	defaultLogLevel         = "info"
 	defaultDNSCacheTTL      = 30 * time.Minute
 	defaultDNSNegativeCache = 10 * time.Minute
+	defaultASNCacheTTL      = 24 * time.Hour
 
 	defaultSubsInterval      = 30 * time.Minute
 	minSubsInterval          = time.Minute
@@ -145,6 +146,7 @@ type Groups map[string][]string
 type ASNConfig struct {
 	DenyPatterns []string      `yaml:"deny_patterns"`
 	Timeout      time.Duration `yaml:"timeout"`
+	CacheTTL     time.Duration `yaml:"cache_ttl"`
 }
 
 // GeoBlockConfig configures the per-node geo-block list: a SQLite TTL store of
@@ -302,6 +304,9 @@ func Load(path string) (Config, error) {
 	if cfg.ASN.Timeout == 0 {
 		cfg.ASN.Timeout = defaultTimeout
 	}
+	if cfg.ASN.CacheTTL == 0 {
+		cfg.ASN.CacheTTL = defaultASNCacheTTL
+	}
 	if len(cfg.Workflow.Stages) == 0 {
 		cfg.Workflow.Stages = []string{"geofeed", "asn"}
 	}
@@ -357,6 +362,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.ASN.Timeout < 0 {
 		return errors.New("asn.timeout must not be negative")
+	}
+	if cfg.ASN.CacheTTL < 0 {
+		return errors.New("asn.cache_ttl must not be negative")
 	}
 	if cfg.Fetch.Timeout < 0 {
 		return errors.New("fetch.timeout must not be negative")

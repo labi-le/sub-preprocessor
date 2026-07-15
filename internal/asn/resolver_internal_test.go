@@ -16,7 +16,7 @@ func TestResolve_NegativeCachesFailure(t *testing.T) {
 	wantErr := errors.New("cymru unreachable")
 	calls := 0
 
-	r := New(time.Second)
+	r := New(time.Second, time.Hour)
 	r.lookupFn = func(_ context.Context, _ netip.Addr) (Result, error) {
 		calls++
 		return Result{}, wantErr
@@ -44,7 +44,7 @@ func TestResolve_CachesSuccess(t *testing.T) {
 	want := Result{Country: geofeed.CountryCode{'F', 'I'}, Name: "Example AS"}
 	calls := 0
 
-	r := New(time.Second)
+	r := New(time.Second, time.Hour)
 	r.lookupFn = func(_ context.Context, _ netip.Addr) (Result, error) {
 		calls++
 		return want, nil
@@ -71,7 +71,7 @@ func TestResolve_CanceledContextNotNegativeCached(t *testing.T) {
 
 	calls := 0
 
-	r := New(time.Second)
+	r := New(time.Second, time.Hour)
 	r.lookupFn = func(ctx context.Context, _ netip.Addr) (Result, error) {
 		calls++
 		return Result{}, ctx.Err()
@@ -95,7 +95,7 @@ func TestResolve_CanceledContextNotNegativeCached(t *testing.T) {
 func TestResolve_CacheBounded(t *testing.T) {
 	t.Parallel()
 
-	r := New(time.Second)
+	r := New(time.Second, time.Hour)
 	r.lookupFn = func(_ context.Context, _ netip.Addr) (Result, error) {
 		return Result{Country: geofeed.CountryCode{'D', 'E'}}, nil
 	}
@@ -109,5 +109,30 @@ func TestResolve_CacheBounded(t *testing.T) {
 		if got := r.CacheLen(); got > maxCacheEntries {
 			t.Fatalf("cache grew to %d entries, cap is %d", got, maxCacheEntries)
 		}
+	}
+}
+
+func TestResolve_UsesConfiguredCacheTTL(t *testing.T) {
+	t.Parallel()
+
+	r := New(time.Second, 12*time.Hour)
+	r.lookupFn = func(_ context.Context, _ netip.Addr) (Result, error) {
+		return Result{Country: geofeed.CountryCode{'F', 'I'}, Name: "AS"}, nil
+	}
+	ip := netip.MustParseAddr("192.0.2.10")
+	before := time.Now()
+	if _, err := r.Resolve(context.Background(), ip); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	exp := r.cache[ip].expiresAt
+	r.mu.Unlock()
+	if d := exp.Sub(before); d < 11*time.Hour || d > 13*time.Hour {
+		t.Fatalf("positive TTL = %v, want ~12h", d)
+	}
+
+	// A zero/negative configured TTL falls back to the package default.
+	if rd := New(time.Second, 0); rd.cacheTTL != defaultCacheTTL {
+		t.Fatalf("zero ttl should fall back to %v, got %v", defaultCacheTTL, rd.cacheTTL)
 	}
 }

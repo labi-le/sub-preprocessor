@@ -19,9 +19,10 @@ const (
 	minASRecordFields = 5
 	minOriginFields   = 3
 
-	// cacheTTL is how long Cymru results are cached in memory.
-	// Cymru data is static (RIR allocations), so 6h is conservative.
-	cacheTTL = 6 * time.Hour
+	// defaultCacheTTL is the fallback TTL for cached Cymru results when the
+	// configured asn.cache_ttl is unset. Cymru data is static (RIR
+	// allocations), so a day is safe; callers override via asn.cache_ttl.
+	defaultCacheTTL = 24 * time.Hour
 	// negativeCacheTTL is how long a failed lookup is remembered so an
 	// unreachable Cymru does not serialize one timeout per node per request.
 	negativeCacheTTL = 5 * time.Minute
@@ -41,17 +42,22 @@ type cachedResult struct {
 }
 
 type Resolver struct {
-	timeout time.Duration
-	cache   map[netip.Addr]cachedResult
-	mu      sync.Mutex
+	timeout  time.Duration
+	cacheTTL time.Duration
+	cache    map[netip.Addr]cachedResult
+	mu       sync.Mutex
 	// lookupFn overrides the Cymru DNS lookup in tests; nil means r.lookup.
 	lookupFn func(ctx context.Context, ip netip.Addr) (Result, error)
 }
 
-func New(timeout time.Duration) *Resolver {
+func New(timeout, cacheTTL time.Duration) *Resolver {
+	if cacheTTL <= 0 {
+		cacheTTL = defaultCacheTTL
+	}
 	return &Resolver{
-		timeout: timeout,
-		cache:   make(map[netip.Addr]cachedResult),
+		timeout:  timeout,
+		cacheTTL: cacheTTL,
+		cache:    make(map[netip.Addr]cachedResult),
 	}
 }
 
@@ -81,7 +87,7 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 		return Result{}, err
 	}
 
-	r.storeCache(ip, cachedResult{result: result, expiresAt: time.Now().Add(cacheTTL)})
+	r.storeCache(ip, cachedResult{result: result, expiresAt: time.Now().Add(r.cacheTTL)})
 
 	return result, nil
 }

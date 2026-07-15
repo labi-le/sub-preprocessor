@@ -599,3 +599,28 @@ func TestLoadRejectsInvalidBandwidth(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadASNCacheTTL(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ASN.CacheTTL != 24*time.Hour {
+		t.Fatalf("asn.cache_ttl default = %v, want 24h", cfg.ASN.CacheTTL)
+	}
+
+	cfg2, err := writeConfig(t, "asn:\n  cache_ttl: 48h\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.ASN.CacheTTL != 48*time.Hour {
+		t.Fatalf("asn.cache_ttl = %v, want 48h", cfg2.ASN.CacheTTL)
+	}
+
+	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	if _, negErr := loadRaw(t, base+"asn:\n  cache_ttl: -1s\n"); negErr == nil {
+		t.Fatal("negative asn.cache_ttl must be rejected")
+	}
+}

@@ -22,6 +22,7 @@ func OptionsFromConfig(cfg config.Config) preprocess.Options {
 		DNSCacheTTL:         cfg.Resolver.CacheTTL,
 		DNSCacheNegativeTTL: cfg.Resolver.CacheNegativeTTL,
 		ASNTimeout:          cfg.ASN.Timeout,
+		ASNCacheTTL:         cfg.ASN.CacheTTL,
 		ASNDenyPatterns:     cfg.ASN.DenyPatterns,
 		WorkflowStages:      cfg.Workflow.Stages,
 		Annotate:            cfg.Workflow.Annotate == nil || *cfg.Workflow.Annotate,

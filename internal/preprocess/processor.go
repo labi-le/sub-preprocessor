@@ -30,6 +30,7 @@ type Options struct {
 	DNSCacheTTL         time.Duration
 	DNSCacheNegativeTTL time.Duration
 	ASNTimeout          time.Duration
+	ASNCacheTTL         time.Duration
 	ASNDenyPatterns     []string
 	WorkflowStages      []string
 	PreloadedGeofeed    geofeed.CountryLookup
@@ -121,7 +122,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 
 	var asnR *asn.Resolver
 	if len(patterns) > 0 || slices.Contains(opts.WorkflowStages, "asn") {
-		asnR = asn.New(opts.ASNTimeout)
+		asnR = asn.New(opts.ASNTimeout, opts.ASNCacheTTL)
 	}
 
 	filters := buildFilters(opts.WorkflowStages, asnR, patterns)
