@@ -3,12 +3,18 @@ package preprocess
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
+	"domains.lst/sub-preprocessor/internal/filter"
+	"domains.lst/sub-preprocessor/internal/resolver"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -103,5 +109,44 @@ func TestProcessBodyCancelledContextReturnsError(t *testing.T) {
 	}
 	if pctx.Stats.Kept != 0 {
 		t.Fatalf("expected no nodes kept after pre-cancelled ctx, got %d", pctx.Stats.Kept)
+	}
+}
+
+// TestFilterInlineBodyNoFetch drives Filter with an inline Body request: the
+// nodes use bare IP servers so resolveNode handles them without DNS, proving the
+// Body path filters directly with no subscription.Load / HTTP fetch. The payload
+// is base64-encoded so the subscription.Normalize step in the inline path is
+// actually exercised. Filters are empty, so every syntactically valid node with
+// a resolvable (bare-IP) server is kept and emitted into the buffer.
+func TestFilterInlineBodyNoFetch(t *testing.T) {
+	t.Parallel()
+
+	plain := "vless://a@1.1.1.1:443#n1\nvless://b@2.2.2.2:443#n2\nvless://c@3.3.3.3:443#n3\n"
+	body := []byte(base64.StdEncoding.EncodeToString([]byte(plain)))
+	p := &Processor{
+		logger:   zerolog.Nop(),
+		resolver: resolver.New(time.Second, "", 0, 0),
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("inline Filter failed: %v", err)
+	}
+	if stats.Total != 3 || stats.Kept != 3 {
+		t.Fatalf("inline Filter stats = %+v, want total=3 kept=3", stats)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"vless://a@1.1.1.1:443#n1",
+		"vless://b@2.2.2.2:443#n2",
+		"vless://c@3.3.3.3:443#n3",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing node %q; got:\n%s", want, out)
+		}
 	}
 }

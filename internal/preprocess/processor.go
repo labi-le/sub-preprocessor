@@ -43,6 +43,10 @@ type Options struct {
 type FilterRequest struct {
 	SubscriptionURL  fetch.SubscriptionURL
 	AllowedCountries filter.CountrySet
+	// Body, when non-empty, is an inline subscription payload filtered directly
+	// without any HTTP fetch. It is normalized with the same base64-tolerant
+	// decoder used for fetched subscriptions. Takes precedence over SubscriptionURL.
+	Body []byte
 }
 
 // Blocklist reports whether a node host is currently geo-blocked (failed the
@@ -146,7 +150,11 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 }
 
 func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
-	requestLog := p.logger.With().Str("url", string(req.SubscriptionURL)).Logger()
+	label := string(req.SubscriptionURL)
+	if len(req.Body) > 0 {
+		label = "inline"
+	}
+	requestLog := p.logger.With().Str("url", label).Logger()
 	start := time.Now()
 
 	lookup := p.currentEntries(ctx)
@@ -163,15 +171,23 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		return Stats{}, errors.New("no allowed countries provided")
 	}
 
-	fetchCtx := ctx
-	if p.fetchTimeout > 0 {
-		var cancelFetch context.CancelFunc
-		fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
-		defer cancelFetch()
-	}
-	body, errLoad := subscription.Load(fetchCtx, req.SubscriptionURL)
-	if errLoad != nil {
-		return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
+	var body []byte
+	if len(req.Body) > 0 {
+		// Inline source: normalize the pasted payload with the same
+		// base64-tolerant decoder used for fetched bodies; no HTTP fetch.
+		body = subscription.Normalize(req.Body)
+	} else {
+		fetchCtx := ctx
+		if p.fetchTimeout > 0 {
+			var cancelFetch context.CancelFunc
+			fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
+			defer cancelFetch()
+		}
+		loaded, errLoad := subscription.Load(fetchCtx, req.SubscriptionURL)
+		if errLoad != nil {
+			return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
+		}
+		body = loaded
 	}
 
 	stats := Stats{}

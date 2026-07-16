@@ -233,10 +233,15 @@ func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
 
 			var buf bytes.Buffer
 			buf.Grow(sourceBufSize)
-			_, err := svc.Filter(sourceCtx, &buf, preprocess.FilterRequest{
+			req := preprocess.FilterRequest{
 				SubscriptionURL:  fetch.SubscriptionURL(src.URL),
 				AllowedCountries: c.allowed,
-			})
+			}
+			if src.Body != "" {
+				// Inline source: filter the pasted payload directly, no fetch.
+				req = preprocess.FilterRequest{Body: []byte(src.Body), AllowedCountries: c.allowed}
+			}
+			_, err := svc.Filter(sourceCtx, &buf, req)
 			if err != nil {
 				results[i] = result{err: err}
 				return

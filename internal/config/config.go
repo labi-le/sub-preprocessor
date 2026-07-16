@@ -128,6 +128,10 @@ type BandwidthConfig struct {
 type SubscriptionSource struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url"`
+	// Body carries an inline subscription payload (base64 or raw newline-joined
+	// URIs) in place of a fetched URL. When set, the source is filtered directly
+	// without any HTTP fetch. Used by the crawler's inline-node harvest.
+	Body string `yaml:"body,omitempty"`
 }
 
 type privateConfig struct {
@@ -549,8 +553,12 @@ func (s *SubscriptionsConfig) Validate(groups Groups) error {
 			return fmt.Errorf("subscriptions.sources: duplicate name %q", src.Name)
 		}
 		seen[src.Name] = struct{}{}
-		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(src.URL)); err != nil {
-			return fmt.Errorf("subscriptions.sources.%s: %w", src.Name, err)
+		// A Body source carries an inline payload and needs no URL; a source
+		// with neither Body nor a valid public https URL is rejected here.
+		if strings.TrimSpace(src.Body) == "" {
+			if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(src.URL)); err != nil {
+				return fmt.Errorf("subscriptions.sources.%s: %w", src.Name, err)
+			}
 		}
 	}
 	return nil

@@ -22,12 +22,13 @@ import (
 )
 
 const (
-	defaultCrawlPages    = 6
-	defaultCrawlDepth    = 2
-	defaultCrawlStateTTL = 720 * time.Hour
-	defaultCrawlInterval = 30 * time.Minute
-	classifyTimeout      = 30 * time.Second
-	exitUsageError       = 2
+	defaultCrawlPages     = 6
+	defaultCrawlDepth     = 2
+	defaultCrawlStateTTL  = 720 * time.Hour
+	defaultCrawlInterval  = 30 * time.Minute
+	defaultCrawlInlineMax = 500
+	classifyTimeout       = 30 * time.Second
+	exitUsageError        = 2
 )
 
 func main() {
@@ -61,15 +62,17 @@ func runCrawl() {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("cmd", "crawl").Logger()
 
 	opts := crawl.Options{
-		Channels:     splitList(getenv("CRAWL_CHANNELS", "")),
-		ChannelsPath: getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
-		PrivatePath:  getenv("CRAWL_PRIVATE", "/config/private.yaml"),
-		Pages:        atoiDefault(getenv("CRAWL_PAGES", ""), defaultCrawlPages),
-		Prune:        boolDefault(getenv("CRAWL_PRUNE", ""), true),
-		MaxDepth:     intDefault(getenv("CRAWL_DEPTH", ""), defaultCrawlDepth),
-		MaxChannels:  intDefault(getenv("CRAWL_MAX_CHANNELS", ""), 0),
-		StatePath:    getenv("CRAWL_STATE", "/config/.crawler-state.json"),
-		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
+		Channels:      splitList(getenv("CRAWL_CHANNELS", "")),
+		ChannelsPath:  getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
+		PrivatePath:   getenv("CRAWL_PRIVATE", "/config/private.yaml"),
+		Pages:         atoiDefault(getenv("CRAWL_PAGES", ""), defaultCrawlPages),
+		Prune:         boolDefault(getenv("CRAWL_PRUNE", ""), true),
+		MaxDepth:      intDefault(getenv("CRAWL_DEPTH", ""), defaultCrawlDepth),
+		MaxChannels:   intDefault(getenv("CRAWL_MAX_CHANNELS", ""), 0),
+		StatePath:     getenv("CRAWL_STATE", "/config/.crawler-state.json"),
+		StateTTL:      durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
+		InlineEnabled: boolDefault(getenv("CRAWL_INLINE", ""), true),
+		InlineMax:     intDefault(getenv("CRAWL_INLINE_MAX", ""), defaultCrawlInlineMax),
 	}
 	interval := durationDefault(getenv("CRAWL_INTERVAL", ""), defaultCrawlInterval)
 

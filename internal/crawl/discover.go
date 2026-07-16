@@ -25,6 +25,11 @@ var reservedSlugs = map[string]bool{
 // discoveredPages caps how many pages are fetched for non-seed channels.
 const discoveredPages = 3
 
+// maxInlineAccum caps how many raw inline URIs are accumulated per cycle before
+// dedupe: a single post could paste a huge list, so bound worst-case memory
+// here (the later dedupe + InlineMax cap still applies to the survivors).
+const maxInlineAccum = 20000
+
 // scanNode is a channel queued for crawling at a given repost-graph depth.
 type scanNode struct {
 	channel string
@@ -40,8 +45,9 @@ type scanNode struct {
 // recorded into st so they become permanent seeds on future cycles, surviving
 // days when their recent pages carry no live sub. Returns every live
 // subscription URL found.
-func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
+func (c *Crawler) scan(ctx context.Context, st *state) (map[string]bool, []string) {
 	live := map[string]bool{}
+	var inline []string
 	visited := map[string]bool{}
 	discovered := 0
 
@@ -49,7 +55,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 	if len(seeds) == 0 {
 		c.logger.Warn().Str("channels_file", c.opts.ChannelsPath).
 			Msg("no seed channels; add them to channels.yaml or CRAWL_CHANNELS")
-		return live
+		return live, inline
 	}
 	queue := make([]scanNode, 0, len(seeds))
 	for slug := range seeds {
@@ -70,13 +76,13 @@ func (c *Crawler) scan(ctx context.Context, st *state) map[string]bool {
 		}
 		visited[n.channel] = true
 
-		for _, ch := range c.scanChannel(ctx, n, st, live) {
+		for _, ch := range c.scanChannel(ctx, n, st, live, &inline) {
 			if !visited[ch] {
 				queue = append(queue, scanNode{ch, n.depth + 1})
 			}
 		}
 	}
-	return live
+	return live, inline
 }
 
 // buildSeeds collects the depth-0 seed channels: configured channels, the
@@ -103,7 +109,7 @@ func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
 // scanChannel scrapes one channel, classifies its candidate URLs into live,
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]bool) []string {
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]bool, inline *[]string) []string {
 	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n.depth))
 	if len(pages) == 0 {
 		return nil
@@ -115,6 +121,10 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 			if candidate(raw) {
 				cand[raw] = struct{}{}
 			}
+		}
+		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
+			// Stop accumulating past the cap; dedupe/InlineMax still trims later.
+			*inline = append(*inline, extractInlineNodes(p)...)
 		}
 	}
 	found, _ := c.classifyAll(ctx, keys(cand))

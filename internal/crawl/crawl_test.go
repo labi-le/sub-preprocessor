@@ -2,6 +2,7 @@ package crawl //nolint:testpackage // exercises unexported crawl helpers
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
@@ -256,6 +258,13 @@ func TestSameSources(t *testing.T) {
 	if sameSources(a, added) {
 		t.Error("different-length sets must differ")
 	}
+
+	// Sources differing only in Body must be detected as different.
+	bodyA := []source{{Name: "tg-inline", Body: "AAAA"}}
+	bodyB := []source{{Name: "tg-inline", Body: "BBBB"}}
+	if sameSources(bodyA, bodyB) {
+		t.Error("sources differing only in Body must differ")
+	}
 }
 
 func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
@@ -436,5 +445,207 @@ func TestNextDaily(t *testing.T) {
 		if got := nextDaily(c.now, 4, 0); !got.Equal(c.want) {
 			t.Errorf("nextDaily(%v) = %v, want %v", c.now, got, c.want)
 		}
+	}
+}
+
+func TestExtractInlineNodes(t *testing.T) {
+	t.Parallel()
+
+	page := `<a href="https://sub.example/list">https://sub.example/list</a>` +
+		`<pre>vless://uuid@1.2.3.4:443?security=tls#fast</pre>` +
+		` vmess://eyJhZGQiOiIxLjEuMS4xIn0=, ` +
+		`<code>trojan://pass@host.example:8443#t</code>` +
+		`text ss://YWVzOnBhc3M@2.2.2.2:8388#s. ` +
+		`ssr://c3NyYmFzZTY0 tuic://uuid@h6.example:443#tu ` +
+		`hysteria://p@h7.example:443 hysteria2://p@h3.example:443 ` +
+		`hy2://p@h4.example:443 anytls://p@h5.example:443 ` +
+		`escaped vless://u@h.example:443?x=1&amp;y=2#e ` +
+		`just prose with a classy word and no proxies here ` +
+		// scheme-substring tokens must NOT be captured (boundary guard).
+		`pass://foo access://bar class://baz`
+
+	got := extractInlineNodes(page)
+	want := map[string]bool{
+		"vless://uuid@1.2.3.4:443?security=tls#fast": true,
+		"vmess://eyJhZGQiOiIxLjEuMS4xIn0=":           true, // trailing comma trimmed
+		"trojan://pass@host.example:8443#t":          true,
+		"ss://YWVzOnBhc3M@2.2.2.2:8388#s":            true, // trailing period trimmed
+		"ssr://c3NyYmFzZTY0":                         true,
+		"tuic://uuid@h6.example:443#tu":              true,
+		"hysteria://p@h7.example:443":                true,
+		"hysteria2://p@h3.example:443":               true,
+		"hy2://p@h4.example:443":                     true,
+		"anytls://p@h5.example:443":                  true,
+		"vless://u@h.example:443?x=1&y=2#e":          true, // &amp; unescaped
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d inline nodes %v, want %d", len(got), got, len(want))
+	}
+	for _, u := range got {
+		if !want[u] {
+			t.Errorf("unexpected inline node %q", u)
+		}
+	}
+}
+
+// pageFetcher is a network-free fetchClient returning canned HTML per URL.
+type pageFetcher struct{ pages map[string]string }
+
+func (f pageFetcher) page(_ context.Context, u string) (string, error) {
+	return f.pages[u], nil
+}
+
+// TestRunOnceHarvestsInlineNodes drives a full cycle against a stub fetcher: the
+// single scraped page carries four inline URIs, two of which collide on
+// server:port. With InlineMax=2 the crawler writes a tg-inline source whose
+// base64 Body holds the first two distinct nodes (dedup first-wins, then cap).
+func TestRunOnceHarvestsInlineNodes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	page := `<pre>vless://a@1.1.1.1:443#n1</pre>` +
+		` vless://b@1.1.1.1:443#dup ` + // same server:port as n1 -> deduped
+		`<code>vless://c@2.2.2.2:443#n2</code>` +
+		` vless://d@3.3.3.3:443#n3 ` // dropped by InlineMax=2 cap
+
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         1,
+			MaxDepth:      0,
+			InlineEnabled: true,
+			InlineMax:     2,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	var pf privateFile
+	b, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+
+	var inline *source
+	for i := range pf.Subscriptions.Sources {
+		if pf.Subscriptions.Sources[i].Name == "tg-inline" {
+			inline = &pf.Subscriptions.Sources[i]
+		}
+	}
+	if inline == nil {
+		t.Fatalf("no tg-inline source written: %+v", pf.Subscriptions.Sources)
+	}
+	if inline.URL != "" {
+		t.Errorf("tg-inline source must have empty URL, got %q", inline.URL)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(inline.Body)
+	if err != nil {
+		t.Fatalf("tg-inline Body is not valid base64: %v", err)
+	}
+	want := "vless://a@1.1.1.1:443#n1\nvless://c@2.2.2.2:443#n2"
+	if string(decoded) != want {
+		t.Fatalf("tg-inline Body = %q, want %q", decoded, want)
+	}
+}
+
+// hasInlineSource reports whether a tg-inline source exists in private.yaml.
+func hasInlineSource(t *testing.T, priv string) bool {
+	t.Helper()
+	b, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	var pf privateFile
+	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+	for i := range pf.Subscriptions.Sources {
+		if pf.Subscriptions.Sources[i].Name == "tg-inline" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunOnceInlineDisabled: with InlineEnabled=false the crawler must not write
+// a tg-inline source even though the scraped page carries inline URIs.
+func TestRunOnceInlineDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	page := `<pre>vless://a@1.1.1.1:443#n1</pre> vless://c@2.2.2.2:443#n2`
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         1,
+			MaxDepth:      0,
+			InlineEnabled: false,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	if hasInlineSource(t, priv) {
+		t.Fatal("tg-inline source written despite InlineEnabled=false")
+	}
+}
+
+// TestRunOnceNoInlineNodes: inline harvesting is on but the pages carry zero
+// proxy URIs, so buildInlineSource returns ok=false and no tg-inline is written.
+func TestRunOnceNoInlineNodes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	page := `<pre>just prose, a classy pass://foo link, and no proxies here</pre>`
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         1,
+			MaxDepth:      0,
+			InlineEnabled: true,
+			InlineMax:     2,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	if hasInlineSource(t, priv) {
+		t.Fatal("tg-inline source written despite no inline nodes")
 	}
 }

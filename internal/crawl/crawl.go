@@ -9,6 +9,7 @@ package crawl
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
 // managedPrefix marks sources this crawler owns. Sources without it (hand-added
@@ -47,24 +49,29 @@ var (
 	urlRe    = regexp.MustCompile(`https://[^\s"'<>\p{Z}]+`) // \p{Z}: URLs never contain unicode whitespace (e.g. &nbsp; adjacent to a link)
 	cursorRe = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
 	trimSet  = ".,;:!?)]}'\""
+	// inlineRe matches raw proxy URIs pasted directly in channel messages.
+	inlineRe = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls)://[^\s"'<>]+`)
 )
 
 // Options configures a crawl run.
 type Options struct {
-	Channels     []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
-	ChannelsPath string   // YAML file of seed channels, re-read each cycle for hot-reload
-	PrivatePath  string
-	Pages        int           // t.me/s pages (~20 msgs each) to walk back per seed channel
-	Prune        bool          // drop managed sources that no longer classify as live
-	MaxDepth     int           // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels  int           // safety cap on discovered (non-seed) channels per cycle; 0 = unlimited
-	StatePath    string        // persisted productive-channel memory; empty disables persistence
-	StateTTL     time.Duration // drop a productive channel from memory after this long without a live sub
+	Channels      []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
+	ChannelsPath  string   // YAML file of seed channels, re-read each cycle for hot-reload
+	PrivatePath   string
+	Pages         int           // t.me/s pages (~20 msgs each) to walk back per seed channel
+	Prune         bool          // drop managed sources that no longer classify as live
+	MaxDepth      int           // repost-recursion depth; 0 = only seed channels (no recursion)
+	MaxChannels   int           // safety cap on discovered (non-seed) channels per cycle; 0 = unlimited
+	StatePath     string        // persisted productive-channel memory; empty disables persistence
+	StateTTL      time.Duration // drop a productive channel from memory after this long without a live sub
+	InlineEnabled bool          // harvest raw inline proxy URIs pasted in channel messages
+	InlineMax     int           // cap on inline nodes kept per cycle (first N after dedup)
 }
 
 type source struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url"`
+	Body string `yaml:"body,omitempty"`
 }
 
 type privateFile struct {
@@ -201,7 +208,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// seeded by configured channels plus remembered productive ones. scan
 	// records freshly productive channels into st; stale ones are pruned.
 	st := loadState(c.opts.StatePath)
-	live := c.scan(ctx, &st)
+	live, inline := c.scan(ctx, &st)
 	if ctx.Err() != nil {
 		c.logger.Info().Msg("shutdown mid-scan; skipping state save and merge")
 		return
@@ -226,6 +233,13 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
+	inlineCount := 0
+	if c.opts.InlineEnabled {
+		if s, n, ok := c.buildInlineSource(inline); ok {
+			next = append(next, s)
+			inlineCount = n
+		}
+	}
 	if sameSources(pf.Subscriptions.Sources, next) {
 		c.logger.Info().Int("managed", len(managed)).Msg("no change")
 		return
@@ -235,7 +249,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		c.logger.Error().Err(writeErr).Msg("write private.yaml failed")
 		return
 	}
-	c.logger.Info().Int("managed", len(managed)).Int("total", len(next)).Msg("private.yaml updated")
+	c.logger.Info().Int("managed", len(managed)).Int("inline", inlineCount).Int("total", len(next)).Msg("private.yaml updated")
 }
 
 // recheckManaged records the URLs of existing managed sources and re-classifies
@@ -248,11 +262,17 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 	managedURL = map[string]bool{}
 	var recheck []string
 	for _, s := range pf.Subscriptions.Sources {
-		if strings.HasPrefix(s.Name, managedPrefix) {
-			managedURL[s.URL] = true
-			if !live[s.URL] {
-				recheck = append(recheck, s.URL)
-			}
+		if !strings.HasPrefix(s.Name, managedPrefix) {
+			continue
+		}
+		if s.Body != "" {
+			// Inline (Body) sources have an empty URL and are regenerated
+			// fresh each cycle; never recheck or classify them.
+			continue
+		}
+		managedURL[s.URL] = true
+		if !live[s.URL] {
+			recheck = append(recheck, s.URL)
 		}
 	}
 	relive, unknown := c.classifyAll(ctx, recheck)
@@ -271,9 +291,14 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[string]bool) (kept, managed []source) {
 	all := map[string]struct{}{}
 	for _, s := range pf.Subscriptions.Sources {
-		if strings.HasPrefix(s.Name, managedPrefix) {
+		switch {
+		case s.Body != "":
+			// Inline (Body) sources are regenerated fresh each cycle by
+			// RunOnce; drop the stale one here so it is not double-counted.
+			continue
+		case strings.HasPrefix(s.Name, managedPrefix):
 			all[s.URL] = struct{}{}
-		} else {
+		default:
 			kept = append(kept, s)
 		}
 	}
@@ -344,6 +369,47 @@ func extractURLs(page string) []string {
 		out = append(out, strings.TrimRight(m, trimSet))
 	}
 	return out
+}
+
+// extractInlineNodes returns every raw proxy URI (vless://, vmess://, ss://,
+// ssr://, trojan://, tuic://, hysteria://, hysteria2://, hy2://, anytls://)
+// pasted directly in a channel page, HTML-unescaped and stripped of trailing
+// punctuation. Unlike extractURLs these are node URIs, not subscription links.
+func extractInlineNodes(page string) []string {
+	page = html.UnescapeString(page)
+	matches := inlineRe.FindAllString(page, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, strings.TrimRight(m, trimSet))
+	}
+	return out
+}
+
+// buildInlineSource parses the raw inline URIs collected this cycle into nodes,
+// dedupes them by lowercased "server:port" (first wins, mirroring stable.Merge),
+// caps the survivors to opts.InlineMax, and packs the kept node URIs into a
+// single base64 Body under the managed "tg-inline" source. It returns ok=false
+// when no usable inline node was found.
+func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
+	seen := make(map[string]struct{}, len(uris))
+	var kept []string
+	subscription.Parse([]byte(strings.Join(uris, "\n")), func(n subscription.Node) bool {
+		if n.Server == "" || n.Port == "" {
+			return true
+		}
+		key := strings.ToLower(n.Server) + ":" + n.Port
+		if _, dup := seen[key]; dup {
+			return true
+		}
+		seen[key] = struct{}{}
+		kept = append(kept, n.Raw)
+		return c.opts.InlineMax <= 0 || len(kept) < c.opts.InlineMax
+	})
+	if len(kept) == 0 {
+		return source{}, 0, false
+	}
+	body := base64.StdEncoding.EncodeToString([]byte(strings.Join(kept, "\n")))
+	return source{Name: managedPrefix + "inline", Body: body}, len(kept), true
 }
 
 // pageCursor returns the smallest message id on a t.me/s page, used as the

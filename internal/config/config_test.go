@@ -716,3 +716,52 @@ func TestLoadMergesSourcesConfig(t *testing.T) {
 		t.Fatalf("sources overlay order wrong: %+v", cfg.Subscriptions.Sources)
 	}
 }
+
+// TestValidateBodySource covers the inline-source validation branch: a Body
+// source needs only a valid name (URL may be empty), a URL source still needs a
+// public https URL, and a source with neither is rejected.
+func TestValidateBodySource(t *testing.T) {
+	t.Parallel()
+
+	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+
+	cases := []struct {
+		name    string
+		sources string
+		wantErr bool
+	}{
+		{
+			name:    "body source with empty url accepted",
+			sources: "subscriptions:\n  sources:\n    - name: tg-inline\n      body: dmxlc3M6Ly91QDEuMS4xLjE6NDQzI2E=\n",
+			wantErr: false,
+		},
+		{
+			name:    "url source with non-https url rejected",
+			sources: "subscriptions:\n  sources:\n    - name: bad\n      url: http://insecure.example/s\n",
+			wantErr: true,
+		},
+		{
+			name:    "source with neither url nor body rejected",
+			sources: "subscriptions:\n  sources:\n    - name: empty\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(base+tc.sources), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := config.Load(path)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
