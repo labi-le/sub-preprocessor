@@ -81,6 +81,16 @@ func runCrawl() {
 		c.RunOnce(ctx)
 		return
 	}
+	// CRAWL_HTTP=":8081" starts an on-demand HTTP trigger alongside the
+	// schedule loop; empty keeps the crawler HTTP-less (unchanged behavior).
+	if addr := getenv("CRAWL_HTTP", ""); addr != "" {
+		logger.Info().Str("addr", addr).Msg("crawl HTTP trigger listening")
+		go func() {
+			if err := c.Serve(ctx, addr); err != nil {
+				logger.Error().Err(err).Str("addr", addr).Msg("crawl HTTP server failed")
+			}
+		}()
+	}
 	// CRAWL_AT="HH:MM" runs once daily at that wall-clock time (local TZ);
 	// otherwise fall back to the CRAWL_INTERVAL ticker.
 	at := getenv("CRAWL_AT", "")

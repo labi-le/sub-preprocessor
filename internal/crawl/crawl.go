@@ -80,6 +80,10 @@ type Crawler struct {
 	httpClient *http.Client
 	classifyFn func(ctx context.Context, client *http.Client, u fetch.SubscriptionURL) (classify.Result, error)
 	logger     zerolog.Logger
+	// running serializes crawl cycles: a triggered cycle and a scheduled tick
+	// never overlap. TryLock lets a scheduled tick (or HTTP trigger) skip
+	// cleanly when a cycle is already in flight instead of queueing behind it.
+	running sync.Mutex
 }
 
 // fetchClient fetches a channel page; an interface so tests can avoid the network.
@@ -119,9 +123,11 @@ func New(opts Options, logger zerolog.Logger) *Crawler {
 	return &Crawler{opts: opts, client: httpFetcher{client: client}, httpClient: client, classifyFn: classify.URL, logger: logger}
 }
 
-// Run executes RunOnce immediately, then every interval until ctx is done.
+// Run executes a cycle immediately, then every interval until ctx is done.
+// Cycles go through runGuarded, so a tick that fires while a cycle (scheduled
+// or HTTP-triggered) is still running is skipped rather than overlapped.
 func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
-	c.RunOnce(ctx)
+	c.runGuarded(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -129,7 +135,9 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.RunOnce(ctx)
+			if !c.runGuarded(ctx) {
+				c.logger.Warn().Msg("previous crawl cycle still running; skipping scheduled tick")
+			}
 		}
 	}
 }
@@ -149,9 +157,25 @@ func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
 			t.Stop()
 			return
 		case <-t.C:
-			c.RunOnce(ctx)
+			if !c.runGuarded(ctx) {
+				c.logger.Warn().Msg("previous crawl cycle still running; skipping scheduled run")
+			}
 		}
 	}
+}
+
+// runGuarded runs a single crawl cycle only if none is already in flight. It
+// TryLocks the cycle mutex: on success it runs RunOnce and returns true; if a
+// cycle is already running it returns false immediately without waiting, so a
+// scheduled tick or an HTTP trigger that collides with a live cycle is skipped
+// safely rather than queued.
+func (c *Crawler) runGuarded(ctx context.Context) bool {
+	if !c.running.TryLock() {
+		return false
+	}
+	defer c.running.Unlock()
+	c.RunOnce(ctx)
+	return true
 }
 
 // nextDaily returns the next instant at hour:min (local) strictly after now.
