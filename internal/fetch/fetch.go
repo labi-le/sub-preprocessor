@@ -189,6 +189,11 @@ func isPublicIP(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return false
 	}
+	for _, p := range trustedPrefixes {
+		if p.Contains(ip) {
+			return true
+		}
+	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsMulticast() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return false
@@ -199,4 +204,34 @@ func isPublicIP(ip netip.Addr) bool {
 		}
 	}
 	return true
+}
+
+// trustedPrefixes are operator-opted CIDRs that bypass the non-public checks,
+// e.g. a local fake-ip range (mihomo/clash) that routes otherwise-blocked
+// domains through a tunnel. Empty by default (strict). Set once at startup via
+// SetTrustedPrefixes before the first fetch; the dial guard reads it per-conn.
+var trustedPrefixes []netip.Prefix
+
+// SetTrustedPrefixes replaces the trusted-prefix allowlist. Call once during
+// startup, before any fetch (the guard reads the package var per-connection).
+func SetTrustedPrefixes(prefixes []netip.Prefix) {
+	trustedPrefixes = prefixes
+}
+
+// ParsePrefixes parses CIDR specs into prefixes, failing on the first invalid
+// entry; blank specs are skipped.
+func ParsePrefixes(specs []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(specs))
+	for _, s := range specs {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return nil, fmt.Errorf("parse trusted prefix %q: %w", s, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
