@@ -84,6 +84,10 @@ type Crawler struct {
 	// never overlap. TryLock lets a scheduled tick (or HTTP trigger) skip
 	// cleanly when a cycle is already in flight instead of queueing behind it.
 	running sync.Mutex
+	// pfMu serializes the private.yaml read-modify-write between the scan cycle
+	// (RunOnce) and the MTProto push path (appendLive), which can write it
+	// concurrently.
+	pfMu sync.Mutex
 }
 
 // fetchClient fetches a channel page; an interface so tests can avoid the network.
@@ -219,7 +223,10 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	// A cycle takes minutes to hours; re-load private.yaml so the merge sees
-	// concurrent hand edits instead of clobbering them with a stale snapshot.
+	// concurrent hand edits (or MTProto push appends) instead of clobbering
+	// them with a stale snapshot. pfMu serializes this against the push path.
+	c.pfMu.Lock()
+	defer c.pfMu.Unlock()
 	pf, err = loadPrivate(c.opts.PrivatePath)
 	if err != nil {
 		c.logger.Error().Err(err).Str("path", c.opts.PrivatePath).Msg("re-read private.yaml failed")

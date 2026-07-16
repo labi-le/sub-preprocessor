@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -90,6 +91,32 @@ func runCrawl() {
 				logger.Error().Err(err).Str("addr", addr).Msg("crawl HTTP server failed")
 			}
 		}()
+	}
+	// CRAWL_TG_API_ID + CRAWL_TG_API_HASH enable the MTProto userbot push path
+	// (real-time channel posts) alongside the poll. The session is cached at
+	// CRAWL_TG_SESSION so a one-time QR scan survives restarts.
+	if rawID := getenv("CRAWL_TG_API_ID", ""); rawID != "" {
+		apiID := intDefault(rawID, 0)
+		apiHash := getenv("CRAWL_TG_API_HASH", "")
+		switch {
+		case apiID <= 0:
+			logger.Error().Str("CRAWL_TG_API_ID", rawID).Msg("invalid CRAWL_TG_API_ID (want a positive integer); telegram push disabled")
+		case apiHash == "":
+			logger.Error().Msg("CRAWL_TG_API_ID set but CRAWL_TG_API_HASH missing; telegram push disabled")
+		default:
+			tgOpts := crawl.TGOptions{
+				APIID:       apiID,
+				APIHash:     apiHash,
+				SessionPath: getenv("CRAWL_TG_SESSION", "/config/.tg-session.json"),
+				Password:    getenv("CRAWL_TG_2FA", ""),
+			}
+			logger.Info().Str("session", tgOpts.SessionPath).Msg("telegram userbot push enabled")
+			go func() {
+				if err := c.RunTelegram(ctx, tgOpts); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error().Err(err).Msg("telegram userbot stopped")
+				}
+			}()
+		}
 	}
 	// CRAWL_AT="HH:MM" runs once daily at that wall-clock time (local TZ);
 	// otherwise fall back to the CRAWL_INTERVAL ticker.

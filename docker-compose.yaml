@@ -37,4 +37,14 @@ services:
       - CRAWL_MAX_CHANNELS=0   # 0 = no cap (visited-set still prevents re-visiting channels within a cycle)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
+      # --- Optional: MTProto userbot push (real-time posts instead of polling) ---
+      # api_id/api_hash from https://my.telegram.org (a USER account). The first
+      # login needs an interactive TTY to scan the QR — run once with:
+      #   docker compose run --rm tg-sub-crawler
+      # gotd caches the session to CRAWL_TG_SESSION (0600) so the detached
+      # service reuses it and skips the QR. The poll above stays as backfill.
+      # - CRAWL_TG_API_ID=0
+      # - CRAWL_TG_API_HASH=
+      # - CRAWL_TG_SESSION=/config/.tg-session.json
+      # - CRAWL_TG_2FA=            # only if the account has a 2FA password
     restart: unless-stopped

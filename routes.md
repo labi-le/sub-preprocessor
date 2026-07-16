@@ -417,7 +417,7 @@ Decides whether a URL serves a usable Mihomo-compatible subscription, reusing th
 
 ## `internal/crawl`
 
-`./internal/crawl/crawl.go`, `discover.go`, `state.go`, `channels.go`
+`./internal/crawl/crawl.go`, `discover.go`, `state.go`, `channels.go`, `mtproto.go`
 
 Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service. One SSRF-safe `http.Client` is held on the `Crawler` and reused for pages + classify batches. Cycle hygiene: a cancelled ctx aborts before any state/private.yaml write; private.yaml is re-loaded right before the merge/write, and managed sources added to the file mid-cycle (never checked) are retained; both private.yaml and the state file are written atomically (fsynced temp + rename). Transport-level classify errors (DNS, timeout, TLS) are *unknown* — those managed sources are retained; a definitive non-2xx answer (`classify.StatusError`) or a dead classification prunes.
 
@@ -431,8 +431,10 @@ Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel
 
 **Seed config (`channels.go`):** seed channels live in `config/channels.yaml` (`ChannelsPath`, `{channels: [slug|@handle|t.me-url]}`), analogous to `config.yaml`/`private.yaml`. `loadChannels` is best-effort (missing/malformed → no channels, never fatal) and re-read every cycle, so adding a channel hot-reloads on the next cycle without a restart. Effective seeds = `channels.yaml` ∪ `CRAWL_CHANNELS` env ∪ remembered productive channels.
 
-**Uses:** `classify`, `fetch`, `subscription` (via classify), `yaml.v3`, `zerolog`
-**Tags:** `crawl`, `telegram`, `subscription`, `private-overlay`, `ssrf`, `sidecar`
+**MTProto push (`mtproto.go`, optional):** when `CRAWL_TG_API_ID`+`CRAWL_TG_API_HASH` are set, `RunTelegram` runs a gotd/td **userbot** alongside the poll — real-time `updateNewChannelMessage` push instead of interval scraping. First run prints a QR to stdout (scan in Telegram → Settings → Devices → Link Desktop Device); gotd caches the session to `CRAWL_TG_SESSION` (default `/config/.tg-session.json`, mode 0600) so restarts skip the QR (`CRAWL_TG_2FA` covers 2FA accounts). It resolves + joins the same seed channels (membership is required to receive a public channel's pushes) and, per new post, runs the same `extractURLs`→`classifyAll`→append-to-`private.yaml` path — deterministic `tg-<sha10>` names, so poll and push collapse to one entry; `pfMu` serializes the write against the scan cycle. The poll stays as backfill for downtime/gaps. Disabled (unchanged behavior) when the creds are unset.
+
+**Uses:** `classify`, `fetch`, `subscription` (via classify), `gotd/td` (MTProto userbot), `mdp/qrterminal` (console QR), `yaml.v3`, `zerolog`
+**Tags:** `crawl`, `telegram`, `mtproto`, `userbot`, `push`, `subscription`, `private-overlay`, `ssrf`, `sidecar`
 
 ---
 ## Dependency Graph
