@@ -79,7 +79,7 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 
 `./internal/fetch/fetch.go`
 
-Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no private IPs (dial-time guard, incl. CGN/benchmarking/class-E reserved ranges), no proxy. One shared `http.Client` is reused across fetches.
+Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no private IPs (dial-time guard, incl. CGN/benchmarking/class-E reserved ranges), no proxy. One shared `http.Client` is reused across fetches. An opt-in trusted-prefix allowlist (`SetTrustedPrefixes`) bypasses the non-public rejection for operator-listed CIDRs — e.g. a local fake-ip range (mihomo/clash `198.18.0.0/16`) that tunnels DNS-poisoned domains like `t.me`; the crawler sets it from `CRAWL_TRUSTED_PREFIXES` (empty default = strict).
 
 **Key types:**
 - `FileType` — `"raw"` | `"gzip"`
@@ -89,6 +89,7 @@ Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no priv
 - `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body (uses the shared client)
 - `ValidatePublicHTTPSURL(url SubscriptionURL) error` — SSRF guard
 - `NewSafeHTTPClient() *http.Client` — transport with private-IP blocking at dial time
+- `SetTrustedPrefixes([]netip.Prefix)` / `ParsePrefixes([]string) ([]netip.Prefix, error)` — opt-in allowlist checked before the non-public rejection (fake-ip / tunnel routing); set once at startup, before the first fetch
 - `MaybeDecode(resp, fileType) (io.ReadCloser, error)` — wrap gzip if needed
 - `ValidateFileType(fileType) error` — must be `raw` or `gzip`
 
