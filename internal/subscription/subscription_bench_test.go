@@ -104,3 +104,42 @@ func BenchmarkParse_SkipsNonURILines(b *testing.B) {
 		})
 	}
 }
+
+var (
+	sinkStr string
+	sinkInt int
+)
+
+// vmessPayload builds the base64 JSON payload for a vmess node with display name.
+func vmessPayload(name string) string {
+	return `{"v":"2","add":"1.2.3.4","port":"443","ps":"` + name +
+		`","id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"ws"}`
+}
+
+func BenchmarkParse_Vmess(b *testing.B) {
+	var sb strings.Builder
+	for range 50 {
+		sb.WriteString(vmessLine(vmessPayload("Name")))
+		sb.WriteString("\n")
+	}
+	input := []byte(sb.String())
+	b.ReportAllocs()
+	for b.Loop() {
+		count := 0
+		subscription.Parse(input, func(_ subscription.Node) bool {
+			count++
+			return true
+		})
+		sinkInt = count
+	}
+}
+
+func BenchmarkRewriteVmessName(b *testing.B) {
+	raw := vmessLine(vmessPayload("Name"))
+	const newName = "[GEO:FI][IP:1.2.3.4] mifa-001"
+	b.ReportAllocs()
+	for b.Loop() {
+		out, _ := subscription.RewriteVmessName(raw, newName)
+		sinkStr = out
+	}
+}
