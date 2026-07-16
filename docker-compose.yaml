@@ -29,8 +29,8 @@ services:
       - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
       - TZ=Europe/Moscow
-      - CRAWL_AT=04:00       # run once daily at 04:00 MSK (falls back to CRAWL_INTERVAL if unset)
-      - CRAWL_INTERVAL=30m
+      # - CRAWL_AT=04:00     # uncomment to run once daily at HH:MM instead of the hourly interval
+      - CRAWL_INTERVAL=1h    # hourly poll of t.me/s (cheap; near-real-time enough)
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1
       - CRAWL_DEPTH=2
