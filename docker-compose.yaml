@@ -33,7 +33,7 @@ services:
       - CRAWL_INTERVAL=1h    # hourly poll of t.me/s (cheap; near-real-time enough)
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1
-      - CRAWL_DEPTH=2
+      - CRAWL_DEPTH=3          # repost-graph recursion depth; higher = wider fan-out + longer cycles
       - CRAWL_MAX_CHANNELS=0   # 0 = no cap (visited-set still prevents re-visiting channels within a cycle)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
