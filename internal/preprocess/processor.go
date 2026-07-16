@@ -85,7 +85,11 @@ type PipelineContext struct {
 	Stats    *Stats
 	// Scratch is a per-request buffer reused across nodes so filters can
 	// compact IPs in place without dirtying the cached Resolved slices.
-	Scratch     []netip.Addr
+	Scratch []netip.Addr
+	// addrScratch backs the single-address slice returned for bare-IP servers,
+	// avoiding a per-node heap allocation. It is overwritten each node and must
+	// be consumed (copied into Scratch) before the next node runs.
+	addrScratch [1]netip.Addr
 	IsFirstNode bool
 }
 
@@ -225,19 +229,35 @@ func (p *Processor) processBody(ctx context.Context, body []byte, pctx *Pipeline
 	return nil
 }
 
-func (p *Processor) resolveNode(ctx context.Context, server string, resolved map[string][]netip.Addr) []netip.Addr {
-	ips, attempted := resolved[server]
-	if !attempted {
-		var resolveErr error
-		ips, resolveErr = p.resolver.Resolve(ctx, server)
-		if resolveErr != nil || len(ips) == 0 {
-			resolved[server] = []netip.Addr{}
-			return []netip.Addr{}
-		}
-		resolved[server] = append([]netip.Addr(nil), ips...)
-		ips = resolved[server]
+// resolveNode returns the IPv4 addresses for a node's server. Bare IPs are
+// handled inline without touching the resolver cache: the address is written
+// into pctx.addrScratch (no allocation) and returned directly, since a bare IP
+// needs no DNS and the caller copies the result into pctx.Scratch before the
+// next node. Hostnames go through the DNS resolver and are memoized in
+// pctx.Resolved with an isolated copy so cached resolver slices are never
+// aliased into request-local state.
+func (p *Processor) resolveNode(ctx context.Context, server string, pctx *PipelineContext) []netip.Addr {
+	if ips, attempted := pctx.Resolved[server]; attempted {
+		return ips
 	}
-	return ips
+	// Bare IPs skip DNS, the cache, and the request map: re-parsing on repeat
+	// is allocation-free, so no memoization is needed.
+	if addr, err := netip.ParseAddr(server); err == nil {
+		if !addr.Is4() {
+			return nil
+		}
+		pctx.addrScratch[0] = addr
+		return pctx.addrScratch[:1]
+	}
+	ips, resolveErr := p.resolver.Resolve(ctx, server)
+	if resolveErr != nil || len(ips) == 0 {
+		pctx.Resolved[server] = []netip.Addr{}
+		return nil
+	}
+	// Isolate the per-request map from the resolver cache: the copy guarantees
+	// request-local code never mutates or aliases a cached resolver slice.
+	pctx.Resolved[server] = append([]netip.Addr(nil), ips...)
+	return pctx.Resolved[server]
 }
 
 func (p *Processor) processNode(ctx context.Context, node subscription.Node, pctx *PipelineContext) {
@@ -256,7 +276,7 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		return
 	}
 
-	cached := p.resolveNode(ctx, node.Server, pctx.Resolved)
+	cached := p.resolveNode(ctx, node.Server, pctx)
 	if len(cached) == 0 {
 		pctx.Stats.DNSDrop++
 		return

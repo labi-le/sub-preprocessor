@@ -1,4 +1,4 @@
-package preprocess
+package preprocess //nolint:testpackage // exercises the unexported processBody pipeline
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ import (
 // entry covers the 198.51.100.0/24 block used by the synthetic node servers and
 // maps it to NL (an allowed country) so every node survives the filter and
 // exercises the rewrite->buffer tail of the pipeline.
-func benchGeofeed() geofeed.CountryLookup {
+func benchGeofeed() geofeed.CountryLookup { //nolint:ireturn // bench helper returns the geofeed lookup interface
 	entries := make([]geofeed.Entry, 0, 501)
 	countries := []geofeed.CountryCode{{'D', 'E'}, {'U', 'S'}, {'J', 'P'}, {'G', 'B'}, {'F', 'R'}}
 	for i := range 500 {

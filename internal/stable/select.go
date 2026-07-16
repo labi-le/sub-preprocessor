@@ -22,7 +22,7 @@ type Survivor struct {
 // delay within maxAvgMs. Entries absent from res count as fully failed.
 // The result is sorted by mean delay ascending (stable).
 func SelectSurvivors(entries []Entry, res map[string]ProbeResult, rounds, maxFail, maxAvgMs int) []Survivor {
-	var out []Survivor
+	out := make([]Survivor, 0, len(entries))
 	for _, e := range entries {
 		r, ok := res[e.Label]
 		if !ok {
@@ -39,7 +39,11 @@ func SelectSurvivors(entries []Entry, res map[string]ProbeResult, rounds, maxFai
 
 // BuildPayload renders survivors as a plain URI list, one node per line.
 func BuildPayload(survivors []Survivor) []byte {
-	var b []byte
+	total := 0
+	for _, s := range survivors {
+		total += len(s.Tagged) + 1
+	}
+	b := make([]byte, 0, total)
 	for _, s := range survivors {
 		b = append(b, s.Tagged...)
 		b = append(b, '\n')

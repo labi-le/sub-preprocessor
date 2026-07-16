@@ -1,9 +1,10 @@
 package stable
 
 import (
-	"fmt"
-	"strings"
+	"bytes"
+	"strconv"
 
+	"domains.lst/sub-preprocessor/internal/ioutil"
 	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
@@ -31,26 +32,36 @@ type Entry struct {
 // lowercased key so mixed-case duplicates share one dead-cache entry; Raw and
 // Tagged keep the original casing.
 func Merge(bodies []SourceBody) []Entry {
-	seen := make(map[string]struct{})
-	var entries []Entry
+	// Estimate total nodes cheaply (one line per node) to pre-size collections.
+	total := 0
+	for _, src := range bodies {
+		total += bytes.Count(src.Body, []byte{'\n'}) + 1
+	}
+	seen := make(map[string]struct{}, total)
+	entries := make([]Entry, 0, total)
+	var scratch []byte  // reused lowercased server:port key builder
+	var labelBuf []byte // reused <source>-NNN label builder
 	for _, src := range bodies {
 		kept := 0
 		subscription.Parse(src.Body, func(n subscription.Node) bool {
-			key := strings.ToLower(n.Server) + ":" + n.Port
-			if _, dup := seen[key]; dup {
+			// Dedupe key: lowercased server:port in the reused scratch buffer.
+			scratch = lowerServerPort(scratch, n.Server, n.Port)
+			// Membership test on the scratch bytes allocates nothing; the real
+			// string key is interned only when the node is actually kept.
+			if _, dup := seen[string(scratch)]; dup {
 				return true
 			}
-			label := fmt.Sprintf("%s-%03d", src.Name, kept+1)
+			labelBuf = labelBuf[:0]
+			labelBuf = append(labelBuf, src.Name...)
+			labelBuf = append(labelBuf, '-')
+			labelBuf = appendPad3(labelBuf, kept+1)
+			label := string(labelBuf)
 			raw, ok := relabelNode(n, label)
 			if !ok {
 				return true
 			}
-			tagged := raw
-			if tags := rewrite.LeadingTags(n.Name); tags != "" {
-				if t, tok := relabelNode(n, tags+" "+label); tok {
-					tagged = t
-				}
-			}
+			tagged := taggedName(n, raw, label)
+			key := string(scratch)
 			seen[key] = struct{}{}
 			kept++
 			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key})
@@ -58,6 +69,52 @@ func Merge(bodies []SourceBody) []Entry {
 		})
 	}
 	return entries
+}
+
+// lowerServerPort appends the ASCII-lowercased "server:port" dedupe key into
+// dst[:0] and returns it (hostnames are ASCII, so byte-wise lowering suffices).
+func lowerServerPort(dst []byte, server, port string) []byte {
+	dst = dst[:0]
+	for i := range len(server) {
+		c := server[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		dst = append(dst, c)
+	}
+	dst = append(dst, ':')
+	return append(dst, port...)
+}
+
+// taggedName carries any leading [GEO][IP] tags from the source name onto the
+// relabeled node, falling back to raw when there are none.
+func taggedName(n subscription.Node, raw, label string) string {
+	tags := rewrite.LeadingTags(n.Name)
+	if tags == "" {
+		return raw
+	}
+	if t, ok := relabelNode(n, tags+" "+label); ok {
+		return t
+	}
+	return raw
+}
+
+const (
+	decimalBase   = 10
+	labelPadWidth = 3
+)
+
+// appendPad3 appends v as a decimal, zero-padded to a minimum width of
+// labelPadWidth (matching the %03d format), without fmt allocations/boxing.
+func appendPad3(b []byte, v int) []byte {
+	digits := 1
+	for n := v; n >= decimalBase; n /= decimalBase {
+		digits++
+	}
+	for ; digits < labelPadWidth; digits++ {
+		b = append(b, '0')
+	}
+	return strconv.AppendInt(b, int64(v), decimalBase)
 }
 
 // relabelNode rewrites a node's display name to label so probe results map
@@ -71,5 +128,11 @@ func relabelNode(n subscription.Node, label string) (string, bool) {
 	if n.FragmentIdx >= 0 {
 		raw = raw[:n.FragmentIdx]
 	}
-	return raw + "#" + label, true
+	// Single allocation for the joined "<raw>#<label>" string; the byte buffer
+	// is not retained after conversion, so the zero-copy view is safe.
+	buf := make([]byte, 0, len(raw)+1+len(label))
+	buf = append(buf, raw...)
+	buf = append(buf, '#')
+	buf = append(buf, label...)
+	return ioutil.UnsafeString(buf), true
 }

@@ -25,7 +25,7 @@ const benchUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
 // benchVlessLine renders a parseable vless URI for host:port with a #fragment name.
 func benchVlessLine(host, port, name string) string {
-	return fmt.Sprintf("vless://%s@%s:%s?encryption=none&security=none&type=tcp#%s",
+	return fmt.Sprintf("vless://%s@%s:%s?encryption=none&security=none&type=tcp#%s", //nolint:nosprintfhostport // synthetic bench URI, not a network dial
 		benchUUID, host, port, name)
 }
 
