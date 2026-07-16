@@ -193,10 +193,10 @@ func TestLoadResolverCacheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Resolver.CacheTTL != 30*time.Minute {
+	if cfg.Resolver.CacheTTL == nil || *cfg.Resolver.CacheTTL != 30*time.Minute {
 		t.Fatalf("cache_ttl: %v", cfg.Resolver.CacheTTL)
 	}
-	if cfg.Resolver.CacheNegativeTTL != 10*time.Minute {
+	if cfg.Resolver.CacheNegativeTTL == nil || *cfg.Resolver.CacheNegativeTTL != 10*time.Minute {
 		t.Fatalf("cache_negative_ttl: %v", cfg.Resolver.CacheNegativeTTL)
 	}
 }
@@ -208,10 +208,10 @@ func TestLoadResolverCacheExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Resolver.CacheTTL != time.Hour {
+	if cfg.Resolver.CacheTTL == nil || *cfg.Resolver.CacheTTL != time.Hour {
 		t.Fatalf("cache_ttl: %v", cfg.Resolver.CacheTTL)
 	}
-	if cfg.Resolver.CacheNegativeTTL != 5*time.Minute {
+	if cfg.Resolver.CacheNegativeTTL == nil || *cfg.Resolver.CacheNegativeTTL != 5*time.Minute {
 		t.Fatalf("cache_negative_ttl: %v", cfg.Resolver.CacheNegativeTTL)
 	}
 }
@@ -535,7 +535,7 @@ func TestStoresChanged(t *testing.T) {
 	for name, mut := range map[string]func(*config.Config){
 		"db_path":       func(c *config.Config) { c.GeoBlock.DBPath = "/new/path.db" },
 		"geoblock ttl":  func(c *config.Config) { c.GeoBlock.TTL = time.Hour },
-		"deadcache ttl": func(c *config.Config) { c.DeadCache.TTL = time.Hour },
+		"deadcache ttl": func(c *config.Config) { d := time.Hour; c.DeadCache.TTL = &d },
 	} {
 		m := a
 		mut(&m)
@@ -622,5 +622,97 @@ func TestLoadASNCacheTTL(t *testing.T) {
 	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
 	if _, negErr := loadRaw(t, base+"asn:\n  cache_ttl: -1s\n"); negErr == nil {
 		t.Fatal("negative asn.cache_ttl must be rejected")
+	}
+}
+
+// TestLoadCacheTTLDisableSemantics proves the pointer-presence semantics for the
+// three cache TTLs: an unset value defaults, an explicit 0 is preserved (which
+// the resolver / app.go treat as "disable"), and a negative value is rejected.
+func TestLoadCacheTTLDisableSemantics(t *testing.T) {
+	t.Parallel()
+
+	// Unset -> defaults.
+	def, err := writeConfig(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Resolver.CacheTTL == nil || *def.Resolver.CacheTTL != 30*time.Minute {
+		t.Fatalf("resolver.cache_ttl default = %v", def.Resolver.CacheTTL)
+	}
+	if def.Resolver.CacheNegativeTTL == nil || *def.Resolver.CacheNegativeTTL != 10*time.Minute {
+		t.Fatalf("resolver.cache_negative_ttl default = %v", def.Resolver.CacheNegativeTTL)
+	}
+	if def.DeadCache.TTL == nil || *def.DeadCache.TTL != 2*time.Hour {
+		t.Fatalf("deadcache.ttl default = %v", def.DeadCache.TTL)
+	}
+
+	// Explicit 0 -> preserved (disable), not coerced back to the default.
+	dis, err := writeConfig(t, "resolver:\n  cache_ttl: 0s\n  cache_negative_ttl: 0s\ndeadcache:\n  ttl: 0s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dis.Resolver.CacheTTL == nil || *dis.Resolver.CacheTTL != 0 {
+		t.Fatalf("explicit resolver.cache_ttl=0 must be preserved, got %v", dis.Resolver.CacheTTL)
+	}
+	if dis.Resolver.CacheNegativeTTL == nil || *dis.Resolver.CacheNegativeTTL != 0 {
+		t.Fatalf("explicit resolver.cache_negative_ttl=0 must be preserved, got %v", dis.Resolver.CacheNegativeTTL)
+	}
+	if dis.DeadCache.TTL == nil || *dis.DeadCache.TTL != 0 {
+		t.Fatalf("explicit deadcache.ttl=0 must be preserved, got %v", dis.DeadCache.TTL)
+	}
+
+	// Negative -> rejected, for each field independently.
+	for _, block := range []string{
+		"resolver:\n  cache_ttl: -1s\n",
+		"resolver:\n  cache_negative_ttl: -1s\n",
+		"deadcache:\n  ttl: -1h\n",
+	} {
+		if _, negErr := writeConfig(t, block); negErr == nil {
+			t.Fatalf("negative TTL must be rejected: %q", block)
+		}
+	}
+}
+
+// TestLoadRejectsUnknownCheckFilter: a filters entry outside the known set
+// {gemini,claude,bandwidth} must fail Load and name the offending filter.
+func TestLoadRejectsUnknownCheckFilter(t *testing.T) {
+	t.Parallel()
+
+	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	yaml := base + "subscriptions:\n  check:\n    filters: [bogus]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	_, err := loadRaw(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for unknown check filter")
+	}
+	if !strings.Contains(err.Error(), "subscriptions.check.filters") || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("error %q does not name the bad filter", err)
+	}
+}
+
+// TestLoadMergesSourcesConfig: a sibling sources.yaml appends its subscription
+// sources to the effective config, mirroring the private.yaml overlay merge.
+func TestLoadMergesSourcesConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := "subscriptions:\n  sources:\n    - name: b\n      url: https://b.example.com/s\n    - name: c\n      url: https://c.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir, "sources.yaml"), []byte(overlay), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(cfg.Subscriptions.Sources); got != 3 {
+		t.Fatalf("sources not merged: got %d, want 3: %+v", got, cfg.Subscriptions.Sources)
+	}
+	if cfg.Subscriptions.Sources[1].Name != "b" || cfg.Subscriptions.Sources[2].Name != "c" {
+		t.Fatalf("sources overlay order wrong: %+v", cfg.Subscriptions.Sources)
 	}
 }

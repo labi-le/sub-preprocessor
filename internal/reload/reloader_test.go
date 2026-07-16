@@ -103,6 +103,9 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.Geofeed.RefreshInterval = 7 * time.Minute
 	cfg.Resolver.Address = "9.9.9.9:53"
 	cfg.Resolver.Timeout = 3 * time.Second
+	dnsTTL, dnsNegTTL := 30*time.Minute, 10*time.Minute
+	cfg.Resolver.CacheTTL = &dnsTTL
+	cfg.Resolver.CacheNegativeTTL = &dnsNegTTL
 	cfg.ASN.Timeout = 4 * time.Second
 	cfg.ASN.DenyPatterns = []string{"^AS1234 ", "spammy"}
 	cfg.Workflow.Stages = []string{"geofeed", "asn"}

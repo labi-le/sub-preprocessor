@@ -28,6 +28,10 @@ type Watcher struct {
 	// config.Load merges it into the effective config, so a change to it must
 	// trigger a reload just like a change to the main file.
 	privatePath string
+	// sourcesPath is the tracked `sources.yaml` overlay sibling of configPath.
+	// config.Load appends its subscription sources, so a change to it must
+	// trigger a reload just like a change to the main file.
+	sourcesPath string
 	onChange    func(context.Context)
 	logger      zerolog.Logger
 	debounce    time.Duration
@@ -52,6 +56,7 @@ func NewWatcher(configPath string, onChange func(context.Context), logger zerolo
 		fsw:         fsw,
 		configPath:  cleaned,
 		privatePath: filepath.Join(filepath.Dir(cleaned), "private.yaml"),
+		sourcesPath: filepath.Join(filepath.Dir(cleaned), "sources.yaml"),
 		onChange:    onChange,
 		logger:      logger,
 		debounce:    debounceInterval,
@@ -137,10 +142,11 @@ func (d *debouncer) stop() {
 }
 
 // matches reports whether ev is a create/write/rename/remove on the watched
-// config file or its private.yaml overlay sibling. Chmod-only events are ignored.
+// config file or its private.yaml / sources.yaml overlay siblings. Chmod-only
+// events are ignored.
 func (w *Watcher) matches(ev fsnotify.Event) bool {
 	name := filepath.Clean(ev.Name)
-	if name != w.configPath && name != w.privatePath {
+	if name != w.configPath && name != w.privatePath && name != w.sourcesPath {
 		return false
 	}
 	return ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0

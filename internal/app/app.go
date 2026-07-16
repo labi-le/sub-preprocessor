@@ -36,9 +36,9 @@ func buildStores(cfg config.Config, logger zerolog.Logger) (*geoblock.Store, *st
 		logger.Info().Str("db", cfg.GeoBlock.DBPath).Int("blocked", store.Count()).Msg("geoblock store")
 	}
 
-	if cfg.DeadCache.TTL > 0 {
-		dcache = stable.NewDeadSet(cfg.DeadCache.TTL)
-		logger.Info().Dur("ttl", cfg.DeadCache.TTL).Msg("dead-node cache (in-memory)")
+	if *cfg.DeadCache.TTL > 0 {
+		dcache = stable.NewDeadSet(*cfg.DeadCache.TTL)
+		logger.Info().Dur("ttl", *cfg.DeadCache.TTL).Msg("dead-node cache (in-memory)")
 	}
 
 	return gbStore, dcache, nil

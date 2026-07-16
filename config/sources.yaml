@@ -1,0 +1,124 @@
+subscriptions:
+  sources:
+    - name: mifa
+      url: https://mifa.world/vless
+    - name: aetris
+      url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
+    - name: purple
+      url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
+    - name: mehrtat
+      url: https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt
+    - name: mhditaheri
+      url: https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vless
+    - name: iboxz
+      url: https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/vless
+    - name: ebrasha
+      url: https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt
+    - name: bahemmat
+      url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt
+    - name: bijandi
+      url: https://raw.githubusercontent.com/amir-reza-bijandi/v2ray-configs/main/configs.txt
+    - name: 3inker
+      url: https://raw.githubusercontent.com/3inker/v2ray-subscription/main/subs/all_not_ru.txt
+    - name: huangyurong
+      url: https://raw.githubusercontent.com/HuangYurong123/p-configs/main/Splitted-By-Protocol/vless.txt
+    - name: rabbitson
+      url: https://raw.githubusercontent.com/MrRabbitson/RabbitProxyZ-proxy-list/refs/heads/main/lite.txt
+    - name: formatorcn
+      url: https://raw.githubusercontent.com/formatorcn/daily-v2ray-sub/main/sub.txt
+    - name: slxkware
+      url: https://raw.githubusercontent.com/slxkware/Vless-list/main/White%20Vless.txt
+    - name: zxcursed
+      url: https://raw.githubusercontent.com/zxcursedzxc0721/vless-subscriptions/main/all/vless.txt
+    - name: fifthidea
+      url: https://raw.githubusercontent.com/fifthidea/sub/main/sub/sub-full-plaintxt.txt
+    - name: ninjanexus
+      url: https://raw.githubusercontent.com/ninjastrikers/nexus-nodes/main/configs/vless.txt
+    - name: darmioniks
+      url: https://raw.githubusercontent.com/Darmioniks/proxy-and-vless-collector/main/vless_filtered.txt
+    - name: theavel
+      url: https://raw.githubusercontent.com/theavel/free-vless-proxy/main/all.txt
+    - name: yafeisun
+      url: https://raw.githubusercontent.com/yafeisun/v2raynode/refs/heads/main/result/karing.txt
+    - name: jagger
+      url: https://raw.githubusercontent.com/jagger235711/V2rayCollector/main/results/vless.txt
+    - name: wlunlocker
+      url: https://raw.githubusercontent.com/wlunlocker/vpn-configs/main/blacklist_vpn1.txt
+    - name: ishalumi
+      url: https://raw.githubusercontent.com/ishalumi/proxy-node-collector/main/output/nodes.txt
+    - name: yuanxiawan
+      url: https://raw.githubusercontent.com/yuanxiawan/freevless/main/results/valid_vless_configs.txt
+    - name: vova
+      url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
+    - name: avia
+      url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
+    - name: prince
+      url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
+    - name: qjlxg
+      url: https://raw.githubusercontent.com/qjlxg/eastmoney/main/all_nodes.txt
+    - name: niqonopin
+      url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
+    - name: wind7077
+      url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
+    - name: tepo80
+      url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
+    - name: etoneya-su
+      url: https://etoneya.su/other
+    - name: etoneya-best
+      url: https://etoneya.best/other
+    - name: etoneya-alley
+      url: https://alley.serv00.net/other
+    - name: etoneya-tenshi
+      url: https://internet-tenshi.kangel.tech/other
+    - name: etoneya-blacklist
+      url: https://blacklist.etoneya.baby
+    - name: etoneya-etoskam
+      url: https://etoskam.ru/other
+    - name: etoneyaproject
+      url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
+    - name: bywarm-selected
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/selected.txt
+    - name: bywarm-wl
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/wl.txt
+    - name: bywarm-merged
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt
+    - name: wlrus
+      url: https://wlrus.lol/confs/blackl.txt
+    - name: goida
+      url: https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
+    - name: igareck-white
+      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+    - name: igareck-black
+      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt
+    - name: vlessuniversal
+      url: https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
+    - name: kfwl
+      url: https://raw.githubusercontent.com/prominbro/KfWL/refs/heads/main/KfWL.txt
+    - name: prominbro
+      url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
+    - name: obwl-wwh
+      url: https://obwlsub.vercel.app/wwh
+    - name: obhodwl
+      url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL
+    - name: reality
+      url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
+    - name: genlib
+      url: https://raw.githubusercontent.com/gergew452/Generation-Liberty/refs/heads/main/githubmirror/best.txt
+    - name: noname-de
+      url: https://white-lists.vercel.app/api/filter?code=DE&type=white&min=false
+    - name: gbr
+      url: https://gbr.mydan.online/configs
+    - name: mygala
+      url: https://mygala.ru/vpn/subscription.txt
+    - name: whitelist-sanuyyq
+      url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
+    - name: lime
+      url: https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
+    - name: shatak
+      url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
+    - name: rostunnel-gen
+      url: https://subrostunnel.vercel.app/gen.txt
+    - name: rostunnel-mega
+      url: https://rostunnel.vercel.app/mega.txt
+    - name: abikus
+      url: https://cdn.jsdelivr.net/gh/AbikusSudo/RussiaVPN@main/docs/index.html

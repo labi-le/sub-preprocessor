@@ -75,10 +75,14 @@ type Config struct {
 	} `yaml:"server"`
 	Geofeed  GeofeedConfig `yaml:"geofeed"`
 	Resolver struct {
-		Address          string        `yaml:"address"`
-		Timeout          time.Duration `yaml:"timeout"`
-		CacheTTL         time.Duration `yaml:"cache_ttl"`
-		CacheNegativeTTL time.Duration `yaml:"cache_negative_ttl"`
+		Address string        `yaml:"address"`
+		Timeout time.Duration `yaml:"timeout"`
+		// CacheTTL / CacheNegativeTTL are pointers so an unset value defaults
+		// (nil -> defaultDNSCacheTTL / defaultDNSNegativeCache) while an
+		// explicit 0 is preserved and means "disable that cache" (resolver.New
+		// treats a zero TTL as disable).
+		CacheTTL         *time.Duration `yaml:"cache_ttl"`
+		CacheNegativeTTL *time.Duration `yaml:"cache_negative_ttl"`
 	} `yaml:"resolver"`
 	ASN           ASNConfig           `yaml:"asn"`
 	Workflow      WorkflowConfig      `yaml:"workflow"`
@@ -162,12 +166,16 @@ type GeoBlockConfig struct {
 // the stable probe, so later cycles skip re-probing them (see stable.DeadSet;
 // keyed by server:port, not persisted).
 type DeadCacheConfig struct {
-	TTL time.Duration `yaml:"ttl"`
+	// TTL is a pointer so an unset value defaults (nil -> defaultDeadCacheTTL)
+	// while an explicit 0 is preserved and means "disable the dead-node cache"
+	// (app.go gates the DeadSet on TTL > 0).
+	TTL *time.Duration `yaml:"ttl"`
 }
 
 func (d *DeadCacheConfig) applyDefaults() {
-	if d.TTL == 0 {
-		d.TTL = defaultDeadCacheTTL
+	if d.TTL == nil {
+		ttl := defaultDeadCacheTTL
+		d.TTL = &ttl
 	}
 }
 
@@ -295,11 +303,13 @@ func Load(path string) (Config, error) {
 	if cfg.Resolver.Timeout == 0 {
 		cfg.Resolver.Timeout = defaultTimeout
 	}
-	if cfg.Resolver.CacheTTL == 0 {
-		cfg.Resolver.CacheTTL = defaultDNSCacheTTL
+	if cfg.Resolver.CacheTTL == nil {
+		ttl := defaultDNSCacheTTL
+		cfg.Resolver.CacheTTL = &ttl
 	}
-	if cfg.Resolver.CacheNegativeTTL == 0 {
-		cfg.Resolver.CacheNegativeTTL = defaultDNSNegativeCache
+	if cfg.Resolver.CacheNegativeTTL == nil {
+		ttl := defaultDNSNegativeCache
+		cfg.Resolver.CacheNegativeTTL = &ttl
 	}
 	if cfg.ASN.Timeout == 0 {
 		cfg.ASN.Timeout = defaultTimeout
@@ -318,6 +328,12 @@ func Load(path string) (Config, error) {
 	cfg.GeoBlock.applyDefaults()
 	cfg.DeadCache.applyDefaults()
 	cfg.Fetch.applyDefaults()
+
+	// Merge the tracked sources.yaml overlay BEFORE validation so the appended
+	// sources are validated together with the rest of the config.
+	if err := mergeSourcesOverlay(filepath.Dir(path), &cfg); err != nil {
+		return Config{}, err
+	}
 	if errValidate := cfg.Validate(); errValidate != nil {
 		return Config{}, errValidate
 	}
@@ -345,44 +361,35 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// mergeSourcesOverlay appends subscription sources from a sibling sources.yaml
+// (curated sources kept out of config.yaml) to cfg. A missing file is fine; a
+// read or parse error fails loudly, mirroring the private.yaml overlay so a
+// permission/I/O problem never silently drops the curated sources.
+func mergeSourcesOverlay(dir string, cfg *Config) error {
+	b, err := os.ReadFile(filepath.Join(dir, "sources.yaml"))
+	switch {
+	case err == nil:
+		var overlay privateConfig
+		if unmarshalErr := yaml.Unmarshal(b, &overlay); unmarshalErr != nil {
+			return fmt.Errorf("unmarshal sources config: %w", unmarshalErr)
+		}
+		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, overlay.Subscriptions.Sources...)
+	case errors.Is(err, fs.ErrNotExist):
+		// No sources overlay to merge.
+	default:
+		return fmt.Errorf("read sources config: %w", err)
+	}
+	return nil
+}
+
 func (cfg *Config) Validate() error {
 	if cfg.Log.Level != "" {
 		if _, err := zerolog.ParseLevel(cfg.Log.Level); err != nil {
 			return fmt.Errorf("log.level: %w", err)
 		}
 	}
-	if cfg.Resolver.Timeout < 0 {
-		return errors.New("resolver.timeout must not be negative")
-	}
-	if cfg.Resolver.CacheTTL < 0 {
-		return errors.New("resolver.cache_ttl must not be negative")
-	}
-	if cfg.Resolver.CacheNegativeTTL < 0 {
-		return errors.New("resolver.cache_negative_ttl must not be negative")
-	}
-	if cfg.ASN.Timeout < 0 {
-		return errors.New("asn.timeout must not be negative")
-	}
-	if cfg.ASN.CacheTTL < 0 {
-		return errors.New("asn.cache_ttl must not be negative")
-	}
-	if cfg.Fetch.Timeout < 0 {
-		return errors.New("fetch.timeout must not be negative")
-	}
-	if cfg.DeadCache.TTL < 0 {
-		return errors.New("deadcache.ttl must not be negative")
-	}
-	if cfg.Geofeed.RefreshInterval < 0 {
-		return errors.New("geofeed.refresh_interval must not be negative")
-	}
-	if cfg.Subscriptions.Interval < 0 {
-		return errors.New("subscriptions.interval must not be negative")
-	}
-	if cfg.Subscriptions.Check.Timeout < 0 {
-		return errors.New("subscriptions.check.timeout must not be negative")
-	}
-	if cfg.Subscriptions.Check.SourceTimeout < 0 {
-		return errors.New("subscriptions.check.source_timeout must not be negative")
+	if err := cfg.validateNonNegative(); err != nil {
+		return err
 	}
 	if err := cfg.Workflow.validate(); err != nil {
 		return err
@@ -398,6 +405,45 @@ func (cfg *Config) Validate() error {
 	}
 	if err := cfg.Subscriptions.Validate(cfg.Groups); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateNonNegative rejects negative durations. The three cache TTLs are
+// pointers (nil-checked) because an explicit 0 is valid and means "disable".
+func (cfg *Config) validateNonNegative() error {
+	if cfg.Resolver.Timeout < 0 {
+		return errors.New("resolver.timeout must not be negative")
+	}
+	if cfg.Resolver.CacheTTL != nil && *cfg.Resolver.CacheTTL < 0 {
+		return errors.New("resolver.cache_ttl must not be negative")
+	}
+	if cfg.Resolver.CacheNegativeTTL != nil && *cfg.Resolver.CacheNegativeTTL < 0 {
+		return errors.New("resolver.cache_negative_ttl must not be negative")
+	}
+	if cfg.ASN.Timeout < 0 {
+		return errors.New("asn.timeout must not be negative")
+	}
+	if cfg.ASN.CacheTTL < 0 {
+		return errors.New("asn.cache_ttl must not be negative")
+	}
+	if cfg.Fetch.Timeout < 0 {
+		return errors.New("fetch.timeout must not be negative")
+	}
+	if cfg.DeadCache.TTL != nil && *cfg.DeadCache.TTL < 0 {
+		return errors.New("deadcache.ttl must not be negative")
+	}
+	if cfg.Geofeed.RefreshInterval < 0 {
+		return errors.New("geofeed.refresh_interval must not be negative")
+	}
+	if cfg.Subscriptions.Interval < 0 {
+		return errors.New("subscriptions.interval must not be negative")
+	}
+	if cfg.Subscriptions.Check.Timeout < 0 {
+		return errors.New("subscriptions.check.timeout must not be negative")
+	}
+	if cfg.Subscriptions.Check.SourceTimeout < 0 {
+		return errors.New("subscriptions.check.source_timeout must not be negative")
 	}
 	return nil
 }
@@ -510,6 +556,15 @@ func (s *SubscriptionsConfig) Validate(groups Groups) error {
 	return nil
 }
 
+// knownCheckFilters is the set of valid subscriptions.check.filters names. It is
+// duplicated here (rather than importing internal/stable, which would create an
+// import cycle) purely for load-time validation; stable owns the real filters.
+var knownCheckFilters = map[string]struct{}{
+	"gemini":    {},
+	"claude":    {},
+	"bandwidth": {},
+}
+
 func (c *CheckConfig) validate() error {
 	if c.Rounds < 1 {
 		return errors.New("subscriptions.check.rounds must be at least 1")
@@ -528,6 +583,11 @@ func (c *CheckConfig) validate() error {
 	}
 	if c.MaxAvgMs < 1 {
 		return errors.New("subscriptions.check.max_avg_ms must be at least 1")
+	}
+	for _, f := range c.Filters {
+		if _, ok := knownCheckFilters[f]; !ok {
+			return fmt.Errorf("subscriptions.check.filters: unknown filter %q (must be \"gemini\", \"claude\" or \"bandwidth\")", f)
+		}
 	}
 	// Same parser the prober uses (stable.NewMihomoProber), so a value that
 	// loads is guaranteed to build — zero drift between Load and Apply.
@@ -598,7 +658,7 @@ func ProberChanged(old, newCfg Config) bool {
 func StoresChanged(old, newCfg Config) bool {
 	return old.GeoBlock.DBPath != newCfg.GeoBlock.DBPath ||
 		old.GeoBlock.TTL != newCfg.GeoBlock.TTL ||
-		old.DeadCache.TTL != newCfg.DeadCache.TTL
+		!reflect.DeepEqual(old.DeadCache.TTL, newCfg.DeadCache.TTL)
 }
 
 // AnnotateChanged reports whether workflow.annotate differs. The stable worker
