@@ -19,6 +19,9 @@ import (
 // Prober measures reachability of the proxy nodes in a subscription payload.
 type Prober interface {
 	Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error)
+	// ParseProxies parses a subscription payload into live mihomo proxies. The
+	// caller owns their lifecycle and MUST Close each proxy exactly once.
+	ParseProxies(payload []byte) ([]mihomo.Proxy, error)
 }
 
 // MihomoProber runs repeated URL tests through mihomo's adapter stack.
@@ -96,6 +99,13 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	}
 
 	return res, nil
+}
+
+// ParseProxies is the exported wrapper over parseProxies so the checker can
+// parse the survivor set once and share the proxies across the node-filter
+// chain. The caller owns closing every returned proxy exactly once.
+func (m *MihomoProber) ParseProxies(payload []byte) ([]mihomo.Proxy, error) {
+	return m.parseProxies(payload)
 }
 
 func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, error) {

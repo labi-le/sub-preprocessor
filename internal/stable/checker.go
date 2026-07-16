@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
@@ -131,9 +132,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
-	for _, f := range c.filters {
-		survivors = f.apply(ctx, survivors)
-	}
+	survivors = c.applyFilters(ctx, survivors)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
 		return fmt.Errorf("cycle cancelled during node filters: %w", err)
@@ -163,6 +162,46 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Msg("stable list updated")
 
 	return nil
+}
+
+// applyFilters runs the through-node NodeFilter chain over the survivors. It
+// parses the survivor set into proxies ONCE (regardless of filter count) and
+// shares them across every filter, which selects the subset for its current
+// (narrowed) survivors by node label. The checker owns the proxies' lifecycle:
+// they are closed exactly once after the chain (deferred), and no filter closes
+// them. Probe parses and closes its own full set independently. Parsing is
+// skipped entirely when there is no filter or no survivor; a parse failure logs
+// and passes survivors through unchanged (matching the previous per-filter
+// skip-on-no-proxies behavior).
+func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) []Survivor {
+	if len(c.filters) == 0 || len(survivors) == 0 {
+		return survivors
+	}
+
+	entries := make([]Entry, len(survivors))
+	for i, s := range survivors {
+		entries[i] = s.Entry
+	}
+	proxies, err := c.prober.ParseProxies(entriesPayload(entries))
+	if err != nil {
+		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
+		return survivors
+	}
+	defer func() {
+		for _, px := range proxies {
+			_ = px.Close()
+		}
+	}()
+
+	byLabel := make(map[string]mihomo.Proxy, len(proxies))
+	for _, px := range proxies {
+		byLabel[px.Name()] = px
+	}
+	for _, f := range c.filters {
+		survivors = f.apply(ctx, survivors, byLabel)
+	}
+
+	return survivors
 }
 
 // fetchSources fetches every configured source concurrently through the

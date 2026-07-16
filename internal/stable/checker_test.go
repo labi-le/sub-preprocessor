@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
@@ -45,6 +46,8 @@ func (p *fakeProber) Probe(_ context.Context, payload []byte) (map[string]stable
 
 	return p.res, nil
 }
+
+func (p *fakeProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
 
 func testSources() []config.SubscriptionSource {
 	return []config.SubscriptionSource{
@@ -338,6 +341,8 @@ func (p *cancellingProber) Probe(context.Context, []byte) (map[string]stable.Pro
 	p.cancel()
 	return p.res, nil
 }
+
+func (p *cancellingProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
 
 func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 	t.Parallel()

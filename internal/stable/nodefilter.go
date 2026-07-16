@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 
+	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/subscription"
@@ -17,23 +18,25 @@ import (
 // to this package.
 type NodeFilter interface {
 	name() string
-	apply(ctx context.Context, survivors []Survivor) []Survivor
+	// apply narrows survivors using the shared, pre-parsed proxies keyed by
+	// node label. The checker owns the proxies' lifecycle; filters only read.
+	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor
 }
 
 // geminiChecker is the through-node Gemini capability of a Prober.
 type geminiChecker interface {
 	GeminiEnabled() bool
-	GeminiCheck(ctx context.Context, payload []byte) map[string]APIOutcome
+	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
 // claudeChecker is the through-node Anthropic capability of a Prober.
 type claudeChecker interface {
-	ClaudeCheck(ctx context.Context, payload []byte) map[string]APIOutcome
+	ClaudeCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
-	BandwidthCheck(ctx context.Context, payload []byte) map[string]BandwidthOutcome
+	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
 	BandwidthMinMbps() int
 }
 
@@ -53,24 +56,26 @@ const (
 type apiFilter struct {
 	filterName string
 	enabled    func() bool
-	check      func(ctx context.Context, payload []byte) map[string]APIOutcome
+	check      func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 	store      Blocklist
 	logger     zerolog.Logger
 }
 
 func (f *apiFilter) name() string { return f.filterName }
 
-func (f *apiFilter) apply(ctx context.Context, survivors []Survivor) []Survivor {
+func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor {
 	if f.enabled != nil && !f.enabled() {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter configured but disabled; skipping")
 		return survivors
 	}
 
-	subset := make([]Entry, 0, len(survivors))
+	subset := make([]mihomo.Proxy, 0, len(survivors))
 	for _, s := range survivors {
-		subset = append(subset, s.Entry)
+		if px, ok := proxies[s.Label]; ok {
+			subset = append(subset, px)
+		}
 	}
-	outcomes := f.check(ctx, entriesPayload(subset))
+	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter skipped: no outcomes")
 		return survivors
@@ -113,18 +118,20 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor) []Survivor 
 type bandwidthFilter struct {
 	minMbps  int
 	annotate bool
-	check    func(ctx context.Context, payload []byte) map[string]BandwidthOutcome
+	check    func(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
 	logger   zerolog.Logger
 }
 
 func (f *bandwidthFilter) name() string { return bandwidthFilterName }
 
-func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor) []Survivor {
-	subset := make([]Entry, 0, len(survivors))
+func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor {
+	subset := make([]mihomo.Proxy, 0, len(survivors))
 	for _, s := range survivors {
-		subset = append(subset, s.Entry)
+		if px, ok := proxies[s.Label]; ok {
+			subset = append(subset, px)
+		}
 	}
-	outcomes := f.check(ctx, entriesPayload(subset))
+	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter skipped: no outcomes")
 		return survivors
