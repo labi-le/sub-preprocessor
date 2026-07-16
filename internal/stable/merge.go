@@ -3,6 +3,8 @@ package stable
 import (
 	"bytes"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"domains.lst/sub-preprocessor/internal/ioutil"
 	"domains.lst/sub-preprocessor/internal/rewrite"
@@ -71,12 +73,18 @@ func Merge(bodies []SourceBody) []Entry {
 	return entries
 }
 
-// lowerServerPort appends the ASCII-lowercased "server:port" dedupe key into
-// dst[:0] and returns it (hostnames are ASCII, so byte-wise lowering suffices).
+// lowerServerPort appends the lowercased "server:port" dedupe key into dst[:0]
+// and returns it. Node servers are virtually always ASCII (bare IPs, punycode
+// domains), so the byte-wise fast path handles them zero-alloc; a rare non-ASCII
+// server falls back to strings.ToLower for exact parity with the prior key.
 func lowerServerPort(dst []byte, server, port string) []byte {
 	dst = dst[:0]
 	for i := range len(server) {
 		c := server[i]
+		if c >= utf8.RuneSelf {
+			dst = append(dst[:0], strings.ToLower(server)...)
+			break
+		}
 		if c >= 'A' && c <= 'Z' {
 			c += 'a' - 'A'
 		}
