@@ -38,8 +38,9 @@ type TGOptions struct {
 }
 
 // RunTelegram connects a gotd/td MTProto user client and blocks until ctx is
-// done. On first run (no cached session) it prints a QR code to stdout to scan
-// in Telegram (Settings -> Devices -> Link Desktop Device); gotd then caches the
+// done. On first run (no cached session) it serves a scannable QR at GET /qr on
+// the CRAWL_HTTP endpoint (and also prints it to stdout) to scan in Telegram
+// (Settings -> Devices -> Link Desktop Device); gotd then caches the
 // session to opts.SessionPath so later runs skip the QR. It resolves and joins
 // the seed channels (membership is required to receive their pushes) and, on
 // every new post, extracts URLs, classifies them, and appends the live ones to
@@ -105,7 +106,7 @@ func (c *Crawler) RunTelegram(ctx context.Context, opts TGOptions) error {
 			return fmt.Errorf("auth status: %w", err)
 		}
 		if !status.Authorized {
-			if loginErr := qrLogin(ctx, log, client, loggedIn, opts.Password); loginErr != nil {
+			if loginErr := c.qrLogin(ctx, log, client, loggedIn, opts.Password); loginErr != nil {
 				return loginErr
 			}
 		}
@@ -144,15 +145,21 @@ func (c *Crawler) seedChannels() []string {
 	return out
 }
 
-// qrLogin drives the QR console login and then the 2FA branch if the account
-// has a password. The QR is the tg://login?token=... URL rendered to stdout.
-func qrLogin(ctx context.Context, log zerolog.Logger, client *telegram.Client, loggedIn qrlogin.LoggedIn, password string) error {
+// qrLogin drives the QR login: each login token is published to c.tgLoginURL so
+// the GET /qr endpoint can serve it as a scannable PNG, and also rendered to
+// stdout as a fallback. tgLoginURL is cleared when the attempt finishes; then
+// the 2FA branch runs if the account has a password.
+func (c *Crawler) qrLogin(ctx context.Context, log zerolog.Logger, client *telegram.Client, loggedIn qrlogin.LoggedIn, password string) error {
+	log.Info().Msg("MTProto login required: open GET /qr on the CRAWL_HTTP endpoint to scan (or use the QR printed below)")
 	_, err := client.QR().Auth(ctx, loggedIn, func(_ context.Context, token qrlogin.Token) error {
-		fmt.Fprintln(os.Stdout, "\nTelegram login — scan this QR in the app (Settings -> Devices -> Link Desktop Device):")
-		qrterminal.Generate(token.URL(), qrterminal.L, os.Stdout)
+		u := token.URL()
+		c.tgLoginURL.Store(&u)
+		fmt.Fprintln(os.Stdout, "\nTelegram login — scan this QR (or open GET /qr), Telegram → Settings → Devices → Link Desktop Device:")
+		qrterminal.Generate(u, qrterminal.L, os.Stdout)
 		fmt.Fprintln(os.Stdout)
 		return nil
 	})
+	c.tgLoginURL.Store(nil) // attempt finished (scanned, failed, or ctx done): stop serving the QR
 	switch {
 	case err == nil:
 		return nil

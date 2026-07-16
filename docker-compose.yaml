@@ -38,13 +38,16 @@ services:
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
       # --- Optional: MTProto userbot push (real-time posts instead of polling) ---
-      # api_id/api_hash from https://my.telegram.org (a USER account). The first
-      # login needs an interactive TTY to scan the QR — run once with:
-      #   docker compose run --rm tg-sub-crawler
-      # gotd caches the session to CRAWL_TG_SESSION (0600) so the detached
-      # service reuses it and skips the QR. The poll above stays as backfill.
+      # api_id/api_hash from https://my.telegram.org (a USER account). To log in,
+      # set CRAWL_HTTP below + expose the port, then open GET /qr in a browser and
+      # scan the QR (Telegram -> Settings -> Devices -> Link Desktop Device). Or scan
+      # the console QR by running once on a TTY: docker compose run --rm tg-sub-crawler.
+      # gotd caches the session to CRAWL_TG_SESSION (0600) so the detached service
+      # reuses it and skips the QR next time. With the userbot on, the poll above is
+      # just a backfill — CRAWL_AT can stay nightly.
       # - CRAWL_TG_API_ID=0
       # - CRAWL_TG_API_HASH=
       # - CRAWL_TG_SESSION=/config/.tg-session.json
       # - CRAWL_TG_2FA=            # only if the account has a 2FA password
+      # - CRAWL_HTTP=:8081      # required for the GET /qr login page (also enables POST /crawl)
     restart: unless-stopped

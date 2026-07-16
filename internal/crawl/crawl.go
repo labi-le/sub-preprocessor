@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -88,6 +89,11 @@ type Crawler struct {
 	// (RunOnce) and the MTProto push path (appendLive), which can write it
 	// concurrently.
 	pfMu sync.Mutex
+	// tgLoginURL holds the current tg://login?token=... URL while an MTProto QR
+	// login is pending (set by the QR show callback, cleared on auth); the
+	// GET /qr endpoint renders it as a scannable PNG. nil when authorized or no
+	// login is in progress.
+	tgLoginURL atomic.Pointer[string]
 }
 
 // fetchClient fetches a channel page; an interface so tests can avoid the network.
