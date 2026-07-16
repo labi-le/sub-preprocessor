@@ -123,8 +123,10 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 			}
 		}
 		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			// Stop accumulating past the cap; dedupe/InlineMax still trims later.
 			*inline = append(*inline, extractInlineNodes(p)...)
+			if len(*inline) > maxInlineAccum {
+				*inline = (*inline)[:maxInlineAccum] // hard-cap a large single-page burst
+			}
 		}
 	}
 	found, _ := c.classifyAll(ctx, keys(cand))

@@ -127,7 +127,7 @@ type BandwidthConfig struct {
 
 type SubscriptionSource struct {
 	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+	URL  string `yaml:"url,omitempty"`
 	// Body carries an inline subscription payload (base64 or raw newline-joined
 	// URIs) in place of a fetched URL. When set, the source is filtered directly
 	// without any HTTP fetch. Used by the crawler's inline-node harvest.

@@ -70,7 +70,7 @@ type Options struct {
 
 type source struct {
 	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+	URL  string `yaml:"url,omitempty"`
 	Body string `yaml:"body,omitempty"`
 }
 
