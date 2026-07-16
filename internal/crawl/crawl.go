@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -85,15 +84,6 @@ type Crawler struct {
 	// never overlap. TryLock lets a scheduled tick (or HTTP trigger) skip
 	// cleanly when a cycle is already in flight instead of queueing behind it.
 	running sync.Mutex
-	// pfMu serializes the private.yaml read-modify-write between the scan cycle
-	// (RunOnce) and the MTProto push path (appendLive), which can write it
-	// concurrently.
-	pfMu sync.Mutex
-	// tgLoginURL holds the current tg://login?token=... URL while an MTProto QR
-	// login is pending (set by the QR show callback, cleared on auth); the
-	// GET /qr endpoint renders it as a scannable PNG. nil when authorized or no
-	// login is in progress.
-	tgLoginURL atomic.Pointer[string]
 }
 
 // fetchClient fetches a channel page; an interface so tests can avoid the network.
@@ -229,10 +219,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	// A cycle takes minutes to hours; re-load private.yaml so the merge sees
-	// concurrent hand edits (or MTProto push appends) instead of clobbering
-	// them with a stale snapshot. pfMu serializes this against the push path.
-	c.pfMu.Lock()
-	defer c.pfMu.Unlock()
+	// concurrent hand edits instead of clobbering them with a stale snapshot.
 	pf, err = loadPrivate(c.opts.PrivatePath)
 	if err != nil {
 		c.logger.Error().Err(err).Str("path", c.opts.PrivatePath).Msg("re-read private.yaml failed")

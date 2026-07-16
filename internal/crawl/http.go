@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
-	"rsc.io/qr"
 )
 
 const (
@@ -26,8 +24,6 @@ const (
 //	              is already running. The cycle runs in a background goroutine,
 //	              so the request never blocks on a full crawl.
 //	GET  /healthz liveness probe; always 200 "ok".
-//	GET  /qr      HTML page (auto-refreshing) with the MTProto login QR while a
-//	              login is pending; GET /qr.png is the raw QR PNG (404 when none).
 //
 // Other methods on /crawl return 405; unknown paths return 404. Only the
 // stdlib net/http is used.
@@ -89,60 +85,5 @@ func serveMux(ctx context.Context, c *Crawler) http.Handler {
 		}
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/qr.png", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		p := c.tgLoginURL.Load()
-		if p == nil {
-			http.Error(w, "no pending Telegram login\n", http.StatusNotFound)
-			return
-		}
-		code, err := qr.Encode(*p, qr.M)
-		if err != nil {
-			http.Error(w, "qr encode failed\n", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(code.PNG())
-	})
-	mux.HandleFunc("/qr", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		page := qrPendingPage
-		if c.tgLoginURL.Load() == nil {
-			page = qrDonePage
-		}
-		_, _ = w.Write([]byte(page))
-	})
 	return mux
 }
-
-// qrPendingPage renders the pending MTProto login QR; it reloads every 15s so
-// the browser always shows a currently-valid (auto-refreshing) login token, and
-// no-store keeps the embedded /qr.png fresh.
-const qrPendingPage = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15"><title>Telegram login</title></head>
-<body style="font-family:sans-serif;text-align:center;padding:2rem">
-<h2>Link this crawler to your Telegram</h2>
-<p>In Telegram: <b>Settings -&gt; Devices -&gt; Link Desktop Device</b>, then scan:</p>
-<img alt="login QR" src="/qr.png" style="width:320px;height:320px;image-rendering:pixelated">
-<p style="color:#888">The code refreshes automatically; this page reloads every 15s.</p>
-</body></html>
-`
-
-// qrDonePage is shown when no login is pending (authorized, or MTProto off).
-const qrDonePage = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Telegram login</title></head>
-<body style="font-family:sans-serif;text-align:center;padding:2rem">
-<h2>No pending Telegram login</h2>
-<p>The crawler is authorized (or MTProto is disabled). You can close this page.</p>
-</body></html>
-`
