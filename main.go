@@ -72,17 +72,6 @@ func runCrawl() {
 		StateTTL:     durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
 	}
 	interval := durationDefault(getenv("CRAWL_INTERVAL", ""), defaultCrawlInterval)
-	// CRAWL_TRUSTED_PREFIXES lets the SSRF guard pass otherwise-blocked CIDRs,
-	// e.g. a local fake-ip range (198.18.0.0/16) that mihomo/clash uses to route
-	// DNS-poisoned domains (t.me when Telegram is blocked) through a tunnel.
-	if specs := splitList(getenv("CRAWL_TRUSTED_PREFIXES", "")); len(specs) > 0 {
-		prefixes, err := fetch.ParsePrefixes(specs)
-		if err != nil {
-			logger.Fatal().Err(err).Strs("prefixes", specs).Msg("invalid CRAWL_TRUSTED_PREFIXES")
-		}
-		fetch.SetTrustedPrefixes(prefixes)
-		logger.Info().Strs("trusted_prefixes", specs).Msg("SSRF guard trusting extra prefixes (fake-ip)")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

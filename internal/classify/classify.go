@@ -1,7 +1,7 @@
 // Package classify decides whether a URL serves a usable Mihomo-compatible
-// subscription. It reuses the project's SSRF-safe HTTP client and the same
-// body normalizer/parser the preprocessor uses, so a "live subscription"
-// verdict here means the same thing the stable worker would see.
+// subscription. It reuses the same body normalizer/parser the preprocessor uses
+// (so a "live subscription" verdict matches what the stable worker sees) and
+// fetches through a caller-supplied client whose dialer owns the IP/SSRF policy.
 package classify
 
 import (
@@ -89,11 +89,12 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return "bad status: " + e.Status }
 
-// URL fetches rawURL with the SSRF-safe client and classifies the response.
-// A non-2xx status is returned as *StatusError (definitively not a
+// URL fetches rawURL with the supplied client and classifies the response; the
+// client's dialer owns the IP/SSRF policy (guarded for the CLI, unrestricted for
+// the crawler). A non-2xx status is returned as *StatusError (definitively not a
 // subscription); any other error means the verdict is undetermined.
 func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error) {
-	if err := fetch.ValidatePublicHTTPSURL(rawURL); err != nil {
+	if err := fetch.ValidateHTTPSURL(rawURL); err != nil {
 		return Result{}, fmt.Errorf("validate url: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, string(rawURL), nil)

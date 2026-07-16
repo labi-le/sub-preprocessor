@@ -79,17 +79,18 @@ YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full co
 
 `./internal/fetch/fetch.go`
 
-Safe HTTP fetching with SSRF protection. Only `https` URLs, no userinfo, no private IPs (dial-time guard, incl. CGN/benchmarking/class-E reserved ranges), no proxy. One shared `http.Client` is reused across fetches. An opt-in trusted-prefix allowlist (`SetTrustedPrefixes`) bypasses the non-public rejection for operator-listed CIDRs — e.g. a local fake-ip range (mihomo/clash `198.18.0.0/16`) that tunnels DNS-poisoned domains like `t.me`; the crawler sets it from `CRAWL_TRUSTED_PREFIXES` (empty default = strict).
+Safe HTTP fetching. Only `https`, no userinfo, no proxy. The **SSRF IP policy lives in the HTTP client's dialer**, not the validators: `NewSafeHTTPClient` refuses resolved non-public IPs at dial time (private/loopback/link-local + CGN/benchmarking/class-E reserved ranges) and backs the shared client for user/content URLs; `NewUnrestrictedHTTPClient` keeps https-only + no-proxy but does **not** restrict IPs — used only by the crawler, which reaches `t.me` through a local fake-ip tunnel and follows scraped links (blind SSRF, no response reflected to any user).
 
 **Key types:**
 - `FileType` — `"raw"` | `"gzip"`
 - `SubscriptionURL` — lightweight `string` type for subscription URLs
 
 **Key functions:**
-- `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body (uses the shared client)
-- `ValidatePublicHTTPSURL(url SubscriptionURL) error` — SSRF guard
-- `NewSafeHTTPClient() *http.Client` — transport with private-IP blocking at dial time
-- `SetTrustedPrefixes([]netip.Prefix)` / `ParsePrefixes([]string) ([]netip.Prefix, error)` — opt-in allowlist checked before the non-public rejection (fake-ip / tunnel routing); set once at startup, before the first fetch
+- `BytesWithType(ctx, url SubscriptionURL, limit, fileType) ([]byte, error)` — fetch + decode body (uses the shared guarded client)
+- `ValidateHTTPSURL(url SubscriptionURL) error` — scheme/host/userinfo check only; no IP restriction
+- `ValidatePublicHTTPSURL(url SubscriptionURL) error` — `ValidateHTTPSURL` + reject a literal non-public-IP host (SSRF guard for the `/` endpoint and subscription sources)
+- `NewSafeHTTPClient() *http.Client` — guarded transport: non-public resolved IPs refused at dial time
+- `NewUnrestrictedHTTPClient() *http.Client` — https-only, no proxy, **no IP guard** (crawler only)
 - `MaybeDecode(resp, fileType) (io.ReadCloser, error)` — wrap gzip if needed
 - `ValidateFileType(fileType) error` — must be `raw` or `gzip`
 
@@ -402,14 +403,14 @@ Config hot-reload. Watches the config file **and its `private.yaml` overlay sibl
 
 `./internal/classify/classify.go`
 
-Decides whether a URL serves a usable Mihomo-compatible subscription, reusing the SSRF-safe client and the same normalizer/parser the preprocessor uses. Used by the `crawl` subcommand and the `classify` CLI subcommand.
+Decides whether a URL serves a usable Mihomo-compatible subscription, reusing the project's HTTP client (the caller supplies it — the crawler an unrestricted client, the `classify` CLI a guarded one) and the same normalizer/parser the preprocessor uses. Used by the `crawl` subcommand and the `classify` CLI subcommand.
 
 **Key types:**
 - `Result{Nodes int, Expired bool}` — `(Result).Live()` reports `Nodes > 0 && !Expired`
 
 **Key functions:**
 - `Body(body []byte, subUserinfo string, now int64) Result` — pure classifier: base64-normalizes the body, counts only **proxy-scheme** nodes (`vless`/`vmess`/`ss`/`ssr`/`trojan`/`tuic`/`hysteria`/`hysteria2`/`hy2`/`anytls` — so HTML pages full of `https://` links are rejected), and marks expired from a `subscription-userinfo: expire=` header
-- `URL(ctx, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error)` — SSRF-gate + fetch + `Body`
+- `URL(ctx, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error)` — scheme-validate + fetch + `Body`; the IP/SSRF policy comes from the passed client
 
 **Uses:** `fetch`, `subscription`
 **Tags:** `classify`, `subscription`, `ssrf`, `crawler`
@@ -420,13 +421,13 @@ Decides whether a URL serves a usable Mihomo-compatible subscription, reusing th
 
 `./internal/crawl/crawl.go`, `discover.go`, `state.go`, `channels.go`
 
-Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service. One SSRF-safe `http.Client` is held on the `Crawler` and reused for pages + classify batches. Cycle hygiene: a cancelled ctx aborts before any state/private.yaml write; private.yaml is re-loaded right before the merge/write, and managed sources added to the file mid-cycle (never checked) are retained; both private.yaml and the state file are written atomically (fsynced temp + rename). Transport-level classify errors (DNS, timeout, TLS) are *unknown* — those managed sources are retained; a definitive non-2xx answer (`classify.StatusError`) or a dead classification prunes.
+Format-agnostic, recursive subscription crawler. Scrapes public Telegram channel web previews (`t.me/s/<channel>` + `?before=` pagination), treats **every** https link as a candidate, keeps the ones that `classify` as a live subscription, and writes them to the `private.yaml` overlay as `tg-<sha10>` sources. Matches the artifact (a URL that returns a subscription), not any channel-specific wrapper pattern. Runs as the `crawl` subcommand in the same image as the service. One **unrestricted** `http.Client` (no IP guard — it reaches `t.me` through the host's local fake-ip tunnel and follows links scraped from channel content) is held on the `Crawler` and reused for pages + classify batches. Cycle hygiene: a cancelled ctx aborts before any state/private.yaml write; private.yaml is re-loaded right before the merge/write, and managed sources added to the file mid-cycle (never checked) are retained; both private.yaml and the state file are written atomically (fsynced temp + rename). Transport-level classify errors (DNS, timeout, TLS) are *unknown* — those managed sources are retained; a definitive non-2xx answer (`classify.StatusError`) or a dead classification prunes.
 
 **Key types:**
 - `Options{Channels []string, ChannelsPath string, PrivatePath string, Pages int, Prune bool, MaxDepth int, MaxChannels int, StatePath string, StateTTL time.Duration}`
 - `Crawler` — `New(opts, logger)`; `RunOnce(ctx)` one cycle, `Run(ctx, interval)` loop
 
-**Behavior:** `scan` (in `discover.go`) does a **relevance-gated BFS** over the channel repost graph — seeds are crawled unconditionally, a discovered channel (`extractChannels`: forwarded-from/@mention `t.me/<slug>` links, excluding self/reserved/bot `?start=`) is expanded only if it itself yielded a live subscription; the subscription yield is the thematic signal (a VPN channel forwards VPN channels; a news channel yields nothing and its branch stops). Depth is bounded by `MaxDepth`; `MaxChannels` caps discovered (non-seed) visits per cycle (`0` = unlimited). A per-cycle `visited` set means every channel is fetched at most once and a repost loop (A→B→A) can never re-enter an explored channel. Page fetches are sequential (rate-limit friendly). SSRF-gates candidates via `fetch.ValidatePublicHTTPSURL` and skips Telegram/CDN noise hosts before fetching; classifies concurrently; managed (`tg-`) sources are fully derived from currently-live URLs (implicit prune when `Prune`), hand-added private sources are preserved; only rewrites `private.yaml` (atomic temp+rename) when the managed set changes, so unchanged cycles trigger no reload.
+**Behavior:** `scan` (in `discover.go`) does a **relevance-gated BFS** over the channel repost graph — seeds are crawled unconditionally, a discovered channel (`extractChannels`: forwarded-from/@mention `t.me/<slug>` links, excluding self/reserved/bot `?start=`) is expanded only if it itself yielded a live subscription; the subscription yield is the thematic signal (a VPN channel forwards VPN channels; a news channel yields nothing and its branch stops). Depth is bounded by `MaxDepth`; `MaxChannels` caps discovered (non-seed) visits per cycle (`0` = unlimited). A per-cycle `visited` set means every channel is fetched at most once and a repost loop (A→B→A) can never re-enter an explored channel. Page fetches are sequential (rate-limit friendly). Validates candidate URLs via `fetch.ValidateHTTPSURL` (scheme only — no IP guard) and skips Telegram/CDN noise hosts before fetching; classifies concurrently; managed (`tg-`) sources are fully derived from currently-live URLs (implicit prune when `Prune`), hand-added private sources are preserved; only rewrites `private.yaml` (atomic temp+rename) when the managed set changes, so unchanged cycles trigger no reload.
 
 **Persistence (`state.go`):** channels that yield a live subscription are recorded in a JSON state file (`StatePath`, default `/config/.crawler-state.json`) and become **permanent depth-0 seeds** on future cycles — always crawled and always expanded — so a proven-productive channel keeps growing the graph even on days its recent pages carry no live sub. Entries with no live sub for `StateTTL` (default 30d) are pruned; empty `StatePath` disables persistence.
 

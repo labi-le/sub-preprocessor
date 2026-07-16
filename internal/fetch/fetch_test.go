@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -70,42 +71,73 @@ func TestNewSafeHTTPClientDisablesProxy(t *testing.T) {
 	}
 }
 
-func TestTrustedPrefixesBypassGuard(t *testing.T) {
-	// Mutates package-level guard state, so not parallel; reset after.
-	t.Cleanup(func() { fetch.SetTrustedPrefixes(nil) })
+func TestValidateHTTPSURLAllowsAnyIP(t *testing.T) {
+	t.Parallel()
 
-	const fakeIP = "https://198.18.1.15/sub" // mihomo fake-ip, inside reserved 198.18.0.0/15
-
-	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(fakeIP)); err == nil {
-		t.Fatal("reserved fake-ip must be rejected by default")
+	// ValidateHTTPSURL is scheme-only: a private/literal IP host passes (the
+	// IP/SSRF policy lives in the client's dialer, not this validator).
+	if err := fetch.ValidateHTTPSURL(fetch.SubscriptionURL("https://10.0.0.1/sub")); err != nil {
+		t.Fatalf("private IP host should pass scheme-only validation, got: %v", err)
 	}
-
-	prefixes, err := fetch.ParsePrefixes([]string{"198.18.0.0/16"})
-	if err != nil {
-		t.Fatalf("ParsePrefixes: %v", err)
+	if err := fetch.ValidateHTTPSURL(fetch.SubscriptionURL("http://example.com/")); err == nil {
+		t.Fatal("http scheme must be rejected")
 	}
-	fetch.SetTrustedPrefixes(prefixes)
-
-	if err = fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(fakeIP)); err != nil {
-		t.Fatalf("trusted fake-ip should pass, got: %v", err)
-	}
-	// A private IP outside the trusted range is still rejected.
-	if err = fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://10.0.0.1/sub")); err == nil {
-		t.Fatal("private IP outside trusted range must still be rejected")
+	if err := fetch.ValidateHTTPSURL(fetch.SubscriptionURL("https://user@example.com/")); err == nil {
+		t.Fatal("userinfo must be rejected")
 	}
 }
 
-func TestParsePrefixes(t *testing.T) {
+func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
 	t.Parallel()
 
-	if _, err := fetch.ParsePrefixes([]string{"not-a-cidr"}); err == nil {
-		t.Fatal("expected error for invalid CIDR")
+	for _, u := range []string{
+		"https://10.0.0.1/sub",     // private
+		"https://127.0.0.1/sub",    // loopback
+		"https://198.18.1.15/sub",  // reserved (mihomo fake-ip range)
+		"https://169.254.169.254/", // link-local (cloud metadata)
+	} {
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err == nil {
+			t.Errorf("%s: non-public IP host must be rejected", u)
+		}
 	}
-	got, err := fetch.ParsePrefixes([]string{"", "198.18.0.0/16", "  "})
+	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://1.1.1.1/sub")); err != nil {
+		t.Fatalf("public IP host should pass, got: %v", err)
+	}
+}
+
+func TestNewUnrestrictedHTTPClientDisablesProxy(t *testing.T) {
+	t.Parallel()
+
+	client := fetch.NewUnrestrictedHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected transport type: %T", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected proxy to be disabled even on the unrestricted client")
+	}
+}
+
+func TestGuardBlocksLoopbackUnrestrictedAllows(t *testing.T) {
+	t.Parallel()
+
+	// httptest binds 127.0.0.1 — a non-public (loopback) target.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// The guarded client refuses to dial the loopback address.
+	if _, err := fetch.NewSafeHTTPClient().Get(srv.URL); err == nil {
+		t.Fatal("safe client must refuse to dial a loopback (non-public) target")
+	}
+	// The unrestricted client reaches it.
+	resp, err := fetch.NewUnrestrictedHTTPClient().Get(srv.URL)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unrestricted client should reach loopback, got: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 parsed prefix, got %d", len(got))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }

@@ -96,19 +96,40 @@ func ValidateFileType(fileType FileType) error {
 	}
 }
 
-func ValidatePublicHTTPSURL(rawURL SubscriptionURL) error {
+// parseHTTPSURL validates and parses a well-formed https URL with a host and no
+// userinfo. It does not restrict the target IP.
+func parseHTTPSURL(rawURL SubscriptionURL) (*url.URL, error) {
 	u, errURL := url.Parse(string(rawURL))
 	if errURL != nil {
-		return fmt.Errorf("invalid url: %w", errURL)
+		return nil, fmt.Errorf("invalid url: %w", errURL)
 	}
 	if !strings.EqualFold(u.Scheme, "https") {
-		return errors.New(errOnlyHTTPS)
+		return nil, errors.New(errOnlyHTTPS)
 	}
 	if u.Hostname() == "" {
-		return errors.New(errURLHostRequired)
+		return nil, errors.New(errURLHostRequired)
 	}
 	if u.User != nil {
-		return errors.New(errURLUserinfo)
+		return nil, errors.New(errURLUserinfo)
+	}
+	return u, nil
+}
+
+// ValidateHTTPSURL checks the URL is well-formed https with a host and no
+// userinfo. It does NOT restrict the target IP; that (SSRF) policy belongs to
+// the HTTP client's dialer (guarded vs unrestricted).
+func ValidateHTTPSURL(rawURL SubscriptionURL) error {
+	_, err := parseHTTPSURL(rawURL)
+	return err
+}
+
+// ValidatePublicHTTPSURL is ValidateHTTPSURL plus an SSRF guard: a literal-IP
+// host in a non-public range is rejected. Domain hosts pass here and are
+// re-checked against their resolved IPs at dial time by the guarded client.
+func ValidatePublicHTTPSURL(rawURL SubscriptionURL) error {
+	u, err := parseHTTPSURL(rawURL)
+	if err != nil {
+		return err
 	}
 	if addr, errAddr := netip.ParseAddr(u.Hostname()); errAddr == nil && !isPublicIP(addr) {
 		return errors.New(errNonPublicTarget)
@@ -116,41 +137,55 @@ func ValidatePublicHTTPSURL(rawURL SubscriptionURL) error {
 	return nil
 }
 
-func NewSafeHTTPClient() *http.Client {
+// NewSafeHTTPClient returns a client with the full SSRF guard: https-only, no
+// proxy, and resolved non-public IPs refused at dial time. Used for anything
+// fetching user- or content-supplied URLs (the / endpoint, subscriptions).
+func NewSafeHTTPClient() *http.Client { return newHTTPClient(true) }
+
+// NewUnrestrictedHTTPClient returns a client that still forbids proxies and
+// non-https redirects, but does NOT restrict the target IP. Used by the crawler
+// only: it fetches t.me through a local fake-ip tunnel and follows links from
+// scraped pages, where the IP guard is intentionally off (blind, no reflection).
+func NewUnrestrictedHTTPClient() *http.Client { return newHTTPClient(false) }
+
+func newHTTPClient(guardIPs bool) *http.Client {
 	dialer := &net.Dialer{Timeout: defaultDialTimeout}
 
 	transport := &http.Transport{
 		DisableCompression: true,
 		Proxy:              nil,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if !guardIPs {
+				return dialer.DialContext(ctx, network, addr)
+			}
 			host, port, errDial := net.SplitHostPort(addr)
 			if errDial != nil {
 				return nil, fmt.Errorf("split host port: %w", errDial)
 			}
-
 			if ip, errIP := netip.ParseAddr(host); errIP == nil {
 				if !isPublicIP(ip) {
 					return nil, errors.New(errNonPublicTarget)
 				}
 				return dialer.DialContext(ctx, network, addr)
 			}
-
 			ips, errIP := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 			if errIP != nil {
 				return nil, fmt.Errorf("lookup net ip: %w", errIP)
 			}
-
 			for _, ip := range ips {
 				if !isPublicIP(ip) {
 					continue
 				}
 				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 			}
-
 			return nil, errors.New(errNonPublicTarget)
 		},
 	}
 
+	validate := ValidatePublicHTTPSURL
+	if !guardIPs {
+		validate = ValidateHTTPSURL
+	}
 	return &http.Client{
 		Timeout:   defaultHTTPTimeout,
 		Transport: transport,
@@ -158,7 +193,7 @@ func NewSafeHTTPClient() *http.Client {
 			if len(via) >= maxRedirects {
 				return errStoppedRedirects
 			}
-			return ValidatePublicHTTPSURL(SubscriptionURL(req.URL.String()))
+			return validate(SubscriptionURL(req.URL.String()))
 		},
 	}
 }
@@ -189,11 +224,6 @@ func isPublicIP(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return false
 	}
-	for _, p := range trustedPrefixes {
-		if p.Contains(ip) {
-			return true
-		}
-	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsMulticast() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return false
@@ -204,34 +234,4 @@ func isPublicIP(ip netip.Addr) bool {
 		}
 	}
 	return true
-}
-
-// trustedPrefixes are operator-opted CIDRs that bypass the non-public checks,
-// e.g. a local fake-ip range (mihomo/clash) that routes otherwise-blocked
-// domains through a tunnel. Empty by default (strict). Set once at startup via
-// SetTrustedPrefixes before the first fetch; the dial guard reads it per-conn.
-var trustedPrefixes []netip.Prefix
-
-// SetTrustedPrefixes replaces the trusted-prefix allowlist. Call once during
-// startup, before any fetch (the guard reads the package var per-connection).
-func SetTrustedPrefixes(prefixes []netip.Prefix) {
-	trustedPrefixes = prefixes
-}
-
-// ParsePrefixes parses CIDR specs into prefixes, failing on the first invalid
-// entry; blank specs are skipped.
-func ParsePrefixes(specs []string) ([]netip.Prefix, error) {
-	out := make([]netip.Prefix, 0, len(specs))
-	for _, s := range specs {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			return nil, fmt.Errorf("parse trusted prefix %q: %w", s, err)
-		}
-		out = append(out, p)
-	}
-	return out, nil
 }

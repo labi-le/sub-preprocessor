@@ -29,10 +29,6 @@ services:
       - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
       - TZ=Europe/Moscow
-      # Telegram is DNS-poisoned here; mihomo/clash resolves t.me to a fake-ip
-      # (198.18.0.0/16) and tunnels it. Trust that range so the SSRF guard lets
-      # the crawler reach t.me through the TUN instead of rejecting it as reserved.
-      - CRAWL_TRUSTED_PREFIXES=198.18.0.0/16
       # - CRAWL_AT=04:00     # uncomment to run once daily at HH:MM instead of the hourly interval
       - CRAWL_INTERVAL=1h    # hourly poll of t.me/s (cheap; near-real-time enough)
       - CRAWL_PAGES=6

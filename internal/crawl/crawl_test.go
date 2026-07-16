@@ -203,7 +203,7 @@ func TestCandidate(t *testing.T) {
 		"https://host.example/sub":            true,
 		"https://t.me/chan":                   false, // telegram noise
 		"https://cdn4.telesco.pe/file/x.jpg":  false, // telegram media cdn
-		"https://192.168.1.1/sub":             false, // SSRF: private ip
+		"https://192.168.1.1/sub":             true,  // private ip allowed: crawler client is unrestricted
 		"http://host.example/sub":             false, // not https
 	}
 	for u, want := range cases {

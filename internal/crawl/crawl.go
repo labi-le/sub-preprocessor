@@ -91,8 +91,8 @@ type fetchClient interface {
 	page(ctx context.Context, u string) (string, error)
 }
 
-// httpFetcher fetches a page with the SSRF-safe client (t.me is public so it
-// passes the gate) and a browser User-Agent.
+// httpFetcher fetches a page with the crawler's unrestricted client (no IP
+// guard, so t.me via the fake-ip tunnel is reachable) and a browser User-Agent.
 type httpFetcher struct{ client *http.Client }
 
 func (f httpFetcher) page(ctx context.Context, u string) (string, error) {
@@ -119,7 +119,7 @@ func (f httpFetcher) page(ctx context.Context, u string) (string, error) {
 }
 
 func New(opts Options, logger zerolog.Logger) *Crawler {
-	client := fetch.NewSafeHTTPClient()
+	client := fetch.NewUnrestrictedHTTPClient()
 	return &Crawler{opts: opts, client: httpFetcher{client: client}, httpClient: client, classifyFn: classify.URL, logger: logger}
 }
 
@@ -360,13 +360,13 @@ func pageCursor(page string) string {
 }
 
 // candidate reports whether a URL is worth fetching: not obvious Telegram noise
-// and accepted by the SSRF public-https gate.
+// and a well-formed https URL (scheme-only check — no IP guard).
 func candidate(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || isNoiseHost(u.Hostname()) {
 		return false
 	}
-	return fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)) == nil
+	return fetch.ValidateHTTPSURL(fetch.SubscriptionURL(raw)) == nil
 }
 
 // isNoiseHost matches hosts that never serve subscriptions (Telegram itself and
