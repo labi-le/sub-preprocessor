@@ -23,6 +23,13 @@ services:
       - sub-preprocessor
     volumes:
       - ./config:/config:rw
+    ports:
+      - "127.0.0.1:8081:8081"    # GET /qr login page + POST /crawl; localhost-only, SSH-tunnel to reach
+    env_file:
+      # MTProto api_id/api_hash from the agenix secret (server-only, never committed);
+      # defined in ~/nixos hosts/configuration-server.nix as age.secrets.tg-crawler-env.
+      - path: /run/agenix/tg-crawler-env
+        required: false          # absent -> userbot disabled, nightly poll still runs
     environment:
       # Seed channels live in config/channels.yaml (hot-reloaded each cycle).
       # CRAWL_CHANNELS (comma/space list) still works as an extra override.
@@ -37,17 +44,10 @@ services:
       - CRAWL_MAX_CHANNELS=0   # 0 = no cap (visited-set still prevents re-visiting channels within a cycle)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
-      # --- Optional: MTProto userbot push (real-time posts instead of polling) ---
-      # api_id/api_hash from https://my.telegram.org (a USER account). To log in,
-      # set CRAWL_HTTP below + expose the port, then open GET /qr in a browser and
-      # scan the QR (Telegram -> Settings -> Devices -> Link Desktop Device). Or scan
-      # the console QR by running once on a TTY: docker compose run --rm tg-sub-crawler.
-      # gotd caches the session to CRAWL_TG_SESSION (0600) so the detached service
-      # reuses it and skips the QR next time. With the userbot on, the poll above is
-      # just a backfill — CRAWL_AT can stay nightly.
-      # - CRAWL_TG_API_ID=0
-      # - CRAWL_TG_API_HASH=
-      # - CRAWL_TG_SESSION=/config/.tg-session.json
-      # - CRAWL_TG_2FA=            # only if the account has a 2FA password
-      # - CRAWL_HTTP=:8081      # required for the GET /qr login page (also enables POST /crawl)
+      # --- MTProto userbot push (real-time posts; api_id/api_hash from env_file above) ---
+      # First run: open http://127.0.0.1:8081/qr (SSH-tunnel from your machine) and scan
+      # the QR in Telegram -> Devices -> Link Desktop Device. gotd caches the session to
+      # CRAWL_TG_SESSION so restarts skip the QR. With push on, CRAWL_AT (poll) is backfill.
+      - CRAWL_TG_SESSION=/config/.tg-session.json
+      - CRAWL_HTTP=:8081
     restart: unless-stopped
