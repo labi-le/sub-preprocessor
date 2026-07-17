@@ -105,5 +105,8 @@
             };
           };
         };
+      # Monitoring wiring for a host that runs Prometheus + Grafana; imported
+      # by the nixos repo as inputs.sub-preprocessor.nixosModules.monitoring.
+      nixosModules.monitoring = import ./deploy/monitoring.nix;
     };
 }
