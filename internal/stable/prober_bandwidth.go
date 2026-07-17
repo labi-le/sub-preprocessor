@@ -51,6 +51,7 @@ func measure(ctx context.Context, client *http.Client, target string) (bool, int
 		return false, 0, 0
 	}
 	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", browserUserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {

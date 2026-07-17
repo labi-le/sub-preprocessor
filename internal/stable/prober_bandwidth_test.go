@@ -78,3 +78,19 @@ func TestMeasureRedirectYieldsNoBody(t *testing.T) {
 		t.Fatalf("redirect body should be ~0, got %d", read)
 	}
 }
+
+func TestMeasureSendsBrowserUserAgent(t *testing.T) {
+	t.Parallel()
+
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	measure(context.Background(), srv.Client(), srv.URL)
+	if gotUA != browserUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, browserUserAgent)
+	}
+}

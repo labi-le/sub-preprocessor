@@ -124,6 +124,7 @@ func apiProbeOne(
 	if err != nil {
 		return false, ""
 	}
+	req.Header.Set("User-Agent", browserUserAgent)
 	for k, vs := range header {
 		for _, v := range vs {
 			req.Header.Add(k, v)

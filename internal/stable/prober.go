@@ -16,6 +16,11 @@ import (
 	"domains.lst/sub-preprocessor/internal/log"
 )
 
+// browserUserAgent is sent on every through-node GET probe so traffic egressing
+// each node looks like an ordinary browser: the default Go-http-client/1.1 UA is
+// a common WAF / geo-panel block trigger that would skew reachability results.
+const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+
 // Prober measures reachability of the proxy nodes in a subscription payload.
 type Prober interface {
 	Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error)
