@@ -156,7 +156,6 @@ func newIndexHandler(holder *Holder) fiber.Handler {
 		}
 
 		var sb bytes.Buffer
-		// Pre-allocate some reasonable capacity to avoid reallocations
 		sb.Grow(defaultBuilderCapacity)
 
 		req := preprocess.FilterRequest{
@@ -216,7 +215,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// TestApp returns the underlying Fiber app for use in tests.
 func (s *Server) TestApp() *fiber.App {
 	return s.app
 }

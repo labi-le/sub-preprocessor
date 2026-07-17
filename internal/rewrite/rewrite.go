@@ -57,7 +57,6 @@ func StripKnownTags(s string) string {
 	// Performs exactly one slice and one TrimSpace at the end.
 	pos := 0
 	for pos < len(s) {
-		// Skip leading whitespace
 		for pos < len(s) && (s[pos] == ' ' || s[pos] == '\t') {
 			pos++
 		}

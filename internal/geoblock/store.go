@@ -128,7 +128,6 @@ func (s *Store) Count() int {
 	return len(s.blocked)
 }
 
-// Close closes the underlying database.
 func (s *Store) Close() error {
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("geoblock close: %w", err)

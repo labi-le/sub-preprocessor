@@ -34,7 +34,6 @@ type Entry struct {
 	Country CountryCode
 }
 
-// Source defines a geofeed data source.
 type Source struct {
 	URL  string         `yaml:"url"`
 	Type fetch.FileType `yaml:"type"`

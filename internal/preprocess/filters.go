@@ -16,7 +16,6 @@ type Filter interface {
 	Process(ctx context.Context, ips []netip.Addr, pctx *PipelineContext) []netip.Addr
 }
 
-// asnResolver resolves an IP to ASN metadata.
 type asnResolver interface {
 	Resolve(ctx context.Context, ip netip.Addr) (asn.Result, error)
 }

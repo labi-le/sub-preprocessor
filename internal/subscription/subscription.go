@@ -75,7 +75,7 @@ func parseNode(line string) (Node, bool) {
 	if scheme == SchemeVmess {
 		return parseVmess(line, idx)
 	}
-	rest := line[idx+len(schemeSep):] // after "://"
+	rest := line[idx+len(schemeSep):]
 
 	// Find end of authority section: '/', '?', '#', or end of string.
 	// Explicit IndexByte calls are faster than IndexAny for short authority strings.

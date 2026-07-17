@@ -110,7 +110,6 @@ var (
 	sinkInt int
 )
 
-// vmessPayload builds the base64 JSON payload for a vmess node with display name.
 func vmessPayload(name string) string {
 	return `{"v":"2","add":"1.2.3.4","port":"443","ps":"` + name +
 		`","id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"ws"}`
