@@ -68,6 +68,16 @@ func All() CountrySet {
 	return set
 }
 
+// fullSet is the All() set precomputed once for IsFull comparisons.
+var fullSet = All()
+
+// IsFull reports whether s allows every country code (equivalently, no
+// exclusions are in effect). A country filter is a no-op in this case, so it
+// keeps every IP including those with an unknown country.
+func IsFull(s CountrySet) bool {
+	return s == fullSet
+}
+
 // Exclude unsets every country code that is present in other.
 func (s *CountrySet) Exclude(other CountrySet) {
 	for i := range s {

@@ -6,18 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"regexp"
-	"slices"
 	"sync"
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
+	"domains.lst/sub-preprocessor/internal/geo"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/resolver"
-	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 	"github.com/rs/zerolog"
 )
@@ -31,12 +30,11 @@ type Options struct {
 	DNSCacheNegativeTTL time.Duration
 	ASNTimeout          time.Duration
 	ASNCacheTTL         time.Duration
-	ASNDenyPatterns     []string
-	WorkflowStages      []string
+	IPFilters           []config.IPFilterSpec
+	Annotate            []config.AnnotateSpec
 	PreloadedGeofeed    geofeed.CountryLookup
 	PreloadedLoadedAt   time.Time
 	Blocklist           Blocklist
-	Annotate            bool
 	FetchTimeout        time.Duration
 }
 
@@ -66,7 +64,7 @@ type Processor struct {
 	resolver        *resolver.Resolver
 	filters         []Filter
 	blocklist       Blocklist
-	annotate        bool
+	annotator       *annotator
 	fetchTimeout    time.Duration
 }
 
@@ -95,6 +93,7 @@ type PipelineContext struct {
 	// be consumed (copied into Scratch) before the next node runs.
 	addrScratch [1]netip.Addr
 	IsFirstNode bool
+	tagBuf      bytes.Buffer
 }
 
 func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
@@ -118,24 +117,29 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		lookup = geofeed.NewLookup(entries)
 		loadedAt = time.Now()
 	}
-
-	patterns := make([]*regexp.Regexp, 0, len(opts.ASNDenyPatterns))
-	for _, p := range opts.ASNDenyPatterns {
-		re, errCompile := regexp.Compile(p)
-		if errCompile != nil {
-			return nil, fmt.Errorf("compile asn deny pattern %q: %w", p, errCompile)
+	needsASN := false
+	for _, spec := range opts.IPFilters {
+		if spec.Type == config.FilterASN || (spec.Type == config.FilterCountry && spec.Provider == config.ProviderASN) {
+			needsASN = true
 		}
-		patterns = append(patterns, re)
+	}
+	for _, a := range opts.Annotate {
+		if a.Provider == config.ProviderASN {
+			needsASN = true
+		}
 	}
 
 	var asnR *asn.Resolver
-	if len(patterns) > 0 || slices.Contains(opts.WorkflowStages, "asn") {
+	if needsASN {
 		asnR = asn.New(opts.ASNTimeout, opts.ASNCacheTTL)
 	}
 
-	filters := buildFilters(opts.WorkflowStages, asnR, patterns)
+	filters, errBuild := buildFilters(opts.IPFilters, asnR)
+	if errBuild != nil {
+		return nil, errBuild
+	}
 
-	return &Processor{
+	p := &Processor{
 		logger:          logger,
 		countryLookup:   lookup,
 		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
@@ -143,10 +147,17 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		refreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		blocklist:       opts.Blocklist,
-		annotate:        opts.Annotate,
 		fetchTimeout:    opts.FetchTimeout,
 		filters:         filters,
-	}, nil
+	}
+
+	var asnProv geo.Provider
+	if asnR != nil {
+		asnProv = geo.NewASN(asnR)
+	}
+	p.annotator = newAnnotator(opts.Annotate, geo.NewGeofeed(p.snapshotLookup), asnProv)
+
+	return p, nil
 }
 
 func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
@@ -313,14 +324,23 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		pctx.Buffer.WriteByte('\n')
 	}
 	pctx.IsFirstNode = false
-	if p.annotate {
-		chosenIP := ips[0]
-		chosenCountry := geofeed.LookupCountry(pctx.Lookup, chosenIP)
-		rewrite.NodeName(pctx.Buffer, node, chosenCountry, chosenIP)
+	if p.annotator != nil {
+		p.annotator.annotate(ctx, pctx.Buffer, &pctx.tagBuf, node, ips[0])
 	} else {
 		pctx.Buffer.WriteString(node.Raw)
 	}
 	pctx.Stats.Kept++
+}
+
+// snapshotLookup returns the processor's current geofeed lookup under the read
+// lock. It backs the annotator's geofeed provider so per-node GEO annotation
+// reflects background reloads instead of a captured snapshot.
+//
+//nolint:ireturn // returns the CountryLookup interface for the geo.Provider getter
+func (p *Processor) snapshotLookup() geofeed.CountryLookup {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.countryLookup
 }
 
 //nolint:ireturn // pre-existing: returns interface for flexibility

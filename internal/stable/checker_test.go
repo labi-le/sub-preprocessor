@@ -226,10 +226,14 @@ func TestControllerApplyAndStop(t *testing.T) {
 
 	enabled := config.Config{
 		Groups: config.Groups{"geo_blocked": {"RU", "CN"}},
-		Subscriptions: config.SubscriptionsConfig{
-			Interval:         time.Hour,
+		Filters: []config.FilterConfig{{
+			Type:             config.FilterCountry,
+			Provider:         config.ProviderGeofeed,
 			ExcludeCountries: []string{"IR"},
 			ExcludeGroups:    []string{"geo_blocked"},
+		}},
+		Subscriptions: config.SubscriptionsConfig{
+			Interval: time.Hour,
 			Check: config.CheckConfig{
 				Rounds:         1,
 				Timeout:        time.Second,

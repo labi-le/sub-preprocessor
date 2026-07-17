@@ -2,7 +2,6 @@ package preprocess_test
 
 import (
 	"bytes"
-	"net/netip"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/filter"
@@ -39,15 +38,14 @@ func BenchmarkRewriteNodeName(b *testing.B) {
 		return true
 	})
 	node := nodes[0]
-	ip := netip.MustParseAddr("198.51.100.10")
-	country := geofeed.CountryCode{'N', 'L'}
+	const tags = "[GEO:NL][IP:198.51.100.10]"
 	var sb bytes.Buffer
 	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		rewrite.NodeName(&sb, node, country, ip)
+		rewrite.NodeName(&sb, node, tags)
 	}
 }
 
@@ -58,14 +56,13 @@ func BenchmarkRewriteNodeName_EmptyName(b *testing.B) {
 		return true
 	})
 	node := nodes[0]
-	ip := netip.MustParseAddr("203.0.113.5")
-	country := geofeed.CountryCode{'U', 'S'}
+	const tags2 = "[GEO:US][IP:203.0.113.5]"
 	var sb bytes.Buffer
 	sb.Grow(256)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		sb.Reset()
-		rewrite.NodeName(&sb, node, country, ip)
+		rewrite.NodeName(&sb, node, tags2)
 	}
 }

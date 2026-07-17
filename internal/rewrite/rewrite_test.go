@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"net/netip"
 	"testing"
 
-	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
@@ -32,7 +30,7 @@ func TestNodeNameVlessAppendsGeoIPFragment(t *testing.T) {
 
 	node := parseNode(t, "vless://uuid@host.example:443?type=tcp#Old Name")
 	var buf bytes.Buffer
-	rewrite.NodeName(&buf, node, geofeed.CountryCode{'U', 'S'}, netip.MustParseAddr("1.2.3.4"))
+	rewrite.NodeName(&buf, node, "[GEO:US][IP:1.2.3.4]")
 
 	want := "vless://uuid@host.example:443?type=tcp#[GEO:US][IP:1.2.3.4] Old Name"
 	if buf.String() != want {
@@ -46,7 +44,7 @@ func TestNodeNameVmessRewritesPsWithGeoIP(t *testing.T) {
 	line := "vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"v":"2","ps":"Old","add":"1.2.3.4","port":"443","id":"uuid","net":"ws"}`))
 	node := parseNode(t, line)
 	var buf bytes.Buffer
-	rewrite.NodeName(&buf, node, geofeed.CountryCode{'U', 'S'}, netip.MustParseAddr("1.2.3.4"))
+	rewrite.NodeName(&buf, node, "[GEO:US][IP:1.2.3.4]")
 
 	out := buf.String()
 	const prefix = "vmess://"

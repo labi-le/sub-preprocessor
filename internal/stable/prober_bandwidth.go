@@ -108,9 +108,9 @@ func bandwidthProbeOne(ctx context.Context, px mihomo.Proxy, target string, time
 // debug log, progress reporter. The caller owns the proxies' lifecycle (parse
 // once, close once).
 func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome {
-	target := m.cfg.Bandwidth.TestURL
-	timeout := m.cfg.Bandwidth.Timeout
-	concurrency := m.cfg.Bandwidth.Concurrency
+	target := m.bandwidth.TestURL
+	timeout := m.bandwidth.Timeout
+	concurrency := m.bandwidth.Concurrency
 
 	opLog := log.Op(m.logger, "stable.BandwidthCheck")
 	prog := newProgress(opLog, "bandwidth check progress", len(proxies))
@@ -147,10 +147,10 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 
 // BandwidthMinMbps resolves the configured floor; nil (unset) means 0 = no floor.
 func (m *MihomoProber) BandwidthMinMbps() int {
-	if m.cfg.Bandwidth.MinMbps == nil {
+	if m.bandwidth.MinMbps == nil {
 		return 0
 	}
-	return *m.cfg.Bandwidth.MinMbps
+	return *m.bandwidth.MinMbps
 }
 
 // hostPort extracts host:port from a URL, defaulting the port by scheme.

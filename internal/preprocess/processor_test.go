@@ -26,7 +26,7 @@ func TestRewriteNodeName(t *testing.T) {
 	})
 
 	var b bytes.Buffer
-	rewrite.NodeName(&b, nodes[0], geofeed.CountryCode{'N', 'L'}, netip.MustParseAddr("198.51.100.10"))
+	rewrite.NodeName(&b, nodes[0], "[GEO:NL][IP:198.51.100.10]")
 	got := b.String()
 	want := "vless://uuid@example.com:443?security=tls#[GEO:NL][IP:198.51.100.10] Old Name"
 	if got != want {
@@ -44,7 +44,7 @@ func TestRewriteNodeNameUnknownSchemeStillRewritesURIFragment(t *testing.T) {
 	})
 
 	var b bytes.Buffer
-	rewrite.NodeName(&b, nodes[0], geofeed.CountryCode{'N', 'L'}, netip.MustParseAddr("198.51.100.10"))
+	rewrite.NodeName(&b, nodes[0], "[GEO:NL][IP:198.51.100.10]")
 	got := b.String()
 	want := "trojan://uuid@example.com:443#[GEO:NL][IP:198.51.100.10] Old Name"
 	if got != want {

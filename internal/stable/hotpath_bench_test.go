@@ -145,7 +145,7 @@ func BenchmarkBuildPayload(b *testing.B) {
 func BenchmarkParseProxies(b *testing.B) {
 	prober, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
-		config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop(),
+		config.BandwidthConfig{}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop(),
 	)
 	if err != nil {
 		b.Fatal(err)

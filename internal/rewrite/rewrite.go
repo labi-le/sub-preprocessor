@@ -2,19 +2,17 @@ package rewrite
 
 import (
 	"bytes"
-	"net/netip"
 	"strings"
 
-	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
-const (
-	decimalBase = 10
-	hundred     = 100
-)
-
-func NodeName(b *bytes.Buffer, node subscription.Node, country geofeed.CountryCode, ip netip.Addr) {
+// NodeName writes node to b with the given already-formatted tag prefix folded
+// into its published name, e.g. tags="[GEO:NL][IP:1.2.3.4]" produces
+// "...#[GEO:NL][IP:1.2.3.4] Old Name". An empty tags string writes the node
+// with its known-tag prefix stripped (annotation reduced to a clean relabel).
+// Nodes that do not support fragment rewrites are written verbatim.
+func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
 		return
@@ -25,25 +23,15 @@ func NodeName(b *bytes.Buffer, node subscription.Node, country geofeed.CountryCo
 		cleanName = node.Server
 	}
 
+	name := cleanName
+	if tags != "" {
+		name = tags + " " + cleanName
+	}
+
 	// vmess carries its name in the base64 JSON "ps" field, not a URI
-	// fragment, so the geo/IP tag is folded into the payload and re-encoded.
+	// fragment, so the tag prefix is folded into the payload and re-encoded.
 	if node.Scheme == subscription.SchemeVmess {
-		var name bytes.Buffer
-		name.WriteString("[GEO:")
-		name.WriteByte(country[0])
-		name.WriteByte(country[1])
-		name.WriteString("][IP:")
-		ip4 := ip.As4()
-		writeOctet(&name, ip4[0])
-		name.WriteByte('.')
-		writeOctet(&name, ip4[1])
-		name.WriteByte('.')
-		writeOctet(&name, ip4[2])
-		name.WriteByte('.')
-		writeOctet(&name, ip4[3])
-		name.WriteString("] ")
-		name.WriteString(cleanName)
-		if out, ok := subscription.RewriteVmessName(node.Raw, name.String()); ok {
+		if out, ok := subscription.RewriteVmessName(node.Raw, name); ok {
 			b.WriteString(out)
 			return
 		}
@@ -56,34 +44,8 @@ func NodeName(b *bytes.Buffer, node subscription.Node, country geofeed.CountryCo
 	} else {
 		b.WriteString(node.Raw)
 	}
-	b.WriteString("#[GEO:")
-	b.WriteByte(country[0])
-	b.WriteByte(country[1])
-	b.WriteString("][IP:")
-	ip4 := ip.As4()
-	writeOctet(b, ip4[0])
-	b.WriteByte('.')
-	writeOctet(b, ip4[1])
-	b.WriteByte('.')
-	writeOctet(b, ip4[2])
-	b.WriteByte('.')
-	writeOctet(b, ip4[3])
-	b.WriteString("] ")
-	b.WriteString(cleanName)
-}
-
-func writeOctet(b *bytes.Buffer, n byte) {
-	switch {
-	case n >= hundred:
-		b.WriteByte('0' + n/hundred)
-		b.WriteByte('0' + (n/decimalBase)%decimalBase)
-		b.WriteByte('0' + n%decimalBase)
-	case n >= decimalBase:
-		b.WriteByte('0' + n/decimalBase)
-		b.WriteByte('0' + n%decimalBase)
-	default:
-		b.WriteByte('0' + n)
-	}
+	b.WriteByte('#')
+	b.WriteString(name)
 }
 
 func supportsFragmentRewrite(node subscription.Node) bool {
@@ -150,6 +112,9 @@ func isKnownTag(tag string) bool {
 		return true
 	}
 	if len(tag) >= 3 && tag[:3] == "IP:" {
+		return true
+	}
+	if len(tag) >= 4 && tag[:4] == "ASN:" {
 		return true
 	}
 	if len(tag) >= 4 && tag[:4] == "JUR:" {

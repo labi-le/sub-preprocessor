@@ -40,24 +40,52 @@ func (c *Controller) Apply(cfg config.Config) error {
 
 	subs := cfg.Subscriptions
 	allowed := filter.All()
-	excluded := filter.ParseAllowed(subs.ExcludeCountries...)
-	for _, group := range subs.ExcludeGroups {
-		for _, code := range cfg.Groups[group] {
+	excluded := filter.CountrySet{}
+	for _, spec := range cfg.IPFilterSpecs() {
+		if spec.Type != config.FilterCountry {
+			continue
+		}
+		for _, code := range spec.ExcludeCountries {
 			excluded.Add(code)
+		}
+		for _, group := range spec.ExcludeGroups {
+			for _, code := range cfg.Groups[group] {
+				excluded.Add(code)
+			}
 		}
 	}
 	allowed.Exclude(excluded)
 
-	geminiKey, keyErr := cfg.GeoBlock.Gemini.APIKeyResolved()
+	// The gemini/claude prober params default to the geoblock block and are
+	// overridden per-entry by the merged NodeFilterSpec; bandwidth params come
+	// entirely from its filter entry.
+	nodeSpecs := cfg.NodeFilterSpecs()
+	gemini := cfg.GeoBlock.Gemini
+	claude := cfg.GeoBlock.Claude
+	var bandwidth config.BandwidthConfig
+	names := make([]string, 0, len(nodeSpecs))
+	for _, spec := range nodeSpecs {
+		names = append(names, spec.Type)
+		switch spec.Type {
+		case config.FilterGemini:
+			gemini = spec.Gemini
+		case config.FilterClaude:
+			claude = spec.Claude
+		case config.FilterBandwidth:
+			bandwidth = spec.Bandwidth
+		}
+	}
+
+	geminiKey, keyErr := gemini.APIKeyResolved()
 	if keyErr != nil {
 		c.logger.Warn().Err(keyErr).Msg("gemini key unavailable; geo-block check disabled")
 	}
-	prober, err := NewMihomoProber(subs.Check, cfg.GeoBlock.Gemini, geminiKey, cfg.GeoBlock.Claude, c.logger)
+	prober, err := NewMihomoProber(subs.Check, bandwidth, gemini, geminiKey, claude, c.logger)
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}
-	annotate := cfg.Workflow.Annotate == nil || *cfg.Workflow.Annotate
-	filters := buildNodeFilters(subs.Check.Filters, prober, c.store, annotate, c.logger)
+	annotate := len(cfg.Annotate) > 0
+	filters := buildNodeFilters(names, prober, c.store, annotate, c.logger)
 
 	c.Stop()
 	checker := NewChecker(

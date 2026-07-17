@@ -30,7 +30,7 @@ func TestProbeCancelledContextReturnsError(t *testing.T) {
 		Timeout:        time.Second,
 		TestURL:        "http://127.0.0.1:0/",
 		ExpectedStatus: "204",
-	}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
+	}, config.BandwidthConfig{}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

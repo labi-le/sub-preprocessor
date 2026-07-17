@@ -16,7 +16,7 @@ func TestLoadDefaults(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n")
+	content := []byte("geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -31,17 +31,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Resolver.Timeout != 5*time.Second {
 		t.Fatalf("unexpected timeout: %v", cfg.Resolver.Timeout)
 	}
-	if len(cfg.Geofeed.Sources) != 1 {
-		t.Fatalf("unexpected sources count: %d", len(cfg.Geofeed.Sources))
+	if len(cfg.Geo.Geofeed.Sources) != 1 {
+		t.Fatalf("unexpected sources count: %d", len(cfg.Geo.Geofeed.Sources))
 	}
-	if cfg.Geofeed.Sources[0].Type != "gzip" {
-		t.Fatalf("unexpected source type: %q", cfg.Geofeed.Sources[0].Type)
+	if cfg.Geo.Geofeed.Sources[0].Type != "gzip" {
+		t.Fatalf("unexpected source type: %q", cfg.Geo.Geofeed.Sources[0].Type)
 	}
-	if cfg.Geofeed.RefreshInterval != 0 {
-		t.Fatalf("unexpected refresh interval default: %v", cfg.Geofeed.RefreshInterval)
-	}
-	if len(cfg.Workflow.Stages) != 2 || cfg.Workflow.Stages[0] != "geofeed" || cfg.Workflow.Stages[1] != "asn" {
-		t.Fatalf("unexpected default workflow stages: %v", cfg.Workflow.Stages)
+	if cfg.Geo.Geofeed.RefreshInterval != 0 {
+		t.Fatalf("unexpected refresh interval default: %v", cfg.Geo.Geofeed.RefreshInterval)
 	}
 }
 
@@ -50,7 +47,7 @@ func TestLoadRejectsMissingGeofeedType(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n")
+	content := []byte("geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +62,7 @@ func TestLoadGeofeedRefreshInterval(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  refresh_interval: 24h\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n")
+	content := []byte("geo:\n  geofeed:\n    refresh_interval: 24h\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +71,8 @@ func TestLoadGeofeedRefreshInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Geofeed.RefreshInterval != 24*time.Hour {
-		t.Fatalf("unexpected refresh interval: %v", cfg.Geofeed.RefreshInterval)
+	if cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
+		t.Fatalf("unexpected refresh interval: %v", cfg.Geo.Geofeed.RefreshInterval)
 	}
 }
 
@@ -84,7 +81,7 @@ func TestLoadGroups(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  nordics:\n    - FI\n    - SE\n    - NO\n    - DK\n  baltics:\n    - EE\n    - LV\n    - LT\n")
+	content := []byte("geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\ngroups:\n  nordics:\n    - FI\n    - SE\n    - NO\n    - DK\n  baltics:\n    - EE\n    - LV\n    - LT\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +106,7 @@ func TestLoadRejectsInvalidGroupCountryCode(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  invalid:\n    - XYZ\n")
+	content := []byte("geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\ngroups:\n  invalid:\n    - XYZ\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +121,7 @@ func TestLoadRejectsGroupWithEmptyName(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  \"\":\n    - FI\n")
+	content := []byte("geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\ngroups:\n  \"\":\n    - FI\n")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -150,12 +147,12 @@ func TestEqual(t *testing.T) {
 
 func TestGeofeedSourcesChanged(t *testing.T) {
 	src := geofeed.Source{URL: "https://example.com/feed.csv", Type: "raw"}
-	cfgA := config.Config{Geofeed: config.GeofeedConfig{Sources: []geofeed.Source{src}}}
+	cfgA := config.Config{Geo: config.GeoConfig{Geofeed: config.GeofeedConfig{Sources: []geofeed.Source{src}}}}
 	cfgB := cfgA
 	if config.GeofeedSourcesChanged(cfgA, cfgB) {
 		t.Fatal("identical sources should not be changed")
 	}
-	cfgB.Geofeed.Sources = append(cfgB.Geofeed.Sources, geofeed.Source{URL: "https://other.com/feed.csv", Type: "gzip"})
+	cfgB.Geo.Geofeed.Sources = append(cfgB.Geo.Geofeed.Sources, geofeed.Source{URL: "https://other.com/feed.csv", Type: "gzip"})
 	if !config.GeofeedSourcesChanged(cfgA, cfgB) {
 		t.Fatal("added source should be detected as changed")
 	}
@@ -177,7 +174,7 @@ func TestListenChanged(t *testing.T) {
 
 func writeConfig(t *testing.T, subsBlock string) (config.Config, error) {
 	t.Helper()
-	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\ngroups:\n  geo_blocked: [RU, IR]\n"
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\ngroups:\n  geo_blocked: [RU, IR]\n"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(base+subsBlock), 0o644); err != nil {
@@ -263,8 +260,6 @@ func TestLoadSubscriptionsFullBlock(t *testing.T) {
 
 	cfg, err := writeConfig(t, `subscriptions:
   interval: 15m
-  exclude_countries: [CN]
-  exclude_groups: [geo_blocked]
   check:
     rounds: 3
     timeout: 1500ms
@@ -283,7 +278,7 @@ func TestLoadSubscriptionsFullBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := cfg.Subscriptions
-	if s.Interval != 15*time.Minute || len(s.ExcludeCountries) != 1 || len(s.ExcludeGroups) != 1 {
+	if s.Interval != 15*time.Minute {
 		t.Fatalf("subs: %+v", s)
 	}
 	c := s.Check
@@ -317,8 +312,8 @@ func TestLoadRejectsBadSubscriptions(t *testing.T) {
 		"dup name":        "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n    - name: a\n      url: https://b.example.com/s\n",
 		"http url":        "subscriptions:\n  sources:\n    - name: a\n      url: http://a.example.com/s\n",
 		"private ip":      "subscriptions:\n  sources:\n    - name: a\n      url: https://192.168.1.1/s\n",
-		"unknown group":   "subscriptions:\n  exclude_groups: [nope]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
-		"bad country":     "subscriptions:\n  exclude_countries: [RUS]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
+		"unknown group":   "filters:\n  - type: country\n    exclude_groups: [nope]\n",
+		"bad country":     "filters:\n  - type: country\n    exclude_countries: [RUS]\n",
 		"short interval":  "subscriptions:\n  interval: 10s\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
 		"zero rounds":     "subscriptions:\n  check:\n    rounds: -1\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
 		"bad concurrency": "subscriptions:\n  check:\n    concurrency: -2\n  sources:\n    - name: a\n      url: https://a.example.com/s\n",
@@ -347,7 +342,7 @@ func TestSubscriptionsChanged(t *testing.T) {
 		t.Fatal("source add must be detected")
 	}
 	c := a
-	c.ASN.DenyPatterns = []string{"changed"}
+	c.Geo.ASN.Timeout = 42 * time.Second
 	if config.SubscriptionsChanged(a, c) {
 		t.Fatal("asn change must not affect subscriptions diff")
 	}
@@ -384,7 +379,7 @@ func loadRaw(t *testing.T, content string) (config.Config, error) {
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	t.Parallel()
 
-	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	const base = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
 	const subs = "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
 	cases := map[string]struct {
 		yaml    string
@@ -396,14 +391,14 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative claude timeout":       {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
 		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
 		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
-		"negative asn timeout":          {base + "asn:\n  timeout: -1s\n", "asn.timeout"},
+		"negative asn timeout":          {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
 		"negative fetch timeout":        {base + "fetch:\n  timeout: -1s\n", "fetch.timeout"},
 		"negative deadcache ttl":        {base + "deadcache:\n  ttl: -1h\n", "deadcache.ttl"},
-		"negative geofeed refresh":      {"geofeed:\n  refresh_interval: -1m\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n", "geofeed.refresh_interval"},
+		"negative geofeed refresh":      {"geo:\n  geofeed:\n    refresh_interval: -1m\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n", "geo.geofeed.refresh_interval"},
 		"negative subs interval":        {base + "subscriptions:\n  interval: -1m\n", "subscriptions.interval"},
 		"negative check timeout":        {base + "subscriptions:\n  check:\n    timeout: -1s\n", "subscriptions.check.timeout"},
 		"negative check source timeout": {base + "subscriptions:\n  check:\n    source_timeout: -1s\n", "subscriptions.check.source_timeout"},
-		"unknown workflow stage":        {base + "workflow:\n  stages: [geofeed, dns]\n", `workflow.stages: unknown stage "dns"`},
+		"unknown filter type":           {base + "filters:\n  - type: bogus\n", `unknown type "bogus"`},
 		"bad log level":                 {base + "log:\n  level: verbose\n", "log.level"},
 		"bad expected status":           {base + subs + "  check:\n    expected_status: not-a-range\n", "expected_status"},
 		"non-http test url":             {base + subs + "  check:\n    test_url: ftp://example.com/generate_204\n", "test_url"},
@@ -424,9 +419,8 @@ func TestLoadAcceptsValidNewKnobs(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := loadRaw(t, "log:\n  level: WARN\n"+
-		"workflow:\n  stages: [geofeed]\n"+
 		"geoblock:\n  gemini:\n    concurrency: 4\n    timeout: 20s\n"+
-		"geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"+
+		"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"+
 		"subscriptions:\n  check:\n    expected_status: 200/204\n    test_url: http://www.gstatic.com/generate_204\n  sources:\n    - name: a\n      url: https://a.example.com/s\n")
 	if err != nil {
 		t.Fatal(err)
@@ -449,7 +443,7 @@ func TestLoadMergesPrivateConfig(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
 	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +472,7 @@ func TestLoadFailsOnUnreadablePrivateConfig(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
 	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +503,7 @@ func TestProberChanged(t *testing.T) {
 		t.Fatal("gemini sub-config change must be detected")
 	}
 	c := a
-	c.ASN.DenyPatterns = []string{"changed"}
+	c.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"changed"}}}
 	if config.ProberChanged(a, c) {
 		t.Fatal("asn change must not affect prober diff")
 	}
@@ -553,11 +547,21 @@ func TestStoresChanged(t *testing.T) {
 func TestLoadBandwidthDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\n")
+	cfg, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\nfilters:\n  - type: bandwidth\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := cfg.Subscriptions.Check.Bandwidth
+	var b config.BandwidthConfig
+	found := false
+	for _, spec := range cfg.NodeFilterSpecs() {
+		if spec.Type == config.FilterBandwidth {
+			b = spec.Bandwidth
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no bandwidth filter spec found")
+	}
 	if b.TestURL != "https://speed.cloudflare.com/__down?bytes=2000000" {
 		t.Fatalf("test_url default = %q", b.TestURL)
 	}
@@ -572,11 +576,17 @@ func TestLoadBandwidthDefaults(t *testing.T) {
 	}
 
 	// An explicit min_mbps: 0 means "no floor" and must survive defaulting.
-	cfg0, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\n  check:\n    bandwidth:\n      min_mbps: 0\n")
+	cfg0, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: mifa\n      url: https://mifa.world/vless\nfilters:\n  - type: bandwidth\n    min_mbps: 0\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := cfg0.Subscriptions.Check.Bandwidth.MinMbps; m == nil || *m != 0 {
+	var m *int
+	for _, spec := range cfg0.NodeFilterSpecs() {
+		if spec.Type == config.FilterBandwidth {
+			m = spec.Bandwidth.MinMbps
+		}
+	}
+	if m == nil || *m != 0 {
 		t.Fatalf("explicit min_mbps=0 must be preserved, got %v", m)
 	}
 }
@@ -585,13 +595,12 @@ func TestLoadRejectsInvalidBandwidth(t *testing.T) {
 	t.Parallel()
 
 	// Negative values survive the "==0 -> default" coercion and reach validation.
-	const subs = "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n  check:\n    bandwidth:\n"
-	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	const base = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
 	cases := map[string]string{
-		"negative timeout":     subs + "      timeout: -1s\n",
-		"negative concurrency": subs + "      concurrency: -1\n",
-		"negative min_mbps":    subs + "      min_mbps: -1\n",
-		"non-http test_url":    subs + "      test_url: ftp://example.com/x\n",
+		"negative timeout":     "filters:\n  - type: bandwidth\n    timeout: -1s\n",
+		"negative concurrency": "filters:\n  - type: bandwidth\n    concurrency: -1\n",
+		"negative min_mbps":    "filters:\n  - type: bandwidth\n    min_mbps: -1\n",
+		"non-http test_url":    "filters:\n  - type: bandwidth\n    test_url: ftp://example.com/x\n",
 	}
 	for name, block := range cases {
 		if _, err := loadRaw(t, base+block); err == nil {
@@ -607,20 +616,20 @@ func TestLoadASNCacheTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ASN.CacheTTL != 24*time.Hour {
-		t.Fatalf("asn.cache_ttl default = %v, want 24h", cfg.ASN.CacheTTL)
+	if cfg.Geo.ASN.CacheTTL != 24*time.Hour {
+		t.Fatalf("asn.cache_ttl default = %v, want 24h", cfg.Geo.ASN.CacheTTL)
 	}
 
-	cfg2, err := writeConfig(t, "asn:\n  cache_ttl: 48h\n")
+	const base = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+	cfg2, err := loadRaw(t, base+"  asn:\n    cache_ttl: 48h\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg2.ASN.CacheTTL != 48*time.Hour {
-		t.Fatalf("asn.cache_ttl = %v, want 48h", cfg2.ASN.CacheTTL)
+	if cfg2.Geo.ASN.CacheTTL != 48*time.Hour {
+		t.Fatalf("asn.cache_ttl = %v, want 48h", cfg2.Geo.ASN.CacheTTL)
 	}
 
-	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
-	if _, negErr := loadRaw(t, base+"asn:\n  cache_ttl: -1s\n"); negErr == nil {
+	if _, negErr := loadRaw(t, base+"  asn:\n    cache_ttl: -1s\n"); negErr == nil {
 		t.Fatal("negative asn.cache_ttl must be rejected")
 	}
 }
@@ -673,18 +682,18 @@ func TestLoadCacheTTLDisableSemantics(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsUnknownCheckFilter: a filters entry outside the known set
-// {gemini,claude,bandwidth} must fail Load and name the offending filter.
-func TestLoadRejectsUnknownCheckFilter(t *testing.T) {
+// TestLoadRejectsUnknownFilterType: a filters entry outside the known set
+// must fail Load and name the offending filter type.
+func TestLoadRejectsUnknownFilterType(t *testing.T) {
 	t.Parallel()
 
-	const base = "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
-	yaml := base + "subscriptions:\n  check:\n    filters: [bogus]\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	const base = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+	yaml := base + "filters:\n  - type: bogus\n"
 	_, err := loadRaw(t, yaml)
 	if err == nil {
-		t.Fatal("expected error for unknown check filter")
+		t.Fatal("expected error for unknown filter type")
 	}
-	if !strings.Contains(err.Error(), "subscriptions.check.filters") || !strings.Contains(err.Error(), "bogus") {
+	if !strings.Contains(err.Error(), "unknown type") || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("error %q does not name the bad filter", err)
 	}
 }
@@ -696,7 +705,7 @@ func TestLoadMergesSourcesConfig(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\nsubscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
 	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +732,7 @@ func TestLoadMergesSourcesConfig(t *testing.T) {
 func TestValidateBodySource(t *testing.T) {
 	t.Parallel()
 
-	base := "geofeed:\n  sources:\n    - url: https://example.com/geofeed.csv.gz\n      type: gzip\n"
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
 
 	cases := []struct {
 		name    string

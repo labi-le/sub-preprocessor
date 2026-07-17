@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -26,10 +27,11 @@ import (
 // at an SSRF-unreachable loopback address. Combined with a preloaded geofeed in
 // setupReloader, this guarantees no test ever performs a network fetch: if the
 // reload path tried to fetch it, NewProcessor would fail (proving carry-over).
-const baseGeofeedYAML = "geofeed:\n" +
-	"  sources:\n" +
-	"    - url: https://127.0.0.1:1/geofeed\n" +
-	"      type: raw\n"
+const baseGeofeedYAML = "geo:\n" +
+	"  geofeed:\n" +
+	"    sources:\n" +
+	"      - url: https://127.0.0.1:1/geofeed\n" +
+	"        type: raw\n"
 
 // stubLookup is a no-op geofeed.CountryLookup used to preload a Processor so it
 // never fetches geofeed data during tests.
@@ -99,25 +101,26 @@ func TestOptionsFromConfig(t *testing.T) {
 	t.Parallel()
 
 	var cfg config.Config
-	cfg.Geofeed.Sources = []geofeed.Source{{URL: "https://example.com/feed.csv", Type: "raw"}}
-	cfg.Geofeed.RefreshInterval = 7 * time.Minute
+	cfg.Geo.Geofeed.Sources = []geofeed.Source{{URL: "https://example.com/feed.csv", Type: "raw"}}
+	cfg.Geo.Geofeed.RefreshInterval = 7 * time.Minute
 	cfg.Resolver.Address = "9.9.9.9:53"
 	cfg.Resolver.Timeout = 3 * time.Second
 	dnsTTL, dnsNegTTL := 30*time.Minute, 10*time.Minute
 	cfg.Resolver.CacheTTL = &dnsTTL
 	cfg.Resolver.CacheNegativeTTL = &dnsNegTTL
-	cfg.ASN.Timeout = 4 * time.Second
-	cfg.ASN.DenyPatterns = []string{"^AS1234 ", "spammy"}
-	cfg.Workflow.Stages = []string{"geofeed", "asn"}
+	cfg.Geo.ASN.Timeout = 4 * time.Second
+	cfg.Geo.ASN.CacheTTL = 24 * time.Hour
+	cfg.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"^AS1234 ", "spammy"}}}
+	cfg.Annotate = []config.AnnotateSpec{{Tag: "GEO", Provider: "geofeed"}, {Tag: "IP"}}
 	cfg.Fetch.Timeout = 3 * time.Second
 
 	opts := reload.OptionsFromConfig(cfg)
 
-	if !slices.Equal(opts.GeofeedSources, cfg.Geofeed.Sources) {
-		t.Errorf("GeofeedSources: got %v want %v", opts.GeofeedSources, cfg.Geofeed.Sources)
+	if !slices.Equal(opts.GeofeedSources, cfg.Geo.Geofeed.Sources) {
+		t.Errorf("GeofeedSources: got %v want %v", opts.GeofeedSources, cfg.Geo.Geofeed.Sources)
 	}
-	if opts.RefreshInterval != cfg.Geofeed.RefreshInterval {
-		t.Errorf("RefreshInterval: got %v want %v", opts.RefreshInterval, cfg.Geofeed.RefreshInterval)
+	if opts.RefreshInterval != cfg.Geo.Geofeed.RefreshInterval {
+		t.Errorf("RefreshInterval: got %v want %v", opts.RefreshInterval, cfg.Geo.Geofeed.RefreshInterval)
 	}
 	if opts.DNSTimeout != cfg.Resolver.Timeout {
 		t.Errorf("DNSTimeout: got %v want %v", opts.DNSTimeout, cfg.Resolver.Timeout)
@@ -125,14 +128,23 @@ func TestOptionsFromConfig(t *testing.T) {
 	if opts.DNSAddress != cfg.Resolver.Address {
 		t.Errorf("DNSAddress: got %q want %q", opts.DNSAddress, cfg.Resolver.Address)
 	}
-	if opts.ASNTimeout != cfg.ASN.Timeout {
-		t.Errorf("ASNTimeout: got %v want %v", opts.ASNTimeout, cfg.ASN.Timeout)
+	if opts.ASNTimeout != cfg.Geo.ASN.Timeout {
+		t.Errorf("ASNTimeout: got %v want %v", opts.ASNTimeout, cfg.Geo.ASN.Timeout)
 	}
-	if !slices.Equal(opts.ASNDenyPatterns, cfg.ASN.DenyPatterns) {
-		t.Errorf("ASNDenyPatterns: got %v want %v", opts.ASNDenyPatterns, cfg.ASN.DenyPatterns)
+	if opts.ASNCacheTTL != cfg.Geo.ASN.CacheTTL {
+		t.Errorf("ASNCacheTTL: got %v want %v", opts.ASNCacheTTL, cfg.Geo.ASN.CacheTTL)
 	}
-	if !slices.Equal(opts.WorkflowStages, cfg.Workflow.Stages) {
-		t.Errorf("WorkflowStages: got %v want %v", opts.WorkflowStages, cfg.Workflow.Stages)
+	if !reflect.DeepEqual(opts.IPFilters, cfg.IPFilterSpecs()) {
+		t.Errorf("IPFilters: got %v want %v", opts.IPFilters, cfg.IPFilterSpecs())
+	}
+	if opts.DNSCacheTTL != *cfg.Resolver.CacheTTL {
+		t.Errorf("DNSCacheTTL: got %v want %v", opts.DNSCacheTTL, *cfg.Resolver.CacheTTL)
+	}
+	if opts.DNSCacheNegativeTTL != *cfg.Resolver.CacheNegativeTTL {
+		t.Errorf("DNSCacheNegativeTTL: got %v want %v", opts.DNSCacheNegativeTTL, *cfg.Resolver.CacheNegativeTTL)
+	}
+	if !reflect.DeepEqual(opts.Annotate, cfg.Annotate) {
+		t.Errorf("Annotate: got %v want %v", opts.Annotate, cfg.Annotate)
 	}
 	if opts.FetchTimeout != cfg.Fetch.Timeout {
 		t.Errorf("FetchTimeout: got %v want %v", opts.FetchTimeout, cfg.Fetch.Timeout)
@@ -172,7 +184,7 @@ func TestReloadKeepsOldOnError(t *testing.T) {
 		{"empty file (AC2)", ""},
 		{"valid yaml but empty geofeed sources (AC3)", "server:\n  listen: \":7777\"\n"},
 		{"malformed yaml", "key: [a, b, c"},
-		{"invalid asn regex (AC9)", baseGeofeedYAML + "asn:\n  deny_patterns:\n    - \"(\"\n"},
+		{"invalid asn regex (AC9)", baseGeofeedYAML + "filters:\n  - type: asn\n    deny_patterns:\n      - \"(\"\n"},
 	}
 
 	for _, tc := range cases {
@@ -200,7 +212,7 @@ func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt, nil)
 
 	before := holder.Load()
-	writeConfig(t, path, baseGeofeedYAML+"asn:\n  deny_patterns:\n    - \"^AS1234 \"\n")
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
 	r.Reload(t.Context())
 
 	after := holder.Load()
@@ -324,7 +336,7 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 	before := holder.Load()
 	logBuf.Reset()
 
-	writeConfig(t, path, baseGeofeedYAML+"asn:\n  deny_patterns:\n    - \"^AS9999 \"\n")
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
 	r.Reload(t.Context())
 
 	if holder.Load() == before {
@@ -435,7 +447,7 @@ func TestReloadAppliesOnAnnotateChange(t *testing.T) {
 		t.Fatalf("adding subscriptions: expected 1 Apply call, got %d", fake.calls)
 	}
 
-	writeConfig(t, path, subsYAML+"workflow:\n  annotate: false\n")
+	writeConfig(t, path, subsYAML+"annotate:\n  - tag: GEO\n    provider: geofeed\n")
 	r.Reload(t.Context())
 	if fake.calls != 2 {
 		t.Fatalf("annotate-only edit must trigger Apply: expected 2 calls, got %d", fake.calls)

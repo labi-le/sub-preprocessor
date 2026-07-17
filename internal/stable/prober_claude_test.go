@@ -31,6 +31,7 @@ func TestClaudeURL(t *testing.T) {
 
 	p, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{},
 		config.GeminiConfig{},
 		"",
 		config.ClaudeConfig{Endpoint: "https://api.anthropic.com/"},

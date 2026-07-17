@@ -2,25 +2,40 @@ log:
   level: info # debug is verbose (per-node/DNS/probe); it is hot-reloadable, so turn it on live only when troubleshooting
 server:
   listen: :8080
-geofeed:
-  refresh_interval: 24h
-  sources:
-    - url: https://github.com/ipanalytics/GeoFeed-Harvester/releases/latest/download/geofeed.csv.gz
-      type: gzip
-    - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
-      type: raw
+geo:
+  # Shared geo providers used by the country/asn filters and by annotation.
+  geofeed:
+    refresh_interval: 24h
+    sources:
+      - url: https://github.com/ipanalytics/GeoFeed-Harvester/releases/latest/download/geofeed.csv.gz
+        type: gzip
+      - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
+        type: raw
+  asn:
+    timeout: 5s
+    cache_ttl: 24h # in-memory cache of Cymru ASN lookups; geolocations rarely change (0 = default 24h)
 resolver:
   timeout: 5s
   cache_ttl: 1h
   cache_negative_ttl: 10m
-workflow:
-  stages:
-    - asn # note: the geofeed country-filter is always appended last, even when omitted here
-  annotate: true # add [GEO:XX][IP:x.x.x.x] to node names (both / and /stable.txt)
-asn:
-  deny_patterns: [] # empty: per-host geoblock list replaced ASN-name denial; the asn stage still does IP->country filtering
-  timeout: 5s
-  cache_ttl: 24h # in-memory cache of Cymru ASN lookups; geolocations rarely change (0 = default 24h)
+# Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
+# preprocess; through-node filters (gemini/claude/bandwidth) run post-probe in
+# the stable worker. Order is honoured within each stage.
+filters:
+  - type: country
+    provider: geofeed
+    # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop
+  - type: claude
+  - type: bandwidth # drop nodes slower than min_mbps (last: runs on the fewest nodes)
+    test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
+    min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
+    timeout: 20s # per-node download deadline
+    concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
+# Ordered annotation tags added to node names (both / and /stable.txt).
+annotate:
+  - tag: GEO
+    provider: geofeed # [GEO:xx], [GEO:??] when the country is unknown
+  - tag: IP # [IP:1.2.3.4] of the chosen address
 geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h
@@ -34,7 +49,7 @@ geoblock:
     timeout: 15s
     concurrency: 8
 deadcache:
-  ttl: 2h # decouple from subscriptions.interval (30m): a per-cycle TTL would make the dead-node cache a no-op. Set 0s to disable.
+  ttl: 2h # decouple from subscriptions.interval: a per-cycle TTL would make the dead-node cache a no-op. Set 0s to disable.
 fetch:
   # HTTP fetch timeout per subscription; unresponsive sources fail fast
   timeout: 3s
@@ -81,14 +96,9 @@ groups:
     - "CN"
     - "BY"
 subscriptions:
-  interval: 30m
-  # exclude_groups:      # TEMP: commented to let inline (mostly RU/IR/CN) nodes past the geo filter
-  #   - geo_blocked
+  interval: 1h
   check:
-    filters:
-      # - gemini
-      - claude
-      - bandwidth # drop nodes slower than check.bandwidth.min_mbps (last: runs on the fewest nodes)
+    # URL-test (latency) prober params only; through-node filters live in `filters`.
     rounds: 2
     timeout: 1000ms
     max_fail: 1
@@ -97,10 +107,3 @@ subscriptions:
     source_timeout: 5m
     # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
     # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax
-    # bandwidth: through-node download-speed gate (only active when "bandwidth" is listed in filters above).
-    # Measures each survivor by pulling test_url through the node; drops those below min_mbps.
-    bandwidth:
-      test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
-      min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
-      timeout: 20s # per-node download deadline
-      concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes

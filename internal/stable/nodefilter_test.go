@@ -95,7 +95,7 @@ func TestBandwidthFilterAnnotatesVmess(t *testing.T) {
 func TestBuildNodeFilters(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.GeminiConfig{}, "KEY", config.ClaudeConfig{}, zerolog.Nop())
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeminiConfig{}, "KEY", config.ClaudeConfig{}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 
 	prober, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
-		config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
+		config.BandwidthConfig{}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

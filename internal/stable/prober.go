@@ -27,6 +27,7 @@ type Prober interface {
 // MihomoProber runs repeated URL tests through mihomo's adapter stack.
 type MihomoProber struct {
 	cfg       config.CheckConfig
+	bandwidth config.BandwidthConfig
 	expected  utils.IntRanges[uint16]
 	gemini    config.GeminiConfig
 	geminiKey string
@@ -36,6 +37,7 @@ type MihomoProber struct {
 
 func NewMihomoProber(
 	cfg config.CheckConfig,
+	bandwidth config.BandwidthConfig,
 	gemini config.GeminiConfig,
 	geminiKey string,
 	claude config.ClaudeConfig,
@@ -46,7 +48,7 @@ func NewMihomoProber(
 		return nil, fmt.Errorf("parse expected_status %q: %w", cfg.ExpectedStatus, err)
 	}
 
-	return &MihomoProber{cfg: cfg, expected: expected, gemini: gemini, geminiKey: geminiKey, claude: claude, logger: logger}, nil
+	return &MihomoProber{cfg: cfg, bandwidth: bandwidth, expected: expected, gemini: gemini, geminiKey: geminiKey, claude: claude, logger: logger}, nil
 }
 
 type delayAcc struct {

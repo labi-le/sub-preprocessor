@@ -115,12 +115,14 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
 
-	// The stable worker derives its filter set from subscriptions, groups, the
-	// geoblock prober settings (gemini/claude), and workflow.annotate (baked
-	// into the bandwidth [SPD:] tag), so a change to any of them re-applies it;
-	// unrelated config edits must leave it running.
+	// The stable worker derives its allow set and through-node filters from the
+	// unified filters list, plus subscriptions, groups, the geoblock prober
+	// settings (gemini/claude), and the annotate list (baked into the bandwidth
+	// [SPD:] tag), so a change to any of them re-applies it; unrelated config
+	// edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
+		config.FiltersChanged(r.currentCfg, newCfg) ||
 		config.ProberChanged(r.currentCfg, newCfg) ||
 		config.AnnotateChanged(r.currentCfg, newCfg)
 	applied := true
