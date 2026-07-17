@@ -82,8 +82,8 @@ groups:
     - "BY"
 subscriptions:
   interval: 30m
-  exclude_groups:
-    - geo_blocked
+  # exclude_groups:      # TEMP: commented to let inline (mostly RU/IR/CN) nodes past the geo filter
+  #   - geo_blocked
   check:
     filters:
       # - gemini
