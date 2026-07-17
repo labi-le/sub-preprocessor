@@ -18,7 +18,7 @@ type NodeFilter interface {
 	name() string
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by
 	// node label. The checker owns the proxies' lifecycle; filters only read.
-	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor
+	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport)
 }
 
 // geminiChecker is the through-node Gemini capability of a Prober.
@@ -61,10 +61,11 @@ type apiFilter struct {
 
 func (f *apiFilter) name() string { return f.filterName }
 
-func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor {
+func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+	rep := FilterReport{Name: f.filterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	if f.enabled != nil && !f.enabled() {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter configured but disabled; skipping")
-		return survivors
+		return survivors, rep
 	}
 
 	subset := make([]mihomo.Proxy, 0, len(survivors))
@@ -76,13 +77,13 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter skipped: no outcomes")
-		return survivors
+		return survivors, rep
 	}
 	if ctx.Err() != nil {
 		// A cancelled check yields partial outcomes; don't record blocks or
 		// drop survivors based on them.
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter cancelled; keeping survivors unchanged")
-		return survivors
+		return survivors, rep
 	}
 
 	kept := make([]Survivor, 0, len(survivors))
@@ -105,7 +106,9 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	}
 	f.logger.Info().Str("filter", f.filterName).Int("survivors", len(survivors)).Int("kept", len(kept)).
 		Int("blocked", blocked).Int("unreachable", unreachable).Msg("node filter")
-	return kept
+	rep.Kept = len(kept)
+	rep.Dropped = map[string]int{"blocked": blocked, "unreachable": unreachable}
+	return kept, rep
 }
 
 // bandwidthFilter keeps only survivors whose measured through-node download
@@ -122,7 +125,8 @@ type bandwidthFilter struct {
 
 func (f *bandwidthFilter) name() string { return bandwidthFilterName }
 
-func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) []Survivor {
+func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+	rep := FilterReport{Name: bandwidthFilterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	subset := make([]mihomo.Proxy, 0, len(survivors))
 	for _, s := range survivors {
 		if px, ok := proxies[s.Label]; ok {
@@ -132,11 +136,11 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter skipped: no outcomes")
-		return survivors
+		return survivors, rep
 	}
 	if ctx.Err() != nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter cancelled; keeping survivors unchanged")
-		return survivors
+		return survivors, rep
 	}
 
 	kept := make([]Survivor, 0, len(survivors))
@@ -158,7 +162,9 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 	}
 	f.logger.Info().Str("filter", bandwidthFilterName).Int("survivors", len(survivors)).
 		Int("kept", len(kept)).Int("slow", slow).Int("unreachable", unreachable).Msg("node filter")
-	return kept
+	rep.Kept = len(kept)
+	rep.Dropped = map[string]int{"slow": slow, "unreachable": unreachable}
+	return kept, rep
 }
 
 // annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses

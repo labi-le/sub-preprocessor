@@ -8,6 +8,8 @@ services:
     user: "1000:1000" # config owner: read the 0400 agenix secret + write /config/.geoblock.db
     ports:
       - "7008:8080"
+      # internal Prometheus metrics; loopback-only so the host Prometheus can scrape it but it is not public
+      - "127.0.0.1:9091:9090"
     volumes:
       - ./config:/config:rw
       # agenix-decrypted secret; the Gemini key is read from it (geoblock.gemini.key_file)

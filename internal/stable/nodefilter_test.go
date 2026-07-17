@@ -34,7 +34,7 @@ func TestBandwidthFilterApply(t *testing.T) {
 	}
 
 	f := &bandwidthFilter{minMbps: 10, annotate: true, check: check, logger: zerolog.Nop()}
-	kept := f.apply(context.Background(), survivors, nil)
+	kept, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 || kept[0].Label != "s-001" {
 		t.Fatalf("expected only s-001 kept, got %+v", kept)
 	}
@@ -47,21 +47,21 @@ func TestBandwidthFilterApply(t *testing.T) {
 
 	// annotate=false: kept but no tag injected.
 	f2 := &bandwidthFilter{minMbps: 10, annotate: false, check: check, logger: zerolog.Nop()}
-	kept2 := f2.apply(context.Background(), survivors, nil)
+	kept2, _ := f2.apply(context.Background(), survivors, nil)
 	if len(kept2) != 1 || strings.Contains(kept2[0].Tagged, "[SPD:") {
 		t.Fatalf("annotate=false must not inject SPD: %q", kept2[0].Tagged)
 	}
 
 	// minMbps=0: keep all reachable (no floor).
 	f3 := &bandwidthFilter{minMbps: 0, annotate: false, check: check, logger: zerolog.Nop()}
-	if kept3 := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
+	if kept3, _ := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
 		t.Fatalf("minMbps=0 keeps all reachable, got %d", len(kept3))
 	}
 
 	// cancelled ctx: no-op, survivors unchanged.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
+	if got, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
 		t.Fatalf("cancelled ctx must pass survivors through, got %d", len(got))
 	}
 }
@@ -77,7 +77,7 @@ func TestBandwidthFilterAnnotatesVmess(t *testing.T) {
 		return map[string]BandwidthOutcome{"s-001": {Server: "1.2.3.4", Reachable: true, Mbps: 42}}
 	}
 	f := &bandwidthFilter{minMbps: 1, annotate: true, check: check, logger: zerolog.Nop()}
-	kept := f.apply(context.Background(), survivors, nil)
+	kept, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 {
 		t.Fatalf("expected 1 kept, got %d", len(kept))
 	}
@@ -156,7 +156,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		return out
 	}
 	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
-	kept := f.apply(context.Background(), survivors, proxies)
+	kept, _ := f.apply(context.Background(), survivors, proxies)
 	if len(kept) != 2 {
 		t.Fatalf("expected s-001 and s-002 kept, got %+v", kept)
 	}

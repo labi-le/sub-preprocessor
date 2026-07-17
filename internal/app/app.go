@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -10,6 +12,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/geoblock"
 	"domains.lst/sub-preprocessor/internal/log"
+	"domains.lst/sub-preprocessor/internal/metrics"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/reload"
 	serverpkg "domains.lst/sub-preprocessor/internal/server"
@@ -18,6 +21,27 @@ import (
 
 const defaultConfigPath = "./config/config.yaml"
 const shutdownTimeout = 3 * time.Second
+const metricsReadHeaderTimeout = 5 * time.Second
+
+func startMetrics(addr string, m *metrics.Metrics, logger zerolog.Logger) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", m.Handler())
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: metricsReadHeaderTimeout,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error().Err(err).Msg("metrics listener error")
+		}
+	}()
+	logger.Info().Str("addr", addr).Msg("metrics listener started")
+	return srv
+}
 
 // buildStores constructs the optional geoblock store and dead-node cache from
 // config. Both are nil when their feature is disabled; the caller owns the
@@ -99,15 +123,20 @@ func Run(ctx context.Context) error {
 
 	holder := serverpkg.NewHolder(&serverpkg.Snapshot{Svc: svc, Groups: cfg.Groups})
 	stableHolder := stable.NewHolder()
+	m := metrics.New()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
 		return holder.Load().Svc
-	}, sblock, dcache, logger)
+	}, sblock, dcache, logger, m)
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
 	defer ctl.Stop()
 
 	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
+
+	if metricsSrv := startMetrics(cfg.Server.MetricsListen, m, logger); metricsSrv != nil {
+		defer func() { _ = metricsSrv.Close() }()
+	}
 
 	watcher, err := buildWatcher(cfg, logger, holder, svc, ctl, pblock)
 	if err != nil {

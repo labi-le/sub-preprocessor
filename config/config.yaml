@@ -2,6 +2,7 @@ log:
   level: info # debug is verbose (per-node/DNS/probe); it is hot-reloadable, so turn it on live only when troubleshooting
 server:
   listen: :8080
+  metrics_listen: :9090 # internal Prometheus metrics endpoint; keep loopback-only (published via docker-compose)
 geo:
   # Shared geo providers used by the country/asn filters and by annotation.
   geofeed:

@@ -52,6 +52,7 @@ type Checker struct {
 	dead          DeadCache
 	holder        *Holder
 	logger        zerolog.Logger
+	reporter      Reporter
 }
 
 func NewChecker(
@@ -66,6 +67,7 @@ func NewChecker(
 	dead DeadCache,
 	holder *Holder,
 	logger zerolog.Logger,
+	reporter Reporter,
 ) *Checker {
 	return &Checker{
 		sources:       sources,
@@ -81,6 +83,7 @@ func NewChecker(
 		dead:          dead,
 		holder:        holder,
 		logger:        logger,
+		reporter:      reporter,
 	}
 }
 
@@ -104,16 +107,19 @@ func (c *Checker) Run(ctx context.Context) {
 // published snapshot is kept untouched; a probe error (including context
 // cancellation) is returned and aborts the cycle before any cache write.
 func (c *Checker) RunOnce(ctx context.Context) error {
-	bodies := c.fetchSources(ctx)
+	start := time.Now()
+	bodies, sourceReports := c.fetchSources(ctx)
 
 	entries := Merge(bodies)
 	if len(entries) == 0 {
 		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
+		c.reportError()
 		return nil
 	}
 
 	probe, deadSkipped, ok := c.filterDead(entries)
 	if !ok {
+		c.reportError()
 		return nil
 	}
 
@@ -122,23 +128,27 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	res, err := c.prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
+		c.reportError()
 		return fmt.Errorf("probe: %w", err)
 	}
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled after probe; keeping previous stable list")
+		c.reportError()
 		return fmt.Errorf("cycle cancelled after probe: %w", err)
 	}
 
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
-	survivors = c.applyFilters(ctx, survivors)
+	survivors, filterReports := c.applyFilters(ctx, survivors)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
+		c.reportError()
 		return fmt.Errorf("cycle cancelled during node filters: %w", err)
 	}
 	if len(survivors) == 0 {
 		c.logger.Warn().Msg("no survivors; keeping previous stable list")
+		c.reportError()
 		return nil
 	}
 
@@ -161,7 +171,47 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Int("kept", len(survivors)).
 		Msg("stable list updated")
 
+	c.observe(CycleReport{
+		SourcesOK:    len(bodies),
+		SourcesTotal: len(c.sources),
+		Merged:       len(entries),
+		DeadSkipped:  deadSkipped,
+		Probed:       len(probe),
+		Kept:         len(survivors),
+		Duration:     time.Since(start),
+		Sources:      sourceReports,
+		Filters:      filterReports,
+		KeptSpeeds:   keptSpeeds(survivors),
+	})
+
 	return nil
+}
+
+// reportError records a cycle that did not publish a new list (hard error or
+// soft skip). observe records a published cycle. Both are no-ops without a
+// Reporter.
+func (c *Checker) reportError() {
+	if c.reporter != nil {
+		c.reporter.ObserveError()
+	}
+}
+
+func (c *Checker) observe(r CycleReport) {
+	if c.reporter != nil {
+		c.reporter.Observe(r)
+	}
+}
+
+// keptSpeeds collects the measured Mbps of kept nodes for the speed histogram.
+// It is empty when no bandwidth filter ran (every Mbps is then zero).
+func keptSpeeds(survivors []Survivor) []int {
+	speeds := make([]int, 0, len(survivors))
+	for _, s := range survivors {
+		if s.Mbps > 0 {
+			speeds = append(speeds, s.Mbps)
+		}
+	}
+	return speeds
 }
 
 // applyFilters runs the through-node NodeFilter chain over the survivors. It
@@ -173,9 +223,9 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 // skipped entirely when there is no filter or no survivor; a parse failure logs
 // and passes survivors through unchanged (matching the previous per-filter
 // skip-on-no-proxies behavior).
-func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) []Survivor {
+func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) ([]Survivor, []FilterReport) {
 	if len(c.filters) == 0 || len(survivors) == 0 {
-		return survivors
+		return survivors, nil
 	}
 
 	entries := make([]Entry, len(survivors))
@@ -185,7 +235,7 @@ func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) []Surv
 	proxies, err := c.prober.ParseProxies(entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-		return survivors
+		return survivors, nil
 	}
 	defer func() {
 		for _, px := range proxies {
@@ -197,22 +247,26 @@ func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) []Surv
 	for _, px := range proxies {
 		byLabel[px.Name()] = px
 	}
+	reports := make([]FilterReport, 0, len(c.filters))
 	for _, f := range c.filters {
-		survivors = f.apply(ctx, survivors, byLabel)
+		var rep FilterReport
+		survivors, rep = f.apply(ctx, survivors, byLabel)
+		reports = append(reports, rep)
 	}
 
-	return survivors
+	return survivors, reports
 }
 
 // fetchSources fetches every configured source concurrently through the
 // preprocess pipeline and returns the successfully-filtered bodies in
 // configuration order, so Merge's first-source-wins dedupe is deterministic.
-func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
+func (c *Checker) fetchSources(ctx context.Context) ([]SourceBody, []SourceReport) {
 	svc := c.filterer()
 
 	type result struct {
-		body SourceBody
-		err  error
+		body  SourceBody
+		stats preprocess.Stats
+		err   error
 	}
 
 	const fetchConcurrency = 16
@@ -241,25 +295,39 @@ func (c *Checker) fetchSources(ctx context.Context) []SourceBody {
 				// Inline source: filter the pasted payload directly, no fetch.
 				req = preprocess.FilterRequest{Body: []byte(src.Body), AllowedCountries: c.allowed}
 			}
-			_, err := svc.Filter(sourceCtx, &buf, req)
+			stats, err := svc.Filter(sourceCtx, &buf, req)
 			if err != nil {
 				results[i] = result{err: err}
 				return
 			}
-			results[i] = result{body: SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)}}
+			results[i] = result{
+				body:  SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)},
+				stats: stats,
+			}
 		}(i, src)
 	}
 	wg.Wait()
 
 	bodies := make([]SourceBody, 0, len(c.sources))
+	reports := make([]SourceReport, 0, len(c.sources))
 	for i, r := range results {
 		if r.err != nil {
 			c.logger.Warn().Str("source", c.sources[i].Name).Err(r.err).Msg("source fetch failed")
 			continue
 		}
 		bodies = append(bodies, r.body)
+		reports = append(reports, SourceReport{
+			Name:         c.sources[i].Name,
+			Total:        r.stats.Total,
+			Kept:         r.stats.Kept,
+			DNSDrop:      r.stats.DNSDrop,
+			GeoDrop:      r.stats.GeoDrop,
+			ASNDrop:      r.stats.ASNDrop,
+			GeoBlockDrop: r.stats.GeoBlockDrop,
+			Unsupported:  r.stats.Unsupported,
+		})
 	}
-	return bodies
+	return bodies, reports
 }
 
 // filterDead drops nodes a recent cycle marked dead so the probe only re-tests

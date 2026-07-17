@@ -16,6 +16,7 @@ WORKDIR /
 COPY --from=builder /app/sub-preprocessor /sub-preprocessor
 
 EXPOSE 8080
+EXPOSE 9090
 
 USER nonroot:nonroot
 

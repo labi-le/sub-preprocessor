@@ -132,9 +132,8 @@ func TestLoadRejectsGroupWithEmptyName(t *testing.T) {
 }
 
 func TestEqual(t *testing.T) {
-	cfgA := config.Config{Server: struct {
-		Listen string `yaml:"listen"`
-	}{Listen: ":8080"}}
+	var cfgA config.Config
+	cfgA.Server.Listen = ":8080"
 	cfgB := cfgA
 	if !config.Equal(cfgA, cfgB) {
 		t.Fatal("identical configs should be equal")
@@ -159,9 +158,8 @@ func TestGeofeedSourcesChanged(t *testing.T) {
 }
 
 func TestListenChanged(t *testing.T) {
-	cfgA := config.Config{Server: struct {
-		Listen string `yaml:"listen"`
-	}{Listen: ":8080"}}
+	var cfgA config.Config
+	cfgA.Server.Listen = ":8080"
 	cfgB := cfgA
 	if config.ListenChanged(cfgA, cfgB) {
 		t.Fatal("same listen should not be changed")

@@ -369,7 +369,7 @@ If only exclusion params are provided (i.e. `countries` and `groups` are both ab
 
 ## `internal/stable`
 
-`./internal/stable/stable.go`, `merge.go`, `select.go`, `prober.go`, `prober_api.go`, `prober_gemini.go`, `prober_claude.go`, `prober_bandwidth.go`, `nodefilter.go`, `checker.go`, `controller.go`, `progress.go`, `deadset.go`
+`./internal/stable/stable.go`, `merge.go`, `select.go`, `report.go`, `prober.go`, `prober_api.go`, `prober_gemini.go`, `prober_claude.go`, `prober_bandwidth.go`, `nodefilter.go`, `checker.go`, `controller.go`, `progress.go`, `deadset.go`
 
 Background worker that produces a stability-tested subscription list. Every `subscriptions.interval` it fetches each configured source through the geo/ASN pipeline (`Filterer`), merges the results into one deduplicated relabeled URI list, probes every node with the embedded mihomo library (`URLTest` HEAD requests, `check.rounds` rounds), keeps only nodes within `check.max_fail`/`check.max_avg_ms`, then runs a **Gemini reachability gate** through each surviving node (a real API `GET`, body-inspected for the geo-block marker — the check mihomo's HEAD-only `URLTest` cannot do), records geo-blocked node hosts in the `geoblock` store (TTL) and drops them, and atomically publishes the rest for `GET /stable.txt`. Every failure mode (all sources down, zero parsable nodes, prober error, zero survivors) keeps the previous snapshot.
 
@@ -385,6 +385,8 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `GeminiOutcome` — per-node through-node Gemini result (`Server`/`Reachable`/`Blocked`)
 - `Checker` — the periodic worker loop
 - `Controller` — start/stop lifecycle around `Checker`, driven by config (re)loads
+- `CycleReport` / `SourceReport` / `FilterReport` — per-cycle accounting (aggregate counts + per-source preprocess drops + per-filter in/kept/dropped-by-reason + kept-node speeds + duration), assembled by `RunOnce` from data otherwise only logged
+- `Reporter` — nil-safe metrics sink: `Observe(CycleReport)` on a published cycle, `ObserveError()` on any abort/no-op; `*metrics.Metrics` implements it
 
 **Key functions:**
 - `Merge(bodies []SourceBody) []Entry` — dedupe by lowercased `server:port` first-wins in source order (`Entry.Addr` shares the lowercased key); relabel fragments to `<source>-NNN`
@@ -394,10 +396,28 @@ Background worker that produces a stability-tested subscription list. Every `sub
 - `NodeFilter` — through-node check applied after the IP-filters + latency probe, routing THROUGH each surviving node (worker-only, so it shapes `/stable.txt`, not `/`); selected from the unified `filters` list via `cfg.NodeFilterSpecs()` (types `gemini`/`claude`/`bandwidth`). `buildNodeFilters(names, prober, store, annotate, logger)` constructs them; one generic `apiFilter{name, enabled, check, store}` implements the interface for gemini (key-gated) and claude (keyless), each keeping API-reachable survivors and recording blocked hosts in the geoblock store.
 - The `bandwidth` `NodeFilter` (`bandwidthFilter`) downloads the bandwidth filter's `test_url` through each survivor (`BandwidthCheck` → `bandwidthProbeOne`, `Accept-Encoding: identity` + body-transfer timing; `computeMbps` guards divide-by-zero), drops nodes below `min_mbps` and unreachable ones, records `Survivor.Mbps`, and — when annotation is enabled (`len(cfg.Annotate) > 0`) — prepends `[SPD:<n>M]` to the published name via the vmess-aware `relabelNode`. No store: results are never cached.
 - `NewChecker(...)` / `(*Checker).Run(ctx)` — immediate first cycle, then ticker; `RunOnce(ctx) error` is one cycle: fetch sources concurrently (results kept in config order so first-source-wins is deterministic), drop dead-cached nodes before probing, probe the rest, record no-success nodes as dead (short TTL), `SelectSurvivors`, then apply the configured `NodeFilter`s. A cancelled/failed probe aborts the cycle: the previous snapshot is kept and nothing is recorded dead (a reload/shutdown mid-probe can't poison the dead cache). `Probe` shares ONE semaphore across rounds, so `check.concurrency` caps total in-flight URL tests. `fetchSources` builds each `preprocess.FilterRequest` per source: when `src.Body != ""` it passes `Body: []byte(src.Body)` with an empty `SubscriptionURL` (inline path, no fetch), otherwise the usual `SubscriptionURL: fetch.SubscriptionURL(src.URL)`; the local `Filterer` interface stays a single `Filter(...)` method.
-- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` builds the allowed `CountrySet` from the `country` filter entries' `exclude_groups`/`exclude_countries` (via `cfg.IPFilterSpecs()` + `cfg.Groups`), resolves the Gemini key, and builds the prober + `NodeFilterSpecs`-selected filters BEFORE stopping the old worker (a failed construction leaves the previous worker running), then starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent
+- `NewController(ctx, holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger, reporter Reporter)` / `(*Controller).Apply(cfg) error` / `(*Controller).Stop()` — `Apply` builds the allowed `CountrySet` from the `country` filter entries' `exclude_groups`/`exclude_countries` (via `cfg.IPFilterSpecs()` + `cfg.Groups`), resolves the Gemini key, and builds the prober + `NodeFilterSpecs`-selected filters BEFORE stopping the old worker (a failed construction leaves the previous worker running), then starts a new one when `subscriptions.sources` is non-empty; `Stop` is idempotent. The `reporter` (nil-safe) is threaded into every `Checker` it builds.
 
 **Uses:** `config`, `filter`, `fetch`, `preprocess`, `subscription`, `mihomo` (adapter, common/convert, common/utils, constant)
 **Tags:** `stable`, `probe`, `url-test`, `gemini`, `claude`, `bandwidth`, `speed`, `geoblock`, `delay`, `worker`, `mihomo`, `atomic-swap`
+
+---
+
+## `internal/metrics`
+
+`./internal/metrics/metrics.go`
+
+Renders the stable worker's per-cycle stats as Prometheus text exposition (hand-rolled — no `client_golang`, avoiding the `google.golang.org/protobuf => metacubex/protobuf-go` replace). Served on an internal listener (`server.metrics_listen`, default `:9090`) that docker-compose publishes loopback-only (`127.0.0.1:9091:9090`); the server's NixOS Prometheus scrapes it and a provisioned Grafana dashboard renders the funnel + trends.
+
+**Key exports:**
+- `Metrics` — holds the last `stable.CycleReport` + lifetime counters (RWMutex); `New()` constructs it
+- `(*Metrics).Observe(stable.CycleReport)` / `ObserveError()` — satisfies `stable.Reporter`; both count toward `stable_cycles_total`, ObserveError also bumps `stable_cycle_failures_total`
+- `(*Metrics).Handler() http.Handler` — renders `/metrics` into a buffer under a read lock, so a slow scrape never blocks `Observe`
+
+**Metrics:** `stable_kept_nodes`, `stable_merged_nodes`, `stable_probed_nodes`, `stable_dead_skipped_nodes`, `stable_sources_ok`/`_total`, `stable_cycle_duration_seconds`, `stable_last_success_timestamp_seconds`, `stable_cycles_total`/`_failures_total`, `stable_filter_{in,kept,dropped}_nodes{filter,reason}`, `stable_source_{nodes_total,kept_nodes,dropped_nodes}{source,reason}`, `stable_kept_speed_mbps` (histogram).
+
+**Uses:** `stable`
+**Tags:** `metrics`, `prometheus`, `grafana`, `exposition`, `observability`
 
 ---
 
@@ -519,4 +539,5 @@ main
 | `shared-iterator`, `unsafe-string` | `ioutil` |
 | `fsnotify`, `watch`, `debounce`, `hot-reload` | `reload` |
 | `stable`, `probe`, `url-test`, `gemini`, `mihomo` | `stable` |
+| `metrics`, `prometheus`, `grafana`, `observability` | `metrics` |
 | `geoblock`, `sqlite`, `ttl`, `blocklist` | `geoblock` |

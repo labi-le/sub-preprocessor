@@ -69,6 +69,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		nil,
 		holder,
 		zerolog.Nop(),
+		nil,
 	)
 }
 
@@ -216,6 +217,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 		nil,
 		nil,
 		zerolog.Nop(),
+		nil,
 	)
 
 	disabled := config.Config{}
@@ -263,6 +265,7 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 		nil,
 		nil,
 		zerolog.Nop(),
+		nil,
 	)
 
 	cfg := config.Config{
@@ -311,7 +314,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	holder := stable.NewHolder()
 	c := stable.NewChecker(
 		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
 	)
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
@@ -363,7 +366,7 @@ func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 
 	c := stable.NewChecker(
 		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(context.Background())
 	if !errors.Is(err, context.Canceled) {
@@ -397,7 +400,7 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 
 	c := stable.NewChecker(
 		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(),
+		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -451,5 +454,44 @@ func TestCheckerMergeOrderIgnoresFetchCompletion(t *testing.T) {
 	}
 	if got, want := string(snap.Payload), "vless://u@1.1.1.1:443#alpha-001\n"; got != want {
 		t.Errorf("payload:\ngot  %q\nwant %q (first configured source must win)", got, want)
+	}
+}
+
+type fakeReporter struct {
+	last *stable.CycleReport
+	errs int
+}
+
+func (r *fakeReporter) Observe(c stable.CycleReport) { r.last = &c }
+func (r *fakeReporter) ObserveError()                { r.errs++ }
+
+func TestCheckerReportsPublishedCycle(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}}
+	holder := stable.NewHolder()
+	rep := &fakeReporter{}
+	c := stable.NewChecker(
+		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
+		func() stable.Filterer { return filterer }, prober, nil, nil, holder, zerolog.Nop(), rep,
+	)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	if rep.last.Kept != 2 {
+		t.Errorf("report Kept = %d, want 2", rep.last.Kept)
+	}
+	if rep.last.SourcesTotal != len(testSources()) {
+		t.Errorf("report SourcesTotal = %d, want %d", rep.last.SourcesTotal, len(testSources()))
 	}
 }

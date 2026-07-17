@@ -83,7 +83,8 @@ type LogConfig struct {
 type Config struct {
 	Log    LogConfig `yaml:"log"`
 	Server struct {
-		Listen string `yaml:"listen"`
+		Listen        string `yaml:"listen"`
+		MetricsListen string `yaml:"metrics_listen"`
 	} `yaml:"server"`
 	Geo      GeoConfig `yaml:"geo"`
 	Resolver struct {
@@ -483,6 +484,9 @@ func Load(path string) (Config, error) {
 
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8080"
+	}
+	if cfg.Server.MetricsListen == "" {
+		cfg.Server.MetricsListen = ":9090"
 	}
 	if cfg.Resolver.Timeout == 0 {
 		cfg.Resolver.Timeout = defaultTimeout

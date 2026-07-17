@@ -19,13 +19,14 @@ type Controller struct {
 	store    Blocklist
 	dead     DeadCache
 	logger   zerolog.Logger
+	reporter Reporter
 
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-func NewController(ctx context.Context, holder *Holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger zerolog.Logger) *Controller {
-	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger}
+func NewController(ctx context.Context, holder *Holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger zerolog.Logger, reporter Reporter) *Controller {
+	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger, reporter: reporter}
 }
 
 // Apply stops any running checker and starts a new one when cfg has
@@ -102,6 +103,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		c.dead,
 		c.holder,
 		c.logger,
+		c.reporter,
 	)
 
 	ctx, cancel := context.WithCancel(c.baseCtx)
