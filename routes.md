@@ -42,7 +42,7 @@ Application bootstrap: loads config, creates `Processor`, wires the config watch
 
 `./internal/config/config.go`
 
-YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema. `Load` merges a sibling `private.yaml` overlay (crawler-managed sources) when present — a read error other than not-exist fails the load. Also provides diff helpers used by the reloader to decide what changed.
+YAML config loading and validation. Uses `gopkg.in/yaml.v3`. Defines the full config schema. `Load` merges sibling overlays when present — `sources.yaml` (curated subscription sources) and `private.yaml` (crawler-managed sources) — appending their `subscriptions.sources`; a read error other than not-exist fails the load. Also provides diff helpers used by the reloader to decide what changed.
 
 **Key types:**
 - `Config` — root config struct (`log`, `server`, `geo`, `resolver`, `filters`, `annotate`, `groups`, `subscriptions`, `geoblock`, `deadcache`, `fetch`)
@@ -425,12 +425,12 @@ Renders the stable worker's per-cycle stats as Prometheus text exposition (hand-
 
 `./internal/reload/reloader.go`, `watcher.go`, `options.go`
 
-Config hot-reload. Watches the config file **and its `private.yaml` overlay sibling** for changes (via fsnotify on the parent directory), debounces bursts, and atomically swaps the active `Processor` + groups into the server `Holder`. On any error the previous settings are kept unchanged. The private overlay matters because the crawler writes it, and a change there must restart the stable worker.
+Config hot-reload. Watches the config file **and its `private.yaml` / `sources.yaml` overlay siblings** for changes (via fsnotify on the parent directory), debounces bursts, and atomically swaps the active `Processor` + groups into the server `Holder`. On any error the previous settings are kept unchanged. The overlays matter because the crawler writes `private.yaml` and `sources.yaml` carries curated sources, and a change to either must restart the stable worker.
 
 **Key types:**
 - `Reloader` — holds `path`, `*server.Holder`, `zerolog.Logger`, and the last-applied `config.Config` + `*preprocess.Processor` for diffing
 - `Applier` — interface `Apply(config.Config) error`; satisfied by `*stable.Controller` (enables fake controllers in tests)
-- `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; fires `onChange` for events on either `config.yaml` or its `private.yaml` sibling; debounces events with a 200 ms window
+- `Watcher` — wraps `*fsnotify.Watcher`; watches the config file's parent directory to survive atomic-rename writes; fires `onChange` for events on `config.yaml` or its `private.yaml` / `sources.yaml` siblings; debounces events with a 200 ms window
 
 **Key functions:**
 - `NewReloader(path string, holder *server.Holder, logger zerolog.Logger, cfg config.Config, proc *preprocess.Processor, ctl Applier, blocklist preprocess.Blocklist) *Reloader` — seed with startup state so the first reload can diff against it; injects the shared geo-block store into every rebuilt `Processor`

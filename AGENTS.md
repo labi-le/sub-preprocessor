@@ -80,28 +80,32 @@ good list is kept if a cycle fails (`503` only until the first cycle completes).
 
 ## Current config shape
 
-`config.yaml` is hot-reloaded on change. The `/` request still takes its
-`subscription_url` and allowed countries from HTTP query params; the
-`subscriptions` block only configures the `/stable.txt` worker.
+`config/config.yaml` is hot-reloaded on change, together with its overlay
+siblings `config/sources.yaml` (curated sources) and `config/private.yaml`
+(crawler-managed sources) — both append to `subscriptions.sources`. The `/`
+request still takes its `subscription_url` and allowed countries from HTTP
+query params; the `subscriptions` block only configures the `/stable.txt`
+worker.
 
 Important keys:
 
 - `server.listen`
-- `geofeed.refresh_interval`
-- `geofeed.sources[].url`
-- `geofeed.sources[].type` (`raw` or `gzip`)
+- `server.metrics_listen` — internal Prometheus `/metrics` endpoint (default `:9090`; docker-compose publishes it loopback-only on `127.0.0.1:9091`, never public)
+- `geo.geofeed.refresh_interval` / `geo.geofeed.sources[].url` / `geo.geofeed.sources[].type` (`raw` or `gzip`)
+- `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
 - `resolver.timeout`
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
-- `workflow.stages` (order of IP-filter stages: `asn`, `geofeed`) + `workflow.annotate` (default true — add `[GEO:XX][IP:]` to node names on both `/` and `/stable.txt`)
-- `asn.deny_patterns` (+ `asn.timeout`, `asn.cache_ttl`) — usually empty now; the per-host `geoblock` list replaces ASN-name denial. The ASN stage still does country filtering, backed by an in-memory Cymru TTL cache (`asn.cache_ttl`, default 24h).
+- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`bandwidth`) run post-probe in the stable worker only.
+- `annotate` — ordered tag list (`tag: GEO|IP|ASN` + `provider`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
-- `geoblock.gemini.*` (`model`, `marker`, `key_file`, `key_var`, `timeout`, `concurrency`) — params for the `gemini` node-filter; enabled by listing `gemini` in `subscriptions.check.filters`
+- `geoblock.gemini.*` / `geoblock.claude.*` (`endpoint`, `model`, `marker`, `api_key`/`key_file`/`key_var`, `timeout`, `concurrency`) — base params for the `gemini`/`claude` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` in `filters` (a filter entry may override these per-field)
 - `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
-- `subscriptions.exclude_groups`
-- `subscriptions.sources[].name` / `subscriptions.sources[].url`
-- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `concurrency`, `filters`) — `filters` lists Layer-2 through-node node-filters (e.g. `gemini`) run after latency selection
+- `subscriptions.sources[].name` + `url` *or* inline `body` (base64/raw node URIs; used by the crawler's `tg-inline` harvest)
+- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `expected_status`, `concurrency`, `source_timeout`) — URL-test (latency) prober params ONLY; through-node filters and exclusions live in the top-level `filters` list
+- `fetch.timeout` — per-subscription fetch deadline (default 3s)
+- `log.level` — zerolog level, hot-reloadable
 
 ## Important package map
 
@@ -120,6 +124,7 @@ Important keys:
 - `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node Gemini reachability gate, checker loop, holder
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
+- `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
 
 ## API behavior to remember
 
@@ -137,6 +142,40 @@ Example:
 ```bash
 curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries=FI,EE,LV,LT,SE,PL,DE,NL"
 curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&groups=nordics,euronorth"
+```
+
+## Monitoring / metrics (Prometheus + Grafana)
+
+The stable worker exports per-cycle stats as Prometheus metrics, visualized by a
+Grafana dashboard. **The dashboard AND its NixOS wiring live in this repo** so they
+track the metric names; the NixOS host pulls them in as a flake input — do NOT
+vendor the dashboard into the nixos repo.
+
+- `internal/metrics` renders `stable.CycleReport` as hand-rolled Prometheus text
+  exposition (deliberately no `client_golang` — the `google.golang.org/protobuf =>
+  metacubex/protobuf-go` replace in `go.mod` makes it risky). Served on an internal
+  listener (`server.metrics_listen`, default `:9090`); `docker-compose.yaml` publishes
+  it loopback-only (`127.0.0.1:9091:9090`) — keep it non-public.
+- Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport`
+  (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds, cycle
+  aggregate + duration) to `metrics.Metrics.Observe` on a published cycle, and
+  `ObserveError()` on any abort. **Adding/renaming a metric? Update
+  `deploy/grafana/sub-preprocessor.json` in the same commit.**
+- `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
+  Prometheus scrape job (`127.0.0.1:9091`) + the Grafana dashboard provider
+  (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
+  variable, so no fixed uid). `nixosModules.default` is the separate systemd-service
+  module — leave it.
+
+**Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
+(provisioned `editable: false`; validate with `jq`, ideally render against a throwaway
+Grafana+Prometheus first):
+
+```bash
+# here:
+$EDITOR deploy/grafana/sub-preprocessor.json && git commit -am '...' && git push
+# in the nixos repo (server imports inputs.sub-preprocessor.nixosModules.monitoring):
+nix flake update sub-preprocessor && make switch
 ```
 
 ## Bench / performance notes
