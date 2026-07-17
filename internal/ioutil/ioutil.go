@@ -34,7 +34,6 @@ type Lines struct {
 	remain []byte
 }
 
-// NewLines creates a Lines iterator over body.
 func NewLines(body []byte) Lines {
 	return Lines{remain: body}
 }

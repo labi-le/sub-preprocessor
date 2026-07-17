@@ -10,12 +10,10 @@ import (
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
-// NodeFilter is a Layer-2 check applied in the worker after the IP-filter
-// pipeline (workflow.stages) and the latency probe. Unlike the preprocess
-// IP-filters it routes traffic THROUGH each surviving proxy node, so it lives
-// in the worker and only affects /stable.txt. Filters are selected by name via
-// subscriptions.check.filters. The methods are unexported so the set is sealed
-// to this package.
+// NodeFilter is a through-node check the worker runs on latency-probe
+// survivors: unlike the preprocess IP-filters it routes traffic THROUGH each
+// proxy node, so it lives here and only affects /stable.txt. The through-node
+// entries of the unified filters list (gemini/claude/bandwidth) select which run.
 type NodeFilter interface {
 	name() string
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by

@@ -15,6 +15,13 @@ nix-shell --run "make race"
 nix-shell --run "make bench"
 ```
 
+## Code conventions
+
+- **Comments earn their place.** Write one only for what the code cannot say itself: the *why* (rationale, tradeoffs), non-obvious invariants, ordering/locking/concurrency rules, units, edge-case semantics, gotchas, or external behavior (mihomo quirks, SSRF, protocol details).
+- **Never restate the code.** Delete doc blocks that only echo the name or signature (`// name returns the name`, `// NewX creates a new X`, `// Close closes it`) or narrate the next line. Self-explanatory code gets no comment.
+- **A stale comment is worse than none.** Changing behavior means updating the comment or deleting it — never leave it describing the old world.
+- Removing an obvious doc comment is lint-safe: `.golangci.yml` excludes revive's "exported … should have comment", and `godot` needs no trailing period. Comments that remain must still start with the symbol's name (`godoc`/`staticcheck`).
+
 ## Project overview for LLM agents
 
 Before making any changes, read `./routes.md` — it describes every package in the
