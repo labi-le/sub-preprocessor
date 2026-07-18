@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 
 const (
 	defaultTimeout          = 5 * time.Second
+	schemeHTTPS             = "https"
 	defaultLogLevel         = "info"
 	defaultDNSCacheTTL      = 30 * time.Minute
 	defaultDNSNegativeCache = 10 * time.Minute
@@ -53,6 +55,11 @@ const (
 	defaultClaudeVersion     = "2023-06-01"
 	defaultClaudeTimeout     = 15 * time.Second
 	defaultClaudeConcurrency = 8
+
+	// Free downloadable IP->country databases for the annotate provider chain.
+	// {yyyy-mm} in the dbip URL expands to the current UTC month at fetch time.
+	defaultDBIPURL      = "https://download.db-ip.com/free/dbip-country-lite-{yyyy-mm}.csv.gz"
+	defaultGeoDBRefresh = 24 * time.Hour
 )
 
 // Unified filter types, provider names, and annotation tags. The single
@@ -66,8 +73,10 @@ const (
 	FilterClaude    = "claude"
 	FilterBandwidth = "bandwidth"
 
-	ProviderGeofeed = "geofeed"
-	ProviderASN     = "asn"
+	ProviderGeofeed  = "geofeed"
+	ProviderDBIP     = "dbip"
+	ProviderRegistry = "registry"
+	ProviderASN      = "asn"
 
 	TagGEO = "GEO"
 	TagIP  = "IP"
@@ -75,6 +84,16 @@ const (
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// The five RIR delegated-extended-latest files together cover the full
+// allocated IP space with registration countries.
+var defaultRegistryURLs = []string{
+	"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
+	"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+	"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
+	"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
+	"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
+}
 
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -111,11 +130,13 @@ type Config struct {
 }
 
 // GeoConfig groups the geo provider settings shared by the country/asn filters
-// and by annotation: the geofeed IP->country lookup and the Team-Cymru ASN
-// resolver.
+// and by annotation: the geofeed IP->country lookup, the DB-IP and RIR-registry
+// downloadable databases, and the Team-Cymru ASN resolver.
 type GeoConfig struct {
-	Geofeed GeofeedConfig `yaml:"geofeed"`
-	ASN     ASNConfig     `yaml:"asn"`
+	Geofeed  GeofeedConfig  `yaml:"geofeed"`
+	DBIP     DBIPConfig     `yaml:"dbip"`
+	Registry RegistryConfig `yaml:"registry"`
+	ASN      ASNConfig      `yaml:"asn"`
 }
 
 // FilterConfig is one entry in the unified filters list. Type selects which
@@ -153,11 +174,15 @@ type FilterConfig struct {
 	Version  string `yaml:"version"`
 }
 
-// AnnotateSpec is one entry in the ordered annotation tag list. Provider is
-// required for GEO and ASN (geofeed|asn) and unused for IP.
+// AnnotateSpec is one entry in the ordered annotation tag list. Providers is
+// the ordered lookup chain for GEO and ASN (first provider that answers wins)
+// and must be empty for IP. Provider is the retired single-provider key, kept
+// only so a stale config fails loudly: the non-strict yaml load would
+// otherwise drop the unknown key and silently change behavior.
 type AnnotateSpec struct {
-	Tag      string `yaml:"tag"`
-	Provider string `yaml:"provider"`
+	Tag       string   `yaml:"tag"`
+	Providers []string `yaml:"providers"`
+	Provider  string   `yaml:"provider"`
 }
 
 // IPFilterSpec is a parsed IP-stage (per-node, preprocess) filter derived from
@@ -329,6 +354,66 @@ func (cfg *Config) SubscriptionsEnabled() bool {
 type GeofeedConfig struct {
 	Sources         []geofeed.Source `yaml:"sources"`
 	RefreshInterval time.Duration    `yaml:"refresh_interval"`
+}
+
+// DBIPConfig configures the DB-IP Country Lite IP->country database download
+// (annotate provider "dbip"). The literal {yyyy-mm} placeholder in URL expands
+// to the current UTC month at fetch time.
+type DBIPConfig struct {
+	URL             string        `yaml:"url"`
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+}
+
+func (d *DBIPConfig) applyDefaults() {
+	if d.URL == "" {
+		d.URL = defaultDBIPURL
+	}
+	if d.RefreshInterval == 0 {
+		d.RefreshInterval = defaultGeoDBRefresh
+	}
+}
+
+func (d *DBIPConfig) validate() error {
+	return validateDownloadURL("geo.dbip.url", d.URL)
+}
+
+// RegistryConfig configures the RIR delegated-extended IP->country database
+// downloads (annotate provider "registry"), one URL per RIR.
+type RegistryConfig struct {
+	URLs            []string      `yaml:"urls"`
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+}
+
+func (r *RegistryConfig) applyDefaults() {
+	if len(r.URLs) == 0 {
+		r.URLs = slices.Clone(defaultRegistryURLs)
+	}
+	if r.RefreshInterval == 0 {
+		r.RefreshInterval = defaultGeoDBRefresh
+	}
+}
+
+func (r *RegistryConfig) validate() error {
+	for i, u := range r.URLs {
+		if err := validateDownloadURL(fmt.Sprintf("geo.registry.urls[%d]", i), u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateDownloadURL requires an absolute https URL with a host. The literal
+// {yyyy-mm} month placeholder is substituted before parsing so it never trips
+// the URL parser.
+func validateDownloadURL(name, raw string) error {
+	u, err := url.Parse(strings.ReplaceAll(raw, "{yyyy-mm}", "2000-01"))
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if u.Scheme != schemeHTTPS || u.Host == "" {
+		return fmt.Errorf("%s: must be an absolute https URL, got %q", name, raw)
+	}
+	return nil
 }
 
 type Groups map[string][]string
@@ -505,6 +590,8 @@ func Load(path string) (Config, error) {
 	if cfg.Geo.ASN.CacheTTL == 0 {
 		cfg.Geo.ASN.CacheTTL = defaultASNCacheTTL
 	}
+	cfg.Geo.DBIP.applyDefaults()
+	cfg.Geo.Registry.applyDefaults()
 	cfg.applyFilterDefaults()
 	cfg.Subscriptions.applyDefaults()
 	cfg.GeoBlock.applyDefaults()
@@ -599,14 +686,16 @@ func applyBandwidthDefaults(f *FilterConfig) {
 }
 
 func applyAnnotateDefaults(a *AnnotateSpec) {
-	if a.Provider != "" {
+	// A set Provider is left alone (with empty Providers) so validation can
+	// reject the renamed key instead of masking it with a defaulted chain.
+	if len(a.Providers) > 0 || a.Provider != "" {
 		return
 	}
 	switch a.Tag {
 	case TagGEO:
-		a.Provider = ProviderGeofeed
+		a.Providers = []string{ProviderGeofeed}
 	case TagASN:
-		a.Provider = ProviderASN
+		a.Providers = []string{ProviderASN}
 	}
 }
 
@@ -623,6 +712,12 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 	if err := cfg.Geo.Geofeed.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Geo.DBIP.validate(); err != nil {
+		return err
+	}
+	if err := cfg.Geo.Registry.validate(); err != nil {
 		return err
 	}
 	if err := cfg.Groups.Validate(); err != nil {
@@ -666,6 +761,12 @@ func (cfg *Config) validateNonNegative() error {
 	}
 	if cfg.Geo.Geofeed.RefreshInterval < 0 {
 		return errors.New("geo.geofeed.refresh_interval must not be negative")
+	}
+	if cfg.Geo.DBIP.RefreshInterval < 0 {
+		return errors.New("geo.dbip.refresh_interval must not be negative")
+	}
+	if cfg.Geo.Registry.RefreshInterval < 0 {
+		return errors.New("geo.registry.refresh_interval must not be negative")
 	}
 	if cfg.Subscriptions.Interval < 0 {
 		return errors.New("subscriptions.interval must not be negative")
@@ -758,25 +859,49 @@ func (f FilterConfig) validateBandwidth(i int) error {
 		if err != nil {
 			return fmt.Errorf("filters[%d].test_url: %w", i, err)
 		}
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if (u.Scheme != "http" && u.Scheme != schemeHTTPS) || u.Host == "" {
 			return fmt.Errorf("filters[%d].test_url: must be an absolute http(s) URL, got %q", i, f.TestURL)
 		}
 	}
 	return nil
 }
 
-// validateAnnotate rejects unknown tags and missing/invalid providers.
+// validateAnnotate rejects unknown tags, the renamed provider key, and invalid
+// provider chains.
 func (cfg *Config) validateAnnotate() error {
 	for i, a := range cfg.Annotate {
+		if a.Provider != "" {
+			return fmt.Errorf(`annotate[%d]: "provider" was renamed to "providers" (ordered list)`, i)
+		}
 		switch a.Tag {
 		case TagGEO, TagASN:
-			if a.Provider != ProviderGeofeed && a.Provider != ProviderASN {
-				return fmt.Errorf("annotate[%d]: tag %s provider must be %q or %q, got %q", i, a.Tag, ProviderGeofeed, ProviderASN, a.Provider)
+			if len(a.Providers) == 0 {
+				return fmt.Errorf("annotate[%d]: tag %s requires at least one provider", i, a.Tag)
+			}
+			if err := validateProviderChain(i, a.Providers); err != nil {
+				return err
 			}
 		case TagIP:
-			// No provider needed.
+			if len(a.Providers) != 0 {
+				return fmt.Errorf("annotate[%d]: tag IP takes no providers", i)
+			}
 		default:
 			return fmt.Errorf("annotate[%d]: unknown tag %q (must be %q, %q or %q)", i, a.Tag, TagGEO, TagIP, TagASN)
+		}
+	}
+	return nil
+}
+
+func validateProviderChain(i int, providers []string) error {
+	for j, p := range providers {
+		switch p {
+		case ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN:
+		default:
+			return fmt.Errorf("annotate[%d]: unknown provider %q (must be %q, %q, %q or %q)",
+				i, p, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN)
+		}
+		if slices.Contains(providers[:j], p) {
+			return fmt.Errorf("annotate[%d]: duplicate provider %q", i, p)
 		}
 	}
 	return nil
@@ -893,7 +1018,7 @@ func (c *CheckConfig) validate() error {
 		if err != nil {
 			return fmt.Errorf("subscriptions.check.test_url: %w", err)
 		}
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if (u.Scheme != "http" && u.Scheme != schemeHTTPS) || u.Host == "" {
 			return fmt.Errorf("subscriptions.check.test_url: must be an absolute http(s) URL, got %q", c.TestURL)
 		}
 	}
@@ -1000,6 +1125,24 @@ func GeofeedSourcesChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Geo.Geofeed.Sources, newCfg.Geo.Geofeed.Sources)
 }
 
+// DBIPChanged / RegistryChanged report whether the corresponding downloadable
+// database settings differ; the reloader carries over the loaded lookup when
+// they don't, avoiding a multi-MB re-download per reload.
+func DBIPChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Geo.DBIP, newCfg.Geo.DBIP)
+}
+
+func RegistryChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Geo.Registry, newCfg.Geo.Registry)
+}
+
 func ListenChanged(old, newCfg Config) bool {
 	return old.Server.Listen != newCfg.Server.Listen
+}
+
+// MetricsListenChanged reports a change to server.metrics_listen. The metrics
+// listener is started once in app.Run and never re-applied, so a change
+// requires a restart.
+func MetricsListenChanged(old, newCfg Config) bool {
+	return old.Server.MetricsListen != newCfg.Server.MetricsListen
 }

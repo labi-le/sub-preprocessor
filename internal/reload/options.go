@@ -10,9 +10,9 @@ import (
 // internal/app so the startup path and the reload path build processors
 // identically.
 //
-// The PreloadedGeofeed / PreloadedLoadedAt fields are intentionally left unset:
-// callers (the reloader) decide whether to carry over geofeed state, while the
-// startup path leaves them zero so NewProcessor performs the initial fetch.
+// The Preloaded* fields are intentionally left unset: callers (the reloader)
+// decide whether to carry over geofeed/dbip/registry state, while the startup
+// path leaves them zero so NewProcessor performs the initial fetches.
 func OptionsFromConfig(cfg config.Config) preprocess.Options {
 	return preprocess.Options{
 		GeofeedSources:      cfg.Geo.Geofeed.Sources,
@@ -25,6 +25,8 @@ func OptionsFromConfig(cfg config.Config) preprocess.Options {
 		ASNCacheTTL:         cfg.Geo.ASN.CacheTTL,
 		IPFilters:           cfg.IPFilterSpecs(),
 		Annotate:            cfg.Annotate,
+		DBIP:                cfg.Geo.DBIP,
+		Registry:            cfg.Geo.Registry,
 		FetchTimeout:        cfg.Fetch.Timeout,
 	}
 }

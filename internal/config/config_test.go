@@ -157,6 +157,47 @@ func TestGeofeedSourcesChanged(t *testing.T) {
 	}
 }
 
+func TestDBIPChanged(t *testing.T) {
+	t.Parallel()
+
+	var cfgA config.Config
+	cfgA.Geo.DBIP = config.DBIPConfig{URL: "https://example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: 24 * time.Hour}
+	cfgB := cfgA
+	if config.DBIPChanged(cfgA, cfgB) {
+		t.Fatal("identical dbip config should not be changed")
+	}
+	cfgB.Geo.DBIP.URL = "https://mirror.example.com/db.csv.gz"
+	if !config.DBIPChanged(cfgA, cfgB) {
+		t.Fatal("url change should be detected")
+	}
+	cfgC := cfgA
+	cfgC.Geo.Registry.RefreshInterval = time.Hour
+	if config.DBIPChanged(cfgA, cfgC) {
+		t.Fatal("registry change must not affect dbip diff")
+	}
+}
+
+func TestRegistryChanged(t *testing.T) {
+	t.Parallel()
+
+	var cfgA config.Config
+	cfgA.Geo.Registry = config.RegistryConfig{URLs: []string{"https://ftp.ripe.net/x"}, RefreshInterval: 24 * time.Hour}
+	cfgB := cfgA
+	if config.RegistryChanged(cfgA, cfgB) {
+		t.Fatal("identical registry config should not be changed")
+	}
+	cfgB.Geo.Registry.URLs = append([]string{}, cfgA.Geo.Registry.URLs...)
+	cfgB.Geo.Registry.URLs = append(cfgB.Geo.Registry.URLs, "https://ftp.apnic.net/y")
+	if !config.RegistryChanged(cfgA, cfgB) {
+		t.Fatal("added url should be detected")
+	}
+	cfgC := cfgA
+	cfgC.Geo.DBIP.RefreshInterval = time.Hour
+	if config.RegistryChanged(cfgA, cfgC) {
+		t.Fatal("dbip change must not affect registry diff")
+	}
+}
+
 func TestListenChanged(t *testing.T) {
 	var cfgA config.Config
 	cfgA.Server.Listen = ":8080"

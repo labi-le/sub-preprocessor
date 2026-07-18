@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,6 +40,17 @@ const (
 
 var errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
 
+// StatusError reports a non-2xx HTTP response. Typed so callers can branch on
+// the status code with errors.As (dbip month fallback checks 404) instead of
+// parsing error text.
+type StatusError struct {
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return "bad status: " + strconv.Itoa(e.Code) + " " + http.StatusText(e.Code)
+}
+
 // sharedClient is reused across fetches: the safe client is stateless apart
 // from its connection pool, and rebuilding a Transport per request churns
 // sockets and TLS handshakes.
@@ -67,7 +79,7 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
+		return nil, &StatusError{Code: resp.StatusCode}
 	}
 
 	reader, errDecode := MaybeDecode(resp, fileType)

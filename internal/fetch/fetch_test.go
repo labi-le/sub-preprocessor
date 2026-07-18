@@ -3,6 +3,8 @@ package fetch_test
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +39,27 @@ func TestMaybeDecodeGzip(t *testing.T) {
 	}
 	if string(body) != "hello\n" {
 		t.Fatalf("unexpected body: %q", body)
+	}
+}
+
+// TestStatusErrorMessageAndAs guards the typed non-2xx error: callers branch on
+// the code via errors.As (dbip month fallback checks 404), and the message must
+// keep the historical "bad status: ..." text.
+func TestStatusErrorMessageAndAs(t *testing.T) {
+	t.Parallel()
+
+	var err error = &fetch.StatusError{Code: http.StatusNotFound}
+	if got, want := err.Error(), "bad status: 404 Not Found"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+
+	wrapped := fmt.Errorf("do request: %w", err)
+	var statusErr *fetch.StatusError
+	if !errors.As(wrapped, &statusErr) {
+		t.Fatal("errors.As must find *fetch.StatusError through wrapping")
+	}
+	if statusErr.Code != http.StatusNotFound {
+		t.Fatalf("Code = %d, want 404", statusErr.Code)
 	}
 }
 

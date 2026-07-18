@@ -10,6 +10,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -18,10 +19,11 @@ const (
 )
 
 // annotTag is one resolved annotation tag: a key (GEO/IP/ASN) and, for
-// provider-backed tags (GEO/ASN), the geo provider that resolves it.
+// provider-backed tags (GEO/ASN), the ordered provider chain that resolves it
+// (first provider that answers wins).
 type annotTag struct {
-	key      string
-	provider geo.Provider
+	key       string
+	providers []geo.Provider
 }
 
 // annotator builds the ordered [KEY:VAL] tag prefix for a node's chosen IP and
@@ -31,21 +33,27 @@ type annotator struct {
 	tags []annotTag
 }
 
-// newAnnotator builds an annotator from the ordered tag specs, wiring each
-// provider-backed tag to the shared geofeed/ASN providers. It returns nil when
-// no tags are configured.
-func newAnnotator(specs []config.AnnotateSpec, geofeedProv, asnProv geo.Provider) *annotator {
+// newAnnotator builds an annotator from the ordered tag specs, resolving each
+// spec's provider chain against the map of providers the processor actually
+// built. A referenced-but-missing name is impossible by the lazy-build rule in
+// NewProcessor, so it is treated as a wiring bug: logged and skipped rather
+// than panicking, degrading one provider instead of the service. It returns
+// nil when no tags are configured.
+func newAnnotator(logger zerolog.Logger, specs []config.AnnotateSpec, providers map[string]geo.Provider) *annotator {
 	if len(specs) == 0 {
 		return nil
 	}
 	tags := make([]annotTag, 0, len(specs))
 	for _, s := range specs {
 		t := annotTag{key: s.Tag}
-		switch s.Provider {
-		case config.ProviderGeofeed:
-			t.provider = geofeedProv
-		case config.ProviderASN:
-			t.provider = asnProv
+		for _, name := range s.Providers {
+			prov, ok := providers[name]
+			if !ok || prov == nil {
+				logger.Error().Str("tag", s.Tag).Str("provider", name).
+					Msg("annotate provider referenced but not built; skipping")
+				continue
+			}
+			t.providers = append(t.providers, prov)
 		}
 		tags = append(tags, t)
 	}
@@ -60,7 +68,7 @@ func (a *annotator) annotate(ctx context.Context, buf, tagBuf *bytes.Buffer, nod
 	for _, t := range a.tags {
 		switch t.key {
 		case config.TagGEO:
-			c := t.provider.Lookup(ctx, ip).Country
+			c := t.lookupCountry(ctx, ip)
 			tagBuf.WriteString("[GEO:")
 			if c == (geofeed.CountryCode{}) {
 				tagBuf.WriteString("??")
@@ -74,7 +82,7 @@ func (a *annotator) annotate(ctx context.Context, buf, tagBuf *bytes.Buffer, nod
 			writeIPv4(tagBuf, ip)
 			tagBuf.WriteByte(']')
 		case config.TagASN:
-			name := t.provider.Lookup(ctx, ip).ASN
+			name := t.lookupASN(ctx, ip)
 			tagBuf.WriteString("[ASN:")
 			if name == "" {
 				tagBuf.WriteString("??")
@@ -85,6 +93,28 @@ func (a *annotator) annotate(ctx context.Context, buf, tagBuf *bytes.Buffer, nod
 		}
 	}
 	rewrite.NodeName(buf, node, tagBuf.String())
+}
+
+// lookupCountry walks the tag's provider chain and returns the first non-zero
+// country; all-miss returns the zero code (rendered as ??).
+func (t *annotTag) lookupCountry(ctx context.Context, ip netip.Addr) geofeed.CountryCode {
+	for _, prov := range t.providers {
+		if c := prov.Lookup(ctx, ip).Country; c != (geofeed.CountryCode{}) {
+			return c
+		}
+	}
+	return geofeed.CountryCode{}
+}
+
+// lookupASN walks the tag's provider chain and returns the first non-empty AS
+// name; all-miss returns "" (rendered as ??).
+func (t *annotTag) lookupASN(ctx context.Context, ip netip.Addr) string {
+	for _, prov := range t.providers {
+		if name := prov.Lookup(ctx, ip).ASN; name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func writeIPv4(b *bytes.Buffer, ip netip.Addr) {

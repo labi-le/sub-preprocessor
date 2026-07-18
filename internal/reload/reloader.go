@@ -64,7 +64,8 @@ func NewReloader(
 // Reload loads the config from disk and, if it changed and is valid, builds a
 // new Processor and atomically swaps it into the holder. Geofeed data (lookup +
 // LoadedAt) is carried over when geofeed.sources are unchanged, avoiding a
-// re-download. Any error keeps the previously applied settings.
+// re-download; dbip/registry data is carried the same way when its config
+// block is unchanged. Any error keeps the previously applied settings.
 func (r *Reloader) Reload(ctx context.Context) {
 	newCfg, err := config.Load(r.path)
 	if err != nil {
@@ -88,6 +89,18 @@ func (r *Reloader) Reload(ctx context.Context) {
 		opts.PreloadedGeofeed = lookup
 		opts.PreloadedLoadedAt = at
 	}
+	// Same discipline for the downloaded geo databases; a nil state (provider
+	// not built in the current processor) simply leaves the preload unset.
+	if !config.DBIPChanged(r.currentProcCfg, newCfg) {
+		lookup, at := r.currentProc.DBIPState()
+		opts.PreloadedDBIP = lookup
+		opts.PreloadedDBIPLoadedAt = at
+	}
+	if !config.RegistryChanged(r.currentProcCfg, newCfg) {
+		lookup, at := r.currentProc.RegistryState()
+		opts.PreloadedRegistry = lookup
+		opts.PreloadedRegistryLoadedAt = at
+	}
 
 	newProc, err := preprocess.NewProcessor(ctx, r.logger, opts)
 	if err != nil {
@@ -106,6 +119,13 @@ func (r *Reloader) Reload(ctx context.Context) {
 			Str("old", r.currentCfg.Server.Listen).
 			Str("new", newCfg.Server.Listen).
 			Msg("server.listen change requires restart; ignoring")
+	}
+
+	if config.MetricsListenChanged(r.currentCfg, newCfg) {
+		r.logger.Warn().
+			Str("old", r.currentCfg.Server.MetricsListen).
+			Str("new", newCfg.Server.MetricsListen).
+			Msg("server.metrics_listen change requires restart; metrics listener is started once at startup")
 	}
 
 	if config.StoresChanged(r.currentCfg, newCfg) {

@@ -22,16 +22,16 @@ func lookupWith(country string) geofeed.CountryLookup {
 	})
 }
 
-func TestGeofeedProviderName(t *testing.T) {
-	p := geo.NewGeofeed(func() geofeed.CountryLookup { return nil })
-	if got := p.Name(); got != "geofeed" {
-		t.Fatalf("Name() = %q, want %q", got, "geofeed")
+func TestLookupProviderName(t *testing.T) {
+	p := geo.NewLookupProvider("dbip", func() geofeed.CountryLookup { return nil })
+	if got := p.Name(); got != "dbip" {
+		t.Fatalf("Name() = %q, want %q", got, "dbip")
 	}
 }
 
-func TestGeofeedProviderLookupCovered(t *testing.T) {
+func TestLookupProviderLookupCovered(t *testing.T) {
 	lookup := lookupWith("DE")
-	p := geo.NewGeofeed(func() geofeed.CountryLookup { return lookup })
+	p := geo.NewLookupProvider("geofeed", func() geofeed.CountryLookup { return lookup })
 
 	got := p.Lookup(context.Background(), netip.MustParseAddr("1.2.3.4"))
 	if got.Country != cc("DE") {
@@ -42,9 +42,9 @@ func TestGeofeedProviderLookupCovered(t *testing.T) {
 	}
 }
 
-func TestGeofeedProviderLookupUncovered(t *testing.T) {
+func TestLookupProviderLookupUncovered(t *testing.T) {
 	lookup := lookupWith("DE")
-	p := geo.NewGeofeed(func() geofeed.CountryLookup { return lookup })
+	p := geo.NewLookupProvider("geofeed", func() geofeed.CountryLookup { return lookup })
 
 	got := p.Lookup(context.Background(), netip.MustParseAddr("9.9.9.9"))
 	if got != (geo.Info{}) {
@@ -52,9 +52,9 @@ func TestGeofeedProviderLookupUncovered(t *testing.T) {
 	}
 }
 
-func TestGeofeedProviderReflectsSwap(t *testing.T) {
+func TestLookupProviderReflectsSwap(t *testing.T) {
 	current := lookupWith("DE")
-	p := geo.NewGeofeed(func() geofeed.CountryLookup { return current })
+	p := geo.NewLookupProvider("geofeed", func() geofeed.CountryLookup { return current })
 
 	ip := netip.MustParseAddr("1.2.3.4")
 	if got := p.Lookup(context.Background(), ip); got.Country != cc("DE") {

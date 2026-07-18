@@ -127,12 +127,33 @@ runs on the fewest nodes.
 ### Annotation
 
 The ordered `annotate:` list controls the tags prepended to node names on both
-endpoints: `GEO` (`[GEO:XX]`, `[GEO:??]` when unknown), `IP`
-(`[IP:1.2.3.4]`), `ASN` (`[ASN:...]`), each with a selectable provider
-(`geofeed`/`asn`). An empty list disables annotation (original names pass
-through). Rewriting is scheme-aware: URI schemes fold tags into the
-`#fragment`, vmess into the base64 `ps` field. Known stale tags from upstream
-are stripped first.
+endpoints: `GEO` (`[GEO:XX]`), `IP` (`[IP:1.2.3.4]`), `ASN` (`[ASN:...]`).
+GEO and ASN entries take `providers:` — an **ordered lookup chain** (e.g.
+`providers: [geofeed, dbip, registry, asn]`): the first provider that
+resolves the IP wins, and when every provider misses the tag renders as
+`[GEO:??]` / `[ASN:??]`. An empty `annotate` list disables annotation
+(original names pass through). Rewriting is scheme-aware: URI schemes fold
+tags into the `#fragment`, vmess into the base64 `ps` field. Known stale tags
+from upstream are stripped first.
+
+Available providers:
+
+| Provider | Source | Character |
+|---|---|---|
+| `geofeed` | RFC 8805 CSV feeds (`geo.geofeed.sources`) | precise, low coverage |
+| `dbip` | DB-IP Country Lite — monthly gzip CSV; the `{yyyy-mm}` URL placeholder expands to the current UTC month, with one previous-month retry on a 404 right after rollover | broad coverage, in-memory |
+| `registry` | the five RIR delegated-extended files | *registration* country of the allocated block, not necessarily where it routes |
+| `asn` | Team Cymru DNS | cached last resort |
+
+The `dbip`/`registry` databases are downloaded and indexed in memory only when
+an annotate chain actually references them. Note the filter/annotator
+asymmetry: the country **filter** still uses a single `provider:`
+(`geofeed`/`asn`), so a node's `[GEO:...]` tag may come from dbip while the
+filter consulted only geofeed/asn.
+
+The DB-IP data is the free Country Lite edition, licensed CC BY 4.0 —
+[IP Geolocation by DB-IP](https://db-ip.com) (this link is the required
+attribution).
 
 ## Caches and stores
 
@@ -143,6 +164,15 @@ are stripped first.
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
 | geofeed data (`geo.geofeed.refresh_interval`) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
+| dbip (`geo.dbip.refresh_interval`, default 24h) | in-memory range index (~700k ranges), refreshed in background | DB-IP Country Lite IP→country database for the `dbip` annotate provider |
+| registry (`geo.registry.refresh_interval`, default 24h) | in-memory range index (~330k ranges), refreshed in background | RIR delegated-extended registration countries for the `registry` annotate provider |
+
+The two downloadable databases are built only when an `annotate` chain
+references them. A failed startup download logs a warning and starts empty —
+the provider chain degrades to the next provider and the next
+request-triggered refresh retries; a failed background refresh keeps the
+stale data. Loaded databases are carried across hot reloads when their config
+block is unchanged, so a reload never re-downloads them.
 
 ## Telegram crawler
 
@@ -181,11 +211,12 @@ into it on load: `config/sources.yaml` (curated subscription sources kept out
 of the main file) and `config/private.yaml` (crawler-managed sources). All
 three are watched and **hot-reloaded** on
 change; on any reload error the previous settings stay active. Changing
-`server.listen`, `geoblock.db_path`/`ttl`, or `deadcache.ttl` requires a
-restart (logged as a warning); a `server.metrics_listen` change is silently
-ignored on reload (the metrics server starts once). Everything else —
-filters, annotate, groups,
-sources, prober knobs, log level — applies live. The stable worker is
+`server.listen`, `server.metrics_listen`, `geoblock.db_path`/`ttl`, or
+`deadcache.ttl` requires a restart (logged as a warning; listeners and stores
+are built once at startup). Everything else — filters, annotate, groups,
+sources, prober knobs, log level — applies live. A reflection test
+(`TestReloadCoverageComplete`) classifies every config key's reload path, so
+a new key cannot ship without one. The stable worker is
 restarted only when its inputs actually changed, and the new worker is built
 *before* the old one stops.
 
@@ -196,9 +227,17 @@ Key sections:
   Prometheus listeners.
 - `geo.geofeed.sources[]` (`url` + explicit `type: raw|gzip`) +
   `refresh_interval`; `geo.asn.timeout` / `cache_ttl` — shared geo providers.
+- `geo.dbip.url` / `geo.dbip.refresh_interval` and `geo.registry.urls[]` /
+  `geo.registry.refresh_interval` — optional blocks for the downloadable
+  IP→country databases; defaults are built in (the DB-IP Country Lite
+  `{yyyy-mm}` monthly URL, the five RIR delegated-extended files, 24h
+  refresh).
 - `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`.
 - `filters` — the ordered filter list described above.
-- `annotate` — the ordered tag list described above.
+- `annotate` — the ordered tag list described above; GEO/ASN entries take a
+  `providers:` chain. The retired singular `provider:` key is rejected at
+  load (`annotate[i]: "provider" was renamed to "providers" (ordered list)`)
+  instead of being silently dropped.
 - `geoblock` — store path/TTL plus `gemini.*` and `claude.*` base params
   (endpoint, model, marker, key, timeout, concurrency) for the through-node
   filters.

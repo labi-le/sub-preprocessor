@@ -111,7 +111,9 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.Geo.ASN.Timeout = 4 * time.Second
 	cfg.Geo.ASN.CacheTTL = 24 * time.Hour
 	cfg.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"^AS1234 ", "spammy"}}}
-	cfg.Annotate = []config.AnnotateSpec{{Tag: "GEO", Provider: "geofeed"}, {Tag: "IP"}}
+	cfg.Annotate = []config.AnnotateSpec{{Tag: "GEO", Providers: []string{"geofeed", "dbip"}}, {Tag: "IP"}}
+	cfg.Geo.DBIP = config.DBIPConfig{URL: "https://mirror.example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: time.Hour}
+	cfg.Geo.Registry = config.RegistryConfig{URLs: []string{"https://mirror.example.com/delegated"}, RefreshInterval: 2 * time.Hour}
 	cfg.Fetch.Timeout = 3 * time.Second
 
 	opts := reload.OptionsFromConfig(cfg)
@@ -149,11 +151,23 @@ func TestOptionsFromConfig(t *testing.T) {
 	if opts.FetchTimeout != cfg.Fetch.Timeout {
 		t.Errorf("FetchTimeout: got %v want %v", opts.FetchTimeout, cfg.Fetch.Timeout)
 	}
+	if !reflect.DeepEqual(opts.DBIP, cfg.Geo.DBIP) {
+		t.Errorf("DBIP: got %+v want %+v", opts.DBIP, cfg.Geo.DBIP)
+	}
+	if !reflect.DeepEqual(opts.Registry, cfg.Geo.Registry) {
+		t.Errorf("Registry: got %+v want %+v", opts.Registry, cfg.Geo.Registry)
+	}
 	if opts.PreloadedGeofeed != nil {
 		t.Error("OptionsFromConfig must not set PreloadedGeofeed")
 	}
 	if !opts.PreloadedLoadedAt.IsZero() {
 		t.Error("OptionsFromConfig must not set PreloadedLoadedAt")
+	}
+	if opts.PreloadedDBIP != nil || !opts.PreloadedDBIPLoadedAt.IsZero() {
+		t.Error("OptionsFromConfig must not set PreloadedDBIP state")
+	}
+	if opts.PreloadedRegistry != nil || !opts.PreloadedRegistryLoadedAt.IsZero() {
+		t.Error("OptionsFromConfig must not set PreloadedRegistry state")
 	}
 }
 
@@ -447,9 +461,129 @@ func TestReloadAppliesOnAnnotateChange(t *testing.T) {
 		t.Fatalf("adding subscriptions: expected 1 Apply call, got %d", fake.calls)
 	}
 
-	writeConfig(t, path, subsYAML+"annotate:\n  - tag: GEO\n    provider: geofeed\n")
+	writeConfig(t, path, subsYAML+"annotate:\n  - tag: GEO\n    providers: [geofeed]\n")
 	r.Reload(t.Context())
 	if fake.calls != 2 {
 		t.Fatalf("annotate-only edit must trigger Apply: expected 2 calls, got %d", fake.calls)
+	}
+}
+
+// geoDBYAML extends the base config with SSRF-unreachable dbip/registry URLs
+// and an annotate chain referencing them, so both databases are built (from
+// the preloads below — never the network) on every processor construction.
+const geoDBYAML = baseGeofeedYAML +
+	"  dbip:\n" +
+	"    url: https://127.0.0.1:1/db-{yyyy-mm}.csv.gz\n" +
+	"  registry:\n" +
+	"    urls:\n" +
+	"      - https://127.0.0.1:1/delegated\n" +
+	"annotate:\n" +
+	"  - tag: GEO\n" +
+	"    providers: [geofeed, dbip, registry]\n"
+
+// setupGeoDBReloader mirrors setupReloader for the geoDBYAML config, seeding
+// the processor with preloaded geofeed/dbip/registry state so no network fetch
+// ever happens.
+func setupGeoDBReloader(
+	t *testing.T,
+	geofeedAt, dbipAt, registryAt time.Time,
+) (*reload.Reloader, *server.Holder, string) {
+	t.Helper()
+	ctx := t.Context()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, geoDBYAML)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+
+	opts := reload.OptionsFromConfig(cfg)
+	opts.PreloadedGeofeed = stubLookup{}
+	opts.PreloadedLoadedAt = geofeedAt
+	opts.PreloadedDBIP = stubLookup{}
+	opts.PreloadedDBIPLoadedAt = dbipAt
+	opts.PreloadedRegistry = stubLookup{}
+	opts.PreloadedRegistryLoadedAt = registryAt
+	proc, err := preprocess.NewProcessor(ctx, zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("initial processor: %v", err)
+	}
+
+	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
+	return r, holder, path
+}
+
+// TestReloadCarriesDBIPAndRegistry mirrors TestReloadValidSwapCarriesGeofeed:
+// an unrelated edit rebuilds the processor while the dbip and registry
+// databases (lookup + LoadedAt) are carried over because their config blocks
+// are unchanged — proven by the preserved LoadedAt (no re-download occurred).
+func TestReloadCarriesDBIPAndRegistry(t *testing.T) {
+	geofeedAt := time.Now().Add(-time.Hour)
+	dbipAt := time.Now().Add(-2 * time.Hour)
+	registryAt := time.Now().Add(-3 * time.Hour)
+	r, holder, path := setupGeoDBReloader(t, geofeedAt, dbipAt, registryAt)
+
+	before := holder.Load()
+	writeConfig(t, path, geoDBYAML+"resolver:\n  timeout: 10s\n")
+	r.Reload(t.Context())
+
+	after := holder.Load()
+	if after == before {
+		t.Fatal("valid reload must swap the holder snapshot")
+	}
+	newProc, ok := after.Svc.(*preprocess.Processor)
+	if !ok {
+		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
+	}
+	lookup, at := newProc.DBIPState()
+	if lookup == nil {
+		t.Fatal("dbip lookup must be carried over (non-nil)")
+	}
+	if !at.Equal(dbipAt) {
+		t.Fatalf("dbip LoadedAt must be carried over: got %v want %v", at, dbipAt)
+	}
+	lookup, at = newProc.RegistryState()
+	if lookup == nil {
+		t.Fatal("registry lookup must be carried over (non-nil)")
+	}
+	if !at.Equal(registryAt) {
+		t.Fatalf("registry LoadedAt must be carried over: got %v want %v", at, registryAt)
+	}
+}
+
+// TestReloadRefetchesDBIPOnConfigChange: a dbip.url edit must NOT carry the
+// old database. The re-download against the unreachable URL fails, which by
+// the degrade-to-empty rule yields a zero LoadedAt (retry on next refresh)
+// instead of a build error; the unchanged registry is still carried.
+func TestReloadRefetchesDBIPOnConfigChange(t *testing.T) {
+	geofeedAt := time.Now().Add(-time.Hour)
+	dbipAt := time.Now().Add(-2 * time.Hour)
+	registryAt := time.Now().Add(-3 * time.Hour)
+	r, holder, path := setupGeoDBReloader(t, geofeedAt, dbipAt, registryAt)
+
+	changed := strings.Replace(geoDBYAML,
+		"https://127.0.0.1:1/db-{yyyy-mm}.csv.gz",
+		"https://127.0.0.1:1/other-{yyyy-mm}.csv.gz", 1)
+	writeConfig(t, path, changed)
+	r.Reload(t.Context())
+
+	newProc, ok := holder.Load().Svc.(*preprocess.Processor)
+	if !ok {
+		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", holder.Load().Svc)
+	}
+	lookup, at := newProc.DBIPState()
+	if lookup == nil {
+		t.Fatal("changed dbip must still be built (empty lookup), not nil")
+	}
+	if !at.IsZero() {
+		t.Fatalf("changed dbip must not carry LoadedAt: got %v", at)
+	}
+	_, at = newProc.RegistryState()
+	if !at.Equal(registryAt) {
+		t.Fatalf("unchanged registry must be carried over: got %v want %v", at, registryAt)
 	}
 }

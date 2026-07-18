@@ -1,6 +1,6 @@
-// Package geo provides a shared Provider abstraction over the geofeed
-// IP->country lookup and the Team-Cymru ASN resolver, so that filtering and
-// annotation can reuse the same provider instances.
+// Package geo provides a shared Provider abstraction over the in-memory
+// IP->country lookups (geofeed/dbip/registry) and the Team-Cymru ASN resolver,
+// so that filtering and annotation can reuse the same provider instances.
 package geo
 
 import (
@@ -24,24 +24,25 @@ type Provider interface {
 	Lookup(ctx context.Context, ip netip.Addr) Info
 }
 
-// geofeedProvider resolves the country via the current geofeed lookup. It reads
-// the lookup through a getter so it reflects background geofeed reloads instead
-// of capturing a stale snapshot.
-type geofeedProvider struct {
+// lookupProvider resolves the country via an in-memory CountryLookup. It reads
+// the lookup through a getter so it reflects background reloads instead of
+// capturing a stale snapshot. Backs the geofeed, dbip, and registry providers.
+type lookupProvider struct {
+	name    string
 	current func() geofeed.CountryLookup
 }
 
-// NewGeofeed returns a Provider backed by the geofeed lookup obtained from
-// current on each call.
+// NewLookupProvider returns a Provider named name, backed by the lookup
+// obtained from current on each call.
 //
 //nolint:ireturn // constructor intentionally returns the Provider interface
-func NewGeofeed(current func() geofeed.CountryLookup) Provider {
-	return &geofeedProvider{current: current}
+func NewLookupProvider(name string, current func() geofeed.CountryLookup) Provider {
+	return &lookupProvider{name: name, current: current}
 }
 
-func (p *geofeedProvider) Name() string { return "geofeed" }
+func (p *lookupProvider) Name() string { return p.name }
 
-func (p *geofeedProvider) Lookup(_ context.Context, ip netip.Addr) Info {
+func (p *lookupProvider) Lookup(_ context.Context, ip netip.Addr) Info {
 	return Info{Country: geofeed.LookupCountry(p.current(), ip)}
 }
 

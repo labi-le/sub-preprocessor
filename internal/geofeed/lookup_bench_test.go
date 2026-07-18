@@ -52,3 +52,42 @@ func makeBenchmarkEntries(n int) []geofeed.Entry {
 	}
 	return entries
 }
+
+// BenchmarkV6Lookup_100k probes a hit in ~100k v6 ranges (DB-IP scale). Named
+// V6 so before/after the indexed-v6 rewrite compares with the same bench name.
+func BenchmarkV6Lookup_100k(b *testing.B) {
+	lookup := geofeed.NewLookup(makeBenchmarkV6Entries(100_000))
+	ip := netip.MustParseAddr("2001:db8:0:1234::1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if got := lookup.LookupCountry(ip); got != (geofeed.CountryCode{'D', 'E'}) {
+			b.Fatalf("unexpected %q", got)
+		}
+	}
+}
+
+// BenchmarkV6Lookup_100kMiss probes an IP outside every range: the worst case
+// for a linear scan (touches all entries on every lookup).
+func BenchmarkV6Lookup_100kMiss(b *testing.B) {
+	lookup := geofeed.NewLookup(makeBenchmarkV6Entries(100_000))
+	ip := netip.MustParseAddr("3000::1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if got := lookup.LookupCountry(ip); got != (geofeed.CountryCode{}) {
+			b.Fatalf("unexpected %q", got)
+		}
+	}
+}
+
+func makeBenchmarkV6Entries(n int) []geofeed.Entry {
+	entries := make([]geofeed.Entry, n)
+	for i := range n {
+		entries[i] = geofeed.Entry{
+			Prefix:  netip.MustParsePrefix(fmt.Sprintf("2001:db8:%x:%x::/64", i/65536, i%65536)),
+			Country: geofeed.CountryCode{'D', 'E'},
+		}
+	}
+	return entries
+}

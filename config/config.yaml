@@ -5,6 +5,11 @@ server:
   metrics_listen: :9090 # internal Prometheus metrics endpoint; keep loopback-only (published via docker-compose)
 geo:
   # Shared geo providers used by the country/asn filters and by annotation.
+  # Optional blocks `dbip:` (url, refresh_interval; default: DB-IP Country
+  # Lite monthly CSV, 24h) and `registry:` (urls, refresh_interval; default:
+  # the 5 RIR delegated-extended files, 24h) configure the downloadable
+  # in-memory databases used by the matching annotate providers; the defaults
+  # suffice, so they are omitted here.
   geofeed:
     refresh_interval: 24h
     sources:
@@ -34,8 +39,11 @@ filters:
     concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
 # Ordered annotation tags added to node names (both / and /stable.txt).
 annotate:
-  - tag: GEO
-    provider: geofeed # [GEO:xx], [GEO:??] when the country is unknown
+  - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
+    # Ordered chain, first hit wins: dbip/registry are downloaded in-memory
+    # databases (built only because they are referenced here), asn is the
+    # cached Cymru DNS last resort.
+    providers: [geofeed, dbip, registry, asn]
   - tag: IP # [IP:1.2.3.4] of the chosen address
 geoblock:
   db_path: /config/.geoblock.db

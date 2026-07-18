@@ -11,6 +11,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/geo"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/subscription"
+	"github.com/rs/zerolog"
 )
 
 // fakeProvider is a geo.Provider that returns a fixed Info regardless of the IP.
@@ -42,11 +43,11 @@ func TestAnnotatorTagListOrder(t *testing.T) {
 
 	geofeedProv := fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}}
 	asnProv := fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}}
-	a := newAnnotator([]config.AnnotateSpec{
-		{Tag: config.TagGEO, Provider: config.ProviderGeofeed},
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
 		{Tag: config.TagIP},
-		{Tag: config.TagASN, Provider: config.ProviderASN},
-	}, geofeedProv, asnProv)
+		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
+	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
 	if a == nil {
 		t.Fatal("expected a non-nil annotator")
 	}
@@ -67,11 +68,11 @@ func TestAnnotatorUnknownGeoAndASN(t *testing.T) {
 	// Zero-value Info => unknown country and empty ASN, which must render as ??.
 	geofeedProv := fakeProvider{name: "geofeed"}
 	asnProv := fakeProvider{name: "asn"}
-	a := newAnnotator([]config.AnnotateSpec{
-		{Tag: config.TagGEO, Provider: config.ProviderGeofeed},
-		{Tag: config.TagASN, Provider: config.ProviderASN},
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 		{Tag: config.TagIP},
-	}, geofeedProv, asnProv)
+	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
 
 	node := parseOneNode(t, "vless://u@example.com:443#Old")
 	var buf, tagBuf bytes.Buffer
@@ -86,8 +87,107 @@ func TestAnnotatorUnknownGeoAndASN(t *testing.T) {
 func TestNewAnnotatorEmptyIsNil(t *testing.T) {
 	t.Parallel()
 
-	if a := newAnnotator(nil, nil, nil); a != nil {
+	if a := newAnnotator(zerolog.Nop(), nil, nil); a != nil {
 		t.Fatal("empty specs must yield a nil annotator (annotation disabled)")
+	}
+}
+
+// annotateOne runs a single node through the annotator and returns the output.
+func annotateOne(t *testing.T, a *annotator, ip string) string {
+	t.Helper()
+	node := parseOneNode(t, "vless://u@example.com:443#Old")
+	var buf, tagBuf bytes.Buffer
+	a.annotate(context.Background(), &buf, &tagBuf, node, netip.MustParseAddr(ip))
+	return buf.String()
+}
+
+// TestAnnotatorGeoChainOrder: the FIRST provider in the chain that returns a
+// non-zero country wins, even when later providers would also answer.
+func TestAnnotatorGeoChainOrder(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+		config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'D', 'E'}}},
+	})
+
+	want := "vless://u@example.com:443#[GEO:NL] Old"
+	if got := annotateOne(t, a, "1.2.3.4"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestAnnotatorGeoChainFallback: a miss (zero country) falls through to the
+// next provider in the chain.
+func TestAnnotatorGeoChainFallback(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed:  fakeProvider{name: "geofeed"},
+		config.ProviderDBIP:     fakeProvider{name: "dbip"},
+		config.ProviderRegistry: fakeProvider{name: "registry", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
+	})
+
+	want := "vless://u@example.com:443#[GEO:SE] Old"
+	if got := annotateOne(t, a, "1.2.3.4"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestAnnotatorGeoChainAllMiss: every provider missing renders [GEO:??].
+func TestAnnotatorGeoChainAllMiss(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed"},
+		config.ProviderDBIP:    fakeProvider{name: "dbip"},
+	})
+
+	want := "vless://u@example.com:443#[GEO:??] Old"
+	if got := annotateOne(t, a, "9.9.9.9"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestAnnotatorASNChainFallback: the ASN tag takes the first NON-EMPTY AS name
+// in the chain; a provider that returns a country but no ASN is a miss.
+func TestAnnotatorASNChainFallback(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagASN, Providers: []string{config.ProviderGeofeed, config.ProviderASN}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+		config.ProviderASN:     fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
+	})
+
+	want := "vless://u@example.com:443#[ASN:AS64500 EXAMPLE] Old"
+	if got := annotateOne(t, a, "1.2.3.4"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestAnnotatorSkipsUnbuiltProvider: a referenced-but-missing provider (a
+// wiring bug by the lazy-build rule) is skipped, not fatal — the rest of the
+// chain still resolves.
+func TestAnnotatorSkipsUnbuiltProvider(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderGeofeed}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+	})
+
+	want := "vless://u@example.com:443#[GEO:NL] Old"
+	if got := annotateOne(t, a, "1.2.3.4"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

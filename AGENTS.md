@@ -92,11 +92,13 @@ Important keys:
 - `server.listen`
 - `server.metrics_listen` — internal Prometheus `/metrics` endpoint (default `:9090`; docker-compose publishes it loopback-only on `127.0.0.1:9091`, never public)
 - `geo.geofeed.refresh_interval` / `geo.geofeed.sources[].url` / `geo.geofeed.sources[].type` (`raw` or `gzip`)
+- `geo.dbip.url` / `geo.dbip.refresh_interval` — DB-IP Country Lite monthly gzip CSV (`{yyyy-mm}`-templated URL, default built-in, 24h refresh); in-memory IP→country DB for the `dbip` annotate provider, built only when an annotate chain references it
+- `geo.registry.urls[]` / `geo.registry.refresh_interval` — the five RIR delegated-extended files (defaults built-in, 24h refresh); in-memory registration-country DB for the `registry` annotate provider, built only when referenced
 - `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
 - `resolver.timeout`
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
 - `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`bandwidth`) run post-probe in the stable worker only.
-- `annotate` — ordered tag list (`tag: GEO|IP|ASN` + `provider`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation.
+- `annotate` — ordered tag list (`tag: GEO|IP|ASN`; GEO/ASN take `providers:`, an ordered chain of `geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`; IP takes no providers) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. The retired singular `provider:` key is rejected at load with a rename error.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` / `geoblock.claude.*` (`endpoint`, `model`, `marker`, `api_key`/`key_file`/`key_var`, `timeout`, `concurrency`) — base params for the `gemini`/`claude` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` in `filters` (a filter entry may override these per-field)
 - `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)

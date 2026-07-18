@@ -168,8 +168,88 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 	}
 }
 
-// TestLoadAnnotateDefaultsAndValidation covers annotate provider defaulting and
-// tag/provider validation.
+// TestLoadGeoDatabaseDefaults proves the dbip/registry blocks default to the
+// free public database URLs with a 24h refresh when omitted.
+func TestLoadGeoDatabaseDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Geo.DBIP.URL != "https://download.db-ip.com/free/dbip-country-lite-{yyyy-mm}.csv.gz" {
+		t.Fatalf("dbip url default = %q", cfg.Geo.DBIP.URL)
+	}
+	if cfg.Geo.DBIP.RefreshInterval != 24*time.Hour {
+		t.Fatalf("dbip refresh default = %v, want 24h", cfg.Geo.DBIP.RefreshInterval)
+	}
+	wantURLs := []string{
+		"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
+		"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+		"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
+		"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
+		"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
+	}
+	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, wantURLs) {
+		t.Fatalf("registry urls default = %v", cfg.Geo.Registry.URLs)
+	}
+	if cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
+		t.Fatalf("registry refresh default = %v, want 24h", cfg.Geo.Registry.RefreshInterval)
+	}
+}
+
+// TestLoadGeoDatabaseOverrides proves explicit dbip/registry settings are kept
+// verbatim, including a {yyyy-mm} placeholder in the URL.
+func TestLoadGeoDatabaseOverrides(t *testing.T) {
+	t.Parallel()
+
+	yaml := geoBase +
+		"  dbip:\n    url: https://mirror.example.com/db-{yyyy-mm}.csv.gz\n    refresh_interval: 1h\n" +
+		"  registry:\n    urls: [https://mirror.example.com/delegated]\n    refresh_interval: 2h\n"
+	cfg, err := loadYAML(t, yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Geo.DBIP.URL != "https://mirror.example.com/db-{yyyy-mm}.csv.gz" || cfg.Geo.DBIP.RefreshInterval != time.Hour {
+		t.Fatalf("dbip override = %+v", cfg.Geo.DBIP)
+	}
+	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, []string{"https://mirror.example.com/delegated"}) || cfg.Geo.Registry.RefreshInterval != 2*time.Hour {
+		t.Fatalf("registry override = %+v", cfg.Geo.Registry)
+	}
+}
+
+// TestLoadRejectsBadGeoDatabases covers dbip/registry URL and refresh
+// validation at load time.
+func TestLoadRejectsBadGeoDatabases(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"dbip negative refresh":     {geoBase + "  dbip:\n    refresh_interval: -1s\n", "geo.dbip.refresh_interval must not be negative"},
+		"registry negative refresh": {geoBase + "  registry:\n    refresh_interval: -1s\n", "geo.registry.refresh_interval must not be negative"},
+		"dbip non-https":            {geoBase + "  dbip:\n    url: http://x.example.com/y.csv.gz\n", "geo.dbip.url"},
+		"dbip missing host":         {geoBase + "  dbip:\n    url: https:///y.csv.gz\n", "geo.dbip.url"},
+		"registry non-https":        {geoBase + "  registry:\n    urls: [ftp://x.example.com/delegated]\n", "geo.registry.urls[0]"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadYAML(t, tc.yaml)
+			if err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s: error %q does not contain %q", name, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadAnnotateDefaultsAndValidation covers per-tag provider-chain
+// defaulting and tag/providers validation, including the provider->providers
+// rename rejection (non-strict yaml would silently drop the old key).
 func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	t.Parallel()
 
@@ -180,19 +260,25 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	if len(cfg.Annotate) != 3 {
 		t.Fatalf("annotate len=%d, want 3", len(cfg.Annotate))
 	}
-	if cfg.Annotate[0].Provider != config.ProviderGeofeed {
-		t.Fatalf("GEO provider default = %q, want geofeed", cfg.Annotate[0].Provider)
+	if !reflect.DeepEqual(cfg.Annotate[0].Providers, []string{config.ProviderGeofeed}) {
+		t.Fatalf("GEO providers default = %v, want [geofeed]", cfg.Annotate[0].Providers)
 	}
-	if cfg.Annotate[2].Provider != config.ProviderASN {
-		t.Fatalf("ASN provider default = %q, want asn", cfg.Annotate[2].Provider)
+	if len(cfg.Annotate[1].Providers) != 0 {
+		t.Fatalf("IP providers = %v, want none", cfg.Annotate[1].Providers)
+	}
+	if !reflect.DeepEqual(cfg.Annotate[2].Providers, []string{config.ProviderASN}) {
+		t.Fatalf("ASN providers default = %v, want [asn]", cfg.Annotate[2].Providers)
 	}
 
 	rejects := map[string]struct {
 		yaml    string
 		wantErr string
 	}{
-		"unknown tag":      {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
-		"geo bad provider": {geoBase + "annotate:\n  - tag: GEO\n    provider: bogus\n", "provider must be"},
+		"unknown tag":        {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
+		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", `"provider" was renamed to "providers"`},
+		"unknown provider":   {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
+		"ip with providers":  {geoBase + "annotate:\n  - tag: IP\n    providers: [geofeed]\n", "tag IP takes no providers"},
+		"duplicate provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},
 	}
 	for name, tc := range rejects {
 		if _, rejErr := loadYAML(t, tc.yaml); rejErr == nil {
@@ -200,6 +286,21 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 		} else if !strings.Contains(rejErr.Error(), tc.wantErr) {
 			t.Fatalf("%s: error %q does not contain %q", name, rejErr, tc.wantErr)
 		}
+	}
+}
+
+// TestLoadAnnotateProviderChain proves an explicit ordered chain is preserved
+// verbatim across all four provider names.
+func TestLoadAnnotateProviderChain(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, registry, asn]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN}
+	if !reflect.DeepEqual(cfg.Annotate[0].Providers, want) {
+		t.Fatalf("providers = %v, want %v", cfg.Annotate[0].Providers, want)
 	}
 }
 
