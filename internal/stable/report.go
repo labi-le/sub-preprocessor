@@ -15,10 +15,12 @@ type CycleReport struct {
 	// GeoUnknown counts published nodes carrying a [GEO:??] tag: the
 	// annotation chain resolved no country for them.
 	GeoUnknown int
-	Duration   time.Duration
-	Sources    []SourceReport
-	Filters    []FilterReport
-	KeptSpeeds []int
+	// KeptCountries counts published nodes per resolved country code.
+	KeptCountries map[string]int
+	Duration      time.Duration
+	Sources       []SourceReport
+	Filters       []FilterReport
+	KeptSpeeds    []int
 }
 
 // SourceReport is one source's contribution to a cycle: how many nodes it

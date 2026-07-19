@@ -99,27 +99,25 @@ func TestMergeKeepsGeoTag(t *testing.T) {
 	}
 }
 
-// TestMergeFlagsGeoUnknown: the GeoUnknown flag mirrors the carried annotation
-// so the checker can report publication-time GEO coverage without re-parsing
-// names (vmess hides tags inside base64 ps).
-func TestMergeFlagsGeoUnknown(t *testing.T) {
+// TestMergeExtractsCountry: Entry.Country mirrors the carried [GEO:xx] tag so
+// the checker can report publication-time coverage and per-country counts
+// without re-parsing names (vmess hides tags inside base64 ps). "??" = the
+// chain resolved nothing; "" = annotation off.
+func TestMergeExtractsCountry(t *testing.T) {
 	t.Parallel()
 
 	body := []byte("vless://u@unknown.example:443#[GEO:??][IP:1.2.3.4] a\n" +
 		"vless://u@known.example:443#[GEO:FI][IP:1.2.3.4] b\n" +
-		"vless://u@untagged.example:443#plain c\n")
+		"vless://u@untagged.example:443#plain c\n" +
+		"vless://u@iptag.example:443#[IP:1.2.3.4][GEO:NL] d\n")
 	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
-	if len(entries) != 3 {
-		t.Fatalf("want 3 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("want 4 entries, got %d", len(entries))
 	}
-	if !entries[0].GeoUnknown {
-		t.Error("[GEO:??] node must be flagged GeoUnknown")
-	}
-	if entries[1].GeoUnknown {
-		t.Error("[GEO:FI] node must not be flagged")
-	}
-	if entries[2].GeoUnknown {
-		t.Error("untagged node (annotation off) must not be flagged")
+	for i, want := range []string{"??", "FI", "", "NL"} {
+		if got := entries[i].Country; got != want {
+			t.Errorf("entries[%d].Country = %q, want %q", i, got, want)
+		}
 	}
 }
 

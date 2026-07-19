@@ -19,15 +19,15 @@ type SourceBody struct {
 
 // Entry is a merged node. Raw carries the clean <source>-NNN name used for
 // probing; Tagged carries the published name (the [GEO][IP] annotation from the
-// filter pass, when present, plus the same unique label). GeoUnknown mirrors a
-// carried [GEO:??] tag — the annotation chain resolved no country; it stays
-// false when annotation is off (no tags to judge).
+// filter pass, when present, plus the same unique label). Country mirrors the
+// carried [GEO:xx] tag: a 2-letter code, "??" when the annotation chain
+// resolved nothing, "" when annotation is off (no tag to judge).
 type Entry struct {
-	Label      string
-	Raw        string
-	Tagged     string
-	Addr       string // server:port, the dead-cache key
-	GeoUnknown bool
+	Label   string
+	Raw     string
+	Tagged  string
+	Addr    string // server:port, the dead-cache key
+	Country string
 }
 
 // Merge parses all source bodies in order, dedupes nodes by lowercased
@@ -70,7 +70,7 @@ func Merge(bodies []SourceBody) []Entry {
 			key := string(scratch)
 			seen[key] = struct{}{}
 			kept++
-			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key, GeoUnknown: strings.Contains(tags, "[GEO:??]")})
+			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key, Country: tagCountry(tags)})
 			return true
 		})
 	}
@@ -96,6 +96,21 @@ func lowerServerPort(dst []byte, server, port string) []byte {
 	}
 	dst = append(dst, ':')
 	return append(dst, port...)
+}
+
+// tagCountry extracts the 2-char code from a "[GEO:xx]" tag anywhere in the
+// leading-tags string ("" when absent — annotation off or no GEO tag).
+func tagCountry(tags string) string {
+	const marker = "[GEO:"
+	i := strings.Index(tags, marker)
+	if i < 0 {
+		return ""
+	}
+	code := i + len(marker)
+	if len(tags) < code+3 || tags[code+2] != ']' {
+		return ""
+	}
+	return tags[code : code+2]
 }
 
 // taggedName carries the leading [GEO][IP] tags from the source name onto the

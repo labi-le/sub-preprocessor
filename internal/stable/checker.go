@@ -172,17 +172,18 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Msg("stable list updated")
 
 	c.observe(CycleReport{
-		SourcesOK:    len(bodies),
-		SourcesTotal: len(c.sources),
-		Merged:       len(entries),
-		DeadSkipped:  deadSkipped,
-		Probed:       len(probe),
-		Kept:         len(survivors),
-		GeoUnknown:   geoUnknownCount(survivors),
-		Duration:     time.Since(start),
-		Sources:      sourceReports,
-		Filters:      filterReports,
-		KeptSpeeds:   keptSpeeds(survivors),
+		SourcesOK:     len(bodies),
+		SourcesTotal:  len(c.sources),
+		Merged:        len(entries),
+		DeadSkipped:   deadSkipped,
+		Probed:        len(probe),
+		Kept:          len(survivors),
+		GeoUnknown:    geoUnknownCount(survivors),
+		KeptCountries: keptCountries(survivors),
+		Duration:      time.Since(start),
+		Sources:       sourceReports,
+		Filters:       filterReports,
+		KeptSpeeds:    keptSpeeds(survivors),
 	})
 
 	return nil
@@ -220,11 +221,23 @@ func keptSpeeds(survivors []Survivor) []int {
 func geoUnknownCount(survivors []Survivor) int {
 	n := 0
 	for _, s := range survivors {
-		if s.GeoUnknown {
+		if s.Country == "??" {
 			n++
 		}
 	}
 	return n
+}
+
+// keptCountries counts published nodes per resolved country ("" and "??" are
+// excluded: covered by annotation-off and the geo-unknown gauge respectively).
+func keptCountries(survivors []Survivor) map[string]int {
+	m := make(map[string]int)
+	for _, s := range survivors {
+		if s.Country != "" && s.Country != "??" {
+			m[s.Country]++
+		}
+	}
+	return m
 }
 
 // applyFilters runs the through-node NodeFilter chain over the survivors. It
