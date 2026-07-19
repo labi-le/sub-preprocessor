@@ -53,6 +53,11 @@ var (
 	inlineRe = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls)://[^\s"'<>]+`)
 )
 
+// legacyNameRe matches the pre-attribution managed name form tg-<sha10>. Such
+// names carry no origin info, so they are upgraded to the channel-attributed
+// form the first time the URL is rediscovered in a channel.
+var legacyNameRe = regexp.MustCompile(`^tg-[0-9a-f]{10}$`)
+
 // Options configures a crawl run.
 type Options struct {
 	Channels      []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
@@ -258,7 +263,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 // TLS, read) land in unknown: their status is undetermined, so they must be
 // retained rather than pruned. A definitive non-2xx answer (classify.StatusError)
 // is NOT unknown — the host is alive and the subscription is gone.
-func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]bool) (managedURL, unknown map[string]bool) {
+func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]string) (managedURL, unknown map[string]bool) {
 	managedURL = map[string]bool{}
 	var recheck []string
 	for _, s := range pf.Subscriptions.Sources {
@@ -271,13 +276,16 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 			continue
 		}
 		managedURL[s.URL] = true
-		if !live[s.URL] {
+		if _, ok := live[s.URL]; !ok {
 			recheck = append(recheck, s.URL)
 		}
 	}
 	relive, unknown := c.classifyAll(ctx, recheck)
 	for u := range relive {
-		live[u] = true
+		// Revived by recheck, not seen in a channel this cycle: origin unknown.
+		if _, ok := live[u]; !ok {
+			live[u] = ""
+		}
 	}
 	return managedURL, unknown
 }
@@ -288,8 +296,9 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 // retained when their status is unknown (transient recheck error), when they
 // appeared in the re-loaded file mid-cycle (never checked), or when pruning is
 // disabled; only a definitive not-live verdict prunes.
-func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[string]bool) (kept, managed []source) {
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, managedURL, unknown map[string]bool) (kept, managed []source) {
 	all := map[string]struct{}{}
+	existing := map[string]string{}
 	for _, s := range pf.Subscriptions.Sources {
 		switch {
 		case s.Body != "":
@@ -298,6 +307,7 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[str
 			continue
 		case strings.HasPrefix(s.Name, managedPrefix):
 			all[s.URL] = struct{}{}
+			existing[s.URL] = s.Name
 		default:
 			kept = append(kept, s)
 		}
@@ -305,8 +315,22 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[str
 	for u := range live {
 		all[u] = struct{}{}
 	}
+	// Hand-added names occupy the namespace too; a channel-attributed name may
+	// never collide with them.
+	used := map[string]bool{}
+	for _, s := range kept {
+		used[s.Name] = true
+	}
+	// Deterministic naming order so a hash-fallback on collision is stable
+	// across cycles (map iteration order is randomized).
+	urls := make([]string, 0, len(all))
 	for u := range all {
-		keep := live[u]
+		urls = append(urls, u)
+	}
+	sort.Strings(urls)
+	for _, u := range urls {
+		_, isLive := live[u]
+		keep := isLive
 		if !keep && !managedURL[u] {
 			// In the re-loaded file but absent from the cycle-start snapshot:
 			// added mid-cycle, never checked — retain rather than drop unseen.
@@ -316,12 +340,63 @@ func (c *Crawler) mergeManaged(pf privateFile, live, managedURL, unknown map[str
 			keep = true
 		}
 		if keep {
-			managed = append(managed, source{Name: managedName(u), URL: u})
+			name := sourceName(u, existing[u], live[u], used)
+			used[name] = true
+			managed = append(managed, source{Name: name, URL: u})
 		}
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
 	return kept, managed
+}
+
+// sourceName picks the managed name for url u. An already-attributed name is
+// kept verbatim (renames churn private.yaml, restart the stable worker, and
+// relabel published nodes). A legacy hash-only name upgrades to the
+// channel-attributed form tg-<slug>-<sha6> the first time the URL is seen in a
+// channel; on a (never observed, ~2^-24) name collision or when no channel is
+// known, the legacy hash form is used so the name stays valid and unique.
+func sourceName(u, existingName, channel string, used map[string]bool) string {
+	if existingName != "" && !legacyNameRe.MatchString(existingName) {
+		return existingName
+	}
+	if slug := channelSlug(channel); slug != "" {
+		sum := sha256.Sum256([]byte(u))
+		cand := managedPrefix + slug + "-" + hex.EncodeToString(sum[:])[:6]
+		if !used[cand] {
+			return cand
+		}
+	}
+	if existingName != "" {
+		return existingName
+	}
+	return managedName(u)
+}
+
+// channelSlug normalizes a Telegram channel slug into the config source-name
+// alphabet (^[a-z0-9-]+$): lowercase, "_" folded to "-", anything else dropped,
+// runs of "-" collapsed, capped at 24 bytes. Empty result means the channel is
+// unusable for attribution.
+func channelSlug(ch string) string {
+	const maxSlug = 24
+	b := make([]byte, 0, len(ch))
+	for i := 0; i < len(ch) && len(b) < maxSlug; i++ {
+		r := ch[i]
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b = append(b, r+'a'-'A')
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b = append(b, r)
+		case r == '_' || r == '-':
+			if len(b) > 0 && b[len(b)-1] != '-' {
+				b = append(b, '-')
+			}
+		}
+	}
+	for len(b) > 0 && b[len(b)-1] == '-' {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }
 
 // classifyAll classifies urls with bounded concurrency, returning the set that

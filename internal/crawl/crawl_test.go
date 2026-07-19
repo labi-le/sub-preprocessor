@@ -146,7 +146,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		{Name: managedName(urlGone), URL: urlGone},
 	}
 
-	live := map[string]bool{}
+	live := map[string]string{}
 	managedURL, unknown := c.recheckManaged(context.Background(), pf, live)
 	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
 
@@ -188,7 +188,7 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
 
-	next, managed := c.mergeManaged(pf, map[string]bool{}, map[string]bool{}, map[string]bool{})
+	next, managed := c.mergeManaged(pf, map[string]string{}, map[string]bool{}, map[string]bool{})
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -230,6 +230,89 @@ func TestManagedName(t *testing.T) {
 	}
 	if managedName("https://other/x") == n1 {
 		t.Fatalf("different URLs must produce different names")
+	}
+}
+
+func TestChannelSlug(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"VPN_Channel":                            "vpn-channel",
+		"mychannel":                              "mychannel",
+		"__weird__":                              "weird",
+		"a__b":                                   "a-b",
+		"":                                       "",
+		"???":                                    "",
+		"verylongchannelnamefartoolongforalabel": "verylongchannelnamefarto", // capped at 24
+	}
+	for in, want := range cases {
+		if got := channelSlug(in); got != want {
+			t.Errorf("channelSlug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSourceNameAttribution covers the naming rules: new URLs get the
+// channel-attributed form, attributed names are stable, legacy hash names
+// upgrade once a channel is known, and a collision falls back to the hash form.
+func TestSourceNameAttribution(t *testing.T) {
+	t.Parallel()
+
+	const u = "https://host.example/sub"
+	nameRe := regexp.MustCompile(`^tg-vpn-channel-[0-9a-f]{6}$`)
+
+	got := sourceName(u, "", "VPN_Channel", map[string]bool{})
+	if !nameRe.MatchString(got) {
+		t.Fatalf("new url name = %q, want tg-vpn-channel-<sha6>", got)
+	}
+
+	// Attributed names never change, even when rediscovered elsewhere.
+	if kept := sourceName(u, got, "other_channel", map[string]bool{}); kept != got {
+		t.Errorf("attributed name changed on rediscovery: %q -> %q", got, kept)
+	}
+
+	// Legacy hash names upgrade when the URL is seen in a channel...
+	if up := sourceName(u, managedName(u), "VPN_Channel", map[string]bool{}); !nameRe.MatchString(up) {
+		t.Errorf("legacy name not upgraded: %q", up)
+	}
+	// ...but stay when the origin is unknown this cycle.
+	if same := sourceName(u, managedName(u), "", map[string]bool{}); same != managedName(u) {
+		t.Errorf("legacy name changed without a channel: %q", same)
+	}
+
+	// A name collision falls back to the unique hash form.
+	used := map[string]bool{got: true}
+	if fb := sourceName(u, "", "VPN_Channel", used); fb != managedName(u) {
+		t.Errorf("collision fallback = %q, want %q", fb, managedName(u))
+	}
+
+	// Every produced form satisfies the config source-name alphabet.
+	re := regexp.MustCompile(`^[a-z0-9-]+$`)
+	for _, n := range []string{got, managedName(u)} {
+		if !re.MatchString(n) {
+			t.Errorf("name %q violates ^[a-z0-9-]+$", n)
+		}
+	}
+}
+
+// TestMergeUpgradesLegacyName proves the end-to-end rename: a legacy-named
+// managed source rediscovered in a channel this cycle is rewritten under its
+// attributed name, keeping exactly one entry for the URL.
+func TestMergeUpgradesLegacyName(t *testing.T) {
+	t.Parallel()
+
+	const u = "https://host.example/sub"
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u}}
+
+	live := map[string]string{u: "VPN_Channel"}
+	next, managed := c.mergeManaged(pf, live, map[string]bool{u: true}, map[string]bool{})
+	if len(next) != 1 || len(managed) != 1 {
+		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
+	}
+	if want := regexp.MustCompile(`^tg-vpn-channel-[0-9a-f]{6}$`); !want.MatchString(managed[0].Name) {
+		t.Errorf("name = %q, want attributed form", managed[0].Name)
 	}
 }
 

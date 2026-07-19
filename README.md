@@ -190,7 +190,10 @@ compose sidecar) that discovers new sources automatically:
 - additionally harvests **raw proxy URIs pasted directly in messages**
   (`vless://…` etc.), dedupes them, and packs them into a single inline
   `tg-inline` source with a base64 `body`,
-- writes results to `config/private.yaml` as `tg-<sha10>` sources — an
+- writes results to `config/private.yaml` as `tg-<channel>-<sha6>` sources
+  (the discovering channel's slug plus a short URL hash, so the origin of
+  every subscription is visible — including in `/stable.txt` node labels;
+  pre-attribution `tg-<sha10>` names upgrade on the next rediscovery) — an
   overlay the service merges into `subscriptions.sources` and **hot-reloads**
   on change.
 

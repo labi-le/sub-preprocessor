@@ -44,9 +44,9 @@ type scanNode struct {
 // MaxChannels; recursion depth by MaxDepth. Channels that yield a live sub are
 // recorded into st so they become permanent seeds on future cycles, surviving
 // days when their recent pages carry no live sub. Returns every live
-// subscription URL found.
-func (c *Crawler) scan(ctx context.Context, st *state) (map[string]bool, []string) {
-	live := map[string]bool{}
+// subscription URL found, mapped to the channel that first yielded it.
+func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []string) {
+	live := map[string]string{}
 	var inline []string
 	visited := map[string]bool{}
 	discovered := 0
@@ -109,7 +109,7 @@ func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
 // scanChannel scrapes one channel, classifies its candidate URLs into live,
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]bool, inline *[]string) []string {
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string) []string {
 	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n.depth))
 	if len(pages) == 0 {
 		return nil
@@ -131,7 +131,11 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	}
 	found, _ := c.classifyAll(ctx, keys(cand))
 	for u := range found {
-		live[u] = true
+		// First discoverer wins: BFS visits seeds before discovered channels,
+		// so attribution prefers the operator-configured origin.
+		if _, ok := live[u]; !ok {
+			live[u] = n.channel
+		}
 	}
 	if len(found) > 0 {
 		st.record(n.channel, time.Now())
