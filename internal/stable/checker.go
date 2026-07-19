@@ -178,6 +178,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		DeadSkipped:  deadSkipped,
 		Probed:       len(probe),
 		Kept:         len(survivors),
+		GeoUnknown:   geoUnknownCount(survivors),
 		Duration:     time.Since(start),
 		Sources:      sourceReports,
 		Filters:      filterReports,
@@ -212,6 +213,18 @@ func keptSpeeds(survivors []Survivor) []int {
 		}
 	}
 	return speeds
+}
+
+// geoUnknownCount counts published nodes whose annotation resolved no country
+// (the [GEO:??] tag), for the coverage gauge.
+func geoUnknownCount(survivors []Survivor) int {
+	n := 0
+	for _, s := range survivors {
+		if s.GeoUnknown {
+			n++
+		}
+	}
+	return n
 }
 
 // applyFilters runs the through-node NodeFilter chain over the survivors. It

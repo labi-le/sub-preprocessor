@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,12 +89,17 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped by the dead-node cache.", float64(r.DeadSkipped))
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
+	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
 	gauge(w, "stable_cycle_duration_seconds", "Wall time of the last cycle.", r.Duration.Seconds())
 	gauge(w, "stable_last_success_timestamp_seconds", "Unix time of the last published cycle.", float64(m.lastAt.Unix()))
 
 	writeFilters(w, r.Filters)
 	writeSources(w, r.Sources)
 	writeHistogram(w, "stable_kept_speed_mbps", "Download speed (Mbps) of kept nodes.", r.KeptSpeeds)
+	if len(r.KeptSpeeds) > 0 {
+		gauge(w, "stable_kept_speed_min_mbps", "Slowest kept node's measured speed last cycle.", float64(slices.Min(r.KeptSpeeds)))
+		gauge(w, "stable_kept_speed_max_mbps", "Fastest kept node's measured speed last cycle.", float64(slices.Max(r.KeptSpeeds)))
+	}
 }
 
 func writeFilters(w io.Writer, filters []stable.FilterReport) {

@@ -38,6 +38,7 @@ func TestMetricsObserveRender(t *testing.T) {
 			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}},
 		},
 		KeptSpeeds: []int{3, 7, 30, 120},
+		GeoUnknown: 3,
 	})
 
 	out := render(t, m)
@@ -59,6 +60,9 @@ func TestMetricsObserveRender(t *testing.T) {
 		`stable_kept_speed_mbps_bucket{le="+Inf"} 4`,
 		"stable_kept_speed_mbps_count 4",
 		"stable_kept_speed_mbps_sum 160",
+		"stable_geo_unknown_nodes 3",
+		"stable_kept_speed_min_mbps 3",
+		"stable_kept_speed_max_mbps 120",
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {

@@ -19,12 +19,15 @@ type SourceBody struct {
 
 // Entry is a merged node. Raw carries the clean <source>-NNN name used for
 // probing; Tagged carries the published name (the [GEO][IP] annotation from the
-// filter pass, when present, plus the same unique label).
+// filter pass, when present, plus the same unique label). GeoUnknown mirrors a
+// carried [GEO:??] tag — the annotation chain resolved no country; it stays
+// false when annotation is off (no tags to judge).
 type Entry struct {
-	Label  string
-	Raw    string
-	Tagged string
-	Addr   string // server:port, the dead-cache key
+	Label      string
+	Raw        string
+	Tagged     string
+	Addr       string // server:port, the dead-cache key
+	GeoUnknown bool
 }
 
 // Merge parses all source bodies in order, dedupes nodes by lowercased
@@ -62,11 +65,12 @@ func Merge(bodies []SourceBody) []Entry {
 			if !ok {
 				return true
 			}
-			tagged := taggedName(n, raw, label)
+			tags := rewrite.LeadingTags(n.Name)
+			tagged := taggedName(n, raw, label, tags)
 			key := string(scratch)
 			seen[key] = struct{}{}
 			kept++
-			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key})
+			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key, GeoUnknown: strings.Contains(tags, "[GEO:??]")})
 			return true
 		})
 	}
@@ -94,10 +98,9 @@ func lowerServerPort(dst []byte, server, port string) []byte {
 	return append(dst, port...)
 }
 
-// taggedName carries any leading [GEO][IP] tags from the source name onto the
+// taggedName carries the leading [GEO][IP] tags from the source name onto the
 // relabeled node, falling back to raw when there are none.
-func taggedName(n subscription.Node, raw, label string) string {
-	tags := rewrite.LeadingTags(n.Name)
+func taggedName(n subscription.Node, raw, label, tags string) string {
 	if tags == "" {
 		return raw
 	}
