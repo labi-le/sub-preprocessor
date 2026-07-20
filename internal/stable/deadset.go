@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -27,13 +28,25 @@ func (d *DeadSet) Blocked(key string) bool {
 	return ok && exp > time.Now().UnixNano()
 }
 
-// Block marks key dead until now+ttl (refreshing an existing entry).
+// Block marks key dead until now + jittered ttl (refreshing an existing entry).
 func (d *DeadSet) Block(key string) error {
-	exp := time.Now().Add(d.ttl).UnixNano()
+	exp := time.Now().Add(jitteredTTL(d.ttl)).UnixNano()
 	d.mu.Lock()
 	d.m[key] = exp
 	d.mu.Unlock()
 	return nil
+}
+
+// jitteredTTL stretches ttl by a uniform factor in [1, 1.5). A full re-probe
+// marks tens of thousands of nodes dead in one batch; with a fixed TTL that
+// batch expires as one batch too, making every TTL-th cycle another full
+// re-probe. The jitter spreads the expiries over ~ttl/2 (a few cycles), so no
+// single cycle re-probes the whole graveyard at once.
+func jitteredTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return ttl
+	}
+	return ttl + time.Duration(rand.Float64()*0.5*float64(ttl)) //nolint:gosec // cache-expiry jitter needs no cryptographic randomness
 }
 
 // Prune drops expired entries to reclaim memory.
