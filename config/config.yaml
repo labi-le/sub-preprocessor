@@ -109,10 +109,10 @@ subscriptions:
   check:
     # URL-test (latency) prober params only; through-node filters live in `filters`.
     rounds: 2
-    timeout: 900ms # per-attempt cap; anything slower than max_avg_ms is discarded anyway, so waiting longer only slows full re-probes (dead nodes each burn the full timeout)
+    timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1
     max_avg_ms: 800
-    concurrency: 256 # in-flight URL tests; dead nodes cost a full timeout each, so this bounds full re-probe time (~37k*2/256*0.9s). HEAD-only tests are cheap: mostly idle sockets
+    concurrency: 96 # in-flight URL tests through the fake-ip tunnel; higher (tried 256) saturates it and false-fails live nodes -> they get dead-cached -> kept collapses. TTL jitter (deadset.go) already caps re-probe waves, so this need not be cranked
     source_timeout: 5m
     # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
     # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax
