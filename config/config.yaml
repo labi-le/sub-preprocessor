@@ -112,7 +112,7 @@ subscriptions:
     timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1
     max_avg_ms: 800
-    concurrency: 96 # in-flight URL tests through the fake-ip tunnel; higher (tried 256) saturates it and false-fails live nodes -> they get dead-cached -> kept collapses. TTL jitter (deadset.go) already caps re-probe waves, so this need not be cranked
+    concurrency: 16 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates the measured latency and false-fails live nodes. Controlled test on 126 live nodes: conc<=16 matches serial baseline (+-6ms), conc=64 +107ms & 119->100 pass, conc=256 +166ms & 36 timeouts. Raising this trades node yield for speed -- don't. Spread coverage via the TTL-jitter waves instead
     source_timeout: 5m
     # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
     # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax
