@@ -112,7 +112,7 @@ subscriptions:
     timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1
     max_avg_ms: 800
-    concurrency: 16 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates the measured latency and false-fails live nodes. Controlled test on 126 live nodes: conc<=16 matches serial baseline (+-6ms), conc=64 +107ms & 119->100 pass, conc=256 +166ms & 36 timeouts. Raising this trades node yield for speed -- don't. Spread coverage via the TTL-jitter waves instead
+    concurrency: 8 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates measured latency and false-fails live nodes (test on 126 nodes: conc<=16 == serial baseline, conc=64 +107ms, conc=256 +166ms). Trying 8 (from 16): prod CPU is weaker than the test box, so its contention knee may be below 16. Watch cycle_duration -- an ~13k jitter wave at conc=8 is ~55min probe, near the 1h interval; if cycles exceed it, 8 is too low for the batch model
     source_timeout: 5m
     # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
     # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax
