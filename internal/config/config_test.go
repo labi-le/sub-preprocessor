@@ -428,6 +428,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative claude concurrency":   {base + "geoblock:\n  claude:\n    concurrency: -1\n", "geoblock.claude.concurrency"},
 		"negative gemini timeout":       {base + "geoblock:\n  gemini:\n    timeout: -1s\n", "geoblock.gemini.timeout"},
 		"negative claude timeout":       {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
+		"negative chatgpt concurrency":  {base + "geoblock:\n  chatgpt:\n    concurrency: -1\n", "geoblock.chatgpt.concurrency"},
+		"negative chatgpt timeout":      {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
 		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
 		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
 		"negative asn timeout":          {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
@@ -474,6 +476,25 @@ func TestLoadAcceptsValidNewKnobs(t *testing.T) {
 	// there and must not be rejected by host-side SSRF rules.
 	if cfg.Subscriptions.Check.TestURL != "http://www.gstatic.com/generate_204" {
 		t.Fatalf("test_url: %q", cfg.Subscriptions.Check.TestURL)
+	}
+}
+
+// TestChatGPTDefaults pins the shipped OpenAI check defaults: the compliance
+// endpoint host and the error code it returns for a refused egress. Both are
+// keyless, so the filter works unconfigured.
+func TestChatGPTDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadRaw(t, "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cg := cfg.GeoBlock.ChatGPT
+	if cg.Endpoint != "https://api.openai.com" || cg.Marker != "unsupported_country" {
+		t.Fatalf("chatgpt endpoint/marker defaults: %+v", cg)
+	}
+	if cg.Timeout != 15*time.Second || cg.Concurrency != 8 {
+		t.Fatalf("chatgpt timeout/concurrency defaults: %+v", cg)
 	}
 }
 
@@ -540,6 +561,11 @@ func TestProberChanged(t *testing.T) {
 	b.GeoBlock.Gemini.Timeout = 42 * time.Second
 	if !config.ProberChanged(a, b) {
 		t.Fatal("gemini sub-config change must be detected")
+	}
+	cg := a
+	cg.GeoBlock.ChatGPT.Marker = "changed"
+	if !config.ProberChanged(a, cg) {
+		t.Fatal("chatgpt sub-config change must be detected")
 	}
 	c := a
 	c.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"changed"}}}

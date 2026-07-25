@@ -9,7 +9,7 @@ import (
 )
 
 func (m *MihomoProber) claudeURL() string {
-	return strings.TrimRight(m.claude.Endpoint, "/") + "/v1/models"
+	return strings.TrimRight(m.geo.Claude.Endpoint, "/") + "/v1/models"
 }
 
 // ClaudeCheck sends a keyless Anthropic API GET through each of the supplied
@@ -19,14 +19,9 @@ func (m *MihomoProber) claudeURL() string {
 // key is required, so the gate is always active when the filter is configured.
 // The caller owns the proxies' lifecycle (parse once, close once).
 func (m *MihomoProber) ClaudeCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
-	header := http.Header{"Anthropic-Version": []string{m.claude.Version}}
+	c := m.geo.Claude
+	header := http.Header{"Anthropic-Version": []string{c.Version}}
 	return m.apiCheck(ctx, "stable.ClaudeCheck", "claude check", proxies,
-		m.claudeURL(), header, m.claude.Timeout, m.claude.Concurrency,
-		func(body string) bool { return claudeBlocked(body, m.claude.Marker) })
-}
-
-// claudeBlocked reports whether an Anthropic API response body indicates the
-// caller's location is geo-blocked.
-func claudeBlocked(body, marker string) bool {
-	return marker != "" && strings.Contains(body, marker)
+		m.claudeURL(), header, c.Timeout, c.Concurrency,
+		func(body string) bool { return markerBlocked(body, c.Marker) })
 }

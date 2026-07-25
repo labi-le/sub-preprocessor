@@ -12,16 +12,16 @@ func TestClaudeBlocked(t *testing.T) {
 	t.Parallel()
 
 	const marker = "Request not allowed"
-	if !claudeBlocked(`{"error":{"type":"forbidden","message":"Request not allowed"}}`, marker) {
+	if !markerBlocked(`{"error":{"type":"forbidden","message":"Request not allowed"}}`, marker) {
 		t.Fatal("geo-block body should be detected")
 	}
-	if claudeBlocked(`{"error":{"type":"authentication_error","message":"x-api-key header is required"}}`, marker) {
+	if markerBlocked(`{"error":{"type":"authentication_error","message":"x-api-key header is required"}}`, marker) {
 		t.Fatal("a keyless auth error from an allowed region must not be flagged")
 	}
-	if claudeBlocked(`{"data":[{"id":"claude-sonnet-4-5"}]}`, marker) {
+	if markerBlocked(`{"data":[{"id":"claude-sonnet-4-5"}]}`, marker) {
 		t.Fatal("a normal response body must not be flagged")
 	}
-	if claudeBlocked("anything", "") {
+	if markerBlocked("anything", "") {
 		t.Fatal("empty marker must never match")
 	}
 }
@@ -32,9 +32,8 @@ func TestClaudeURL(t *testing.T) {
 	p, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
 		config.BandwidthConfig{},
-		config.GeminiConfig{},
+		config.GeoBlockConfig{Claude: config.ClaudeConfig{Endpoint: "https://api.anthropic.com/"}},
 		"",
-		config.ClaudeConfig{Endpoint: "https://api.anthropic.com/"},
 		zerolog.Nop(),
 	)
 	if err != nil {

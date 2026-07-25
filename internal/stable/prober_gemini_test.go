@@ -12,13 +12,13 @@ func TestGeminiBlocked(t *testing.T) {
 	t.Parallel()
 
 	const marker = "User location is not supported for the API use"
-	if !geminiBlocked(`{"error":{"message":"User location is not supported for the API use."}}`, marker) {
+	if !markerBlocked(`{"error":{"message":"User location is not supported for the API use."}}`, marker) {
 		t.Fatal("geo-block body should be detected")
 	}
-	if geminiBlocked(`{"models":[{"name":"gemini-2.0-flash"}]}`, marker) {
+	if markerBlocked(`{"models":[{"name":"gemini-2.0-flash"}]}`, marker) {
 		t.Fatal("a normal response body must not be flagged")
 	}
-	if geminiBlocked("anything", "") {
+	if markerBlocked("anything", "") {
 		t.Fatal("empty marker must never match")
 	}
 }
@@ -29,9 +29,8 @@ func TestGeminiURLAndEnabled(t *testing.T) {
 	p, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
 		config.BandwidthConfig{},
-		config.GeminiConfig{Endpoint: "https://generativelanguage.googleapis.com/", Model: "gemini-2.0-flash"},
+		config.GeoBlockConfig{Gemini: config.GeminiConfig{Endpoint: "https://generativelanguage.googleapis.com/", Model: "gemini-2.0-flash"}},
 		"SECRET",
-		config.ClaudeConfig{},
 		zerolog.Nop(),
 	)
 	if err != nil {
@@ -45,7 +44,7 @@ func TestGeminiURLAndEnabled(t *testing.T) {
 		t.Fatalf("geminiURL = %q, want %q", got, want)
 	}
 
-	off, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
+	off, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

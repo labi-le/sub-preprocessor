@@ -52,30 +52,33 @@ func TestIPFilterSpecsSplit(t *testing.T) {
 }
 
 // TestNodeFilterSpecsSplit proves the through-node types (gemini/claude/
-// bandwidth) split out in order, with gemini/claude merged over the geoblock
-// defaults and bandwidth carrying its entry params.
+// chatgpt/bandwidth) split out in order, with the API configs merged over the
+// geoblock defaults and bandwidth carrying its entry params.
 func TestNodeFilterSpecsSplit(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Config{
 		GeoBlock: config.GeoBlockConfig{
-			Gemini: config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8},
-			Claude: config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
+			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8},
+			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
+			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
 			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
 			{Type: config.FilterClaude, Marker: "override-claude"},
 			{Type: config.FilterBandwidth, MinMbps: new(9), TestURL: "https://speed/x", Timeout: 30 * time.Second, Concurrency: 2},
 			{Type: config.FilterGemini, Model: "override-model"},
+			{Type: config.FilterChatGPT, Concurrency: 3},
 		},
 	}
 
 	got := cfg.NodeFilterSpecs()
-	if len(got) != 3 {
-		t.Fatalf("NodeFilterSpecs() len=%d, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("NodeFilterSpecs() len=%d, want 4", len(got))
 	}
-	if got[0].Type != config.FilterClaude || got[1].Type != config.FilterBandwidth || got[2].Type != config.FilterGemini {
-		t.Fatalf("order = %s,%s,%s", got[0].Type, got[1].Type, got[2].Type)
+	if got[0].Type != config.FilterClaude || got[1].Type != config.FilterBandwidth ||
+		got[2].Type != config.FilterGemini || got[3].Type != config.FilterChatGPT {
+		t.Fatalf("order = %s,%s,%s,%s", got[0].Type, got[1].Type, got[2].Type, got[3].Type)
 	}
 
 	// claude: overridden marker, other fields inherited from geoblock base.
@@ -90,6 +93,10 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	// gemini: overridden model, other fields inherited from geoblock base.
 	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" || got[2].Gemini.Marker != "base-marker" {
 		t.Fatalf("gemini merge wrong: %+v", got[2].Gemini)
+	}
+	// chatgpt: overridden concurrency, endpoint/marker inherited from the base.
+	if got[3].ChatGPT.Concurrency != 3 || got[3].ChatGPT.Endpoint != "https://chatgpt.base" || got[3].ChatGPT.Marker != "base-chatgpt" {
+		t.Fatalf("chatgpt merge wrong: %+v", got[3].ChatGPT)
 	}
 }
 

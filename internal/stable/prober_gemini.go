@@ -15,8 +15,8 @@ func (m *MihomoProber) GeminiEnabled() bool {
 }
 
 func (m *MihomoProber) geminiURL() string {
-	return strings.TrimRight(m.gemini.Endpoint, "/") + "/v1beta/models/" +
-		m.gemini.Model + "?key=" + url.QueryEscape(m.geminiKey)
+	return strings.TrimRight(m.geo.Gemini.Endpoint, "/") + "/v1beta/models/" +
+		m.geo.Gemini.Model + "?key=" + url.QueryEscape(m.geminiKey)
 }
 
 // GeminiCheck sends a real Gemini API GET through each of the supplied proxies
@@ -24,13 +24,8 @@ func (m *MihomoProber) geminiURL() string {
 // do: a geo-block appears only in the API response body, not the status code.
 // The caller owns the proxies' lifecycle (parse once, close once).
 func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
+	g := m.geo.Gemini
 	return m.apiCheck(ctx, "stable.GeminiCheck", "gemini check", proxies,
-		m.geminiURL(), nil, m.gemini.Timeout, m.gemini.Concurrency,
-		func(body string) bool { return geminiBlocked(body, m.gemini.Marker) })
-}
-
-// geminiBlocked reports whether a Gemini API response body indicates the
-// caller's location is geo-blocked.
-func geminiBlocked(body, marker string) bool {
-	return marker != "" && strings.Contains(body, marker)
+		m.geminiURL(), nil, g.Timeout, g.Concurrency,
+		func(body string) bool { return markerBlocked(body, g.Marker) })
 }

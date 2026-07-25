@@ -29,17 +29,9 @@ func NewController(ctx context.Context, holder *Holder, filterer func() Filterer
 	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger, reporter: reporter}
 }
 
-// Apply stops any running checker and starts a new one when cfg has
-// subscription sources configured. The prober and node filters are built
-// before the old worker is stopped, so a failed construction leaves the
-// previous checker running.
-func (c *Controller) Apply(cfg config.Config) error {
-	if !cfg.SubscriptionsEnabled() {
-		c.Stop()
-		return nil
-	}
-
-	subs := cfg.Subscriptions
+// allowedCountries builds the worker's country allow-set: every code except
+// those the country filter entries exclude, directly or through a group.
+func allowedCountries(cfg config.Config) filter.CountrySet {
 	allowed := filter.All()
 	excluded := filter.CountrySet{}
 	for _, spec := range cfg.IPFilterSpecs() {
@@ -56,32 +48,48 @@ func (c *Controller) Apply(cfg config.Config) error {
 		}
 	}
 	allowed.Exclude(excluded)
+	return allowed
+}
 
-	// The gemini/claude prober params default to the geoblock block and are
-	// overridden per-entry by the merged NodeFilterSpec; bandwidth params come
+// Apply stops any running checker and starts a new one when cfg has
+// subscription sources configured. The prober and node filters are built
+// before the old worker is stopped, so a failed construction leaves the
+// previous checker running.
+func (c *Controller) Apply(cfg config.Config) error {
+	if !cfg.SubscriptionsEnabled() {
+		c.Stop()
+		return nil
+	}
+
+	subs := cfg.Subscriptions
+	allowed := allowedCountries(cfg)
+
+	// The gemini/claude/chatgpt prober params default to the geoblock block and
+	// are overridden per-entry by the merged NodeFilterSpec; bandwidth params come
 	// entirely from its filter entry.
 	nodeSpecs := cfg.NodeFilterSpecs()
-	gemini := cfg.GeoBlock.Gemini
-	claude := cfg.GeoBlock.Claude
+	geo := cfg.GeoBlock
 	var bandwidth config.BandwidthConfig
 	names := make([]string, 0, len(nodeSpecs))
 	for _, spec := range nodeSpecs {
 		names = append(names, spec.Type)
 		switch spec.Type {
 		case config.FilterGemini:
-			gemini = spec.Gemini
+			geo.Gemini = spec.Gemini
 		case config.FilterClaude:
-			claude = spec.Claude
+			geo.Claude = spec.Claude
+		case config.FilterChatGPT:
+			geo.ChatGPT = spec.ChatGPT
 		case config.FilterBandwidth:
 			bandwidth = spec.Bandwidth
 		}
 	}
 
-	geminiKey, keyErr := gemini.APIKeyResolved()
+	geminiKey, keyErr := geo.Gemini.APIKeyResolved()
 	if keyErr != nil {
 		c.logger.Warn().Err(keyErr).Msg("gemini key unavailable; geo-block check disabled")
 	}
-	prober, err := NewMihomoProber(subs.Check, bandwidth, gemini, geminiKey, claude, c.logger)
+	prober, err := NewMihomoProber(subs.Check, bandwidth, geo, geminiKey, c.logger)
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}

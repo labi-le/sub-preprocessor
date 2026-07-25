@@ -13,7 +13,8 @@ import (
 // NodeFilter is a through-node check the worker runs on latency-probe
 // survivors: unlike the preprocess IP-filters it routes traffic THROUGH each
 // proxy node, so it lives here and only affects /stable.txt. The through-node
-// entries of the unified filters list (gemini/claude/bandwidth) select which run.
+// entries of the unified filters list (gemini/claude/chatgpt/bandwidth) select
+// which run.
 type NodeFilter interface {
 	name() string
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by
@@ -32,6 +33,11 @@ type claudeChecker interface {
 	ClaudeCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
+// chatgptChecker is the through-node OpenAI capability of a Prober.
+type chatgptChecker interface {
+	ChatGPTCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+}
+
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
 	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -42,6 +48,7 @@ type bandwidthChecker interface {
 const (
 	geminiFilterName    = "gemini"
 	claudeFilterName    = "claude"
+	chatgptFilterName   = "chatgpt"
 	bandwidthFilterName = "bandwidth"
 )
 
@@ -189,8 +196,9 @@ func annotateSpeed(line string, mbps int) string {
 
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key); the claude filter is keyless; the bandwidth
-// filter needs a prober with bandwidth support.
+// support (a resolved API key); the claude and chatgpt filters are keyless
+// (both APIs geo-block before authentication); the bandwidth filter needs a
+// prober with bandwidth support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -217,6 +225,18 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 			filters = append(filters, &apiFilter{
 				filterName: claudeFilterName,
 				check:      cc.ClaudeCheck,
+				store:      store,
+				logger:     logger,
+			})
+		case chatgptFilterName:
+			cg, ok := prober.(chatgptChecker)
+			if !ok {
+				logger.Warn().Msg("chatgpt filter requested but prober lacks ChatGPT support; skipping")
+				continue
+			}
+			filters = append(filters, &apiFilter{
+				filterName: chatgptFilterName,
+				check:      cg.ChatGPTCheck,
 				store:      store,
 				logger:     logger,
 			})

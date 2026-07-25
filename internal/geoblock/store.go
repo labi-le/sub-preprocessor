@@ -1,7 +1,8 @@
-// Package geoblock persists a blocklist of proxy node hosts that failed the
-// Gemini reachability check, each with an expiry (TTL). Reads are served from
-// an in-memory cache (the filter hot path); the SQLite file is touched only on
-// writes, prune, and startup load, so it survives restarts.
+// Package geoblock persists a blocklist of proxy node hosts that failed a
+// through-node API reachability check (Gemini/Claude/ChatGPT), each with an
+// expiry (TTL). Reads are served from an in-memory cache (the filter hot path);
+// the SQLite file is touched only on writes, prune, and startup load, so it
+// survives restarts.
 package geoblock
 
 import (

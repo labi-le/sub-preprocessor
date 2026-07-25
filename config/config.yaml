@@ -25,13 +25,14 @@ resolver:
   cache_ttl: 1h
   cache_negative_ttl: 10m
 # Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
-# preprocess; through-node filters (gemini/claude/bandwidth) run post-probe in
+# preprocess; through-node filters (gemini/claude/chatgpt/bandwidth) run post-probe in
 # the stable worker. Order is honoured within each stage.
 filters:
   - type: country
     provider: geofeed
     # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop
   - type: claude
+  - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: bandwidth # drop nodes slower than min_mbps (last: runs on the fewest nodes)
     test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
     min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
@@ -55,6 +56,9 @@ geoblock:
     timeout: 15s
     concurrency: 8
   claude:
+    timeout: 15s
+    concurrency: 8
+  chatgpt:
     timeout: 15s
     concurrency: 8
 deadcache:

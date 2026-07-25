@@ -137,9 +137,9 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	// The stable worker derives its allow set and through-node filters from the
 	// unified filters list, plus subscriptions, groups, the geoblock prober
-	// settings (gemini/claude), and the annotate list (baked into the bandwidth
-	// [SPD:] tag), so a change to any of them re-applies it; unrelated config
-	// edits must leave it running.
+	// settings (gemini/claude/chatgpt), and the annotate list (baked into the
+	// bandwidth [SPD:] tag), so a change to any of them re-applies it; unrelated
+	// config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
 		config.FiltersChanged(r.currentCfg, newCfg) ||

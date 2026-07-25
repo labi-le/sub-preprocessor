@@ -55,6 +55,12 @@ const (
 	defaultClaudeVersion     = "2023-06-01"
 	defaultClaudeTimeout     = 15 * time.Second
 	defaultClaudeConcurrency = 8
+	defaultChatGPTEndpoint   = "https://api.openai.com"
+	// The error code OpenAI returns on the compliance endpoint when it refuses
+	// the caller's egress; the accepted answer carries no such code.
+	defaultChatGPTMarker      = "unsupported_country"
+	defaultChatGPTTimeout     = 15 * time.Second
+	defaultChatGPTConcurrency = 8
 
 	// Free downloadable IP->country databases for the annotate provider chain.
 	// {yyyy-mm} in the dbip URL expands to the current UTC month at fetch time.
@@ -64,13 +70,15 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn, run per-node in preprocess) and
-// through-node filters (gemini/claude/bandwidth, run post-probe in stable);
-// which physical stage a type lands in is an implementation detail, not config.
+// through-node filters (gemini/claude/chatgpt/bandwidth, run post-probe in
+// stable); which physical stage a type lands in is an implementation detail,
+// not config.
 const (
 	FilterCountry   = "country"
 	FilterASN       = "asn"
 	FilterGemini    = "gemini"
 	FilterClaude    = "claude"
+	FilterChatGPT   = "chatgpt"
 	FilterBandwidth = "bandwidth"
 
 	ProviderGeofeed  = "geofeed"
@@ -144,10 +152,11 @@ type GeoConfig struct {
 //   - country: Provider (geofeed|asn), ExcludeGroups, ExcludeCountries
 //   - asn:     DenyPatterns
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/claude: selectors; prober params come from geoblock.{gemini,claude}
-//     and may be overridden per-entry (Marker/Model/Endpoint/Key*/Timeout/
-//     Concurrency for gemini; Marker/Endpoint/Version/Timeout/Concurrency for
-//     claude).
+//   - gemini/claude/chatgpt: selectors; prober params come from
+//     geoblock.{gemini,claude,chatgpt} and may be overridden per-entry
+//     (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
+//     Marker/Endpoint/Version/Timeout/Concurrency for claude;
+//     Marker/Endpoint/Timeout/Concurrency for chatgpt).
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
@@ -164,7 +173,7 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude optional overrides (fall back to geoblock.{gemini,claude}).
+	// gemini/claude/chatgpt overrides (fall back to the geoblock sub-block).
 	Marker   string `yaml:"marker"`
 	Model    string `yaml:"model"`
 	Endpoint string `yaml:"endpoint"`
@@ -196,13 +205,14 @@ type IPFilterSpec struct {
 }
 
 // NodeFilterSpec is a parsed through-node (post-probe, stable) filter derived
-// from the unified filters list. The gemini/claude configs are already merged
+// from the unified filters list. The API configs are already merged
 // over the geoblock defaults; bandwidth carries the entry's params.
 type NodeFilterSpec struct {
 	Type      string
 	Bandwidth BandwidthConfig
 	Gemini    GeminiConfig
 	Claude    ClaudeConfig
+	ChatGPT   ChatGPTConfig
 }
 
 // IPFilterSpecs returns the IP-stage filters (country/asn) in config order.
@@ -228,8 +238,8 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 	return specs
 }
 
-// NodeFilterSpecs returns the through-node filters (gemini/claude/bandwidth) in
-// config order.
+// NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
+// bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
 	for _, f := range cfg.Filters {
@@ -238,6 +248,8 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 			specs = append(specs, NodeFilterSpec{Type: FilterGemini, Gemini: f.mergedGemini(cfg.GeoBlock.Gemini)})
 		case FilterClaude:
 			specs = append(specs, NodeFilterSpec{Type: FilterClaude, Claude: f.mergedClaude(cfg.GeoBlock.Claude)})
+		case FilterChatGPT:
+			specs = append(specs, NodeFilterSpec{Type: FilterChatGPT, ChatGPT: f.mergedChatGPT(cfg.GeoBlock.ChatGPT)})
 		case FilterBandwidth:
 			specs = append(specs, NodeFilterSpec{Type: FilterBandwidth, Bandwidth: f.bandwidthConfig()})
 		}
@@ -292,6 +304,22 @@ func (f FilterConfig) mergedClaude(base ClaudeConfig) ClaudeConfig {
 	return base
 }
 
+func (f FilterConfig) mergedChatGPT(base ChatGPTConfig) ChatGPTConfig {
+	if f.Endpoint != "" {
+		base.Endpoint = f.Endpoint
+	}
+	if f.Marker != "" {
+		base.Marker = f.Marker
+	}
+	if f.Timeout != 0 {
+		base.Timeout = f.Timeout
+	}
+	if f.Concurrency != 0 {
+		base.Concurrency = f.Concurrency
+	}
+	return base
+}
+
 func (f FilterConfig) bandwidthConfig() BandwidthConfig {
 	return BandwidthConfig{
 		TestURL:     f.TestURL,
@@ -308,8 +336,8 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the URL-test (latency) prober params only. The through-node
-// filters (gemini/claude/bandwidth) and their params live in the top-level
-// filters list, not here.
+// filters (gemini/claude/chatgpt/bandwidth) and their params live in the
+// top-level filters list, not here.
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
 	Timeout        time.Duration `yaml:"timeout"`
@@ -424,12 +452,14 @@ type ASNConfig struct {
 }
 
 // GeoBlockConfig configures the per-node geo-block list: a SQLite TTL store of
-// node hosts that failed a through-node API reachability check (Gemini, Claude).
+// node hosts that failed a through-node API reachability check (Gemini, Claude,
+// ChatGPT).
 type GeoBlockConfig struct {
-	DBPath string        `yaml:"db_path"`
-	TTL    time.Duration `yaml:"ttl"`
-	Gemini GeminiConfig  `yaml:"gemini"`
-	Claude ClaudeConfig  `yaml:"claude"`
+	DBPath  string        `yaml:"db_path"`
+	TTL     time.Duration `yaml:"ttl"`
+	Gemini  GeminiConfig  `yaml:"gemini"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -488,6 +518,18 @@ type ClaudeConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
+// ChatGPTConfig configures the through-node OpenAI reachability check. It needs
+// no API key: the compliance endpoint refuses an unsupported egress with HTTP
+// 403 and code "unsupported_country" before any credential is involved. The
+// refusal tracks the egress, not the node's IP country -- nodes in supported
+// countries are refused too, which is the point of checking through the node.
+type ChatGPTConfig struct {
+	Endpoint    string        `yaml:"endpoint"`
+	Marker      string        `yaml:"marker"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
@@ -526,6 +568,19 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if cl.Concurrency == 0 {
 		cl.Concurrency = defaultClaudeConcurrency
+	}
+	cg := &g.ChatGPT
+	if cg.Endpoint == "" {
+		cg.Endpoint = defaultChatGPTEndpoint
+	}
+	if cg.Marker == "" {
+		cg.Marker = defaultChatGPTMarker
+	}
+	if cg.Timeout == 0 {
+		cg.Timeout = defaultChatGPTTimeout
+	}
+	if cg.Concurrency == 0 {
+		cg.Concurrency = defaultChatGPTConcurrency
 	}
 }
 
@@ -796,13 +851,13 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return cfg.validateCountryFilter(i, f)
 	case FilterASN:
 		return validateASNFilter(i, f)
-	case FilterGemini, FilterClaude:
+	case FilterGemini, FilterClaude, FilterChatGPT:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
 	default:
-		return fmt.Errorf("filters[%d]: unknown type %q (must be %q, %q, %q, %q or %q)",
-			i, f.Type, FilterCountry, FilterASN, FilterGemini, FilterClaude, FilterBandwidth)
+		return fmt.Errorf("filters[%d]: unknown type %q (must be %q, %q, %q, %q, %q or %q)",
+			i, f.Type, FilterCountry, FilterASN, FilterGemini, FilterClaude, FilterChatGPT, FilterBandwidth)
 	}
 }
 
@@ -926,6 +981,12 @@ func (g *GeoBlockConfig) validate() error {
 	if g.Claude.Concurrency < 0 {
 		return errors.New("geoblock.claude.concurrency must not be negative")
 	}
+	if g.ChatGPT.Timeout < 0 {
+		return errors.New("geoblock.chatgpt.timeout must not be negative")
+	}
+	if g.ChatGPT.Concurrency < 0 {
+		return errors.New("geoblock.chatgpt.concurrency must not be negative")
+	}
 	return nil
 }
 
@@ -1041,12 +1102,14 @@ func FiltersChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Filters, newCfg.Filters)
 }
 
-// ProberChanged reports whether the through-node prober settings (gemini/claude)
-// differ; the stable worker must be re-applied when they do. The store-only
-// geoblock fields (db_path, ttl) are covered by StoresChanged instead.
+// ProberChanged reports whether the through-node prober settings
+// (gemini/claude/chatgpt) differ; the stable worker must be re-applied when
+// they do. The store-only geoblock fields (db_path, ttl) are covered by
+// StoresChanged instead.
 func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
-		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude)
+		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
+		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT)
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at

@@ -34,18 +34,21 @@ type MihomoProber struct {
 	cfg       config.CheckConfig
 	bandwidth config.BandwidthConfig
 	expected  utils.IntRanges[uint16]
-	gemini    config.GeminiConfig
+	geo       config.GeoBlockConfig
 	geminiKey string
-	claude    config.ClaudeConfig
 	logger    zerolog.Logger
 }
 
+// NewMihomoProber takes the whole geoblock block rather than one parameter per
+// through-node API check: a new check then adds a GeoBlockConfig field and a
+// Controller.Apply switch case, both required anyway, instead of widening this
+// signature again. geminiKey stays separate because only Gemini needs a
+// credential and resolving it can fail, which is the caller's decision to log.
 func NewMihomoProber(
 	cfg config.CheckConfig,
 	bandwidth config.BandwidthConfig,
-	gemini config.GeminiConfig,
+	geo config.GeoBlockConfig,
 	geminiKey string,
-	claude config.ClaudeConfig,
 	logger zerolog.Logger,
 ) (*MihomoProber, error) {
 	expected, err := utils.NewUnsignedRanges[uint16](cfg.ExpectedStatus)
@@ -53,7 +56,7 @@ func NewMihomoProber(
 		return nil, fmt.Errorf("parse expected_status %q: %w", cfg.ExpectedStatus, err)
 	}
 
-	return &MihomoProber{cfg: cfg, bandwidth: bandwidth, expected: expected, gemini: gemini, geminiKey: geminiKey, claude: claude, logger: logger}, nil
+	return &MihomoProber{cfg: cfg, bandwidth: bandwidth, expected: expected, geo: geo, geminiKey: geminiKey, logger: logger}, nil
 }
 
 type delayAcc struct {

@@ -56,8 +56,9 @@ type FilterRequest struct {
 	Body []byte
 }
 
-// Blocklist reports whether a node host is currently geo-blocked (failed the
-// Gemini reachability check). Satisfied by *geoblock.Store; nil disables it.
+// Blocklist reports whether a node host is currently geo-blocked (failed a
+// through-node API reachability check). Satisfied by *geoblock.Store; nil
+// disables it.
 type Blocklist interface {
 	Blocked(host string) bool
 }

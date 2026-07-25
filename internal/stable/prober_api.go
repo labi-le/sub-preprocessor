@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,12 @@ func (m *MihomoProber) apiCheck(
 	out := make(map[string]APIOutcome, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// A zero/negative bound would make sem unbuffered; the acquire below runs on
+	// this goroutine before any worker exists to release it, so the fan-out would
+	// deadlock on the first proxy rather than run serially.
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	sem := make(chan struct{}, concurrency)
 	for _, px := range proxies {
 		wg.Add(1)
@@ -73,6 +80,13 @@ func (m *MihomoProber) apiCheck(
 	}
 	wg.Wait()
 	return out
+}
+
+// markerBlocked reports whether an API response body carries the service's
+// geo-block marker. An empty marker never matches, so a check with no
+// configured marker keeps every node instead of dropping all of them.
+func markerBlocked(body, marker string) bool {
+	return marker != "" && strings.Contains(body, marker)
 }
 
 // apiProbeOne dials target through px, issues a GET with header, and returns

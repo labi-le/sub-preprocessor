@@ -51,9 +51,11 @@ It exposes two modes.
 one curated list built from all `subscriptions.sources`. Each cycle fetches every
 source, runs it through the same geo/ASN filter, merges and dedupes by
 `server:port` (first source wins), relabels kept nodes to `<source>-NNN`, probes
-every node with an embedded Mihomo URL test, and keeps only those that pass all
-rounds under the latency threshold. The result is swapped in atomically; the last
-good list is kept if a cycle fails (`503` only until the first cycle completes).
+every node with an embedded Mihomo URL test, keeps only those that pass all
+rounds under the latency threshold, then runs the configured through-node
+filters (`gemini`/`claude`/`chatgpt`/`bandwidth`) on the survivors. The result is
+swapped in atomically; the last good list is kept if a cycle fails (`503` only
+until the first cycle completes).
 
 ## Important current design decisions
 
@@ -97,10 +99,10 @@ Important keys:
 - `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
 - `resolver.timeout`
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
-- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`bandwidth`) run post-probe in the stable worker only.
+- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`bandwidth`) run post-probe in the stable worker only.
 - `annotate` — ordered tag list (`tag: GEO|IP|ASN`; GEO/ASN take `providers:`, an ordered chain of `geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`; IP takes no providers) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. The retired singular `provider:` key is rejected at load with a rename error.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
-- `geoblock.gemini.*` / `geoblock.claude.*` (`endpoint`, `model`, `marker`, `api_key`/`key_file`/`key_var`, `timeout`, `concurrency`) — base params for the `gemini`/`claude` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` in `filters` (a filter entry may override these per-field)
+- `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` (`endpoint`, `marker`, `timeout`, `concurrency`; plus `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` in `filters` (a filter entry may override these per-field)
 - `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
@@ -122,8 +124,8 @@ Important keys:
 - `internal/subscription` — subscription fetch/normalize/parse (incl. `vmess://` decode)
 - `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
-- `internal/geoblock` — SQLite TTL list of node hosts that failed the Gemini reachability check
-- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node Gemini reachability gate, checker loop, holder
+- `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
+- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, bandwidth), checker loop, holder
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`

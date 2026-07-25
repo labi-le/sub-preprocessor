@@ -76,7 +76,7 @@ Every `subscriptions.interval` it:
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `bandwidth`) on the survivors,
+   `chatgpt` / `bandwidth`) on the survivors,
 9. atomically publishes the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
@@ -116,6 +116,9 @@ probe, routing real requests *through* each surviving node:
   skipped.
 - `claude` — same idea, keyless: the Anthropic endpoint answers 403
   `Request not allowed` from blocked regions. Also feeds the geoblock store.
+- `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
+  `unsupported_country` for an egress it refuses. Also feeds the geoblock
+  store.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
   dropped; kept nodes get a `[SPD:<n>M]` tag when annotation is enabled.
@@ -159,7 +162,7 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed the Gemini/Claude reachability check; dropped pre-DNS on both endpoints |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT); dropped pre-DNS on both endpoints |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
@@ -241,9 +244,9 @@ Key sections:
   `providers:` chain. The retired singular `provider:` key is rejected at
   load (`annotate[i]: "provider" was renamed to "providers" (ordered list)`)
   instead of being silently dropped.
-- `geoblock` — store path/TTL plus `gemini.*` and `claude.*` base params
-  (endpoint, model, marker, key, timeout, concurrency) for the through-node
-  filters.
+- `geoblock` — store path/TTL plus `gemini.*`, `claude.*` and `chatgpt.*`
+  base params (endpoint, model, marker, key, timeout, concurrency) for the
+  through-node filters.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline

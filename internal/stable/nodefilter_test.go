@@ -95,7 +95,7 @@ func TestBandwidthFilterAnnotatesVmess(t *testing.T) {
 func TestBuildNodeFilters(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeminiConfig{}, "KEY", config.ClaudeConfig{}, zerolog.Nop())
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "KEY", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,12 +104,15 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "claude", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
-	if len(fs) != 3 {
-		t.Fatalf("gemini + claude + bandwidth + unknown -> 3 filters, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
+	if len(fs) != 4 {
+		t.Fatalf("gemini + claude + chatgpt + bandwidth + unknown -> 4 filters, got %d", len(fs))
 	}
-	if fs[2].name() != "bandwidth" {
-		t.Fatalf("expected bandwidth filter third, got %q", fs[2].name())
+	if fs[2].name() != "chatgpt" {
+		t.Fatalf("expected chatgpt filter third, got %q", fs[2].name())
+	}
+	if fs[3].name() != "bandwidth" {
+		t.Fatalf("expected bandwidth filter fourth, got %q", fs[3].name())
 	}
 }
 
@@ -124,7 +127,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 
 	prober, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeminiConfig{}, "", config.ClaudeConfig{}, zerolog.Nop())
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
