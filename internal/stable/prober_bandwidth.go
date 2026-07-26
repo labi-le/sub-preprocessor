@@ -119,7 +119,7 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 	out := make(map[string]BandwidthOutcome, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, concurrency)
+	sem := fanoutSem(concurrency)
 	for _, px := range proxies {
 		wg.Add(1)
 		sem <- struct{}{}

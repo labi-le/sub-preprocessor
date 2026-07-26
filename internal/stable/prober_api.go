@@ -30,6 +30,18 @@ type APIOutcome struct {
 	Blocked   bool   // the response body carried the geo-block marker
 }
 
+// fanoutSem returns the semaphore bounding a through-node fan-out. The acquire
+// runs on the caller's goroutine before the worker that releases it exists, so
+// a zero or negative bound would deadlock on the first node rather than degrade
+// to serial execution. Config defaults and validation keep the real values >=1;
+// this guards hand-constructed probers.
+func fanoutSem(concurrency int) chan struct{} {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return make(chan struct{}, concurrency)
+}
+
 // apiCheck fans a through-node API GET out over proxies (bounded by
 // concurrency) and classifies each response with blocked. Every node logs a
 // debug outcome and the progress logger reports each completed 10% decade.
@@ -49,13 +61,7 @@ func (m *MihomoProber) apiCheck(
 	out := make(map[string]APIOutcome, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	// A zero/negative bound would make sem unbuffered; the acquire below runs on
-	// this goroutine before any worker exists to release it, so the fan-out would
-	// deadlock on the first proxy rather than run serially.
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	sem := make(chan struct{}, concurrency)
+	sem := fanoutSem(concurrency)
 	for _, px := range proxies {
 		wg.Add(1)
 		sem <- struct{}{}
