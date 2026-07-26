@@ -366,7 +366,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Filter drops by reason",
+      "title": "Through-node filter drops by reason (gemini/claude/chatgpt/bandwidth)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -628,6 +628,15 @@
           },
           "expr": "increase(stable_cycle_failures_total[1h])",
           "legendFormat": "failures/h"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_cycles_total[1h])",
+          "legendFormat": "cycles/h"
         }
       ]
     },
@@ -748,6 +757,139 @@
           "expr": "topk(15, stable_kept_country_nodes)",
           "legendFormat": "{{country}}",
           "instant": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "IP-stage filter drops by reason (preprocess, both endpoints)",
+      "description": "Per-node filters that run before probing: DNS resolution failure, country allow-list, ASN deny-patterns, and the geoblock store populated by the through-node gemini/claude/chatgpt checks.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (reason) (stable_source_dropped_nodes)",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Preprocess yield: nodes fetched vs surviving the IP-stage filters",
+      "description": "Raw nodes all sources yielded versus what reached the merge step. The gap is everything the IP-stage filters dropped.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% kept"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(stable_source_nodes_total)",
+          "legendFormat": "fetched"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(stable_source_kept_nodes)",
+          "legendFormat": "survived IP-stage"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * sum(stable_source_kept_nodes) / clamp_min(sum(stable_source_nodes_total), 1)",
+          "legendFormat": "% kept"
         }
       ]
     }
