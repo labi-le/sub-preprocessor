@@ -139,8 +139,8 @@ func TestNewProcessorSkipsUnreferencedGeoDBs(t *testing.T) {
 	opts := preprocess.Options{
 		PreloadedGeofeed: fakeCountryLookup{},
 		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
-		DBIP:             config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: time.Hour},
-		Registry:         config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: time.Hour},
+		DBIP:             config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+		Registry:         config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
 	}
 
 	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts)
@@ -169,8 +169,8 @@ func TestNewProcessorUsesPreloadedGeoDBs(t *testing.T) {
 		Annotate: []config.AnnotateSpec{
 			{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry}},
 		},
-		DBIP:                      config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: time.Hour},
-		Registry:                  config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: time.Hour},
+		DBIP:                      config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+		Registry:                  config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
 		PreloadedDBIP:             fakeCountryLookup{},
 		PreloadedDBIPLoadedAt:     dbipAt,
 		PreloadedRegistry:         fakeCountryLookup{},
@@ -204,8 +204,8 @@ func TestNewProcessorGeoDBLoadFailureDegrades(t *testing.T) {
 			{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderRegistry}},
 		},
 		// SSRF-unreachable loopback: both loads fail without touching the network.
-		DBIP:     config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: time.Hour},
-		Registry: config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: time.Hour},
+		DBIP:     config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+		Registry: config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
 	}
 
 	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts)

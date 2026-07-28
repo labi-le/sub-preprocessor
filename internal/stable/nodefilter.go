@@ -19,7 +19,15 @@ type NodeFilter interface {
 	name() string
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by
 	// node label. The checker owns the proxies' lifecycle; filters only read.
-	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport)
+	//
+	// rejected lists the Entry.Addr of survivors dropped on a verdict stable
+	// enough to be worth remembering for a few cycles — a service refusal, a
+	// speed below the floor. Transient outcomes (unreachable, cancelled,
+	// no outcomes at all) MUST NOT appear there. Where those addresses are
+	// remembered, and for how long, is the checker's decision, not the
+	// filter's: a filter that also persists to the long-lived geoblock store
+	// does so through its own store field and says so at construction.
+	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) (kept []Survivor, rejected []string, rep FilterReport)
 }
 
 // geminiChecker is the through-node Gemini capability of a Prober.
@@ -60,11 +68,13 @@ const (
 
 // apiFilter keeps only survivors that pass a through-node API check, and records
 // geo-blocked node hosts in the store (TTL) so later cycles skip them before
-// probing; a nil store skips that persistence (see the tidal filter). What
-// counts as blocked is the check's own verdict: a geo-block marker in the body
-// for gemini/claude/chatgpt, a refused request for tidal. A nil enabled func
-// means the check is always active (e.g. Anthropic geo-blocks before
-// authentication, so its check is keyless).
+// probing; a nil store skips that persistence (see the tidal filter). Either
+// way the refusal is returned to the checker as a short-lived reject, so the
+// next cycle does not repeat the check. What counts as blocked is the check's
+// own verdict: a geo-block marker in the body for gemini/claude/chatgpt, a
+// refused request for tidal. A nil enabled func means the check is always
+// active (e.g. Anthropic geo-blocks before authentication, so its check is
+// keyless).
 type apiFilter struct {
 	filterName string
 	enabled    func() bool
@@ -75,11 +85,11 @@ type apiFilter struct {
 
 func (f *apiFilter) name() string { return f.filterName }
 
-func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, []string, FilterReport) {
 	rep := FilterReport{Name: f.filterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	if f.enabled != nil && !f.enabled() {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter configured but disabled; skipping")
-		return survivors, rep
+		return survivors, nil, rep
 	}
 
 	subset := make([]mihomo.Proxy, 0, len(survivors))
@@ -91,28 +101,33 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter skipped: no outcomes")
-		return survivors, rep
+		return survivors, nil, rep
 	}
 	if ctx.Err() != nil {
 		// A cancelled check yields partial outcomes; don't record blocks or
 		// drop survivors based on them.
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter cancelled; keeping survivors unchanged")
-		return survivors, rep
+		return survivors, nil, rep
 	}
 
 	kept := make([]Survivor, 0, len(survivors))
+	var rejected []string
 	var blocked, unreachable int
 	for _, s := range survivors {
 		o := outcomes[s.Label]
 		switch {
 		case o.Blocked:
 			blocked++
+			rejected = append(rejected, s.Addr)
 			if f.store != nil {
 				if err := f.store.Block(o.Server); err != nil {
 					f.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
 				}
 			}
 		case !o.Reachable:
+			// Not cached: a node that answered the latency probe but not this
+			// endpoint is as likely to be a transient path failure as a
+			// standing one, and the next cycle is cheap enough to find out.
 			unreachable++
 		default:
 			kept = append(kept, s)
@@ -122,14 +137,16 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		Int("blocked", blocked).Int("unreachable", unreachable).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{"blocked": blocked, "unreachable": unreachable}
-	return kept, rep
+	return kept, rejected, rep
 }
 
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps (minMbps==0 disables the floor and keeps all
 // reachable nodes). It records Mbps on each kept survivor and, when annotate is
 // set, prepends a [SPD:<n>M] tag to the published name via the vmess-aware
-// relabel path. No store: bandwidth results are never persisted.
+// relabel path. No store: a speed measurement is far too volatile for the
+// host-keyed, month-long geoblock store, so a sub-floor node is only returned
+// to the checker as a short-lived reject.
 type bandwidthFilter struct {
 	minMbps  int
 	annotate bool
@@ -139,7 +156,7 @@ type bandwidthFilter struct {
 
 func (f *bandwidthFilter) name() string { return bandwidthFilterName }
 
-func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, []string, FilterReport) {
 	rep := FilterReport{Name: bandwidthFilterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	subset := make([]mihomo.Proxy, 0, len(survivors))
 	for _, s := range survivors {
@@ -150,22 +167,26 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter skipped: no outcomes")
-		return survivors, rep
+		return survivors, nil, rep
 	}
 	if ctx.Err() != nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter cancelled; keeping survivors unchanged")
-		return survivors, rep
+		return survivors, nil, rep
 	}
 
 	kept := make([]Survivor, 0, len(survivors))
+	var rejected []string
 	var slow, unreachable int
 	for _, s := range survivors {
 		o := outcomes[s.Label]
 		switch {
 		case !o.Reachable:
+			// Not cached: measure returns unreachable for a refused or reset
+			// transfer too, which is the endpoint's mood as much as the node's.
 			unreachable++
 		case f.minMbps > 0 && o.Mbps < f.minMbps:
 			slow++
+			rejected = append(rejected, s.Addr)
 		default:
 			s.Mbps = o.Mbps
 			if f.annotate {
@@ -178,7 +199,7 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 		Int("kept", len(kept)).Int("slow", slow).Int("unreachable", unreachable).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{"slow": slow, "unreachable": unreachable}
-	return kept, rep
+	return kept, rejected, rep
 }
 
 // annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses
@@ -258,8 +279,10 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 			// a far weaker signal than the explicit refusal markers the AI
 			// checks match. The store is keyed by host with no service
 			// dimension and lives for its whole TTL, so a transient CDN error
-			// or rate-limit would evict the node from every endpoint. Cheap to
-			// re-check each cycle instead.
+			// or rate-limit would evict the node from every endpoint. The
+			// refusal is still returned as a reject, so the checker's own
+			// short-lived, filter-scoped cache stops the re-testing churn
+			// without any of that blast radius.
 			filters = append(filters, &apiFilter{
 				filterName: tidalFilterName,
 				check:      td.TidalCheck,

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"domains.lst/sub-preprocessor/internal/metrics"
 	"domains.lst/sub-preprocessor/internal/stable"
@@ -100,4 +101,95 @@ func TestMetricsEmptyRender(t *testing.T) {
 	if strings.Contains(out, "\nstable_kept_nodes ") {
 		t.Errorf("no cycle gauges must render before the first Observe:\n%s", out)
 	}
+}
+
+// TestMetricsLabelValuesStayParseable pins RUNTIME-7. A label value can reach
+// the exposition from outside this service: with annotate disabled the pipeline
+// republishes upstream node names verbatim and stable derives the country label
+// from a [GEO:xx] tag inside such a name. Prometheus rejects a label value that
+// is not valid UTF-8 and fails on any escape sequence other than \\, \" and \n,
+// and either failure takes the WHOLE scrape down, not just the offending line.
+func TestMetricsLabelValuesStayParseable(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Kept: 1,
+		KeptCountries: map[string]int{
+			"\xff\xfe":  1, // invalid UTF-8: must be replaced, not escaped
+			"a\rb":      2, // carriage return: legal raw, and \r is NOT a legal escape
+			"q\"z":      3, // reserved: double quote
+			"back\\sla": 4, // reserved: backslash
+			"two\nline": 5, // reserved: line feed
+		},
+	})
+
+	out := render(t, m)
+	if !utf8.ValidString(out) {
+		t.Fatal("exposition is not valid UTF-8")
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if !strings.HasPrefix(line, "stable_kept_country_nodes{") {
+			continue
+		}
+		// Exactly two unescaped double quotes delimit the single label value,
+		// and every backslash starts an escape the parser knows.
+		if got := unescapedQuotes(line); got != 2 {
+			t.Errorf("line %q has %d unescaped quotes, want 2", line, got)
+		}
+		if bad, ok := badEscape(line); !ok {
+			t.Errorf("line %q carries escape sequence %q, which Prometheus rejects", line, bad)
+		}
+	}
+	for _, want := range []string{
+		`stable_kept_country_nodes{country="invalid_utf8"} 1`,
+		`stable_kept_country_nodes{country="q\"z"} 3`,
+		`stable_kept_country_nodes{country="back\\sla"} 4`,
+		`stable_kept_country_nodes{country="two\nline"} 5`,
+		// A carriage return is left verbatim on purpose: the parser copies it
+		// through, while \r would be an escape sequence it rejects.
+		"stable_kept_country_nodes{country=\"a\rb\"} 2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// A line feed must never reach the exposition raw: it would end the line.
+	if strings.Contains(out, "two\nline") {
+		t.Errorf("unescaped newline in label value:\n%s", out)
+	}
+}
+
+// unescapedQuotes counts the double quotes that are not preceded by an escaping
+// backslash — the delimiters a text-format parser splits a label value on.
+func unescapedQuotes(s string) int {
+	n, escaped := 0, false
+	for i := range len(s) {
+		switch {
+		case escaped:
+			escaped = false
+		case s[i] == '\\':
+			escaped = true
+		case s[i] == '"':
+			n++
+		}
+	}
+	return n
+}
+
+// badEscape reports the first escape sequence Prometheus's text parser would
+// reject (it accepts only \\, \" and \n), or ok=true when there is none.
+func badEscape(s string) (seq string, ok bool) {
+	for i := 0; i < len(s)-1; i++ {
+		if s[i] != '\\' {
+			continue
+		}
+		switch s[i+1] {
+		case '\\', '"', 'n':
+			i++ // consume the escaped byte so `\\` does not read as two escapes
+		default:
+			return s[i : i+2], false
+		}
+	}
+	return "", true
 }

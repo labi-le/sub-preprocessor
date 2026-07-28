@@ -405,3 +405,149 @@ func TestProcessBodyEnforcesNodeCeiling(t *testing.T) {
 		t.Fatalf("processed %d nodes, want %d", atLimit.Stats.Total, maxSubscriptionNodes)
 	}
 }
+
+// TestFilterIPv6LiteralIsNotADNSFailure pins the accepted half of PP-04. The
+// pipeline is IPv4-only, so an IPv6-literal node is refused before any lookup
+// happens — but it used to be booked as Stats.DNSDrop, telling the operator
+// that name resolution failed for a node that was never resolved at all.
+func TestFilterIPv6LiteralIsNotADNSFailure(t *testing.T) {
+	t.Parallel()
+
+	p := &Processor{
+		logger:   zerolog.Nop(),
+		resolver: resolver.New(time.Second, "", 0, 0),
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+		Body:             []byte("vless://u@[2001:db8::1]:8443#v6\nvless://u@192.0.2.7:443#v4\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.DNSDrop != 0 {
+		t.Errorf("dns_drop = %d, want 0: no name was ever looked up", stats.DNSDrop)
+	}
+	if stats.IPv6Drop != 1 {
+		t.Errorf("ipv6_drop = %d, want 1", stats.IPv6Drop)
+	}
+	if stats.Kept != 1 {
+		t.Errorf("kept = %d, want 1 (the v4 node)", stats.Kept)
+	}
+	if stats.Total != stats.Kept+stats.IPv6Drop {
+		t.Errorf("total %d must equal kept+drops %d", stats.Total, stats.Kept+stats.IPv6Drop)
+	}
+}
+
+// TestFilterCountsUnparseableLines pins PP-05. Stats.Unsupported used to guard
+// a structurally unreachable condition and was therefore always zero, while the
+// lines subscription.Parse actually refused were counted nowhere at all.
+func TestFilterCountsUnparseableLines(t *testing.T) {
+	t.Parallel()
+
+	p := &Processor{
+		logger:   zerolog.Nop(),
+		resolver: resolver.New(time.Second, "", 0, 0),
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+		Body: []byte("vless://u@192.0.2.7:443#ok\n" +
+			`<a href="https://panel.example/renew">renew</a>` + "\n" +
+			"vmess://!!!not-base64!!!\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.Unsupported != 2 {
+		t.Errorf("unsupported = %d, want 2", stats.Unsupported)
+	}
+	if stats.Total != 1 || stats.Kept != 1 {
+		t.Errorf("stats = %+v, want total=1 kept=1: refused lines are not nodes", stats)
+	}
+}
+
+// TestFilterHTMLErrorPageFails is PP-07 seen from the pipeline: a source that
+// starts answering with an error page must fail the whole call, not publish
+// markup as nodes.
+func TestFilterHTMLErrorPageFails(t *testing.T) {
+	t.Parallel()
+
+	p := &Processor{
+		logger:   zerolog.Nop(),
+		resolver: resolver.New(time.Second, "", 0, 0),
+	}
+
+	var buf bytes.Buffer
+	_, err := p.Filter(context.Background(), &buf, FilterRequest{
+		Body: []byte("<!DOCTYPE html>\n<html><body>\n" +
+			`<p>Token expired. <a href="https://panel.example/renew">Renew</a></p>` + "\n" +
+			"</body></html>\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err == nil {
+		t.Fatalf("an HTML page must not filter as a healthy subscription; buffer:\n%s", buf.String())
+	}
+	if buf.Len() != 0 {
+		t.Errorf("nothing may be published from an HTML page, got:\n%s", buf.String())
+	}
+}
+
+// TestCountryChainConsultsEveryLoadedDatabase pins PP-02. The country filter
+// used to judge nodes against the geofeed alone while the GEO tag resolved
+// through the whole provider chain, so a node DB-IP places in DE was dropped as
+// unplaceable by an exclusion the tag said did not apply to it.
+func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
+	t.Parallel()
+
+	// 203.0.113.9 is in the dbip database only; the geofeed cannot place it.
+	ip := netip.MustParseAddr("203.0.113.9")
+	dbipOnly := []geofeed.Range{{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}}}
+
+	newProcessor := func() *Processor {
+		return &Processor{
+			logger:          zerolog.Nop(),
+			resolver:        resolver.New(time.Second, "", 0, 0),
+			countryLookup:   geofeed.NewLookup(geoEntries(10)),
+			loadedAt:        time.Now(),
+			refreshInterval: 24 * time.Hour,
+			filters:         []Filter{NewGeofeedFilter()},
+			dbip: &geoDB{
+				name:     "dbip",
+				lookup:   geofeed.NewRangeLookup(dbipOnly),
+				loadedAt: time.Now(),
+				interval: 24 * time.Hour,
+			},
+		}
+	}
+	body := []byte("vless://u@203.0.113.9:443#n\n")
+
+	// An allow-list the dbip answer satisfies: the node must survive.
+	var kept bytes.Buffer
+	stats, err := newProcessor().Filter(context.Background(), &kept, FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.ParseAllowed("DE"),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.Kept != 1 {
+		t.Fatalf("kept = %d, want 1: dbip places this IP in DE", stats.Kept)
+	}
+
+	// A deny-list naming the same country must now reach it too.
+	var dropped bytes.Buffer
+	stats, err = newProcessor().Filter(context.Background(), &dropped, FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.All(),
+		DeniedCountries:  filter.ParseAllowed("DE"),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.Kept != 0 || stats.GeoDrop != 1 {
+		t.Fatalf("stats = %+v, want kept=0 geo_drop=1: exclude DE must reach a dbip-placed node", stats)
+	}
+}

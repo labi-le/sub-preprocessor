@@ -38,7 +38,21 @@ const (
 	errURLUserinfo     = "url userinfo is not allowed"
 )
 
-var errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
+const (
+	// maxWireExpansion bounds how far a compressed body may inflate relative
+	// to the bytes actually received. The geo datasets are text and land near
+	// 5:1; a decompression bomb is orders of magnitude past that.
+	maxWireExpansion = 20
+	// expansionFloor is the output size below which the ratio is not checked.
+	// The flate reader pulls its input in fixed blocks, so the start of any
+	// stream is legitimately far ahead of the wire bytes consumed so far.
+	expansionFloor = 1 << 20
+)
+
+var (
+	errStoppedRedirects = fmt.Errorf("stopped after %d redirects", maxRedirects)
+	errCompressionBomb  = errors.New("compressed body expands beyond the allowed ratio")
+)
 
 // StatusError reports a non-2xx HTTP response. Typed so callers can branch on
 // the status code with errors.As (dbip month fallback checks 404) instead of
@@ -210,25 +224,80 @@ func newHTTPClient(guardIPs bool) *http.Client {
 	}
 }
 
+// MaybeDecode wraps the response body in the reader for fileType. A gzip
+// stream is additionally guarded against decompression bombs: the caller's
+// size limit bounds the inflated body, which a ~200 KB crafted archive would
+// otherwise reach in full before anything noticed.
 func MaybeDecode(resp *http.Response, fileType FileType) (io.ReadCloser, error) {
 	if fileType == FileTypeRaw {
 		return resp.Body, nil
 	}
-	zr, errZip := gzip.NewReader(resp.Body)
+	wire := &wireCounter{r: resp.Body}
+	zr, errZip := gzip.NewReader(wire)
 	if errZip != nil {
 		return nil, fmt.Errorf("gzip reader: %w", errZip)
 	}
-	return zr, nil
+	return &expansionGuard{zr: zr, wire: wire}, nil
 }
 
+// wireCounter tallies the compressed bytes pulled off the network so the
+// expansion guard can compare inflated output against real input.
+type wireCounter struct {
+	r io.Reader
+	n int64
+}
+
+// Read must pass the underlying error through untouched: io.Copy compares it
+// against io.EOF with ==, so wrapping would turn a normal end-of-stream into a
+// copy failure. Same for the two methods on expansionGuard below.
+func (w *wireCounter) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	w.n += int64(n)
+	return n, err //nolint:wrapcheck // io.Reader contract, see above
+}
+
+// expansionGuard fails a gzip stream as soon as its output runs past
+// maxWireExpansion times the wire bytes consumed, so a bomb is cut off in the
+// first few MiB rather than at the caller's (much larger) decompressed cap.
+type expansionGuard struct {
+	zr   *gzip.Reader
+	wire *wireCounter
+	out  int64
+}
+
+func (g *expansionGuard) Read(p []byte) (int, error) {
+	n, err := g.zr.Read(p)
+	g.out += int64(n)
+	if g.out > expansionFloor && g.out > g.wire.n*maxWireExpansion {
+		return n, errCompressionBomb
+	}
+	return n, err //nolint:wrapcheck // io.Reader contract, see wireCounter.Read
+}
+
+func (g *expansionGuard) Close() error { return g.zr.Close() } //nolint:wrapcheck // io.Closer contract
+
 // reservedPrefixes are non-public ranges not covered by the netip.Addr
-// classification methods: CGN shared space, IETF protocol assignments,
-// benchmarking, and class E (incl. limited broadcast).
+// classification methods, which only know ::1, fc00::/7, fe80::/10, ff00::/8
+// and ::.
+//
+// The IPv6 half matters because Unmap normalises only the ::ffff:a.b.c.d form:
+// every other IPv4-in-IPv6 encoding would otherwise read as a public address
+// while a NAT64 gateway, 6to4 relay or Teredo tunnel on the host delivers the
+// embedded IPv4 target. Blanket-rejecting the globally routed 6to4 prefix
+// costs a legitimate 6to4-addressed host, which is the right default here.
 var reservedPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("100.64.0.0/10"), // CGN shared space
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // class E, incl. limited broadcast
+
+	netip.MustParsePrefix("::/96"),          // deprecated IPv4-compatible
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use
+	netip.MustParsePrefix("100::/64"),       // discard-only
+	netip.MustParsePrefix("2001::/32"),      // Teredo
+	netip.MustParsePrefix("2002::/16"),      // 6to4
+	netip.MustParsePrefix("fec0::/10"),      // deprecated site-local
 }
 
 func isPublicIP(ip netip.Addr) bool {

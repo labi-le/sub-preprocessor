@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // channelState records when a channel last proved productive (yielded a live
@@ -24,6 +26,11 @@ type state struct {
 	// BulkPruneAt is when a cycle first proposed deleting a large slice of the
 	// managed corpus and was refused; see confirmBulkPrune.
 	BulkPruneAt time.Time `json:"bulk_prune_at,omitzero"`
+	// loadFailed marks state that stands in for a file loadState could not
+	// read or parse. saveState refuses to write it: the real file may hold
+	// weeks of productive-channel memory that nothing can reconstruct, and a
+	// transient EACCES must not turn into permanent amnesia.
+	loadFailed bool
 }
 
 // record marks a channel productive as of now, preserving its first-seen time.
@@ -113,18 +120,38 @@ func (s *state) seeds() []string {
 	return out
 }
 
-// loadState reads the state file. A missing file or empty path yields empty
-// state; a malformed file is treated as empty (best-effort memory, never fatal).
-func loadState(path string) state {
+// loadState reads the state file. An empty path or a missing file yields empty
+// state and is normal (first cycle, or no state configured).
+//
+// A read or unmarshal failure is not normal and is not silently absorbed: the
+// file holds up to StateTTL of productive-channel memory, every entry of which
+// is also a depth-0 seed, so losing it shrinks the crawl surface to the
+// configured channels alone. Such a failure is logged and the returned state
+// is marked loadFailed, which makes saveState leave the file alone for the
+// rest of the cycle — a truncated file or an EACCES on the shared volume then
+// costs one degraded cycle instead of destroying the memory for good. A
+// genuinely corrupt file must be deleted by hand.
+func loadState(path string, logger zerolog.Logger) state {
 	st := state{Productive: map[string]channelState{}}
 	if path == "" {
 		return st
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Error().Err(err).Str("path", path).
+				Msg("read crawler state failed; crawling without remembered channels and leaving the file untouched")
+			st.loadFailed = true
+		}
 		return st
 	}
-	_ = json.Unmarshal(b, &st)
+	if unmarshalErr := json.Unmarshal(b, &st); unmarshalErr != nil {
+		// Unmarshal may have filled part of st before failing; discard it
+		// rather than crawl on a half-decoded map.
+		logger.Error().Err(unmarshalErr).Str("path", path).
+			Msg("crawler state file is malformed; leaving it untouched, delete it to start over")
+		return state{Productive: map[string]channelState{}, loadFailed: true}
+	}
 	if st.Productive == nil {
 		st.Productive = map[string]channelState{}
 	}
@@ -135,9 +162,10 @@ func loadState(path string) state {
 const stateFileMode os.FileMode = 0o600
 
 // saveState writes the state file atomically (fsynced temp + rename). A no-op
-// when path is empty.
+// when path is empty or when the state is the stand-in for a file that could
+// not be read this cycle (see state.loadFailed).
 func saveState(path string, st state) error {
-	if path == "" {
+	if path == "" || st.loadFailed {
 		return nil
 	}
 	b, err := json.MarshalIndent(st, "", "  ")

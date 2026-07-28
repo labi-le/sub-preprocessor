@@ -49,3 +49,41 @@ func TestProbeCancelledContextReturnsError(t *testing.T) {
 		t.Fatalf("result map must be discarded on cancellation, got %v", res)
 	}
 }
+
+func TestProbeZeroConcurrencyDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+
+	// NewMihomoProber is exported and validates nothing but expected_status, so
+	// a hand-built prober can carry Concurrency 0 — the residual case
+	// fanoutSem's doc comment names. runRound acquires the semaphore on the
+	// producer goroutine before any releasing worker exists, so an unbuffered
+	// channel blocks forever. The failure mode is a HANG, not a wrong value,
+	// hence the deadline + done channel: without them this wedges the suite.
+	p, err := NewMihomoProber(config.CheckConfig{
+		Rounds:         1,
+		Concurrency:    0,
+		Timeout:        50 * time.Millisecond,
+		TestURL:        "http://127.0.0.1:0/",
+		ExpectedStatus: "204",
+	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := vmessPayload(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Deliberately not the deadline context: the blocked send ignores
+		// cancellation, so only a bounded semaphore can let this return.
+		_, _ = p.Probe(context.Background(), payload)
+	}()
+
+	timeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	select {
+	case <-done:
+	case <-timeout.Done():
+		t.Fatal("Probe deadlocked with concurrency 0; the fan-out semaphore must be normalised to >= 1")
+	}
+}

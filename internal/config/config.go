@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/rs/zerolog"
@@ -153,7 +157,8 @@ type GeoConfig struct {
 
 // FilterConfig is one entry in the unified filters list. Type selects which
 // filter to build; the remaining fields are type-specific:
-//   - country: Provider (geofeed|asn), ExcludeGroups, ExcludeCountries
+//   - country: Provider (geofeed|asn); ExcludeGroups/ExcludeCountries, which
+//     are worker-only (see below)
 //   - asn:     DenyPatterns
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
 //   - gemini/claude/chatgpt/tidal: selectors; prober params come from
@@ -165,7 +170,11 @@ type GeoConfig struct {
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
-	// country / asn (IP-stage, preprocess)
+	// country / asn. Provider and DenyPatterns build the IP-stage chain in
+	// preprocess; ExcludeGroups/ExcludeCountries do NOT reach it -- they are
+	// read only by the stable worker, through Config.DeniedCountries, so on the
+	// on-demand GET / path the country constraint comes from the query params
+	// alone.
 	Provider         string   `yaml:"provider"`
 	ExcludeGroups    []string `yaml:"exclude_groups"`
 	ExcludeCountries []string `yaml:"exclude_countries"`
@@ -190,23 +199,23 @@ type FilterConfig struct {
 
 // AnnotateSpec is one entry in the ordered annotation tag list. Providers is
 // the ordered lookup chain for GEO and ASN (first provider that answers wins)
-// and must be empty for IP. Provider is the retired single-provider key, kept
-// only so a stale config fails loudly: the non-strict yaml load would
-// otherwise drop the unknown key and silently change behavior.
+// and must be empty for IP.
+//
+// The retired single-provider "provider" key needs no field here: the strict
+// decode in decodeStrict rejects it, and every future rename with it.
 type AnnotateSpec struct {
 	Tag       string   `yaml:"tag"`
 	Providers []string `yaml:"providers"`
-	Provider  string   `yaml:"provider"`
 }
 
 // IPFilterSpec is a parsed IP-stage (per-node, preprocess) filter derived from
-// the unified filters list.
+// the unified filters list. It carries only what preprocess consumes; the
+// configured country exclusions are the worker's input and travel through
+// Config.DeniedCountries instead.
 type IPFilterSpec struct {
-	Type             string
-	Provider         string
-	ExcludeGroups    []string
-	ExcludeCountries []string
-	DenyPatterns     []string
+	Type         string
+	Provider     string
+	DenyPatterns []string
 }
 
 // NodeFilterSpec is a parsed through-node (post-probe, stable) filter derived
@@ -228,10 +237,8 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 		switch f.Type {
 		case FilterCountry:
 			specs = append(specs, IPFilterSpec{
-				Type:             FilterCountry,
-				Provider:         f.Provider,
-				ExcludeGroups:    f.ExcludeGroups,
-				ExcludeCountries: f.ExcludeCountries,
+				Type:     FilterCountry,
+				Provider: f.Provider,
 			})
 		case FilterASN:
 			specs = append(specs, IPFilterSpec{
@@ -242,6 +249,32 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 		}
 	}
 	return specs
+}
+
+// DeniedCountries builds the stable worker's country deny-set: every code the
+// country filter entries exclude, directly or through a group. It is a deny-set
+// rather than the complement allow-set so a node whose IP no geo source covers
+// is kept rather than dropped for being unplaceable.
+//
+// This is the only consumer of filters[].exclude_groups /
+// filters[].exclude_countries: preprocess never sees them, so a change here
+// takes effect on /stable.txt only.
+func (cfg *Config) DeniedCountries() filter.CountrySet {
+	denied := filter.CountrySet{}
+	for _, f := range cfg.Filters {
+		if f.Type != FilterCountry {
+			continue
+		}
+		for _, code := range f.ExcludeCountries {
+			denied.Add(code)
+		}
+		for _, group := range f.ExcludeGroups {
+			for _, code := range cfg.Groups[group] {
+				denied.Add(code)
+			}
+		}
+	}
+	return denied
 }
 
 // NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
@@ -400,25 +433,39 @@ func (cfg *Config) SubscriptionsEnabled() bool {
 	return len(cfg.Subscriptions.Sources) > 0
 }
 
+// GeofeedConfig configures the published-geofeed IP->country sources. Like its
+// dbip/registry siblings, RefreshInterval is a pointer so an unset value
+// defaults (nil -> defaultGeoDBRefresh) while an explicit 0 is preserved and
+// means "load once, never refresh" (preprocess treats a non-positive interval
+// as disable). Before that distinction existed, omitting the key froze the
+// geofeed for the whole process lifetime.
 type GeofeedConfig struct {
 	Sources         []geofeed.Source `yaml:"sources"`
-	RefreshInterval time.Duration    `yaml:"refresh_interval"`
+	RefreshInterval *time.Duration   `yaml:"refresh_interval"`
+}
+
+func (g *GeofeedConfig) applyDefaults() {
+	if g.RefreshInterval == nil {
+		g.RefreshInterval = new(defaultGeoDBRefresh)
+	}
 }
 
 // DBIPConfig configures the DB-IP Country Lite IP->country database download
 // (annotate provider "dbip"). The literal {yyyy-mm} placeholder in URL expands
 // to the current UTC month at fetch time.
 type DBIPConfig struct {
-	URL             string        `yaml:"url"`
-	RefreshInterval time.Duration `yaml:"refresh_interval"`
+	URL string `yaml:"url"`
+	// RefreshInterval carries the same nil-defaults / explicit-0-disables
+	// semantics as GeofeedConfig.RefreshInterval.
+	RefreshInterval *time.Duration `yaml:"refresh_interval"`
 }
 
 func (d *DBIPConfig) applyDefaults() {
 	if d.URL == "" {
 		d.URL = defaultDBIPURL
 	}
-	if d.RefreshInterval == 0 {
-		d.RefreshInterval = defaultGeoDBRefresh
+	if d.RefreshInterval == nil {
+		d.RefreshInterval = new(defaultGeoDBRefresh)
 	}
 }
 
@@ -429,16 +476,16 @@ func (d *DBIPConfig) validate() error {
 // RegistryConfig configures the RIR delegated-extended IP->country database
 // downloads (annotate provider "registry"), one URL per RIR.
 type RegistryConfig struct {
-	URLs            []string      `yaml:"urls"`
-	RefreshInterval time.Duration `yaml:"refresh_interval"`
+	URLs            []string       `yaml:"urls"`
+	RefreshInterval *time.Duration `yaml:"refresh_interval"`
 }
 
 func (r *RegistryConfig) applyDefaults() {
 	if len(r.URLs) == 0 {
 		r.URLs = slices.Clone(defaultRegistryURLs)
 	}
-	if r.RefreshInterval == 0 {
-		r.RefreshInterval = defaultGeoDBRefresh
+	if r.RefreshInterval == nil {
+		r.RefreshInterval = new(defaultGeoDBRefresh)
 	}
 }
 
@@ -662,6 +709,30 @@ func (g GeminiConfig) APIKeyResolved() (string, error) {
 	return "", fmt.Errorf("gemini key_file %q: %s not found", g.KeyFile, g.KeyVar)
 }
 
+// decodeStrict decodes one YAML document into dst, rejecting any key the target
+// type does not declare. Every setting of this service is a YAML key, so a
+// non-strict decode makes a typo indistinguishable from an omission — and an
+// omission silently means the built-in default: `max_avg_ms` mistyped restores
+// the 1000ms cap over the tuned 800 with no signal anywhere.
+//
+// It is applied to the overlays too: their three-field source shape is a
+// contract the crawler already validates before writing (crawl.validatePrivate),
+// and an unknown key there would be a source the crawler meant to qualify and
+// the service silently read plain.
+//
+// An empty or comment-only document yields io.EOF from Decode with dst
+// untouched; that is not an error, because an absent-equivalent overlay is a
+// valid "no sources".
+func decodeStrict(name string, b []byte, dst any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("unmarshal %s: %w", name, err)
+	}
+
+	return nil
+}
+
 func Load(path string) (Config, error) {
 	b, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -669,8 +740,8 @@ func Load(path string) (Config, error) {
 	}
 
 	var cfg Config
-	if errUnmarshal := yaml.Unmarshal(b, &cfg); errUnmarshal != nil {
-		return Config{}, fmt.Errorf("unmarshal config: %w", errUnmarshal)
+	if errUnmarshal := decodeStrict("config", b, &cfg); errUnmarshal != nil {
+		return Config{}, errUnmarshal
 	}
 
 	if cfg.Log.Level == "" {
@@ -700,6 +771,7 @@ func Load(path string) (Config, error) {
 	if cfg.Geo.ASN.CacheTTL == 0 {
 		cfg.Geo.ASN.CacheTTL = defaultASNCacheTTL
 	}
+	cfg.Geo.Geofeed.applyDefaults()
 	cfg.Geo.DBIP.applyDefaults()
 	cfg.Geo.Registry.applyDefaults()
 	cfg.applyFilterDefaults()
@@ -722,11 +794,11 @@ func Load(path string) (Config, error) {
 	switch {
 	case readErr == nil:
 		var priv privateConfig
-		if unmarshalErr := yaml.Unmarshal(privBytes, &priv); unmarshalErr != nil {
-			return Config{}, fmt.Errorf("unmarshal private config: %w", unmarshalErr)
+		if unmarshalErr := decodeStrict("private config", privBytes, &priv); unmarshalErr != nil {
+			return Config{}, unmarshalErr
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
-		if validateErr := cfg.Subscriptions.Validate(); validateErr != nil {
+		if validateErr := cfg.Subscriptions.validateSources(); validateErr != nil {
 			return Config{}, fmt.Errorf("private config: %w", validateErr)
 		}
 	case errors.Is(readErr, fs.ErrNotExist):
@@ -749,8 +821,8 @@ func mergeSourcesOverlay(dir string, cfg *Config) error {
 	switch {
 	case err == nil:
 		var overlay privateConfig
-		if unmarshalErr := yaml.Unmarshal(b, &overlay); unmarshalErr != nil {
-			return fmt.Errorf("unmarshal sources config: %w", unmarshalErr)
+		if unmarshalErr := decodeStrict("sources config", b, &overlay); unmarshalErr != nil {
+			return unmarshalErr
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, overlay.Subscriptions.Sources...)
 	case errors.Is(err, fs.ErrNotExist):
@@ -796,9 +868,7 @@ func applyBandwidthDefaults(f *FilterConfig) {
 }
 
 func applyAnnotateDefaults(a *AnnotateSpec) {
-	// A set Provider is left alone (with empty Providers) so validation can
-	// reject the renamed key instead of masking it with a defaulted chain.
-	if len(a.Providers) > 0 || a.Provider != "" {
+	if len(a.Providers) > 0 {
 		return
 	}
 	switch a.Tag {
@@ -814,6 +884,9 @@ func (cfg *Config) Validate() error {
 		if _, err := zerolog.ParseLevel(cfg.Log.Level); err != nil {
 			return fmt.Errorf("log.level: %w", err)
 		}
+	}
+	if err := validateResolverAddress(cfg.Resolver.Address); err != nil {
+		return err
 	}
 	if err := cfg.validateNonNegative(); err != nil {
 		return err
@@ -845,8 +918,9 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
-// validateNonNegative rejects negative durations. The three cache TTLs are
-// pointers (nil-checked) because an explicit 0 is valid and means "disable".
+// validateNonNegative rejects negative durations. The cache TTLs and the three
+// geo refresh intervals are pointers (nil-checked) because an explicit 0 is
+// valid and means "disable".
 func (cfg *Config) validateNonNegative() error {
 	if cfg.Resolver.Timeout < 0 {
 		return errors.New("resolver.timeout must not be negative")
@@ -869,13 +943,13 @@ func (cfg *Config) validateNonNegative() error {
 	if cfg.DeadCache.TTL != nil && *cfg.DeadCache.TTL < 0 {
 		return errors.New("deadcache.ttl must not be negative")
 	}
-	if cfg.Geo.Geofeed.RefreshInterval < 0 {
+	if cfg.Geo.Geofeed.RefreshInterval != nil && *cfg.Geo.Geofeed.RefreshInterval < 0 {
 		return errors.New("geo.geofeed.refresh_interval must not be negative")
 	}
-	if cfg.Geo.DBIP.RefreshInterval < 0 {
+	if cfg.Geo.DBIP.RefreshInterval != nil && *cfg.Geo.DBIP.RefreshInterval < 0 {
 		return errors.New("geo.dbip.refresh_interval must not be negative")
 	}
-	if cfg.Geo.Registry.RefreshInterval < 0 {
+	if cfg.Geo.Registry.RefreshInterval != nil && *cfg.Geo.Registry.RefreshInterval < 0 {
 		return errors.New("geo.registry.refresh_interval must not be negative")
 	}
 	if cfg.Subscriptions.Interval < 0 {
@@ -886,6 +960,25 @@ func (cfg *Config) validateNonNegative() error {
 	}
 	if cfg.Subscriptions.Check.SourceTimeout < 0 {
 		return errors.New("subscriptions.check.source_timeout must not be negative")
+	}
+	return nil
+}
+
+// validateResolverAddress requires an explicit host:port -- the string
+// net.Dialer receives verbatim for every DNS query. A portless value dials
+// nothing, so every lookup fails and every node is dropped as a DNS failure:
+// a total outage produced by one missing ":53", previously accepted silently by
+// both startup and reload. An empty address keeps the system resolver.
+func validateResolverAddress(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("resolver.address %q: %w (want host:port, e.g. 1.1.1.1:53)", addr, err)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("resolver.address %q: must be host:port, e.g. 1.1.1.1:53", addr)
 	}
 	return nil
 }
@@ -986,13 +1079,9 @@ func (f FilterConfig) validateBandwidth(i int) error {
 	return nil
 }
 
-// validateAnnotate rejects unknown tags, the renamed provider key, and invalid
-// provider chains.
+// validateAnnotate rejects unknown tags and invalid provider chains.
 func (cfg *Config) validateAnnotate() error {
 	for i, a := range cfg.Annotate {
-		if a.Provider != "" {
-			return fmt.Errorf(`annotate[%d]: "provider" was renamed to "providers" (ordered list)`, i)
-		}
 		switch a.Tag {
 		case TagGEO, TagASN:
 			if len(a.Providers) == 0 {
@@ -1089,16 +1178,26 @@ func (s *SubscriptionsConfig) applyDefaults() {
 	}
 }
 
+// Validate checks the prober parameters unconditionally, then the merged source
+// list. The parameters are independent of where sources come from, and in this
+// deployment every source arrives from an overlay -- gating their validation on
+// a non-empty list meant a bad subscriptions.interval in config.yaml booted
+// clean and then failed EVERY reload from the moment the crawler wrote the
+// first source.
 func (s *SubscriptionsConfig) Validate() error {
-	if len(s.Sources) == 0 {
-		return nil
-	}
 	if s.Interval < minSubsInterval {
 		return fmt.Errorf("subscriptions.interval must be at least %v", minSubsInterval)
 	}
 	if err := s.Check.validate(); err != nil {
 		return err
 	}
+	return s.validateSources()
+}
+
+// validateSources checks the merged source list alone. Load re-runs it after
+// merging an overlay, so the error it blames on that overlay is always about
+// entries the overlay actually contributed.
+func (s *SubscriptionsConfig) validateSources() error {
 	seen := make(map[string]struct{}, len(s.Sources))
 	for _, src := range s.Sources {
 		if !sourceNameRe.MatchString(src.Name) {
@@ -1267,6 +1366,22 @@ func DBIPChanged(old, newCfg Config) bool {
 
 func RegistryChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Geo.Registry, newCfg.Geo.Registry)
+}
+
+// ResolverChanged / ASNChanged report whether the DNS or Cymru resolver
+// settings differ. The reloader carries the live resolver — and with it its
+// warm cache — across a rebuild when they don't, so the configured cache_ttl
+// can actually be reached instead of being reset on every reload.
+//
+// Both compare the whole block rather than the address/URL alone: the timeout
+// and the TTLs are baked into the resolver at construction, so carrying one
+// across a cache_ttl edit would silently keep serving the old TTL.
+func ResolverChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Resolver, newCfg.Resolver)
+}
+
+func ASNChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(old.Geo.ASN, newCfg.Geo.ASN)
 }
 
 func ListenChanged(old, newCfg Config) bool {

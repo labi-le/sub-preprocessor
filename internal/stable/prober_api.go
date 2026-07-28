@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -111,16 +110,16 @@ func apiProbeOne(
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	u, err := url.Parse(target)
-	if err != nil {
+	// One dial-address rule for both probe paths: hostPort defaults the port
+	// from the scheme, so an http:// endpoint override is dialled on 80
+	// instead of being pinned to 443 and timing every node out. It also
+	// refuses a target with no host, which must never reach the node.
+	addr, ok := hostPort(target)
+	if !ok {
 		return false, 0, ""
 	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
 	var meta mihomo.Metadata
-	if addrErr := meta.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port)); addrErr != nil {
+	if addrErr := meta.SetRemoteAddress(addr); addrErr != nil {
 		return false, 0, ""
 	}
 	conn, err := px.DialContext(tctx, &meta)

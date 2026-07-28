@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
 // loadYAML writes content verbatim as config.yaml in a fresh temp dir and loads
@@ -28,7 +29,10 @@ const geoBase = "geo:\n  geofeed:\n    sources:\n      - url: https://example.co
 const geoBaseGroups = geoBase + "groups:\n  geo_blocked: [RU, CN]\n"
 
 // TestIPFilterSpecsSplit proves the unified filters list splits into IP-stage
-// specs (country/asn) in config order, dropping the through-node types.
+// specs (country/asn) in config order, dropping the through-node types -- and
+// that the projection carries only what preprocess consumes. The country
+// exclusions are deliberately absent from IPFilterSpec: preprocess never read
+// them, so projecting them advertised an enforcement that did not exist.
 func TestIPFilterSpecsSplit(t *testing.T) {
 	t.Parallel()
 
@@ -43,11 +47,38 @@ func TestIPFilterSpecsSplit(t *testing.T) {
 
 	got := cfg.IPFilterSpecs()
 	want := []config.IPFilterSpec{
-		{Type: config.FilterCountry, Provider: config.ProviderGeofeed, ExcludeGroups: []string{"geo_blocked"}, ExcludeCountries: []string{"CN"}},
+		{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
 		{Type: config.FilterASN, Provider: config.ProviderASN, DenyPatterns: []string{"spammy"}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("IPFilterSpecs()=%+v, want %+v", got, want)
+	}
+}
+
+// TestDeniedCountries proves filters[].exclude_countries / exclude_groups have
+// exactly one consumer: the worker's deny-set. Group membership is expanded,
+// codes accumulate across country entries, and a non-country entry contributes
+// nothing even when it carries the keys.
+func TestDeniedCountries(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Groups: config.Groups{"geo_blocked": {"RU", "CN"}},
+		Filters: []config.FilterConfig{
+			{Type: config.FilterCountry, Provider: config.ProviderGeofeed, ExcludeGroups: []string{"geo_blocked"}},
+			{Type: config.FilterCountry, Provider: config.ProviderASN, ExcludeCountries: []string{"ir"}},
+			{Type: config.FilterClaude, ExcludeCountries: []string{"US"}},
+		},
+	}
+
+	denied := cfg.DeniedCountries()
+	for _, code := range []geofeed.CountryCode{{'R', 'U'}, {'C', 'N'}, {'I', 'R'}} {
+		if !denied.Has(code) {
+			t.Errorf("denied set must contain %s", code)
+		}
+	}
+	if denied.Has(geofeed.CountryCode{'U', 'S'}) {
+		t.Error("a non-country filter entry must contribute no exclusions")
 	}
 }
 
@@ -219,7 +250,7 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	if cfg.Geo.DBIP.URL != "https://download.db-ip.com/free/dbip-country-lite-{yyyy-mm}.csv.gz" {
 		t.Fatalf("dbip url default = %q", cfg.Geo.DBIP.URL)
 	}
-	if cfg.Geo.DBIP.RefreshInterval != 24*time.Hour {
+	if cfg.Geo.DBIP.RefreshInterval == nil || *cfg.Geo.DBIP.RefreshInterval != 24*time.Hour {
 		t.Fatalf("dbip refresh default = %v, want 24h", cfg.Geo.DBIP.RefreshInterval)
 	}
 	wantURLs := []string{
@@ -232,7 +263,7 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, wantURLs) {
 		t.Fatalf("registry urls default = %v", cfg.Geo.Registry.URLs)
 	}
-	if cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
+	if cfg.Geo.Registry.RefreshInterval == nil || *cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
 		t.Fatalf("registry refresh default = %v, want 24h", cfg.Geo.Registry.RefreshInterval)
 	}
 }
@@ -249,10 +280,10 @@ func TestLoadGeoDatabaseOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Geo.DBIP.URL != "https://mirror.example.com/db-{yyyy-mm}.csv.gz" || cfg.Geo.DBIP.RefreshInterval != time.Hour {
+	if cfg.Geo.DBIP.URL != "https://mirror.example.com/db-{yyyy-mm}.csv.gz" || *cfg.Geo.DBIP.RefreshInterval != time.Hour {
 		t.Fatalf("dbip override = %+v", cfg.Geo.DBIP)
 	}
-	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, []string{"https://mirror.example.com/delegated"}) || cfg.Geo.Registry.RefreshInterval != 2*time.Hour {
+	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, []string{"https://mirror.example.com/delegated"}) || *cfg.Geo.Registry.RefreshInterval != 2*time.Hour {
 		t.Fatalf("registry override = %+v", cfg.Geo.Registry)
 	}
 }
@@ -287,8 +318,8 @@ func TestLoadRejectsBadGeoDatabases(t *testing.T) {
 }
 
 // TestLoadAnnotateDefaultsAndValidation covers per-tag provider-chain
-// defaulting and tag/providers validation, including the provider->providers
-// rename rejection (non-strict yaml would silently drop the old key).
+// defaulting and tag/providers validation, plus the retired `provider` key,
+// which the strict decode now rejects by name instead of a hand-written check.
 func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	t.Parallel()
 
@@ -314,7 +345,7 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 		wantErr string
 	}{
 		"unknown tag":        {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
-		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", `"provider" was renamed to "providers"`},
+		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", "field provider not found in type config.AnnotateSpec"},
 		"unknown provider":   {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
 		"ip with providers":  {geoBase + "annotate:\n  - tag: IP\n    providers: [geofeed]\n", "tag IP takes no providers"},
 		"duplicate provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},

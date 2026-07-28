@@ -65,7 +65,9 @@ func NewReloader(
 // new Processor and atomically swaps it into the holder. Geofeed data (lookup +
 // LoadedAt) is carried over when geofeed.sources are unchanged, avoiding a
 // re-download; dbip/registry data is carried the same way when its config
-// block is unchanged. Any error keeps the previously applied settings.
+// block is unchanged, as are the DNS and ASN resolvers (with their caches)
+// when resolver.*/geo.asn.* are unchanged. Any error keeps the previously
+// applied settings.
 func (r *Reloader) Reload(ctx context.Context) {
 	newCfg, err := config.Load(r.path)
 	if err != nil {
@@ -74,7 +76,13 @@ func (r *Reloader) Reload(ctx context.Context) {
 		return
 	}
 
-	if config.Equal(r.currentCfg, newCfg) {
+	// Both must match for the reload to be genuinely redundant. After a failed
+	// ctl.Apply the two diverge: currentProc serves the new file while
+	// currentCfg still records the old one, so reverting the file to the old one
+	// would hit an Equal(currentCfg) fast path and leave the holder serving the
+	// rejected config — the revert is exactly what an operator reaches for after
+	// that error.
+	if config.Equal(r.currentCfg, newCfg) && config.Equal(r.currentProcCfg, newCfg) {
 		r.logger.Debug().Msg("config unchanged; skipping reload")
 		return
 	}
@@ -100,6 +108,16 @@ func (r *Reloader) Reload(ctx context.Context) {
 		lookup, at := r.currentProc.RegistryState()
 		opts.PreloadedRegistry = lookup
 		opts.PreloadedRegistryLoadedAt = at
+	}
+	// The DNS and Cymru caches are the only carried state whose value is the
+	// cache itself rather than a download: dropping them re-resolves every
+	// host and node IP on the next cycle, so their configured TTLs would never
+	// be reached under the crawler's hourly private.yaml rewrite.
+	if !config.ResolverChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedResolver = r.currentProc.ResolverState()
+	}
+	if !config.ASNChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedASN = r.currentProc.ASNState()
 	}
 
 	newProc, err := preprocess.NewProcessor(ctx, r.logger, opts)

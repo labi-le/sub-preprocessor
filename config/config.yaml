@@ -30,7 +30,7 @@ resolver:
 filters:
   - type: country
     provider: geofeed
-    # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop
+    # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop. NOTE: this key only ever affects /stable.txt -- on / the countries come from the query params
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: tidal # keyless reachability: keep a node only if api.tidal.com answers it. A refused egress (e.g. RU) dies at CloudFront with a 403 and no JSON. The reported country is NOT checked against Tidal's markets: that gates where a subscription can be bought, not where an existing one plays

@@ -3,6 +3,8 @@ package stable //nolint:testpackage // asserts the Controller's internal worker 
 import (
 	"bytes"
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +13,26 @@ import (
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 )
+
+// syncBuf collects log output from the worker's fetchSources fan-out, which
+// writes from several goroutines, while the test reads it back with the worker
+// still running. A bare bytes.Buffer races on both counts.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
 
 // emptyFilterer yields no nodes, so every cycle ends at the "no entries merged"
 // branch: instant, no network, no probing.
@@ -71,28 +93,51 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 	}
 }
 
-// TestApplyStopsWorkerWhenSourcesGone: an empty source list still has to tear
-// the worker down, otherwise it keeps polling a config the user removed.
-func TestApplyStopsWorkerWhenSourcesGone(t *testing.T) {
+// TestApplyKeepsWorkerWhenSourcesGone: an empty merged source list is refused,
+// not obeyed. Every source of this deployment arrives from an overlay, so an
+// empty list is nearly always a missing or truncated sources.yaml/private.yaml;
+// stopping the worker on it cancels the cycle in flight and leaves /stable.txt
+// frozen on its last publication with nothing behind it. The previous spec stays
+// live and the refusal is logged. With no worker running it stays a no-op, so a
+// genuine zero-source deployment still never starts one.
+func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 	t.Parallel()
 
+	var logBuf syncBuf
 	holder := NewHolder()
 	ctl := NewController(t.Context(), holder,
 		func() Filterer { return emptyFilterer{} },
-		nil, nil, zerolog.Nop(), nil)
+		nil, nil, zerolog.New(&logBuf), nil)
 	defer ctl.Stop()
 
 	if err := ctl.Apply(testControllerConfig(time.Hour, "alpha")); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if ctl.checker == nil {
+	running := ctl.checker
+	if running == nil {
 		t.Fatal("worker should be running")
 	}
 
 	if err := ctl.Apply(config.Config{}); err != nil {
 		t.Fatalf("Apply with no sources: %v", err)
 	}
-	if ctl.checker != nil {
-		t.Fatal("worker must be stopped when the source list empties")
+	if ctl.checker != running {
+		t.Fatal("an empty source list must leave the running worker in place")
+	}
+	if got := len(ctl.checker.spec.Load().Sources); got != 1 {
+		t.Fatalf("worker sees %d sources, want the previous 1", got)
+	}
+	if !strings.Contains(logBuf.String(), "no subscription sources") {
+		t.Errorf("the refusal must be logged, got %q", logBuf.String())
+	}
+
+	idle := NewController(t.Context(), holder,
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, zerolog.Nop(), nil)
+	if err := idle.Apply(config.Config{}); err != nil {
+		t.Fatalf("Apply with no sources and no worker: %v", err)
+	}
+	if idle.checker != nil {
+		t.Fatal("a zero-source config must not start a worker")
 	}
 }

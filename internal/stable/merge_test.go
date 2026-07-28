@@ -102,19 +102,27 @@ func TestMergeKeepsGeoTag(t *testing.T) {
 // TestMergeExtractsCountry: Entry.Country mirrors the carried [GEO:xx] tag so
 // the checker can report publication-time coverage and per-country counts
 // without re-parsing names (vmess hides tags inside base64 ps). "??" = the
-// chain resolved nothing; "" = annotation off.
+// chain resolved nothing; "" = annotation off, or a tag whose payload is not a
+// country code.
 func TestMergeExtractsCountry(t *testing.T) {
 	t.Parallel()
 
 	body := []byte("vless://u@unknown.example:443#[GEO:??][IP:1.2.3.4] a\n" +
 		"vless://u@known.example:443#[GEO:FI][IP:1.2.3.4] b\n" +
 		"vless://u@untagged.example:443#plain c\n" +
-		"vless://u@iptag.example:443#[IP:1.2.3.4][GEO:NL] d\n")
+		"vless://u@iptag.example:443#[IP:1.2.3.4][GEO:NL] d\n" +
+		// Source-authored junk in a GEO tag: with annotation off the upstream
+		// name reaches Merge verbatim, and Country becomes a Prometheus label
+		// value, so anything that is not two ASCII letters must be discarded
+		// rather than forwarded.
+		"vless://u@quote.example:443#[GEO:a\"] e\n" +
+		"vless://u@digit.example:443#[GEO:12] f\n" +
+		"vless://u@brace.example:443#[GEO:{}] g\n")
 	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
-	if len(entries) != 4 {
-		t.Fatalf("want 4 entries, got %d", len(entries))
+	if len(entries) != 7 {
+		t.Fatalf("want 7 entries, got %d", len(entries))
 	}
-	for i, want := range []string{"??", "FI", "", "NL"} {
+	for i, want := range []string{"??", "FI", "", "NL", "", "", ""} {
 		if got := entries[i].Country; got != want {
 			t.Errorf("entries[%d].Country = %q, want %q", i, got, want)
 		}

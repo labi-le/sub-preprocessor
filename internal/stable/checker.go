@@ -26,8 +26,12 @@ type Filterer interface {
 
 // Blocklist records nodes that failed a through-node API check; declared
 // locally to avoid importing geoblock. A nil Blocklist disables persistence.
+// Prune is part of the contract for the same reason DeadCache has one: a TTL
+// store that is only swept at process start grows for the whole uptime of a
+// container that restarts monthly at best.
 type Blocklist interface {
 	Block(host string) error
+	Prune() error
 }
 
 // DeadCache skips re-probing recently-dead nodes; a nil DeadCache disables it.
@@ -36,6 +40,15 @@ type DeadCache interface {
 	Block(key string) error
 	Prune() error
 }
+
+// rejectCacheTTL bounds how long a through-node filter's verdict is reused
+// without re-testing the node. Deliberately far shorter than the geoblock
+// store's TTL: "the node never answered" is stable, but "measured below the
+// floor" or "the service refused this egress right now" can reverse, so a
+// recovered node must come back within a handful of cycles (the shipped
+// interval is 1h). DeadSet's jitter keeps those expiries from landing as one
+// batch.
+const rejectCacheTTL = 6 * time.Hour
 
 // CheckerSpec is the config-derived half of a Checker: everything a config
 // reload can change. RunOnce reads it once per cycle, so a reload landing
@@ -64,7 +77,16 @@ type Checker struct {
 	// poke sent during a cycle is drained on the next loop and is then a no-op.
 	reload   chan struct{}
 	filterer func() Filterer
-	dead     DeadCache
+	// store is the same Blocklist the apiFilters write through. The checker
+	// holds it only to prune it once per cycle; it never writes to it.
+	store Blocklist
+	dead  DeadCache
+	// rejects remembers through-node filter verdicts, keyed by filter name and
+	// Entry.Addr, so tidal and bandwidth stop re-testing the same rejects every
+	// cycle. Separate from dead (different lifetime) and from store (the
+	// geoblock store is host-keyed, service-less and 30 days long, which is the
+	// wrong shape for a speed or CDN verdict). Never nil.
+	rejects  *DeadSet
 	holder   *Holder
 	logger   zerolog.Logger
 	reporter Reporter
@@ -73,6 +95,7 @@ type Checker struct {
 func NewChecker(
 	spec CheckerSpec,
 	filterer func() Filterer,
+	store Blocklist,
 	dead DeadCache,
 	holder *Holder,
 	logger zerolog.Logger,
@@ -81,7 +104,9 @@ func NewChecker(
 	c := &Checker{
 		reload:   make(chan struct{}, 1),
 		filterer: filterer,
+		store:    store,
 		dead:     dead,
+		rejects:  NewDeadSet(rejectCacheTTL),
 		holder:   holder,
 		logger:   logger,
 		reporter: reporter,
@@ -142,13 +167,14 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
-	probe, deadSkipped, ok := c.filterDead(entries)
+	probe, skipped, ok := c.filterDead(spec, entries)
 	if !ok {
 		c.reportError()
 		return nil
 	}
 
-	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", deadSkipped).
+	c.logger.Info().Int("nodes", len(probe)).
+		Int("dead_skipped", skipped.Dead).Int("reject_skipped", skipped.Reject).
 		Int("rounds", spec.Rounds).Msg("probing merged nodes")
 	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
@@ -166,6 +192,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	survivors, filterReports := c.applyFilters(ctx, spec, survivors)
+	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
 		c.reportError()
@@ -191,7 +218,8 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.logger.Info().
 		Int("sources_ok", len(bodies)).
 		Int("merged", len(entries)).
-		Int("dead_skipped", deadSkipped).
+		Int("dead_skipped", skipped.Dead).
+		Int("reject_skipped", skipped.Reject).
 		Int("probed", len(probe)).
 		Int("kept", len(survivors)).
 		Msg("stable list updated")
@@ -200,7 +228,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		SourcesOK:     len(bodies),
 		SourcesTotal:  len(spec.Sources),
 		Merged:        len(entries),
-		DeadSkipped:   deadSkipped,
+		DeadSkipped:   skipped.Total(),
 		Probed:        len(probe),
 		Kept:          len(survivors),
 		GeoUnknown:    geoUnknownCount(survivors),
@@ -246,7 +274,7 @@ func keptSpeeds(survivors []Survivor) []int {
 func geoUnknownCount(survivors []Survivor) int {
 	n := 0
 	for _, s := range survivors {
-		if s.Country == "??" {
+		if s.Country == countryUnknown {
 			n++
 		}
 	}
@@ -258,7 +286,7 @@ func geoUnknownCount(survivors []Survivor) int {
 func keptCountries(survivors []Survivor) map[string]int {
 	m := make(map[string]int)
 	for _, s := range survivors {
-		if s.Country != "" && s.Country != "??" {
+		if s.Country != "" && s.Country != countryUnknown {
 			m[s.Country]++
 		}
 	}
@@ -300,8 +328,12 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 	}
 	reports := make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {
-		var rep FilterReport
-		survivors, rep = f.apply(ctx, survivors, byLabel)
+		var (
+			rep      FilterReport
+			rejected []string
+		)
+		survivors, rejected, rep = f.apply(ctx, survivors, byLabel)
+		c.recordRejects(f.name(), rejected)
 		reports = append(reports, rep)
 	}
 
@@ -380,36 +412,62 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 			GeoDrop:      r.stats.GeoDrop,
 			ASNDrop:      r.stats.ASNDrop,
 			GeoBlockDrop: r.stats.GeoBlockDrop,
+			IPv6Drop:     r.stats.IPv6Drop,
 			Unsupported:  r.stats.Unsupported,
 		})
 	}
 	return bodies, reports
 }
 
-// filterDead drops nodes a recent cycle marked dead so the probe only re-tests
-// live/unknown nodes. It returns the nodes to probe, how many were skipped, and
-// false when nothing remains to probe (caller keeps the previous list).
-func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, ok bool) {
-	if c.dead == nil {
-		return entries, 0, true
-	}
+// skipCounts breaks down the merged nodes a cycle chose not to probe. Both
+// reasons feed one funnel gauge (merged = skipped + probed), but they are
+// counted apart so a log line says which cache is holding a node back.
+type skipCounts struct {
+	Dead   int // a recent probe found the node unreachable
+	Reject int // a through-node filter still in the chain rejected it
+}
+
+func (s skipCounts) Total() int { return s.Dead + s.Reject }
+
+// rejectKey scopes a cached filter verdict to the filter that produced it, so
+// dropping a filter from the config immediately stops its verdicts from
+// suppressing nodes — the alternative, a bare address key, would keep hiding
+// them for the rest of the TTL under a rule no longer in force.
+func rejectKey(filterName, addr string) string {
+	return filterName + "\x00" + addr
+}
+
+// filterDead drops nodes a recent cycle already ruled out so the probe only
+// re-tests live/unknown nodes: nodes the dead cache saw fail their probe, and
+// nodes a through-node filter in the CURRENT chain rejected for a stable
+// reason. It returns the nodes to probe, the skip breakdown, and false when
+// nothing remains to probe (caller keeps the previous list).
+func (c *Checker) filterDead(spec *CheckerSpec, entries []Entry) (probe []Entry, skipped skipCounts, ok bool) {
 	probe = make([]Entry, 0, len(entries))
+entry:
 	for _, e := range entries {
-		if c.dead.Blocked(e.Addr) {
-			deadSkipped++
+		if c.dead != nil && c.dead.Blocked(e.Addr) {
+			skipped.Dead++
 			continue
+		}
+		for _, f := range spec.Filters {
+			if c.rejects.Blocked(rejectKey(f.name(), e.Addr)) {
+				skipped.Reject++
+				continue entry
+			}
 		}
 		probe = append(probe, e)
 	}
 	if len(probe) == 0 {
-		c.logger.Warn().Int("dead_skipped", deadSkipped).Msg("all merged nodes recently dead; keeping previous stable list")
-		return nil, deadSkipped, false
+		c.logger.Warn().Int("dead_skipped", skipped.Dead).Int("reject_skipped", skipped.Reject).
+			Msg("every merged node was recently ruled out; keeping previous stable list")
+		return nil, skipped, false
 	}
-	return probe, deadSkipped, true
+	return probe, skipped, true
 }
 
 // recordDead caches nodes that returned no successful probe so later cycles
-// skip them, then prunes expired entries.
+// skip them.
 func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
 	if c.dead == nil {
 		return
@@ -419,7 +477,32 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
 			_ = c.dead.Block(e.Addr)
 		}
 	}
-	_ = c.dead.Prune()
+}
+
+// recordRejects remembers the nodes one through-node filter rejected, so the
+// next cycle skips them instead of paying for the same test again. An empty
+// address is dropped rather than stored: it is not a node key, and one such
+// entry would match every address-less lookup at once.
+func (c *Checker) recordRejects(filterName string, addrs []string) {
+	for _, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		_ = c.rejects.Block(rejectKey(filterName, addr))
+	}
+}
+
+// pruneCaches sheds expired entries from every TTL cache this cycle wrote to.
+// One call site on purpose: the geoblock store spent its life pruned only at
+// process start precisely because its cleanup lived nowhere in the cycle.
+func (c *Checker) pruneCaches() {
+	if c.dead != nil {
+		_ = c.dead.Prune()
+	}
+	_ = c.rejects.Prune()
+	if c.store != nil {
+		_ = c.store.Prune()
+	}
 }
 
 func entriesPayload(entries []Entry) []byte {

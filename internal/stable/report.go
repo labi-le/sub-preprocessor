@@ -9,9 +9,13 @@ type CycleReport struct {
 	SourcesOK    int
 	SourcesTotal int
 	Merged       int
-	DeadSkipped  int
-	Probed       int
-	Kept         int
+	// DeadSkipped counts merged nodes the cycle did not probe because a recent
+	// cycle already ruled them out — the dead cache, or a through-node filter
+	// still in the chain. Both together, so the funnel adds up:
+	// Merged = DeadSkipped + Probed.
+	DeadSkipped int
+	Probed      int
+	Kept        int
 	// GeoUnknown counts published nodes carrying a [GEO:??] tag: the
 	// annotation chain resolved no country for them.
 	GeoUnknown int
@@ -33,6 +37,7 @@ type SourceReport struct {
 	GeoDrop      int
 	ASNDrop      int
 	GeoBlockDrop int
+	IPv6Drop     int
 	Unsupported  int
 }
 

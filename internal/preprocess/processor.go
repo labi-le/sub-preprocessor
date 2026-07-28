@@ -63,6 +63,13 @@ type Options struct {
 	PreloadedRegistryLoadedAt time.Time
 	Blocklist                 Blocklist
 	FetchTimeout              time.Duration
+	// PreloadedResolver / PreloadedASN carry the live DNS and Cymru caches
+	// across a config reload. Both bake their timeouts and TTLs in at
+	// construction, so a caller must only pass them on when the whole
+	// resolver.* / geo.asn.* block is unchanged (config.ResolverChanged /
+	// config.ASNChanged); otherwise the new knobs would be silently ignored.
+	PreloadedResolver *resolver.Resolver
+	PreloadedASN      *asn.Resolver
 }
 
 type FilterRequest struct {
@@ -102,10 +109,14 @@ type Processor struct {
 	reloadFailures  int
 	refreshInterval time.Duration
 	resolver        *resolver.Resolver
-	filters         []Filter
-	blocklist       Blocklist
-	annotator       *annotator
-	fetchTimeout    time.Duration
+	// asnResolver is retained (beyond the filters and annotator that use it)
+	// only so ASNState can hand its warm cache to the next processor; nil
+	// when no filter or annotate chain needs ASN data.
+	asnResolver  *asn.Resolver
+	filters      []Filter
+	blocklist    Blocklist
+	annotator    *annotator
+	fetchTimeout time.Duration
 	// loadEntries fetches and parses the configured geofeed sources, reporting
 	// how many of them failed. It is a field, like geoDB.load, so reload tests
 	// can drive doReload without network access.
@@ -133,6 +144,10 @@ type geoDB struct {
 	load           func(ctx context.Context) (ranges []geofeed.Range, failed int, err error)
 }
 
+// Stats counts one Filter call. Total is the nodes the parser produced, and
+// Kept plus every Drop reason sums back to it. Unsupported sits outside that
+// identity on purpose: it counts URI-shaped input lines the parser refused, so
+// they never became nodes and were never in Total.
 type Stats struct {
 	Total        int
 	Kept         int
@@ -140,12 +155,25 @@ type Stats struct {
 	GeoDrop      int
 	ASNDrop      int
 	GeoBlockDrop int
-	Unsupported  int
+	// IPv6Drop counts nodes whose server is an IP literal this pipeline cannot
+	// use. Resolution, filtering and annotation are IPv4-only, so a v6 literal
+	// is refused before any lookup; booking it as DNSDrop (as it once was)
+	// reported a name-resolution fault that never happened.
+	IPv6Drop int
+	// Unsupported counts lines that contained "://" but did not parse as a
+	// node — a truncated body, a corrupt vmess payload, an HTML page. Not part
+	// of Total; see the type comment.
+	Unsupported int
 }
 
 // PipelineContext holds request-scoped state shared across the processing pipeline.
 type PipelineContext struct {
-	Buffer   *bytes.Buffer
+	Buffer *bytes.Buffer
+	// Lookup is the country-resolution chain the geofeed country filter judges
+	// nodes with: every in-memory country database this process loaded, tried
+	// in order. It is the same set of databases the GEO annotation resolves
+	// against, so the verdict and the published [GEO:xx] tag agree; see
+	// countryChain.
 	Lookup   geofeed.CountryLookup
 	Allowed  filter.CountrySet
 	Denied   filter.CountrySet
@@ -217,9 +245,20 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	}
 	needsASN, wantDBIP, wantRegistry := providerNeeds(opts)
 
+	// A carried-over resolver keeps its warm cache; the reloader only passes
+	// one on when the matching config block is unchanged, so the knobs baked
+	// into it still describe the live config. A carry is ignored when nothing
+	// references ASN data, so the annotator is not handed a dead provider.
 	var asnR *asn.Resolver
 	if needsASN {
-		asnR = asn.New(opts.ASNTimeout, opts.ASNCacheTTL)
+		if asnR = opts.PreloadedASN; asnR == nil {
+			asnR = asn.New(opts.ASNTimeout, opts.ASNCacheTTL)
+		}
+	}
+
+	dnsR := opts.PreloadedResolver
+	if dnsR == nil {
+		dnsR = resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL)
 	}
 
 	filters, errBuild := buildFilters(opts.IPFilters, asnR)
@@ -234,17 +273,18 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		loadedAt:        loadedAt,
 		retryAt:         retryAt,
 		refreshInterval: opts.RefreshInterval,
-		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
+		resolver:        dnsR,
 		blocklist:       opts.Blocklist,
 		fetchTimeout:    opts.FetchTimeout,
 		filters:         filters,
+		asnResolver:     asnR,
 		loadEntries: func(ctx context.Context) ([]geofeed.Entry, int, error) {
 			return geofeed.LoadAll(ctx, sources, logger)
 		},
 	}
 	if wantDBIP {
 		url := opts.DBIP.URL
-		p.dbip = newGeoDB(ctx, initLog, config.ProviderDBIP, opts.DBIP.RefreshInterval,
+		p.dbip = newGeoDB(ctx, initLog, config.ProviderDBIP, *opts.DBIP.RefreshInterval,
 			opts.PreloadedDBIP, opts.PreloadedDBIPLoadedAt,
 			func(ctx context.Context) ([]geofeed.Range, int, error) {
 				// One source: any failure is a total failure, never a partial.
@@ -257,7 +297,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	}
 	if wantRegistry {
 		urls := append([]string(nil), opts.Registry.URLs...)
-		p.registry = newGeoDB(ctx, initLog, config.ProviderRegistry, opts.Registry.RefreshInterval,
+		p.registry = newGeoDB(ctx, initLog, config.ProviderRegistry, *opts.Registry.RefreshInterval,
 			opts.PreloadedRegistry, opts.PreloadedRegistryLoadedAt,
 			func(ctx context.Context) ([]geofeed.Range, int, error) {
 				return geofeed.LoadRegistry(ctx, urls, logger)
@@ -292,8 +332,8 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	requestLog := p.logger.With().Str("url", label).Logger()
 	start := time.Now()
 
-	lookup := p.currentEntries(ctx)
 	p.maybeRefreshGeoDBs(ctx)
+	lookup := p.countryChain(ctx)
 
 	allowed := req.AllowedCountries
 	if filter.IsEmpty(allowed) {
@@ -349,6 +389,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		Int("geo_drop", stats.GeoDrop).
 		Int("asn_drop", stats.ASNDrop).
 		Int("geoblock_drop", stats.GeoBlockDrop).
+		Int("ipv6_drop", stats.IPv6Drop).
 		Int("unsupported", stats.Unsupported).
 		Dur("latency", time.Since(start)).
 		Msg("subscription processed")
@@ -372,6 +413,11 @@ var ErrTooManyNodes = fmt.Errorf("subscription has more than %d nodes", maxSubsc
 // pipeline. Bodies above maxSubscriptionNodes are rejected before any lookup.
 // It returns the context error when the request was cancelled so a truncated
 // node list is never served as success.
+//
+// Lines the parser refused are booked as Stats.Unsupported. They are the only
+// evidence that a source has started answering with something that is not a
+// node list, and they are deliberately kept out of Stats.Total so a body of
+// pure junk still trips Filter's "no supported URI nodes found".
 func (p *Processor) processBody(ctx context.Context, body []byte, pctx *PipelineContext) error {
 	// Checked up front: the ceiling has to bite before the first lookup, or a
 	// hostile body has already cost maxSubscriptionNodes serial DNS resolutions
@@ -379,7 +425,7 @@ func (p *Processor) processBody(ctx context.Context, body []byte, pctx *Pipeline
 	if tooManyNodes(body) {
 		return ErrTooManyNodes
 	}
-	subscription.Parse(body, func(node subscription.Node) bool {
+	pctx.Stats.Unsupported += subscription.Parse(body, func(node subscription.Node) bool {
 		select {
 		case <-ctx.Done():
 			return false
@@ -417,35 +463,39 @@ func countNodes(body []byte, limit int) int {
 	return count
 }
 
-// resolveNode returns the IPv4 addresses for a node's server. Bare IPs are
+// resolveNode returns the IPv4 addresses for a node's server and reports
+// whether the server's address family is supported at all. Bare IPs are
 // handled inline without touching the resolver cache: the address is written
 // into pctx.addrScratch (no allocation) and returned directly, since a bare IP
 // needs no DNS and the caller copies the result into pctx.Scratch before the
-// next node. Hostnames go through the DNS resolver and are memoized in
-// pctx.Resolved with an isolated copy so cached resolver slices are never
-// aliased into request-local state.
-func (p *Processor) resolveNode(ctx context.Context, server string, pctx *PipelineContext) []netip.Addr {
-	if ips, attempted := pctx.Resolved[server]; attempted {
-		return ips
+// next node. A literal that is not IPv4 is refused with supported=false — the
+// rest of the pipeline (resolver, filters, annotator) is IPv4-only, and the
+// caller must not report that refusal as a name-resolution failure. Hostnames
+// go through the DNS resolver and are memoized in pctx.Resolved with an
+// isolated copy so cached resolver slices are never aliased into request-local
+// state.
+func (p *Processor) resolveNode(ctx context.Context, server string, pctx *PipelineContext) (ips []netip.Addr, supported bool) {
+	if cached, attempted := pctx.Resolved[server]; attempted {
+		return cached, true
 	}
 	// Bare IPs skip DNS, the cache, and the request map: re-parsing on repeat
 	// is allocation-free, so no memoization is needed.
 	if addr, err := netip.ParseAddr(server); err == nil {
 		if !addr.Is4() {
-			return nil
+			return nil, false
 		}
 		pctx.addrScratch[0] = addr
-		return pctx.addrScratch[:1]
+		return pctx.addrScratch[:1], true
 	}
-	ips, resolveErr := p.resolver.Resolve(ctx, server)
-	if resolveErr != nil || len(ips) == 0 {
+	resolved, resolveErr := p.resolver.Resolve(ctx, server)
+	if resolveErr != nil || len(resolved) == 0 {
 		pctx.Resolved[server] = []netip.Addr{}
-		return nil
+		return nil, true
 	}
 	// Isolate the per-request map from the resolver cache: the copy guarantees
 	// request-local code never mutates or aliases a cached resolver slice.
-	pctx.Resolved[server] = append([]netip.Addr(nil), ips...)
-	return pctx.Resolved[server]
+	pctx.Resolved[server] = append([]netip.Addr(nil), resolved...)
+	return pctx.Resolved[server], true
 }
 
 func (p *Processor) processNode(ctx context.Context, node subscription.Node, pctx *PipelineContext) {
@@ -455,16 +505,16 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		return
 	default:
 	}
-	if node.Server == "" || node.Port == "" {
-		pctx.Stats.Unsupported++
-		return
-	}
 	if p.blocklist != nil && p.blocklist.Blocked(node.Server) {
 		pctx.Stats.GeoBlockDrop++
 		return
 	}
 
-	cached := p.resolveNode(ctx, node.Server, pctx)
+	cached, supported := p.resolveNode(ctx, node.Server, pctx)
+	if !supported {
+		pctx.Stats.IPv6Drop++
+		return
+	}
 	if len(cached) == 0 {
 		pctx.Stats.DNSDrop++
 		return
@@ -522,6 +572,52 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	}
 
 	return lookup
+}
+
+// countryChain returns the lookup the country filter judges nodes with: the
+// geofeed, then every downloadable database this process actually loaded, in
+// the same geofeed -> dbip -> registry precedence the annotate chain uses.
+//
+// Filtering and annotation ask one question — "which country is this IP in?" —
+// and used to answer it from different sources: the filter saw the geofeed
+// alone, so a node DB-IP places in DE was geo-dropped as unknown while the tag
+// it would have been published with said [GEO:DE]. The databases are already
+// in memory (the lazy-build rule in NewProcessor downloads them only when an
+// annotate entry names them), so consulting them costs a binary search on the
+// IPs the geofeed misses and nothing else.
+//
+// The asn provider stays out: it is a per-IP Cymru round trip, not a local
+// table, and the config exposes it as an explicit `{type: country, provider:
+// asn}` filter for operators who want it. A GEO tag chain ending in asn can
+// therefore still name a country the filter treated as unknown.
+//
+//nolint:ireturn // returns the CountryLookup interface, like currentEntries
+func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
+	lookup := p.currentEntries(ctx)
+	if p.dbip == nil && p.registry == nil {
+		return lookup
+	}
+	chain := chainLookup{lookup}
+	if p.dbip != nil {
+		chain = append(chain, p.dbip.snapshot())
+	}
+	if p.registry != nil {
+		chain = append(chain, p.registry.snapshot())
+	}
+	return chain
+}
+
+// chainLookup resolves an IP against several country databases in order and
+// returns the first non-zero answer.
+type chainLookup []geofeed.CountryLookup
+
+func (c chainLookup) LookupCountry(ip netip.Addr) geofeed.CountryCode {
+	for _, l := range c {
+		if country := geofeed.LookupCountry(l, ip); country != (geofeed.CountryCode{}) {
+			return country
+		}
+	}
+	return geofeed.CountryCode{}
 }
 
 // swapRefusal reports why a freshly loaded geo database must not replace the
@@ -646,6 +742,15 @@ func (p *Processor) RegistryState() (geofeed.CountryLookup, time.Time) {
 	}
 	return p.registry.state()
 }
+
+// ResolverState and ASNState expose the live DNS and Cymru resolvers so a
+// reload can hand their warm caches to the replacement processor. Both caches
+// are internally locked, so the returned resolver stays safe to share with the
+// outgoing processor while requests it already accepted drain.
+func (p *Processor) ResolverState() *resolver.Resolver { return p.resolver }
+
+// ASNState returns nil when no filter or annotate chain needed ASN data.
+func (p *Processor) ASNState() *asn.Resolver { return p.asnResolver }
 
 // maybeRefreshGeoDBs opportunistically refreshes the built geo databases on
 // the request path, the same trigger point as the geofeed refresh in
@@ -796,6 +901,6 @@ func (db *geoDB) doReload(ctx context.Context, logger zerolog.Logger) {
 }
 
 func FormatStats(stats Stats) string {
-	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d geoblock_drop=%d unsupported=%d",
-		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.GeoBlockDrop, stats.Unsupported)
+	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d geoblock_drop=%d ipv6_drop=%d unsupported=%d",
+		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.GeoBlockDrop, stats.IPv6Drop, stats.Unsupported)
 }

@@ -73,6 +73,45 @@ func TestParseVmessMissingPsFallsBackToServer(t *testing.T) {
 	}
 }
 
+// TestParseVmessMissingPsUsesFragment pins PP-08: a share link that omits "ps"
+// and carries its label in the URI fragment is naming the node there. Before
+// the fallback the fragment was stripped by decodeVmessJSON and the node was
+// published under its bare host.
+func TestParseVmessMissingPsUsesFragment(t *testing.T) {
+	t.Parallel()
+
+	got, count := parseOne(t, vmessLine(`{"add":"srv.example","port":"443"}`)+"#Tokyo Relay")
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Name != "Tokyo Relay" {
+		t.Errorf("name: got %q, want the fragment", got.Name)
+	}
+
+	// An empty fragment is not a name; the server fallback still applies.
+	got, count = parseOne(t, vmessLine(`{"add":"srv.example","port":"443"}`)+"#")
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Name != "srv.example" {
+		t.Errorf("blank-fragment name: got %q, want srv.example", got.Name)
+	}
+}
+
+// TestParseVmessPsWinsOverFragment: the payload stays authoritative, so a link
+// carrying both keeps the "ps" value.
+func TestParseVmessPsWinsOverFragment(t *testing.T) {
+	t.Parallel()
+
+	got, count := parseOne(t, vmessLine(`{"add":"srv.example","port":"443","ps":"Payload Name"}`)+"#Stale Fragment")
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Name != "Payload Name" {
+		t.Errorf("name: got %q, want Payload Name", got.Name)
+	}
+}
+
 func TestParseVmessMalformedSkipped(t *testing.T) {
 	t.Parallel()
 

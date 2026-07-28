@@ -61,6 +61,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 	var inline []string
 	visited := map[string]bool{}
 	discovered := 0
+	var cursors cursorStats
 
 	seeds := c.buildSeeds(st)
 	if len(seeds) == 0 {
@@ -91,12 +92,13 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 		}
 		visited[n.channel] = true
 
-		for _, ch := range c.scanChannel(ctx, n, st, live, &inline) {
+		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors) {
 			if !visited[ch] {
 				queue = append(queue, scanNode{channel: ch, depth: n.depth + 1})
 			}
 		}
 	}
+	c.reportCursors(cursors)
 	return live, inline
 }
 
@@ -115,7 +117,7 @@ func (c *Crawler) buildSeeds(st *state) map[string]bool {
 	for _, s := range c.opts.Channels {
 		addSeed(s)
 	}
-	for _, s := range loadChannels(c.opts.ChannelsPath, c.logger) {
+	for _, s := range loadChannels(c.opts.ChannelsPath, c.logger).Channels {
 		addSeed(s)
 	}
 	for _, slug := range st.seeds() {
@@ -126,29 +128,51 @@ func (c *Crawler) buildSeeds(st *state) map[string]bool {
 	return seeds
 }
 
+// cursorStats aggregates page-cursor outcomes over a cycle. Pagination hangs
+// off one undocumented t.me markup attribute (cursorRe); if it is renamed,
+// pageCursor returns "" everywhere, every channel silently degrades to a
+// single page, and nothing in the per-channel log distinguishes that from a
+// channel that genuinely has one page. Only the fleet-wide ratio does.
+type cursorStats struct {
+	// paged counts channels that returned a page and still had budget for
+	// another, i.e. channels whose cursor actually mattered.
+	paged int
+	// lost counts how many of those produced no cursor.
+	lost int
+}
+
+// cursorAlarmMin is how many cursor-relevant channels a cycle must have
+// scraped before a 100%-loss ratio is evidence of a markup break rather than a
+// handful of short channels.
+const cursorAlarmMin = 5
+
+// reportCursors warns when not one channel in the cycle yielded a page cursor.
+// A single channel stopping at one page is normal; every channel doing so is
+// the selector breaking.
+func (c *Crawler) reportCursors(cs cursorStats) {
+	if cs.paged < cursorAlarmMin || cs.lost < cs.paged {
+		return
+	}
+	c.logger.Warn().Int("channels", cs.paged).
+		Msg("no channel yielded a page cursor; t.me markup likely changed and every channel was scraped one page deep")
+}
+
 // scanChannel scrapes one channel, classifies its candidate URLs into live,
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string) []string {
-	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n))
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string, cs *cursorStats) []string {
+	pages, cursorLost := c.scrapeChannel(ctx, n.channel, c.pagesFor(n))
+	if cursorLost {
+		cs.paged++
+		cs.lost++
+	} else if len(pages) > 1 {
+		cs.paged++
+	}
 	if len(pages) == 0 {
 		return nil
 	}
 
-	cand := map[string]struct{}{}
-	for _, p := range pages {
-		for _, raw := range extractURLs(p) {
-			if candidate(raw) {
-				cand[raw] = struct{}{}
-			}
-		}
-		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = append(*inline, extractInlineNodes(p)...)
-			if len(*inline) > maxInlineAccum {
-				*inline = (*inline)[:maxInlineAccum] // hard-cap a large single-page burst
-			}
-		}
-	}
+	cand := c.harvestPages(pages, inline)
 	found, _ := c.classifyAll(ctx, keys(cand))
 	for u := range found {
 		// First discoverer wins: BFS visits seeds before discovered channels,
@@ -161,7 +185,7 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 		st.record(n.channel, time.Now())
 	}
 	c.logger.Info().Str("channel", n.channel).Int("depth", n.depth).
-		Int("subs", len(found)).Msg("scanned channel")
+		Int("pages", len(pages)).Int("subs", len(found)).Msg("scanned channel")
 
 	// Thematic gate: expand into referenced channels only from seeds or from
 	// channels that actually produced subscriptions.
@@ -171,11 +195,37 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	return extractChannels(pages, n.channel)
 }
 
+// harvestPages pulls the subscription candidates out of a channel's scraped
+// pages and, in the same pass, accumulates its inline nodes. The inline
+// accumulator is cycle-wide and capped: one prolific channel must not spend the
+// whole budget, and a single page can overshoot the cap in one append.
+func (c *Crawler) harvestPages(pages []string, inline *[]string) map[string]struct{} {
+	cand := map[string]struct{}{}
+	for _, p := range pages {
+		for _, raw := range extractURLs(p) {
+			if candidate(raw) {
+				cand[raw] = struct{}{}
+			}
+		}
+		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
+			*inline = append(*inline, extractInlineNodes(p)...)
+			if len(*inline) > maxInlineAccum {
+				*inline = (*inline)[:maxInlineAccum]
+			}
+		}
+	}
+	return cand
+}
+
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
 // channel, walking backward via the ?before= cursor. Fetches are sequential,
 // which naturally rate-limits the crawler against t.me.
-func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) []string {
-	var out []string
+//
+// cursorLost reports that the walk stopped only because a fetched page carried
+// no cursor while the page budget still had room — the one outcome that is
+// indistinguishable from a short channel per-channel but diagnostic in
+// aggregate; see cursorStats.
+func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) (out []string, cursorLost bool) {
 	before := ""
 	for range pages {
 		u := "https://t.me/s/" + channel
@@ -185,19 +235,19 @@ func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) 
 		page, err := c.client.page(ctx, u)
 		if err != nil {
 			c.logger.Warn().Err(err).Str("channel", channel).Msg("channel page fetch failed")
-			break
+			return out, false
 		}
 		if page == "" {
-			break
+			return out, false
 		}
 		out = append(out, page)
 		cur := pageCursor(page)
 		if cur == "" {
-			break
+			return out, len(out) < pages
 		}
 		before = cur
 	}
-	return out
+	return out, false
 }
 
 // pagesFor returns how many pages to fetch for a node: the full Pages budget for

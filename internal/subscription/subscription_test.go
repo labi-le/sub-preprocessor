@@ -126,17 +126,92 @@ func TestParseFragmentUsesFirstHash(t *testing.T) {
 	}
 }
 
-func TestParseHashBeforeSchemeIsNotFragment(t *testing.T) {
+// TestParseRejectsProseSchemes pins PP-07: the text before the first "://" must
+// have the RFC 3986 scheme shape. Before the check, every one of these lines
+// became a Node whose Scheme was the surrounding prose and whose Server was the
+// URL's host, so an HTML error page or a Clash YAML document parsed as a
+// perfectly healthy subscription.
+func TestParseRejectsProseSchemes(t *testing.T) {
 	t.Parallel()
 
-	// Lines starting with '#' are skipped by the iterator, so exercise a
-	// '#' that sits before the scheme mid-line instead.
-	node := mustParseOne(t, "x#note vless://uuid@example.com:443")
-	if node.FragmentIdx != -1 {
-		t.Errorf("fragmentIdx: got %d, want -1", node.FragmentIdx)
+	lines := []string{
+		`<a href="https://example.com/login">Sign in</a>`,
+		"- url: https://example.com/sub",
+		"see https://example.com",
+		"x#note vless://uuid@example.com:443",
+		"://example.com",
 	}
-	if node.Name != "example.com" {
-		t.Errorf("name: got %q, want server fallback %q", node.Name, "example.com")
+	for _, line := range lines {
+		if _, count := parseOne(t, line); count != 0 {
+			t.Errorf("%q parsed as a node, want rejected", line)
+		}
+	}
+}
+
+// TestParseHTMLErrorPageYieldsNoNodes is the end-to-end shape of PP-07: a
+// source that starts answering with an error page must produce zero nodes so
+// the caller reports "no supported URI nodes found" instead of republishing
+// markup.
+func TestParseHTMLErrorPageYieldsNoNodes(t *testing.T) {
+	t.Parallel()
+
+	page := "<!DOCTYPE html>\n<html><body>\n" +
+		`<p>Your token expired. <a href="https://panel.example/renew">Renew</a></p>` + "\n" +
+		"<p>Support: https://t.me/support</p>\n</body></html>\n"
+
+	count := 0
+	rejected := subscription.Parse([]byte(page), func(subscription.Node) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Fatalf("HTML page yielded %d nodes, want 0", count)
+	}
+	if rejected != 2 {
+		t.Fatalf("rejected = %d, want 2 (the two URI-bearing markup lines)", rejected)
+	}
+}
+
+// TestParseAcceptsRealSchemes guards the other side of PP-07: the shape check
+// must stay scheme-generic, including the digit-bearing and unknown schemes
+// this service deliberately forwards without understanding.
+func TestParseAcceptsRealSchemes(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"vless", "trojan", "ss", "hysteria2", "hy2", "anytls", "some.new+scheme-1"} {
+		line := scheme + "://uuid@example.com:443#n"
+		node, count := parseOne(t, line)
+		if count != 1 {
+			t.Fatalf("%q yielded %d nodes, want 1", line, count)
+		}
+		if string(node.Scheme) != scheme {
+			t.Errorf("scheme: got %q, want %q", node.Scheme, scheme)
+		}
+	}
+}
+
+// TestParseCountsRejectedLines pins PP-05: URI-shaped lines the parser refuses
+// are reported, so a source that quietly starts returning junk is visible in
+// stats instead of just yielding fewer nodes.
+func TestParseCountsRejectedLines(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("vless://uuid@example.com:443#ok\n" +
+		"vless://@:443#no-host\n" + // empty authority host
+		"not a scheme://example.com\n" + // prose prefix
+		"vmess://!!!not-base64!!!\n" + // undecodable payload
+		"plain text line\n") // no "://" at all: not URI-shaped, not counted
+
+	count := 0
+	rejected := subscription.Parse(body, func(subscription.Node) bool {
+		count++
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("parsed %d nodes, want 1", count)
+	}
+	if rejected != 3 {
+		t.Fatalf("rejected = %d, want 3", rejected)
 	}
 }
 

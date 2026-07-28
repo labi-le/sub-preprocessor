@@ -72,6 +72,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		testCheckerSpec(prober),
 		func() stable.Filterer { return filterer },
 		nil,
+		nil,
 		holder,
 		zerolog.Nop(),
 		nil,
@@ -319,7 +320,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	holder := stable.NewHolder()
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
 	)
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
@@ -339,6 +340,55 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	}
 	if !strings.Contains(string(prober.gotPayload), "2.2.2.2:443") {
 		t.Errorf("cycle 2 must still probe beta, probed %q", prober.gotPayload)
+	}
+}
+
+// fakeBlocklist mirrors fakeDeadCache for the persistent side: it counts the
+// calls the Checker makes so the prune cadence is observable.
+type fakeBlocklist struct {
+	blocked []string
+	prunes  int
+}
+
+func (b *fakeBlocklist) Block(host string) error {
+	b.blocked = append(b.blocked, host)
+	return nil
+}
+func (b *fakeBlocklist) Prune() error { b.prunes++; return nil }
+
+// TestCheckerPrunesBlocklistEveryCycle: the geoblock store is the only TTL
+// store the worker writes to that outlives the process, and it used to be
+// swept exactly once — inside geoblock.Open. On a container that restarts
+// monthly at best, every host ever refused stayed in the map and the table
+// long after its expiry. The dead cache has always been pruned per cycle; this
+// pins the same cadence for the store, which is why Blocklist now has Prune.
+func TestCheckerPrunesBlocklistEveryCycle(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}}
+	store := &fakeBlocklist{}
+	c := stable.NewChecker(
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, store, nil, stable.NewHolder(), zerolog.Nop(), nil,
+	)
+
+	for cycle := 1; cycle <= 2; cycle++ {
+		if err := c.RunOnce(context.Background()); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+		if store.prunes != cycle {
+			t.Fatalf("after cycle %d the store was pruned %d time(s), want %d", cycle, store.prunes, cycle)
+		}
+	}
+	if len(store.blocked) != 0 {
+		t.Fatalf("the checker must never write to the store itself, got %v", store.blocked)
 	}
 }
 
@@ -371,7 +421,7 @@ func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(context.Background())
 	if !errors.Is(err, context.Canceled) {
@@ -405,7 +455,7 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -485,7 +535,7 @@ func TestCheckerReportsPublishedCycle(t *testing.T) {
 	rep := &fakeReporter{}
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, nil, holder, zerolog.Nop(), rep,
+		func() stable.Filterer { return filterer }, nil, nil, holder, zerolog.Nop(), rep,
 	)
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -604,7 +654,7 @@ func TestReconfigureAppliesIntervalWhileIdle(t *testing.T) {
 	spec := testCheckerSpec(prober)
 	spec.Interval = time.Hour
 	c := stable.NewChecker(spec, func() stable.Filterer { return filterer },
-		nil, stable.NewHolder(), zerolog.Nop(), nil)
+		nil, nil, stable.NewHolder(), zerolog.Nop(), nil)
 
 	go c.Run(t.Context()) // cancelled on test cleanup, which stops the loop
 

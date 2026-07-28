@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -44,7 +45,14 @@ func computeMbps(bytesRead int64, elapsed time.Duration) int {
 // Accept-Encoding: identity so bytesRead equals wire bytes (Go otherwise adds
 // gzip and transparently decompresses, inflating the rate). Timing starts after
 // the response headers arrive (connect/TLS/TTFB excluded) and covers only the
-// body transfer. A partial read at the deadline still returns its byte count.
+// body transfer.
+//
+// It reports a measurement ONLY for a 2xx response whose body was read to
+// completion, or one the probe's own deadline cut short. Anything else — a CDN
+// 403/429 block page, a 404, a redirect the pinned conn cannot follow, a reset
+// or a Content-Length the peer failed to deliver — is a few fast kilobytes that
+// computeMbps would turn into a large fabricated rate, so it is discarded
+// rather than timed as payload.
 func measure(ctx context.Context, client *http.Client, target string) (bool, int64, time.Duration) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -58,11 +66,26 @@ func measure(ctx context.Context, client *http.Client, target string) (bool, int
 		return false, 0, 0
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return false, 0, 0
+	}
 
 	start := time.Now()
-	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxBandwidthBody))
+	n, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxBandwidthBody))
 	elapsed := time.Since(start)
+	if copyErr != nil && !deadlineTruncated(ctx, copyErr) {
+		return false, 0, 0
+	}
 	return true, n, elapsed
+}
+
+// deadlineTruncated reports whether a body-read error is only the probe's own
+// timeout firing mid-transfer. Those bytes did arrive inside the measured
+// window, so a deadline-truncated read is a legitimate sample of a slow node
+// and is kept; every other read error means the transfer was cut by the peer
+// and its byte count is not a rate.
+func deadlineTruncated(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)
 }
 
 // bandwidthProbeOne dials target through px, downloads it over a fixed-conn
@@ -72,8 +95,12 @@ func bandwidthProbeOne(ctx context.Context, px mihomo.Proxy, target string, time
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	addr, ok := hostPort(target)
+	if !ok {
+		return false, 0
+	}
 	var meta mihomo.Metadata
-	if addrErr := meta.SetRemoteAddress(hostPort(target)); addrErr != nil {
+	if addrErr := meta.SetRemoteAddress(addr); addrErr != nil {
 		return false, 0
 	}
 	conn, err := px.DialContext(tctx, &meta)
@@ -154,11 +181,17 @@ func (m *MihomoProber) BandwidthMinMbps() int {
 	return *m.bandwidth.MinMbps
 }
 
-// hostPort extracts host:port from a URL, defaulting the port by scheme.
-func hostPort(target string) string {
+// hostPort extracts a dialable host:port from a URL, defaulting the port by
+// scheme. It reports false when the target has no parsable host: dialling that
+// through a node burns a connection per probe and can only ever fail.
+func hostPort(target string) (string, bool) {
 	u, err := url.Parse(target)
 	if err != nil {
-		return target
+		return "", false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", false
 	}
 	port := u.Port()
 	if port == "" {
@@ -168,5 +201,5 @@ func hostPort(target string) string {
 			port = "443"
 		}
 	}
-	return net.JoinHostPort(u.Hostname(), port)
+	return net.JoinHostPort(host, port), true
 }

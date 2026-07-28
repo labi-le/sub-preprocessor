@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"domains.lst/sub-preprocessor/internal/stable"
 )
@@ -86,7 +87,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_sources_ok", "Sources that returned a usable body last cycle.", float64(r.SourcesOK))
 	gauge(w, "stable_sources_total", "Sources configured.", float64(r.SourcesTotal))
 	gauge(w, "stable_merged_nodes", "Unique nodes after merge/dedupe.", float64(r.Merged))
-	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped by the dead-node cache.", float64(r.DeadSkipped))
+	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: recently dead, or recently rejected by a through-node filter.", float64(r.DeadSkipped))
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
@@ -134,14 +135,15 @@ func writeSources(w io.Writer, sources []stable.SourceReport) {
 	for _, s := range sources {
 		sample(w, "stable_source_kept_nodes", map[string]string{labelSource: s.Name}, float64(s.Kept))
 	}
-	help(w, "stable_source_dropped_nodes", "gauge", "Nodes each source dropped in preprocess, by reason.")
+	help(w, "stable_source_dropped_nodes", "gauge", "Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total).")
 	for _, s := range sources {
 		reasons := []struct {
 			reason string
 			n      int
 		}{
 			{"dns", s.DNSDrop}, {"geo", s.GeoDrop}, {"asn", s.ASNDrop},
-			{"geoblock", s.GeoBlockDrop}, {"unsupported", s.Unsupported},
+			{"geoblock", s.GeoBlockDrop}, {"ipv6", s.IPv6Drop},
+			{"unsupported", s.Unsupported},
 		}
 		for _, d := range reasons {
 			sample(w, "stable_source_dropped_nodes", map[string]string{labelSource: s.Name, labelReason: d.reason}, float64(d.n))
@@ -210,13 +212,37 @@ func formatLabels(labels map[string]string) string {
 	return b.String()
 }
 
-// escapeLabelValue escapes the three characters the text format reserves in a
-// label value: backslash, double-quote, and newline.
+// invalidLabelValue replaces a label value that is not valid UTF-8.
+const invalidLabelValue = "invalid_utf8"
+
+// labelValueEscaper escapes exactly the three characters the text format
+// reserves in a label value. It is not a place to be creative: Prometheus's
+// parser accepts only \\, \" and \n after a backslash and fails the whole
+// scrape on any other escape sequence
+// (prometheus/common expfmt.TextParser.readTokenAsLabelValue). A carriage
+// return needs no escape — the parser copies it through — so it is left alone
+// rather than turned into an invalid \r.
+var labelValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+// escapeLabelValue renders s as a Prometheus text-format label value: valid
+// UTF-8 with the reserved characters escaped.
+//
+// Validity is checked, not assumed. A label value can originate outside this
+// service — with annotate disabled the pipeline republishes upstream node
+// names verbatim, and the country label is read out of a [GEO:xx] tag inside
+// such a name — and an invalid byte fails the label value
+// (prometheus/common model.LabelValue.IsValid is utf8.ValidString), taking the
+// ENTIRE scrape and every other metric down with it. Replacing the value is
+// strictly better than reproducing it faithfully; this is the last line of
+// defence, not the first.
 func escapeLabelValue(s string) string {
+	if !utf8.ValidString(s) {
+		return invalidLabelValue
+	}
 	if !strings.ContainsAny(s, "\\\"\n") {
 		return s
 	}
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+	return labelValueEscaper.Replace(s)
 }
 
 func formatFloat(v float64) string {

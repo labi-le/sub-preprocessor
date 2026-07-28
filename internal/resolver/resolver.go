@@ -16,6 +16,10 @@ const (
 	mapInitSize     = 32
 	cacheInitSize   = 1024
 	maxCacheEntries = 16384
+	// evictFraction sets how much of a full cache is dropped when nothing has
+	// expired: 1/8 leaves most of the working set warm while still making room
+	// in amortised O(1) inserts.
+	evictFraction = 8
 )
 
 type cacheEntry struct {
@@ -141,16 +145,31 @@ func (r *Resolver) storeCache(host string, ips []netip.Addr, ttl time.Duration) 
 	r.cache[strings.Clone(host)] = cacheEntry{ips: ips, expires: now.Add(ttl)}
 }
 
-// evictExpiredLocked drops expired entries; when everything is still fresh it
-// resets the whole map so the cache never grows past maxCacheEntries.
+// evictExpiredLocked drops expired entries and, when that frees nothing, a
+// bounded sample of live ones so the cache never grows past maxCacheEntries.
+// Wiping the whole map instead — the obvious way to make room — would take the
+// hit rate to zero at exactly the moment the working set is largest, and would
+// do so for every insert once the map is full of unexpired entries.
+//
+// Go randomises map iteration, so the sample carries no recency signal and can
+// drop a hot host. A real LRU would need an intrusive list plus a write lock
+// on every read, which costs more on the request path than it saves.
 func (r *Resolver) evictExpiredLocked(now time.Time) {
 	for host, entry := range r.cache {
 		if now.After(entry.expires) {
 			delete(r.cache, host)
 		}
 	}
-	if len(r.cache) >= maxCacheEntries {
-		clear(r.cache)
+	if len(r.cache) < maxCacheEntries {
+		return
+	}
+	drop := maxCacheEntries / evictFraction
+	for host := range r.cache {
+		delete(r.cache, host)
+		drop--
+		if drop == 0 {
+			return
+		}
 	}
 }
 

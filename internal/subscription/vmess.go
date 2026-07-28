@@ -17,7 +17,8 @@ const SchemeVmess Scheme = "vmess"
 // parseVmess decodes a vmess:// share link whose payload after the scheme is
 // base64 JSON of the form {"add":host,"port":port,"ps":name,...}.
 func parseVmess(line string, schemeEnd int) (Node, bool) {
-	m, ok := decodeVmessJSON(line[schemeEnd+3:])
+	payload := line[schemeEnd+len(schemeSep):]
+	m, ok := decodeVmessJSON(payload)
 	if !ok {
 		return Node{}, false
 	}
@@ -30,7 +31,17 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 	if port == "" {
 		port = "443"
 	}
+	// Every other scheme takes its name from the URI fragment; vmess normally
+	// carries it in the payload's "ps", but a link that omits "ps" and labels
+	// itself in the fragment is still naming the node, so prefer that over the
+	// bare host. FragmentIdx stays -1: rewrite folds the vmess name back into
+	// "ps" and emits no fragment, so there is nothing for it to point at.
 	name := jsonFieldString(m, "ps")
+	if name == "" {
+		if _, frag, found := strings.Cut(payload, "#"); found {
+			name = strings.TrimSpace(frag)
+		}
+	}
 	if name == "" {
 		name = server
 	}

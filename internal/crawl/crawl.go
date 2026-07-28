@@ -243,7 +243,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// Discover live subscription URLs by scanning the channel repost graph,
 	// seeded by configured channels plus remembered productive ones. scan
 	// records freshly productive channels into st; stale ones are pruned.
-	st := loadState(c.opts.StatePath)
+	st := loadState(c.opts.StatePath, c.logger)
 	live, inline := c.scan(ctx, &st)
 	if ctx.Err() != nil {
 		c.logger.Warn().Str("reason", abortReason(ctx.Err())).
@@ -279,7 +279,11 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	before := managedCount(pf)
-	next, managed := c.mergeManaged(pf, live, rr, prune)
+	// Re-read alongside the merge, not at cycle start: a cycle runs for
+	// minutes to hours and an operator retiring a source expects the block to
+	// take effect on the write it is racing.
+	blocked := blockedSet(loadChannels(c.opts.ChannelsPath, c.logger).Blocked)
+	next, managed := c.mergeManaged(pf, live, rr, prune, blocked)
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
@@ -367,12 +371,14 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 
 // mergeManaged combines the retained hand-added sources with the current managed
 // set (deduped and sorted by name) and returns the full next source list plus
-// the managed subset for logging. Managed sources that are not live are still
-// retained when their status is undetermined, when they appeared in the re-loaded
-// file mid-cycle (never checked), or when prune is off; only a definitive
-// not-live verdict prunes. prune is the cycle's decision, not opts.Prune: a
-// cycle that learned nothing prunes nothing.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool) (kept, managed []source) {
+// the managed subset for logging. Which of the not-live managed URLs survive is
+// retainManaged's decision.
+//
+// blocked is the operator's retirement list (channels.yaml `blocked:`). It is
+// applied here, the single funnel every candidate URL passes through, so a
+// blocked source cannot re-enter from the re-loaded file, from rediscovery in
+// a channel, or from a recheck reviving it.
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source) {
 	all := map[string]struct{}{}
 	existing := map[string]string{}
 	for _, s := range pf.Subscriptions.Sources {
@@ -404,18 +410,13 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 		urls = append(urls, u)
 	}
 	sort.Strings(urls)
+	blockedDropped := 0
 	for _, u := range urls {
-		_, isLive := live[u]
-		keep := isLive
-		if !keep && !rr.managedURL[u] {
-			// In the re-loaded file but absent from the cycle-start snapshot:
-			// added mid-cycle, never checked — retain rather than drop unseen.
-			keep = true
+		if _, isBlocked := blocked[u]; isBlocked {
+			blockedDropped++
+			continue
 		}
-		if !keep && rr.managedURL[u] && (rr.unknown[u] || !prune) {
-			keep = true
-		}
-		if !keep {
+		if !retainManaged(u, live, rr, prune) {
 			continue
 		}
 		// Last gate before the URL reaches private.yaml: the crawler fetches
@@ -430,9 +431,29 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 		used[name] = true
 		managed = append(managed, source{Name: name, URL: u})
 	}
+	if blockedDropped > 0 {
+		c.logger.Info().Int("blocked", blockedDropped).Msg("managed sources withheld by the channels.yaml blocked list")
+	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
 	return kept, managed
+}
+
+// retainManaged decides whether one managed URL survives the cycle. Only a
+// definitive not-live verdict prunes: a source whose status came back
+// undetermined, or one that appeared in the re-loaded file mid-cycle and was
+// therefore never checked, is kept. prune is the cycle's decision, not
+// opts.Prune — a cycle that learned nothing prunes nothing.
+func retainManaged(u string, live map[string]string, rr recheckResult, prune bool) bool {
+	if _, isLive := live[u]; isLive {
+		return true
+	}
+	if !rr.managedURL[u] {
+		// Absent from the cycle-start snapshot: added mid-cycle behind the
+		// crawler's back, so it was never a candidate for a liveness verdict.
+		return true
+	}
+	return rr.unknown[u] || !prune
 }
 
 const (

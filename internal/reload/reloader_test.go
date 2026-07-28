@@ -102,7 +102,7 @@ func TestOptionsFromConfig(t *testing.T) {
 
 	var cfg config.Config
 	cfg.Geo.Geofeed.Sources = []geofeed.Source{{URL: "https://example.com/feed.csv", Type: "raw"}}
-	cfg.Geo.Geofeed.RefreshInterval = 7 * time.Minute
+	cfg.Geo.Geofeed.RefreshInterval = new(7 * time.Minute)
 	cfg.Resolver.Address = "9.9.9.9:53"
 	cfg.Resolver.Timeout = 3 * time.Second
 	dnsTTL, dnsNegTTL := 30*time.Minute, 10*time.Minute
@@ -112,23 +112,25 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.Geo.ASN.CacheTTL = 24 * time.Hour
 	cfg.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"^AS1234 ", "spammy"}}}
 	cfg.Annotate = []config.AnnotateSpec{{Tag: "GEO", Providers: []string{"geofeed", "dbip"}}, {Tag: "IP"}}
-	cfg.Geo.DBIP = config.DBIPConfig{URL: "https://mirror.example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: time.Hour}
-	cfg.Geo.Registry = config.RegistryConfig{URLs: []string{"https://mirror.example.com/delegated"}, RefreshInterval: 2 * time.Hour}
+	cfg.Geo.DBIP = config.DBIPConfig{URL: "https://mirror.example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)}
+	cfg.Geo.Registry = config.RegistryConfig{URLs: []string{"https://mirror.example.com/delegated"}, RefreshInterval: new(2 * time.Hour)}
 	cfg.Fetch.Timeout = 3 * time.Second
 
 	opts := reload.OptionsFromConfig(cfg)
 
+	assertGeoOptions(t, opts, cfg)
+	assertResolverOptions(t, opts, cfg)
+	assertPipelineOptions(t, opts, cfg)
+	assertNoPreloadedState(t, opts)
+}
+
+func assertGeoOptions(t *testing.T, opts preprocess.Options, cfg config.Config) {
+	t.Helper()
 	if !slices.Equal(opts.GeofeedSources, cfg.Geo.Geofeed.Sources) {
 		t.Errorf("GeofeedSources: got %v want %v", opts.GeofeedSources, cfg.Geo.Geofeed.Sources)
 	}
-	if opts.RefreshInterval != cfg.Geo.Geofeed.RefreshInterval {
-		t.Errorf("RefreshInterval: got %v want %v", opts.RefreshInterval, cfg.Geo.Geofeed.RefreshInterval)
-	}
-	if opts.DNSTimeout != cfg.Resolver.Timeout {
-		t.Errorf("DNSTimeout: got %v want %v", opts.DNSTimeout, cfg.Resolver.Timeout)
-	}
-	if opts.DNSAddress != cfg.Resolver.Address {
-		t.Errorf("DNSAddress: got %q want %q", opts.DNSAddress, cfg.Resolver.Address)
+	if opts.RefreshInterval != *cfg.Geo.Geofeed.RefreshInterval {
+		t.Errorf("RefreshInterval: got %v want %v", opts.RefreshInterval, *cfg.Geo.Geofeed.RefreshInterval)
 	}
 	if opts.ASNTimeout != cfg.Geo.ASN.Timeout {
 		t.Errorf("ASNTimeout: got %v want %v", opts.ASNTimeout, cfg.Geo.ASN.Timeout)
@@ -136,8 +138,21 @@ func TestOptionsFromConfig(t *testing.T) {
 	if opts.ASNCacheTTL != cfg.Geo.ASN.CacheTTL {
 		t.Errorf("ASNCacheTTL: got %v want %v", opts.ASNCacheTTL, cfg.Geo.ASN.CacheTTL)
 	}
-	if !reflect.DeepEqual(opts.IPFilters, cfg.IPFilterSpecs()) {
-		t.Errorf("IPFilters: got %v want %v", opts.IPFilters, cfg.IPFilterSpecs())
+	if !reflect.DeepEqual(opts.DBIP, cfg.Geo.DBIP) {
+		t.Errorf("DBIP: got %+v want %+v", opts.DBIP, cfg.Geo.DBIP)
+	}
+	if !reflect.DeepEqual(opts.Registry, cfg.Geo.Registry) {
+		t.Errorf("Registry: got %+v want %+v", opts.Registry, cfg.Geo.Registry)
+	}
+}
+
+func assertResolverOptions(t *testing.T, opts preprocess.Options, cfg config.Config) {
+	t.Helper()
+	if opts.DNSTimeout != cfg.Resolver.Timeout {
+		t.Errorf("DNSTimeout: got %v want %v", opts.DNSTimeout, cfg.Resolver.Timeout)
+	}
+	if opts.DNSAddress != cfg.Resolver.Address {
+		t.Errorf("DNSAddress: got %q want %q", opts.DNSAddress, cfg.Resolver.Address)
 	}
 	if opts.DNSCacheTTL != *cfg.Resolver.CacheTTL {
 		t.Errorf("DNSCacheTTL: got %v want %v", opts.DNSCacheTTL, *cfg.Resolver.CacheTTL)
@@ -145,18 +160,30 @@ func TestOptionsFromConfig(t *testing.T) {
 	if opts.DNSCacheNegativeTTL != *cfg.Resolver.CacheNegativeTTL {
 		t.Errorf("DNSCacheNegativeTTL: got %v want %v", opts.DNSCacheNegativeTTL, *cfg.Resolver.CacheNegativeTTL)
 	}
+}
+
+// assertPipelineOptions covers the per-node stages: IPFilterSpecs() is a derived
+// projection of cfg.Filters, not a plain copy, so it is the one mapping here
+// that can silently drift.
+func assertPipelineOptions(t *testing.T, opts preprocess.Options, cfg config.Config) {
+	t.Helper()
+	if !reflect.DeepEqual(opts.IPFilters, cfg.IPFilterSpecs()) {
+		t.Errorf("IPFilters: got %v want %v", opts.IPFilters, cfg.IPFilterSpecs())
+	}
 	if !reflect.DeepEqual(opts.Annotate, cfg.Annotate) {
 		t.Errorf("Annotate: got %v want %v", opts.Annotate, cfg.Annotate)
 	}
 	if opts.FetchTimeout != cfg.Fetch.Timeout {
 		t.Errorf("FetchTimeout: got %v want %v", opts.FetchTimeout, cfg.Fetch.Timeout)
 	}
-	if !reflect.DeepEqual(opts.DBIP, cfg.Geo.DBIP) {
-		t.Errorf("DBIP: got %+v want %+v", opts.DBIP, cfg.Geo.DBIP)
-	}
-	if !reflect.DeepEqual(opts.Registry, cfg.Geo.Registry) {
-		t.Errorf("Registry: got %+v want %+v", opts.Registry, cfg.Geo.Registry)
-	}
+}
+
+// assertNoPreloadedState pins the half of the contract that is about what
+// OptionsFromConfig must NOT do: carry-over of live geofeed/dbip/registry
+// databases and of the DNS/ASN resolvers is the caller's decision, and a
+// mapping that filled these in would hand the startup path stale objects.
+func assertNoPreloadedState(t *testing.T, opts preprocess.Options) {
+	t.Helper()
 	if opts.PreloadedGeofeed != nil {
 		t.Error("OptionsFromConfig must not set PreloadedGeofeed")
 	}
@@ -168,6 +195,9 @@ func TestOptionsFromConfig(t *testing.T) {
 	}
 	if opts.PreloadedRegistry != nil || !opts.PreloadedRegistryLoadedAt.IsZero() {
 		t.Error("OptionsFromConfig must not set PreloadedRegistry state")
+	}
+	if opts.PreloadedResolver != nil || opts.PreloadedASN != nil {
+		t.Error("OptionsFromConfig must not set the preloaded resolvers")
 	}
 }
 
@@ -402,6 +432,34 @@ func TestReloadRetriesApplyAfterFailure(t *testing.T) {
 	}
 }
 
+// TestReloadRevertAfterFailedApplyRebuilds: after a failed ctl.Apply the holder
+// serves a processor built from the NEW config while currentCfg still records the
+// old one. Restoring the previous file is exactly what an operator does next, and
+// keying the Equal fast path on currentCfg alone made that revert a silent no-op
+// — the holder kept serving the rejected config with no further log line. A
+// reload is redundant only when BOTH configs match.
+func TestReloadRevertAfterFailedApplyRebuilds(t *testing.T) {
+	fake := &fakeApplier{failures: 1}
+	r, holder, path := setupReloader(t, zerolog.Nop(), time.Now().Add(-time.Hour), fake)
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("expected the failing Apply to be attempted once, got %d", fake.calls)
+	}
+	rejected := holder.Load()
+
+	writeConfig(t, path, baseGeofeedYAML) // the operator reverts
+	r.Reload(t.Context())
+
+	if holder.Load() == rejected {
+		t.Fatal("reverting after a failed Apply must rebuild the holder, not hit the Equal fast path")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("the revert matches the last committed config, so the worker needs no re-apply: got %d calls", fake.calls)
+	}
+}
+
 // TestReloadAppliesOnGeoBlockChange: a geoblock-only edit (gemini/claude prober
 // settings) must reach ctl.Apply even though subscriptions and groups are
 // unchanged — the prober is rebuilt from geoblock config on Apply.
@@ -585,5 +643,97 @@ func TestReloadRefetchesDBIPOnConfigChange(t *testing.T) {
 	_, at = newProc.RegistryState()
 	if !at.Equal(registryAt) {
 		t.Fatalf("unchanged registry must be carried over: got %v want %v", at, registryAt)
+	}
+}
+
+// cacheYAML adds an ASN annotate provider to the base config so the processor
+// builds an asn.Resolver as well as the DNS one; the geofeed source is still
+// the SSRF-unreachable loopback, and the ASN resolver never queries anything
+// until a request arrives.
+const cacheYAML = "geo:\n" +
+	"  geofeed:\n" +
+	"    sources:\n" +
+	"      - url: https://127.0.0.1:1/geofeed\n" +
+	"        type: raw\n" +
+	"  asn:\n" +
+	"    timeout: 5s\n" +
+	"annotate:\n" +
+	"  - tag: GEO\n" +
+	"    providers: [geofeed, asn]\n"
+
+func reloadedProcessor(t *testing.T, holder *server.Holder) *preprocess.Processor {
+	t.Helper()
+	proc, ok := holder.Load().Svc.(*preprocess.Processor)
+	if !ok {
+		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", holder.Load().Svc)
+	}
+	return proc
+}
+
+// TestReloadCarriesResolverCaches: the DNS and Cymru caches are the reload's
+// only state whose value IS the cache, and the crawler rewrites private.yaml
+// hourly, so rebuilding them per reload means resolver.cache_ttl (1h) and
+// geo.asn.cache_ttl (24h) can never be reached. An edit outside resolver.* /
+// geo.asn.* must therefore hand both resolvers to the new processor, while an
+// edit inside either block must rebuild that one — the TTLs and timeouts are
+// baked in at construction, so carrying one would silently ignore the change.
+func TestReloadCarriesResolverCaches(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, cacheYAML)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+	opts := reload.OptionsFromConfig(cfg)
+	opts.PreloadedGeofeed = stubLookup{}
+	opts.PreloadedLoadedAt = time.Now().Add(-time.Hour)
+	proc, err := preprocess.NewProcessor(ctx, zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("initial processor: %v", err)
+	}
+	dns, asnR := proc.ResolverState(), proc.ASNState()
+	if dns == nil {
+		t.Fatal("processor must own a DNS resolver")
+	}
+	if asnR == nil {
+		t.Fatal("an asn annotate provider must build an ASN resolver")
+	}
+
+	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
+
+	// An edit that changes the processor but touches neither resolver block.
+	unrelated := cacheYAML + "fetch:\n  timeout: 7s\n"
+	writeConfig(t, path, unrelated)
+	r.Reload(ctx)
+	next := reloadedProcessor(t, holder)
+	if next == proc {
+		t.Fatal("valid reload must build a new processor")
+	}
+	if next.ResolverState() != dns {
+		t.Error("edit outside resolver.* must carry the DNS resolver, not drop its cache")
+	}
+	if next.ASNState() != asnR {
+		t.Error("edit outside geo.asn.* must carry the ASN resolver, not drop its cache")
+	}
+
+	dnsChanged := unrelated + "resolver:\n  cache_ttl: 5m\n"
+	writeConfig(t, path, dnsChanged)
+	r.Reload(ctx)
+	next = reloadedProcessor(t, holder)
+	if next.ResolverState() == dns {
+		t.Error("resolver.cache_ttl edit must rebuild the resolver; the TTL is baked in at construction")
+	}
+	if next.ASNState() != asnR {
+		t.Error("a resolver-only edit must still carry the untouched ASN resolver")
+	}
+
+	writeConfig(t, path, strings.Replace(dnsChanged, "timeout: 5s", "timeout: 6s", 1))
+	r.Reload(ctx)
+	if last := reloadedProcessor(t, holder); last.ASNState() == asnR {
+		t.Error("geo.asn.timeout edit must rebuild the ASN resolver")
 	}
 }

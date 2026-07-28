@@ -20,8 +20,9 @@ type SourceBody struct {
 // Entry is a merged node. Raw carries the clean <source>-NNN name used for
 // probing; Tagged carries the published name (the [GEO][IP] annotation from the
 // filter pass, when present, plus the same unique label). Country mirrors the
-// carried [GEO:xx] tag: a 2-letter code, "??" when the annotation chain
-// resolved nothing, "" when annotation is off (no tag to judge).
+// carried [GEO:xx] tag: two ASCII letters, "??" when the annotation chain
+// resolved nothing, "" when annotation is off (no tag to judge) or the tag
+// carried something that is not a country code — see tagCountry.
 type Entry struct {
 	Label   string
 	Raw     string
@@ -98,8 +99,26 @@ func lowerServerPort(dst []byte, server, port string) []byte {
 	return append(dst, port...)
 }
 
+// countryUnknown is the annotator's marker for "no provider resolved a
+// country" ([GEO:??]). Returning the constant keeps the common miss alloc-free
+// and body-free.
+const countryUnknown = "??"
+
 // tagCountry extracts the 2-char code from a "[GEO:xx]" tag anywhere in the
-// leading-tags string ("" when absent — annotation off or no GEO tag).
+// leading-tags string ("" when absent — annotation off, no GEO tag, or a code
+// that is not two ASCII letters).
+//
+// The result is CLONED rather than sliced. tags is the tail of a five-hop
+// zero-copy chain into this cycle's source body (subscription.Parse hands
+// parseNode an ioutil.UnsafeString view, Node.Name and rewrite.LeadingTags
+// both re-slice it), while Entry.Country outlives the cycle inside the metrics
+// snapshot — so a 2-byte sub-slice would pin the whole filtered body until the
+// next publication replaces it.
+//
+// The code is also validated, because node names are source-authored and
+// Entry.Country becomes a Prometheus label value in the kept-country gauge:
+// without annotation the upstream's own "[GEO:...]" survives verbatim into the
+// merge, and one byte a label cannot carry would break the entire scrape.
 func tagCountry(tags string) string {
 	const marker = "[GEO:"
 	i := strings.Index(tags, marker)
@@ -110,7 +129,20 @@ func tagCountry(tags string) string {
 	if len(tags) < code+3 || tags[code+2] != ']' {
 		return ""
 	}
-	return tags[code : code+2]
+	c := tags[code : code+2]
+	if c == countryUnknown {
+		return countryUnknown
+	}
+	if !asciiLetter(c[0]) || !asciiLetter(c[1]) {
+		return ""
+	}
+	return strings.Clone(c)
+}
+
+func asciiLetter(b byte) bool {
+	const asciiCaseBit = 0x20 // the single bit by which ASCII letter cases differ
+	lower := b | asciiCaseBit
+	return lower >= 'a' && lower <= 'z'
 }
 
 // taggedName carries the leading [GEO][IP] tags from the source name onto the

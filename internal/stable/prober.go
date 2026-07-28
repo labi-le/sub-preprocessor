@@ -86,7 +86,9 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	var wg sync.WaitGroup
 	// One semaphore shared by every round so the effective number of in-flight
 	// URL tests honors check.concurrency instead of rounds*concurrency.
-	sem := make(chan struct{}, m.cfg.Concurrency)
+	// fanoutSem, not a raw channel: runRound acquires on the producer
+	// goroutine before any releaser exists, so a zero bound would deadlock.
+	sem := fanoutSem(m.cfg.Concurrency)
 	for range m.cfg.Rounds {
 		wg.Go(func() {
 			m.runRound(ctx, opLog, prog, proxies, sem, &mu, accs)

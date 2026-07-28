@@ -20,10 +20,15 @@ type asnResolver interface {
 	Resolve(ctx context.Context, ip netip.Addr) (asn.Result, error)
 }
 
-// GeofeedFilter applies the request's country policy to the geofeed lookup: an
-// IP must be in the allow-list, unless the caller asked for none, and must not
-// be in the deny-list. An IP the geofeed cannot place has an unknown country,
-// which is in no excluded country, so only the allow-list can drop it.
+// GeofeedFilter applies the request's country policy to pctx.Lookup: an IP
+// must be in the allow-list, unless the caller asked for none, and must not be
+// in the deny-list. An IP no database can place has an unknown country, which
+// is in no excluded country, so only the allow-list can drop it.
+//
+// The name is historical: pctx.Lookup is the whole database chain the
+// processor loaded (geofeed, then dbip and registry when built), the same
+// sources the GEO annotation resolves against, so a node is never dropped as
+// unplaceable while carrying a tag that places it. See Processor.countryChain.
 type GeofeedFilter struct{}
 
 func NewGeofeedFilter() *GeofeedFilter {

@@ -40,18 +40,26 @@ func Load(ctx context.Context, rawURL fetch.SubscriptionURL) ([]byte, error) {
 // Parse parses subscription body lines as URI nodes.
 // Non-URI lines are skipped. Only lines containing "://" are parsed.
 // It calls yield for each parsed node. If yield returns false, parsing stops.
-func Parse(body []byte, yield func(Node) bool) {
+//
+// It returns how many URI-shaped lines parseNode refused. Those lines never
+// reach yield, so without this count they would be invisible: a source that
+// starts answering with a truncated body or a corrupted vmess payload would
+// simply report fewer nodes with nothing accounting for the difference.
+func Parse(body []byte, yield func(Node) bool) (rejected int) {
 	it := ioutil.NewLines(body)
 	for {
 		line := it.Next()
 		if line == nil {
-			return
+			return rejected
 		}
 		if strings.Contains(ioutil.UnsafeString(line), "://") {
-			if node, ok := parseNode(ioutil.UnsafeString(line)); ok {
-				if !yield(node) {
-					return
-				}
+			node, ok := parseNode(ioutil.UnsafeString(line))
+			if !ok {
+				rejected++
+				continue
+			}
+			if !yield(node) {
+				return rejected
 			}
 		}
 	}
@@ -67,7 +75,7 @@ const schemeSep = "://"
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {
 	idx := strings.Index(line, schemeSep)
-	if idx <= 0 {
+	if idx <= 0 || !validScheme(line[:idx]) {
 		return Node{}, false
 	}
 
@@ -118,6 +126,30 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port, FragmentIdx: hashIdx}, true
+}
+
+// validScheme reports whether s has the RFC 3986 scheme shape
+// ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ). The parser stays scheme-generic —
+// it does not care WHICH scheme a line carries — but "everything before the
+// first ://" is not a scheme: a subscription URL that starts answering with an
+// HTML page or a Clash YAML document contains URLs too, and without this check
+// `<a href="https://example.com">` parses as a node with scheme `<a href="https`
+// and the source looks healthy while publishing markup.
+func validScheme(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	if c := s[0]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		alnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !alnum && c != '+' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitHostPort separates host and port from an authority string.

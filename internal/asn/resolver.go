@@ -28,6 +28,9 @@ const (
 	negativeCacheTTL = 5 * time.Minute
 	// maxCacheEntries caps the cache; expired entries are evicted on insert.
 	maxCacheEntries = 16384
+	// evictFraction sets how much of a full cache is dropped when nothing has
+	// expired; see evictExpiredLocked.
+	evictFraction = 8
 )
 
 type Result struct {
@@ -101,16 +104,27 @@ func (r *Resolver) storeCache(ip netip.Addr, entry cachedResult) {
 	r.cache[ip] = entry
 }
 
-// evictExpiredLocked drops expired entries; when everything is still fresh it
-// resets the whole map so the cache never grows past maxCacheEntries.
+// evictExpiredLocked drops expired entries and, when that frees nothing, a
+// bounded sample of live ones so the cache never grows past maxCacheEntries.
+// See internal/resolver for why a wipe (and a real LRU) are both wrong here;
+// the cliff is worse for ASN data, whose 24h TTL means nothing expires within
+// a day, so a full map takes the wipe branch on every single insert.
 func (r *Resolver) evictExpiredLocked(now time.Time) {
 	for ip, entry := range r.cache {
 		if now.After(entry.expiresAt) {
 			delete(r.cache, ip)
 		}
 	}
-	if len(r.cache) >= maxCacheEntries {
-		clear(r.cache)
+	if len(r.cache) < maxCacheEntries {
+		return
+	}
+	drop := maxCacheEntries / evictFraction
+	for ip := range r.cache {
+		delete(r.cache, ip)
+		drop--
+		if drop == 0 {
+			return
+		}
 	}
 }
 

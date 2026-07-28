@@ -17,3 +17,10 @@ channels:
   - immalware
   - whitelistbypass
   - surfboardv2ray   # research find: Type-A https sub (sub.suffusion.workers.dev), 134 nodes verified
+
+# Subscription URLs the crawler must never manage. Deleting a tg-* source from
+# private.yaml by hand does not stick: the next cycle rediscovers the URL in a
+# channel, or a recheck finds it still live, and re-adds it. Listing it here is
+# the only way to retire one for good. Matched verbatim against the harvested
+# URL; re-read every cycle like the channel list above.
+blocked: []

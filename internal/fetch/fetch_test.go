@@ -42,6 +42,78 @@ func TestMaybeDecodeGzip(t *testing.T) {
 	}
 }
 
+// TestMaybeDecodeGzipBombIsCutOff: the caller's size limit bounds the INFLATED
+// body, so a few KB of crafted gzip is otherwise free to allocate the whole
+// 256 MiB geo cap (three of those load concurrently). The guard compares
+// output against the wire bytes actually consumed and must fail the read long
+// before the archive finishes inflating — while leaving a normal body alone.
+func TestMaybeDecodeGzipBombIsCutOff(t *testing.T) {
+	t.Parallel()
+
+	const inflated = 32 << 20
+	var bomb bytes.Buffer
+	zw := gzip.NewWriter(&bomb)
+	zeros := make([]byte, 1<<16)
+	for written := 0; written < inflated; written += len(zeros) {
+		if _, err := zw.Write(zeros); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if bomb.Len() > inflated/100 {
+		t.Fatalf("test fixture is not a bomb: %d wire bytes for %d inflated", bomb.Len(), inflated)
+	}
+
+	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(bomb.Bytes()))}
+	rc, err := fetch.MaybeDecode(resp, fetch.FileTypeGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	n, err := io.Copy(io.Discard, rc)
+	if err == nil {
+		t.Fatalf("gzip bomb must fail the read; inflated %d bytes with no error", n)
+	}
+	if n >= inflated/4 {
+		t.Fatalf("bomb must be cut off early: inflated %d of %d bytes", n, inflated)
+	}
+
+	// Incompressible data crosses the same size floor without approaching the
+	// ratio, so the guard must let it through untouched.
+	plain := make([]byte, 2<<20)
+	state := uint32(1)
+	for i := range plain {
+		state = state*1664525 + 1013904223
+		plain[i] = byte(state >> 24)
+	}
+	var normal bytes.Buffer
+	zw = gzip.NewWriter(&normal)
+	if _, err = zw.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err = zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp = &http.Response{Body: io.NopCloser(bytes.NewReader(normal.Bytes()))}
+	rc, err = fetch.MaybeDecode(resp, fetch.FileTypeGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("normal gzip body must decode: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("normal gzip body corrupted: got %d bytes, want %d", len(got), len(plain))
+	}
+}
+
 // TestStatusErrorMessageAndAs guards the typed non-2xx error: callers branch on
 // the code via errors.As (dbip month fallback checks 404), and the message must
 // keep the historical "bad status: ..." text.
@@ -118,6 +190,19 @@ func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
 		"https://127.0.0.1/sub",    // loopback
 		"https://198.18.1.15/sub",  // reserved (mihomo fake-ip range)
 		"https://169.254.169.254/", // link-local (cloud metadata)
+		// IPv4-in-IPv6 encodings Unmap does not normalise, in order: NAT64
+		// well-known, NAT64 local-use, 6to4, Teredo, deprecated
+		// IPv4-compatible. Each embeds 127.0.0.1 and reaches it wherever the
+		// matching gateway or tunnel exists. Then three non-global IPv6
+		// ranges: discard-only, deprecated site-local, unique local.
+		"https://[64:ff9b::7f00:1]/",
+		"https://[64:ff9b:1::7f00:1]/",
+		"https://[2002:7f00:1::]/",
+		"https://[2001:0:1::1]/",
+		"https://[::7f00:1]/",
+		"https://[100::1]/",
+		"https://[fec0::1]/",
+		"https://[fd00::1]/",
 	} {
 		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err == nil {
 			t.Errorf("%s: non-public IP host must be rejected", u)
@@ -125,6 +210,9 @@ func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
 	}
 	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://1.1.1.1/sub")); err != nil {
 		t.Fatalf("public IP host should pass, got: %v", err)
+	}
+	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://[2606:4700::1111]/sub")); err != nil {
+		t.Fatalf("public IPv6 host should pass, got: %v", err)
 	}
 }
 

@@ -1,15 +1,18 @@
 package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -21,9 +24,9 @@ func TestBandwidthFilterApply(t *testing.T) {
 	t.Parallel()
 
 	survivors := []Survivor{
-		{Entry: Entry{Label: "s-001", Tagged: "vless://u@h1:443#[GEO:FI][IP:1.1.1.1] s-001"}},
-		{Entry: Entry{Label: "s-002", Tagged: "vless://u@h2:443#[GEO:SE][IP:2.2.2.2] s-002"}},
-		{Entry: Entry{Label: "s-003", Tagged: "vless://u@h3:443#[GEO:DE][IP:3.3.3.3] s-003"}},
+		{Entry: Entry{Label: "s-001", Addr: "h1:443", Tagged: "vless://u@h1:443#[GEO:FI][IP:1.1.1.1] s-001"}},
+		{Entry: Entry{Label: "s-002", Addr: "h2:443", Tagged: "vless://u@h2:443#[GEO:SE][IP:2.2.2.2] s-002"}},
+		{Entry: Entry{Label: "s-003", Addr: "h3:443", Tagged: "vless://u@h3:443#[GEO:DE][IP:3.3.3.3] s-003"}},
 	}
 	check := func(context.Context, []mihomo.Proxy) map[string]BandwidthOutcome {
 		return map[string]BandwidthOutcome{
@@ -34,7 +37,7 @@ func TestBandwidthFilterApply(t *testing.T) {
 	}
 
 	f := &bandwidthFilter{minMbps: 10, annotate: true, check: check, logger: zerolog.Nop()}
-	kept, _ := f.apply(context.Background(), survivors, nil)
+	kept, rejected, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 || kept[0].Label != "s-001" {
 		t.Fatalf("expected only s-001 kept, got %+v", kept)
 	}
@@ -44,24 +47,31 @@ func TestBandwidthFilterApply(t *testing.T) {
 	if !strings.Contains(kept[0].Tagged, "[SPD:50M]") {
 		t.Fatalf("missing speed tag: %q", kept[0].Tagged)
 	}
+	// Only the sub-floor node is worth remembering: re-measuring it every hour
+	// is the waste the reject cache exists to stop. s-003 answered nothing, and
+	// an unreachable endpoint is as likely to be the endpoint's fault as the
+	// node's, so it must stay out of the cache and be retried next cycle.
+	if len(rejected) != 1 || rejected[0] != "h2:443" {
+		t.Fatalf("slow node must be the only cached reject, got %v", rejected)
+	}
 
 	// annotate=false: kept but no tag injected.
 	f2 := &bandwidthFilter{minMbps: 10, annotate: false, check: check, logger: zerolog.Nop()}
-	kept2, _ := f2.apply(context.Background(), survivors, nil)
+	kept2, _, _ := f2.apply(context.Background(), survivors, nil)
 	if len(kept2) != 1 || strings.Contains(kept2[0].Tagged, "[SPD:") {
 		t.Fatalf("annotate=false must not inject SPD: %q", kept2[0].Tagged)
 	}
 
 	// minMbps=0: keep all reachable (no floor).
 	f3 := &bandwidthFilter{minMbps: 0, annotate: false, check: check, logger: zerolog.Nop()}
-	if kept3, _ := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
+	if kept3, _, _ := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
 		t.Fatalf("minMbps=0 keeps all reachable, got %d", len(kept3))
 	}
 
 	// cancelled ctx: no-op, survivors unchanged.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
+	if got, _, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
 		t.Fatalf("cancelled ctx must pass survivors through, got %d", len(got))
 	}
 }
@@ -77,7 +87,7 @@ func TestBandwidthFilterAnnotatesVmess(t *testing.T) {
 		return map[string]BandwidthOutcome{"s-001": {Server: "1.2.3.4", Reachable: true, Mbps: 42}}
 	}
 	f := &bandwidthFilter{minMbps: 1, annotate: true, check: check, logger: zerolog.Nop()}
-	kept, _ := f.apply(context.Background(), survivors, nil)
+	kept, _, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 {
 		t.Fatalf("expected 1 kept, got %d", len(kept))
 	}
@@ -124,11 +134,14 @@ func TestBuildNodeFilters(t *testing.T) {
 type stubBlocklist struct{}
 
 func (stubBlocklist) Block(string) error { return nil }
+func (stubBlocklist) Prune() error       { return nil }
 
 // TestTidalFilterKeepsNoStore locks a deliberate asymmetry: the tidal gate never
 // persists a drop. Its verdict is a bare status code, weaker than the AI checks'
 // explicit refusal markers, and the store is host-keyed for its whole TTL — one
-// CDN hiccup would otherwise evict the node from every endpoint.
+// CDN hiccup would otherwise evict the node from every endpoint. It still
+// reports the refusal as a short-lived reject, which is where a fail-closed
+// verdict belongs.
 func TestTidalFilterKeepsNoStore(t *testing.T) {
 	t.Parallel()
 
@@ -162,9 +175,13 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	tidal.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
 		return map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Blocked: true}}
 	}
-	kept, rep := tidal.apply(context.Background(), []Survivor{{Entry: Entry{Label: "s-001"}}}, nil)
+	kept, rejected, rep := tidal.apply(context.Background(),
+		[]Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
 	if len(kept) != 0 || rep.Dropped["blocked"] != 1 {
 		t.Fatalf("blocked survivor must drop without a store: kept=%d rep=%+v", len(kept), rep)
+	}
+	if len(rejected) != 1 || rejected[0] != "h1:443" {
+		t.Fatalf("a refusal must still be cached briefly by address, got %v", rejected)
 	}
 }
 
@@ -211,7 +228,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		return out
 	}
 	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
-	kept, _ := f.apply(context.Background(), survivors, proxies)
+	kept, _, _ := f.apply(context.Background(), survivors, proxies)
 	if len(kept) != 2 {
 		t.Fatalf("expected s-001 and s-002 kept, got %+v", kept)
 	}
@@ -219,5 +236,97 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		if s.Label == "s-003" {
 			t.Fatal("s-003 (absent from proxy map) must be dropped as unreachable")
 		}
+	}
+}
+
+// staticFilterer returns the same preprocessed body for every source, so a
+// cycle runs end to end with no network and a stable merge result.
+type staticFilterer struct{ body string }
+
+func (f staticFilterer) Filter(_ context.Context, b *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
+	b.WriteString(f.body)
+	return preprocess.Stats{}, nil
+}
+
+// replayProber records every payload it is asked to probe and reports every
+// node in it as healthy, so the only thing that can shrink the probe set
+// between cycles is the checker's own bookkeeping.
+type replayProber struct{ payloads []string }
+
+func (p *replayProber) Probe(_ context.Context, payload []byte) (map[string]ProbeResult, error) {
+	p.payloads = append(p.payloads, string(payload))
+	res := make(map[string]ProbeResult)
+	subscription.Parse(payload, func(n subscription.Node) bool {
+		res[n.Name] = ProbeResult{Successes: 5, MeanMs: 10}
+		return true
+	})
+	return res, nil
+}
+
+func (p *replayProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestCheckerCachesFilterRejects: a through-node rejection used to be
+// unrepeatable knowledge. recordDead can only mark nodes ABSENT from the probe
+// results, and a filter reject is by construction present (it passed the
+// latency probe), so tidal and bandwidth re-ran their full test on the same
+// known-bad nodes every hour forever. Here the slow node must be probed once
+// and then skipped, while the fast one keeps being probed.
+func TestCheckerCachesFilterRejects(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fastAddr = "1.1.1.1:443"
+		slowAddr = "2.2.2.2:443"
+	)
+	filterer := staticFilterer{body: "vless://u@" + fastAddr + "#fast\nvless://u@" + slowAddr + "#slow\n"}
+	prober := &replayProber{}
+	// Merge relabels to <source>-NNN in body order, so the outcomes key on
+	// those labels rather than the original names.
+	check := func(context.Context, []mihomo.Proxy) map[string]BandwidthOutcome {
+		return map[string]BandwidthOutcome{
+			"alpha-001": {Server: "1.1.1.1", Reachable: true, Mbps: 50},
+			"alpha-002": {Server: "2.2.2.2", Reachable: true, Mbps: 1},
+		}
+	}
+	spec := CheckerSpec{
+		Sources:       []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example/sub"}},
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        prober,
+		Filters: []NodeFilter{
+			&bandwidthFilter{minMbps: 10, check: check, logger: zerolog.Nop()},
+		},
+	}
+	c := NewChecker(spec, func() Filterer { return filterer }, nil, nil, NewHolder(), zerolog.Nop(), nil)
+
+	for cycle := 1; cycle <= 2; cycle++ {
+		if err := c.RunOnce(context.Background()); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+	}
+	if len(prober.payloads) != 2 {
+		t.Fatalf("want one probe per cycle, got %d", len(prober.payloads))
+	}
+	if !strings.Contains(prober.payloads[0], slowAddr) {
+		t.Fatalf("cycle 1 must probe the slow node to learn it is slow: %q", prober.payloads[0])
+	}
+	if strings.Contains(prober.payloads[1], slowAddr) {
+		t.Errorf("cycle 2 must skip the node the bandwidth filter already rejected: %q", prober.payloads[1])
+	}
+	if !strings.Contains(prober.payloads[1], fastAddr) {
+		t.Errorf("cycle 2 must still probe the node that passed: %q", prober.payloads[1])
+	}
+
+	// The cache is scoped to the filter that produced the verdict: drop that
+	// filter and its rejects stop suppressing anything, immediately.
+	spec.Filters = nil
+	c.Reconfigure(spec)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("cycle 3: %v", err)
+	}
+	if !strings.Contains(prober.payloads[2], slowAddr) {
+		t.Errorf("removing the bandwidth filter must un-suppress its rejects: %q", prober.payloads[2])
 	}
 }

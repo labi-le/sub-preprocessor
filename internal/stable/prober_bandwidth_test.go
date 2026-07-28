@@ -2,6 +2,7 @@ package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,13 +56,13 @@ func TestMeasureSendsIdentityAndCountsBytes(t *testing.T) {
 	}
 }
 
-func TestMeasureRedirectYieldsNoBody(t *testing.T) {
+func TestMeasureRedirectIsNotAMeasurement(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// A bare Location + status (no body) models a real speed-test URL that
-		// 302s to a CDN; http.Redirect would inject a ~52-byte HTML anchor body
-		// that measure would legitimately count, so set the redirect by hand.
+		// 302s to a CDN. The probe pins one conn and never follows redirects,
+		// so there is no payload to time behind it.
 		w.Header().Set("Location", "https://example.invalid/other")
 		w.WriteHeader(http.StatusFound)
 	}))
@@ -71,11 +72,94 @@ func TestMeasureRedirectYieldsNoBody(t *testing.T) {
 		return http.ErrUseLastResponse
 	}}
 	reachable, read, _ := measure(context.Background(), client, srv.URL)
-	if !reachable {
-		t.Fatal("a 3xx is still a response (reachable)")
+	if reachable {
+		t.Fatal("an unfollowed 3xx carries no payload; it must not be scored")
 	}
 	if read != 0 {
-		t.Fatalf("redirect body should be ~0, got %d", read)
+		t.Fatalf("rejected response must report no bytes, got %d", read)
+	}
+}
+
+func TestMeasureRejectsNon2xx(t *testing.T) {
+	t.Parallel()
+
+	// A Cloudflare-style block page: a small body served fast. Timed as
+	// payload it computes to tens of Mbps and sails past min_mbps.
+	const blockPage = 10 << 10
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write(make([]byte, blockPage))
+	}))
+	defer srv.Close()
+
+	reachable, read, _ := measure(context.Background(), srv.Client(), srv.URL)
+	if reachable {
+		t.Fatal("a 403 error page must not be reported as a bandwidth sample")
+	}
+	if read != 0 {
+		t.Fatalf("rejected response must report no bytes, got %d", read)
+	}
+}
+
+func TestMeasureRejectsTruncatedBody(t *testing.T) {
+	t.Parallel()
+
+	// Hand-written response: declare a large Content-Length, deliver a
+	// fraction of it, then drop the connection — the normal failure mode of
+	// an oversubscribed exit. The client sees io.ErrUnexpectedEOF.
+	const (
+		declared = 2 << 20
+		sent     = 8 << 10
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, hijackErr := w.(http.Hijacker).Hijack()
+		if hijackErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", declared)
+		_, _ = conn.Write(make([]byte, sent))
+	}))
+	defer srv.Close()
+
+	reachable, read, _ := measure(context.Background(), srv.Client(), srv.URL)
+	if reachable {
+		t.Fatal("a transfer the peer cut short must not be reported as a bandwidth sample")
+	}
+	if read != 0 {
+		t.Fatalf("rejected response must report no bytes, got %d", read)
+	}
+}
+
+func TestMeasureKeepsDeadlineTruncatedRead(t *testing.T) {
+	t.Parallel()
+
+	// The one truncation that IS a valid sample: our own deadline cut a
+	// transfer that was still flowing. Those bytes arrived in the measured
+	// window, so a slow node stays measurable instead of vanishing.
+	const sent = 8 << 10
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, hijackErr := w.(http.Hijacker).Hijack()
+		if hijackErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n")
+		_, _ = conn.Write(make([]byte, sent))
+		<-done // hold the transfer open until the probe's deadline fires
+	}))
+	defer srv.Close()
+	defer close(done) // LIFO: releases the handler before srv.Close waits
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	reachable, read, _ := measure(ctx, srv.Client(), srv.URL)
+	if !reachable {
+		t.Fatal("a deadline-truncated transfer is still a sample of a slow node")
+	}
+	if read != sent {
+		t.Fatalf("bytesRead = %d, want %d", read, sent)
 	}
 }
 

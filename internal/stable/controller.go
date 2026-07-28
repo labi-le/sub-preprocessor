@@ -7,12 +7,11 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
-	"domains.lst/sub-preprocessor/internal/filter"
 )
 
 // Controller owns the background subscription checker: it starts one on the
-// first enabling config, reconfigures it on every later one, and stops it only
-// on shutdown or when the source list empties.
+// first enabling config and reconfigures it on every later one. Only shutdown
+// stops it.
 //
 // checker/cancel/done are mutated without locking because callers are
 // serialized: app.Run performs the first Apply before starting the config
@@ -37,41 +36,30 @@ func NewController(ctx context.Context, holder *Holder, filterer func() Filterer
 	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger, reporter: reporter}
 }
 
-// deniedCountries builds the worker's country deny-set: the codes the country
-// filter entries exclude, directly or through a group. It is a deny-set, not
-// the complement allow-set, so a node whose IP no geo source covers is kept
-// rather than dropped for being unplaceable.
-func deniedCountries(cfg config.Config) filter.CountrySet {
-	denied := filter.CountrySet{}
-	for _, spec := range cfg.IPFilterSpecs() {
-		if spec.Type != config.FilterCountry {
-			continue
-		}
-		for _, code := range spec.ExcludeCountries {
-			denied.Add(code)
-		}
-		for _, group := range spec.ExcludeGroups {
-			for _, code := range cfg.Groups[group] {
-				denied.Add(code)
-			}
-		}
-	}
-	return denied
-}
-
 // Apply hands cfg to the running checker, or starts one when none is running.
 // The prober and node filters are built first, so a failed construction leaves
 // the previous configuration in place. A reload NEVER restarts a live worker:
 // it swaps the spec the next cycle reads, letting the cycle in flight run to
 // publication instead of being cancelled and losing its whole probe pass.
+//
+// An empty merged source list is refused rather than obeyed once a worker runs.
+// Every source of this deployment comes from an overlay, so an empty list is
+// nearly always a missing or truncated sources.yaml/private.yaml, and stopping
+// the worker on it would cancel the cycle in flight and freeze /stable.txt on
+// its last publication with nothing behind it. Keeping the previous spec live
+// costs a stale source list until the config is fixed, and a deliberate disable
+// is a restart (or an explicitly empty list at startup, which never starts one).
 func (c *Controller) Apply(cfg config.Config) error {
 	if !cfg.SubscriptionsEnabled() {
-		c.Stop()
+		if c.checker != nil {
+			c.logger.Warn().Msg("reloaded config has no subscription sources; keeping the running worker on its previous sources (check the sources.yaml/private.yaml overlays)")
+		}
+
 		return nil
 	}
 
 	subs := cfg.Subscriptions
-	denied := deniedCountries(cfg)
+	denied := cfg.DeniedCountries()
 
 	// The gemini/claude/chatgpt/tidal prober params default to the geoblock and
 	// are overridden per-entry by the merged NodeFilterSpec; bandwidth params come
@@ -127,7 +115,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		return nil
 	}
 
-	checker := NewChecker(spec, c.filterer, c.dead, c.holder, c.logger, c.reporter)
+	checker := NewChecker(spec, c.filterer, c.store, c.dead, c.holder, c.logger, c.reporter)
 	ctx, cancel := context.WithCancel(c.baseCtx)
 	done := make(chan struct{})
 	c.checker = checker
@@ -143,8 +131,8 @@ func (c *Controller) Apply(cfg config.Config) error {
 }
 
 // Stop cancels the running checker, if any, and waits for it to exit. This is
-// the hard path, used on shutdown and when the source list empties; a config
-// reload goes through Apply, which reconfigures instead of cancelling.
+// the shutdown-only hard path; a config reload goes through Apply, which
+// reconfigures instead of cancelling.
 func (c *Controller) Stop() {
 	if c.cancel == nil {
 		return

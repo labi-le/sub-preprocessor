@@ -37,8 +37,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Geo.Geofeed.Sources[0].Type != "gzip" {
 		t.Fatalf("unexpected source type: %q", cfg.Geo.Geofeed.Sources[0].Type)
 	}
-	if cfg.Geo.Geofeed.RefreshInterval != 0 {
-		t.Fatalf("unexpected refresh interval default: %v", cfg.Geo.Geofeed.RefreshInterval)
+	// Inverted deliberately: omitting geo.geofeed.refresh_interval used to leave
+	// it 0, which the processor reads as "never refresh" -- a geofeed frozen for
+	// the whole process lifetime. It now defaults like its dbip/registry
+	// siblings, and only an explicit 0 disables the refresh.
+	if cfg.Geo.Geofeed.RefreshInterval == nil || *cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
+		t.Fatalf("refresh interval default = %v, want 24h", cfg.Geo.Geofeed.RefreshInterval)
 	}
 }
 
@@ -57,22 +61,28 @@ func TestLoadRejectsMissingGeofeedType(t *testing.T) {
 	}
 }
 
+// TestLoadGeofeedRefreshInterval covers the two explicit forms: a duration is
+// kept verbatim, and an explicit 0 survives defaulting because the processor
+// reads a non-positive interval as "load once, never refresh".
 func TestLoadGeofeedRefreshInterval(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	content := []byte("geo:\n  geofeed:\n    refresh_interval: 24h\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n")
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	const sources = "    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
 
-	cfg, err := config.Load(path)
+	cfg, err := loadRaw(t, "geo:\n  geofeed:\n    refresh_interval: 24h\n"+sources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
+	if cfg.Geo.Geofeed.RefreshInterval == nil || *cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
 		t.Fatalf("unexpected refresh interval: %v", cfg.Geo.Geofeed.RefreshInterval)
+	}
+
+	disabled, err := loadRaw(t, "geo:\n  geofeed:\n    refresh_interval: 0s\n"+sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Geo.Geofeed.RefreshInterval == nil || *disabled.Geo.Geofeed.RefreshInterval != 0 {
+		t.Fatalf("explicit 0 must be preserved as disable, got %v", disabled.Geo.Geofeed.RefreshInterval)
 	}
 }
 
@@ -161,7 +171,7 @@ func TestDBIPChanged(t *testing.T) {
 	t.Parallel()
 
 	var cfgA config.Config
-	cfgA.Geo.DBIP = config.DBIPConfig{URL: "https://example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: 24 * time.Hour}
+	cfgA.Geo.DBIP = config.DBIPConfig{URL: "https://example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: new(24 * time.Hour)}
 	cfgB := cfgA
 	if config.DBIPChanged(cfgA, cfgB) {
 		t.Fatal("identical dbip config should not be changed")
@@ -171,7 +181,7 @@ func TestDBIPChanged(t *testing.T) {
 		t.Fatal("url change should be detected")
 	}
 	cfgC := cfgA
-	cfgC.Geo.Registry.RefreshInterval = time.Hour
+	cfgC.Geo.Registry.RefreshInterval = new(time.Hour)
 	if config.DBIPChanged(cfgA, cfgC) {
 		t.Fatal("registry change must not affect dbip diff")
 	}
@@ -181,7 +191,7 @@ func TestRegistryChanged(t *testing.T) {
 	t.Parallel()
 
 	var cfgA config.Config
-	cfgA.Geo.Registry = config.RegistryConfig{URLs: []string{"https://ftp.ripe.net/x"}, RefreshInterval: 24 * time.Hour}
+	cfgA.Geo.Registry = config.RegistryConfig{URLs: []string{"https://ftp.ripe.net/x"}, RefreshInterval: new(24 * time.Hour)}
 	cfgB := cfgA
 	if config.RegistryChanged(cfgA, cfgB) {
 		t.Fatal("identical registry config should not be changed")
@@ -192,7 +202,7 @@ func TestRegistryChanged(t *testing.T) {
 		t.Fatal("added url should be detected")
 	}
 	cfgC := cfgA
-	cfgC.Geo.DBIP.RefreshInterval = time.Hour
+	cfgC.Geo.DBIP.RefreshInterval = new(time.Hour)
 	if config.RegistryChanged(cfgA, cfgC) {
 		t.Fatal("dbip change must not affect registry diff")
 	}
@@ -862,5 +872,153 @@ func TestValidateBodySource(t *testing.T) {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
 		})
+	}
+}
+
+// TestLoadRejectsPortlessResolverAddress: resolver.address is handed verbatim to
+// net.Dialer for every lookup, so a value missing its port dials nothing and
+// every node is dropped as a DNS failure -- with no error naming the key. Load
+// must refuse it; a host:port and an omitted address load.
+func TestLoadRejectsPortlessResolverAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, addr := range []string{"1.1.1.1", "dns.example.com", ":53"} {
+		_, err := writeConfig(t, "resolver:\n  address: "+addr+"\n")
+		if err == nil {
+			t.Fatalf("resolver.address %q must be rejected", addr)
+		}
+		if !strings.Contains(err.Error(), "resolver.address") {
+			t.Fatalf("error %q does not name resolver.address", err)
+		}
+	}
+
+	cfg, err := writeConfig(t, "resolver:\n  address: 1.1.1.1:53\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Resolver.Address != "1.1.1.1:53" {
+		t.Fatalf("address = %q, want 1.1.1.1:53", cfg.Resolver.Address)
+	}
+	if _, emptyErr := writeConfig(t, ""); emptyErr != nil {
+		t.Fatalf("an omitted resolver.address keeps the system resolver: %v", emptyErr)
+	}
+}
+
+// TestLoadRejectsUnknownKey: every setting of this service is a yaml key, so a
+// typo must fail loudly instead of silently restoring the built-in default. The
+// error names the offending key at every nesting depth.
+func TestLoadRejectsUnknownKey(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct{ yaml, key string }{
+		"top level":      {"bogus_block:\n  x: 1\n", "bogus_block"},
+		"nested block":   {"subscriptions:\n  check:\n    max_avg_mss: 800\n", "max_avg_mss"},
+		"list entry":     {"filters:\n  - type: bandwidth\n    min_mpbs: 9\n", "min_mpbs"},
+		"resolver block": {"resolver:\n  cache_tt1: 1h\n", "cache_tt1"},
+	}
+	for name, tc := range cases {
+		_, err := writeConfig(t, tc.yaml)
+		if err == nil {
+			t.Fatalf("%s: a misspelled key must be rejected", name)
+		}
+		if !strings.Contains(err.Error(), tc.key) {
+			t.Fatalf("%s: error %q does not name %q", name, err, tc.key)
+		}
+	}
+}
+
+// TestLoadOverlayStrictness: the overlays decode strictly too (a key the overlay
+// schema does not carry was silently dropped before, e.g. an interval written
+// into sources.yaml where only sources are honoured), but an empty or
+// comment-only overlay must still load -- an absent-equivalent overlay is a
+// valid "no sources", not a parse failure.
+func TestLoadOverlayStrictness(t *testing.T) {
+	t.Parallel()
+
+	const base = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+
+	write := func(t *testing.T, sources, private string) (config.Config, error) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "sources.yaml"), []byte(sources), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(private), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return config.Load(path)
+	}
+
+	cfg, err := write(t, "", "# no sources harvested yet\n")
+	if err != nil {
+		t.Fatalf("an empty and a comment-only overlay must load: %v", err)
+	}
+	if cfg.SubscriptionsEnabled() {
+		t.Fatal("empty overlays must contribute no sources")
+	}
+
+	_, err = write(t, "subscriptions:\n  interval: 5m\n  sources:\n    - name: a\n      url: https://a.example.com/s\n", "")
+	if err == nil {
+		t.Fatal("a key the overlay schema does not carry must be rejected, not dropped")
+	}
+	if !strings.Contains(err.Error(), "interval") {
+		t.Fatalf("error %q does not name the offending overlay key", err)
+	}
+}
+
+// TestLoadValidatesProberParamsWithoutSources: the prober block must be checked
+// on every load, not only when a source list happens to be non-empty. Every
+// source here arrives from an overlay, so the old list-gated check let a bad
+// value boot clean and then fail EVERY reload from the moment the crawler wrote
+// its first source -- blaming private.yaml for a key in config.yaml.
+func TestLoadValidatesProberParamsWithoutSources(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct{ yaml, want string }{
+		"short interval":     {"subscriptions:\n  interval: 10s\n", "subscriptions.interval must be at least"},
+		"max_fail >= rounds": {"subscriptions:\n  check:\n    rounds: 2\n    max_fail: 2\n", "max_fail"},
+		"max_avg_ms below 1": {"subscriptions:\n  check:\n    max_avg_ms: -1\n", "max_avg_ms"},
+		"bad status range":   {"subscriptions:\n  check:\n    expected_status: not-a-range\n", "expected_status"},
+	}
+	for name, tc := range cases {
+		_, err := writeConfig(t, tc.yaml)
+		if err == nil {
+			t.Fatalf("%s: must be rejected with no sources configured", name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error %q does not contain %q", name, err, tc.want)
+		}
+	}
+}
+
+// TestLoadBlamesTheFileThatOwnsTheKey: a bad prober param in config.yaml must be
+// reported as its own error even when a private.yaml overlay supplies the
+// sources. Previously the check only ran after the overlay merge, so the message
+// pointed at private.yaml, which was innocent.
+func TestLoadBlamesTheFileThatOwnsTheKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n" +
+		"subscriptions:\n  interval: 10s\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("a sub-minimum subscriptions.interval must fail the load")
+	}
+	if strings.Contains(err.Error(), "private config") {
+		t.Fatalf("error %q blames private.yaml for a config.yaml key", err)
 	}
 }

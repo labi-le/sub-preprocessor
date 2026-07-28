@@ -85,13 +85,17 @@ Every `subscriptions.interval` it:
 3. merges and dedupes nodes by lowercased `server:port` (first source wins,
    config order),
 4. relabels each kept node to `<source>-NNN`,
-5. skips nodes recently proven dead (in-memory dead cache, `deadcache.ttl`),
+5. skips nodes a recent cycle already ruled out — proven dead (in-memory dead
+   cache, `deadcache.ttl`) or rejected by a through-node filter that is still
+   configured (in-memory reject cache, 6h),
 6. probes the rest with an embedded **Mihomo URL test** (HEAD requests through
    each node, `check.rounds` rounds, one shared concurrency semaphore),
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `bandwidth`) on the survivors,
+   `chatgpt` / `tidal` / `bandwidth`) on the survivors; a refusal or a
+   below-floor speed goes into the reject cache so the next cycle does not
+   repeat the test,
 9. atomically publishes the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
@@ -112,8 +116,9 @@ after DNS resolution, before any probing:
 - `country` — keep nodes whose IP's country is in the allowed set. The
   IP→country source is selectable per filter: `provider: geofeed` (CSV
   geofeed sources, in-memory indexed lookup) or `provider: asn` (Team Cymru
-  DNS). `exclude_groups` / `exclude_countries` shrink the worker's allowed
-  set; on `/` the allowed set comes from query params.
+  DNS). `exclude_groups` / `exclude_countries` are **worker-only**: they build
+  the `/stable.txt` deny-set and never reach the `/` chain, where the allowed
+  and denied sets come from the query params alone.
 - `asn` — drop nodes whose AS name matches `deny_patterns` (regexps), and
   nodes whose Cymru-resolved country is not allowed.
 
@@ -191,11 +196,12 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
+| reject cache (6h, not configurable) | in-memory, not persisted | `server:port` of nodes a through-node filter rejected (service refusal, speed below `min_mbps`), keyed per filter so removing a filter clears its effect at once; skipped before probing. Short and jittered on purpose: unlike "never answered", these verdicts reverse |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
-| geofeed data (`geo.geofeed.refresh_interval`) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
+| geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
 | dbip (`geo.dbip.refresh_interval`, default 24h) | in-memory range index (~700k ranges), refreshed in background | DB-IP Country Lite IP→country database for the `dbip` annotate provider |
 | registry (`geo.registry.refresh_interval`, default 24h) | in-memory range index (~330k ranges), refreshed in background | RIR delegated-extended registration countries for the `registry` annotate provider |
 
@@ -249,6 +255,9 @@ sub-preprocessor classify https://example.com/sub   # exit 0 = live (prints node
 Everything is driven by `config/config.yaml` plus two overlay siblings merged
 into it on load: `config/sources.yaml` (curated subscription sources kept out
 of the main file) and `config/private.yaml` (crawler-managed sources). All
+three are parsed **strictly** — an unknown or misspelled key fails the load
+naming the key, because a silently dropped key means a silently restored
+default (an empty or comment-only overlay is still fine). All
 three are watched and **hot-reloaded** on
 change; on any reload error the previous settings stay active. Changing
 `server.listen`, `server.metrics_listen`, `geoblock.db_path`/`ttl`, or
@@ -257,10 +266,15 @@ are built once at startup). Everything else — filters, annotate, groups,
 sources, prober knobs, log level — applies live; worker-side keys (sources,
 prober knobs, through-node filters) take effect on the worker's next cycle. A
 reflection test (`TestReloadCoverageComplete`) classifies every config key's
-reload path, so a new key cannot ship without one. A reload never restarts the
+reload path, so a new key cannot ship without one, and a companion test
+(`TestReloadClassificationMatchesBehaviour`) mutates each key to prove the
+declared path is the one the reloader actually takes. A reload never restarts the
 stable worker: when its inputs actually changed it is reconfigured in place, so
 the cycle already in flight (20–55 min) runs to publication under the settings
-it started with instead of being cancelled and losing its whole probe pass.
+it started with instead of being cancelled and losing its whole probe pass. A
+reload that comes out with **zero** subscription sources is refused rather than
+obeyed — the running worker keeps its previous sources and logs a warning,
+since an empty list is nearly always a missing overlay file.
 
 Key sections:
 
@@ -268,18 +282,20 @@ Key sections:
 - `server.listen` / `server.metrics_listen` — public HTTP and internal
   Prometheus listeners.
 - `geo.geofeed.sources[]` (`url` + explicit `type: raw|gzip`) +
-  `refresh_interval`; `geo.asn.timeout` / `cache_ttl` — shared geo providers.
+  `refresh_interval` (unset → 24h, explicit `0` → load once and never
+  refresh); `geo.asn.timeout` / `cache_ttl` — shared geo providers.
 - `geo.dbip.url` / `geo.dbip.refresh_interval` and `geo.registry.urls[]` /
   `geo.registry.refresh_interval` — optional blocks for the downloadable
   IP→country databases; defaults are built in (the DB-IP Country Lite
   `{yyyy-mm}` monthly URL, the five RIR delegated-extended files, 24h
   refresh).
-- `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`.
+- `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`, and `resolver.address`
+  — the upstream DNS server as `host:port` (a portless value is rejected at
+  load: it dials nothing, so every node would be dropped as a DNS failure).
 - `filters` — the ordered filter list described above.
 - `annotate` — the ordered tag list described above; GEO/ASN entries take a
-  `providers:` chain. The retired singular `provider:` key is rejected at
-  load (`annotate[i]: "provider" was renamed to "providers" (ordered list)`)
-  instead of being silently dropped.
+  `providers:` chain. The retired singular `provider:` key is rejected as an
+  unknown key by the strict decode instead of being silently dropped.
 - `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
   `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
   for the through-node filters.
@@ -308,9 +324,10 @@ The stable worker reports every cycle to `internal/metrics`, which renders
 hand-rolled Prometheus text exposition (no `client_golang` — the
 `protobuf => metacubex/protobuf-go` replace in `go.mod` makes it risky):
 cycle funnel (`stable_merged_nodes`, `stable_probed_nodes`,
-`stable_kept_nodes`, `stable_dead_skipped_nodes`), per-source and per-filter
-in/kept/dropped-by-reason counters, kept-node speed histogram, cycle duration,
-success timestamp, and cycle/failure totals.
+`stable_kept_nodes`, `stable_dead_skipped_nodes` — the last counts every node
+skipped before probing, dead-cached or filter-rejected, so the funnel closes),
+per-source and per-filter in/kept/dropped-by-reason counters, kept-node speed
+histogram, cycle duration, success timestamp, and cycle/failure totals.
 
 The metrics listener is bound synchronously at startup, so a port conflict is a
 startup failure like any other rather than a silently missing monitoring

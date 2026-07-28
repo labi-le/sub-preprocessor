@@ -150,7 +150,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 
 	live := map[string]string{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	next, managed := c.mergeManaged(pf, live, rr, true)
+	next, managed := c.mergeManaged(pf, live, rr, true, nil)
 
 	byURL := map[string]bool{}
 	for _, s := range next {
@@ -260,7 +260,7 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 
 	live := map[string]string{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	_, managed := c.mergeManaged(pf, live, rr, true)
+	_, managed := c.mergeManaged(pf, live, rr, true, nil)
 
 	kept := map[string]bool{}
 	for _, s := range managed {
@@ -293,7 +293,7 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
 
-	next, managed := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true)
+	next, managed := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true, nil)
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -412,7 +412,7 @@ func TestMergeUpgradesLegacyName(t *testing.T) {
 	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u}}
 
 	live := map[string]string{u: "VPN_Channel"}
-	next, managed := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true)
+	next, managed := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
 	if len(next) != 1 || len(managed) != 1 {
 		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
 	}
@@ -547,7 +547,7 @@ func TestStateRecordSaveLoadPrune(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".crawler-state.json")
 	now := time.Now()
 
-	st := loadState(path) // missing file → empty
+	st := loadState(path, zerolog.Nop()) // missing file → empty
 	if len(st.Productive) != 0 {
 		t.Fatalf("missing state should be empty, got %+v", st.Productive)
 	}
@@ -557,7 +557,7 @@ func TestStateRecordSaveLoadPrune(t *testing.T) {
 		t.Fatalf("saveState: %v", err)
 	}
 
-	got := loadState(path)
+	got := loadState(path, zerolog.Nop())
 	if len(got.Productive) != 2 {
 		t.Fatalf("roundtrip: got %d entries, want 2", len(got.Productive))
 	}
@@ -577,7 +577,7 @@ func TestStateRecordSaveLoadPrune(t *testing.T) {
 func TestStateEmptyPathDisabled(t *testing.T) {
 	t.Parallel()
 
-	st := loadState("")
+	st := loadState("", zerolog.Nop())
 	st.record("x", time.Now())
 	if err := saveState("", st); err != nil {
 		t.Fatalf("saveState with empty path must be a no-op, got %v", err)
@@ -593,7 +593,7 @@ func TestLoadChannels(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := loadChannels(path, zerolog.Nop())
+	got := loadChannels(path, zerolog.Nop()).Channels
 	want := []string{"o00000000i", "@rap_ex", "https://t.me/remiuc"}
 	if len(got) != len(want) {
 		t.Fatalf("loadChannels = %v, want %v", got, want)
@@ -604,14 +604,14 @@ func TestLoadChannels(t *testing.T) {
 		}
 	}
 
-	if c := loadChannels(filepath.Join(dir, "nope.yaml"), zerolog.Nop()); c != nil {
+	if c := loadChannels(filepath.Join(dir, "nope.yaml"), zerolog.Nop()).Channels; c != nil {
 		t.Errorf("missing file should yield nil, got %v", c)
 	}
 	bad := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(bad, []byte("channels: [not: valid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if c := loadChannels(bad, zerolog.Nop()); c != nil {
+	if c := loadChannels(bad, zerolog.Nop()).Channels; c != nil {
 		t.Errorf("malformed file should yield nil, got %v", c)
 	}
 }
@@ -1022,5 +1022,177 @@ func TestWritePrivateRefusesUnloadableSource(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a refused write must not create the file; stat err = %v", err)
+	}
+}
+
+// TestLoadStateMalformedFileIsNotClobbered pins CRAWL-5. loadState used to
+// swallow the unmarshal error and hand back empty state, which saveState then
+// wrote over the real file at the end of the same cycle — destroying up to
+// StateTTL of productive-channel memory silently and irreversibly.
+func TestLoadStateMalformedFileIsNotClobbered(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".crawler-state.json")
+	corrupt := []byte(`{"productive": {"rap_ex": {"first_seen":`) // truncated mid-write
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	st := loadState(path, zerolog.New(&logBuf))
+	if len(st.Productive) != 0 {
+		t.Fatalf("a malformed file must not yield half-decoded state, got %+v", st.Productive)
+	}
+	if !strings.Contains(logBuf.String(), "malformed") {
+		t.Errorf("an unreadable state file must be logged, got %q", logBuf.String())
+	}
+
+	st.record("newchan", time.Now())
+	if err := saveState(path, st); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Fatalf("saveState overwrote a state file it could not read:\n got: %s\nwant: %s", got, corrupt)
+	}
+}
+
+// TestScrapeChannelReportsLostCursor pins the detection half of CRAWL-6: a page
+// carrying no ?before= cursor while the page budget still had room is the exact
+// signature of the t.me markup changing, and it must be distinguishable from a
+// channel that simply ran out of pages.
+func TestScrapeChannelReportsLostCursor(t *testing.T) {
+	t.Parallel()
+
+	withCursor := `<div data-post="chan/3631"></div>`
+	noCursor := `<div>nothing paginated here</div>`
+
+	cases := []struct {
+		name      string
+		pages     map[string]string
+		budget    int
+		wantPages int
+		wantLost  bool
+	}{
+		{
+			name:      "cursor selector broke",
+			pages:     map[string]string{"https://t.me/s/chan": noCursor},
+			budget:    6,
+			wantPages: 1,
+			wantLost:  true,
+		},
+		{
+			name:      "budget exhausted, not the cursor",
+			pages:     map[string]string{"https://t.me/s/chan": withCursor},
+			budget:    1,
+			wantPages: 1,
+			wantLost:  false,
+		},
+		{
+			name: "channel genuinely ends after two pages",
+			pages: map[string]string{
+				"https://t.me/s/chan":             withCursor,
+				"https://t.me/s/chan?before=3631": noCursor,
+			},
+			budget:    2,
+			wantPages: 2,
+			wantLost:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := &Crawler{client: pageFetcher{pages: tc.pages}, logger: zerolog.Nop()}
+			pages, lost := c.scrapeChannel(context.Background(), "chan", tc.budget)
+			if len(pages) != tc.wantPages {
+				t.Errorf("pages = %d, want %d", len(pages), tc.wantPages)
+			}
+			if lost != tc.wantLost {
+				t.Errorf("cursorLost = %v, want %v", lost, tc.wantLost)
+			}
+		})
+	}
+}
+
+// TestReportCursorsWarnsOnlyOnFleetWideLoss pins the reporting half of CRAWL-6.
+// One short channel is normal and must stay quiet; every cursor-relevant channel
+// in the cycle losing its cursor is the selector breaking and must be loud.
+func TestReportCursorsWarnsOnlyOnFleetWideLoss(t *testing.T) {
+	t.Parallel()
+
+	warned := func(cs cursorStats) bool {
+		var logBuf bytes.Buffer
+		c := &Crawler{logger: zerolog.New(&logBuf)}
+		c.reportCursors(cs)
+		return strings.Contains(logBuf.String(), "page cursor")
+	}
+
+	if !warned(cursorStats{paged: cursorAlarmMin, lost: cursorAlarmMin}) {
+		t.Error("a cycle where no channel yielded a cursor must warn")
+	}
+	if warned(cursorStats{paged: cursorAlarmMin, lost: cursorAlarmMin - 1}) {
+		t.Error("one channel still paginating means the selector works; stay quiet")
+	}
+	if warned(cursorStats{paged: cursorAlarmMin - 1, lost: cursorAlarmMin - 1}) {
+		t.Error("too few channels to distinguish a markup break from short channels")
+	}
+	if warned(cursorStats{}) {
+		t.Error("a cycle that scraped nothing must not warn")
+	}
+}
+
+// TestRunOnceHonoursBlockedList pins CRAWL-7: deleting a harvested source by
+// hand does not stick, because the next cycle rediscovers the URL in a channel
+// and re-adds it. The channels.yaml blocked list is the only supported way to
+// retire one for good.
+func TestRunOnceHonoursBlockedList(t *testing.T) {
+	t.Parallel()
+
+	const (
+		blockedURL = "https://abusive.example/sub"
+		keptURL    = "https://fine.example/sub"
+	)
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	channels := filepath.Join(dir, "channels.yaml")
+	if err := os.WriteFile(channels, []byte("channels:\n  - chan\nblocked:\n  - "+blockedURL+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	page := `<a href="` + blockedURL + `">a</a> <a href="` + keptURL + `">b</a>`
+	c := &Crawler{
+		opts: Options{
+			PrivatePath:  priv,
+			ChannelsPath: channels,
+			Pages:        1,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	urls := map[string]bool{}
+	for _, s := range got.Subscriptions.Sources {
+		urls[s.URL] = true
+	}
+	if urls[blockedURL] {
+		t.Errorf("a blocked URL was harvested anyway: %+v", got.Subscriptions.Sources)
+	}
+	if !urls[keptURL] {
+		t.Errorf("the unblocked URL must still be harvested, got %+v", got.Subscriptions.Sources)
 	}
 }
