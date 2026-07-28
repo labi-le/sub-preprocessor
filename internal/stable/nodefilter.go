@@ -13,8 +13,8 @@ import (
 // NodeFilter is a through-node check the worker runs on latency-probe
 // survivors: unlike the preprocess IP-filters it routes traffic THROUGH each
 // proxy node, so it lives here and only affects /stable.txt. The through-node
-// entries of the unified filters list (gemini/claude/chatgpt/bandwidth) select
-// which run.
+// entries of the unified filters list (gemini/claude/chatgpt/tidal/bandwidth)
+// select which run.
 type NodeFilter interface {
 	name() string
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by
@@ -38,6 +38,11 @@ type chatgptChecker interface {
 	ChatGPTCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
+// tidalChecker is the through-node Tidal capability of a Prober.
+type tidalChecker interface {
+	TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+}
+
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
 	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -49,13 +54,15 @@ const (
 	geminiFilterName    = "gemini"
 	claudeFilterName    = "claude"
 	chatgptFilterName   = "chatgpt"
+	tidalFilterName     = "tidal"
 	bandwidthFilterName = "bandwidth"
 )
 
-// apiFilter keeps only survivors that can reach an API endpoint through their
-// own node, and records geo-blocked node hosts in the store (TTL) so later
-// cycles skip them before probing. A survivor is kept only when the
-// through-node API GET returns a body without the geo-block marker. A nil
+// apiFilter keeps only survivors that pass a through-node API check, and records
+// geo-blocked node hosts in the store (TTL) so later cycles skip them before
+// probing; a nil store skips that persistence (see the tidal filter). What
+// counts as blocked is the check's own verdict: a geo-block marker in the body
+// for gemini/claude/chatgpt, an unsupported egress country for tidal. A nil
 // enabled func means the check is always active (e.g. Anthropic geo-blocks
 // before authentication, so its check is keyless).
 type apiFilter struct {
@@ -196,9 +203,10 @@ func annotateSpeed(line string, mbps int) string {
 
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key); the claude and chatgpt filters are keyless
-// (both APIs geo-block before authentication); the bandwidth filter needs a
-// prober with bandwidth support.
+// support (a resolved API key); the claude, chatgpt and tidal filters are
+// keyless (the first two geo-block before authentication, tidal reports the
+// egress country outright); the bandwidth filter needs a prober with bandwidth
+// support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -238,6 +246,23 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 				filterName: chatgptFilterName,
 				check:      cg.ChatGPTCheck,
 				store:      store,
+				logger:     logger,
+			})
+		case tidalFilterName:
+			td, ok := prober.(tidalChecker)
+			if !ok {
+				logger.Warn().Msg("tidal filter requested but prober lacks Tidal support; skipping")
+				continue
+			}
+			// No store on purpose: this gate's verdict is a bare status code,
+			// a far weaker signal than the explicit refusal markers the AI
+			// checks match. The store is keyed by host with no service
+			// dimension and lives for its whole TTL, so a transient CDN error
+			// or rate-limit would evict the node from every endpoint. Cheap to
+			// re-check each cycle instead.
+			filters = append(filters, &apiFilter{
+				filterName: tidalFilterName,
+				check:      td.TidalCheck,
 				logger:     logger,
 			})
 		case bandwidthFilterName:

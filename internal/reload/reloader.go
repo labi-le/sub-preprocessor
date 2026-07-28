@@ -11,7 +11,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/server"
 )
 
-// Applier restarts the stable subscription worker from a validated config.
+// Applier hands a validated config to the stable subscription worker.
 // Implemented by *stable.Controller.
 type Applier interface {
 	Apply(cfg config.Config) error
@@ -137,7 +137,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	// The stable worker derives its allow set and through-node filters from the
 	// unified filters list, plus subscriptions, groups, the geoblock prober
-	// settings (gemini/claude/chatgpt), and the annotate list (baked into the
+	// settings (gemini/claude/chatgpt/tidal), and the annotate list (baked into the
 	// bandwidth [SPD:] tag), so a change to any of them re-applies it; unrelated
 	// config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||

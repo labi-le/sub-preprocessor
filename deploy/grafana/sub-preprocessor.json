@@ -366,7 +366,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Through-node filter drops by reason (gemini/claude/chatgpt/bandwidth)",
+      "title": "Through-node filter drops by reason (gemini/claude/chatgpt/tidal/bandwidth)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

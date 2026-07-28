@@ -56,16 +56,23 @@ func testSources() []config.SubscriptionSource {
 	}
 }
 
+func testCheckerSpec(prober stable.Prober) stable.CheckerSpec {
+	return stable.CheckerSpec{
+		Sources:       testSources(),
+		Allowed:       filter.All(),
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxFail:       0,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        prober,
+	}
+}
+
 func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stable.Holder) *stable.Checker {
 	return stable.NewChecker(
-		testSources(),
-		filter.All(),
-		time.Hour,
-		5, 0, 1000,
-		time.Minute,
+		testCheckerSpec(prober),
 		func() stable.Filterer { return filterer },
-		prober,
-		nil,
 		nil,
 		holder,
 		zerolog.Nop(),
@@ -313,8 +320,8 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	dead := &fakeDeadCache{blocked: map[string]bool{}}
 	holder := stable.NewHolder()
 	c := stable.NewChecker(
-		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
 	)
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
@@ -365,8 +372,8 @@ func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 	holder.Store(previous)
 
 	c := stable.NewChecker(
-		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(context.Background())
 	if !errors.Is(err, context.Canceled) {
@@ -399,8 +406,8 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 	holder.Store(previous)
 
 	c := stable.NewChecker(
-		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, dead, holder, zerolog.Nop(), nil,
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, dead, holder, zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -479,8 +486,8 @@ func TestCheckerReportsPublishedCycle(t *testing.T) {
 	holder := stable.NewHolder()
 	rep := &fakeReporter{}
 	c := stable.NewChecker(
-		testSources(), filter.All(), time.Hour, 5, 0, 1000, time.Minute,
-		func() stable.Filterer { return filterer }, prober, nil, nil, holder, zerolog.Nop(), rep,
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, nil, holder, zerolog.Nop(), rep,
 	)
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -493,5 +500,129 @@ func TestCheckerReportsPublishedCycle(t *testing.T) {
 	}
 	if rep.last.SourcesTotal != len(testSources()) {
 		t.Errorf("report SourcesTotal = %d, want %d", rep.last.SourcesTotal, len(testSources()))
+	}
+}
+
+// blockingProber parks inside Probe until released, so a Reconfigure can be
+// timed to land while a cycle is in flight.
+type blockingProber struct {
+	entered chan struct{}
+	release chan struct{}
+	res     map[string]stable.ProbeResult
+}
+
+func (p *blockingProber) Probe(ctx context.Context, _ []byte) (map[string]stable.ProbeResult, error) {
+	close(p.entered)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return p.res, nil
+}
+
+func (p *blockingProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestReconfigureLeavesCycleInFlightIntact: RunOnce reads its spec once at the
+// start, so a reload landing mid-cycle configures the NEXT cycle instead of
+// half-rewriting this one. Without the snapshot a cycle could publish stats
+// counted against one source list while its nodes came from another.
+func TestReconfigureLeavesCycleInFlightIntact(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#orig\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#z\n",
+	}}
+	prober := &blockingProber{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		res: map[string]stable.ProbeResult{
+			"alpha-001": {Successes: 5, MeanMs: 100},
+			"beta-001":  {Successes: 5, MeanMs: 100},
+		},
+	}
+	holder := stable.NewHolder()
+	c := newTestChecker(filterer, prober, holder)
+
+	done := make(chan error, 1)
+	go func() { done <- c.RunOnce(context.Background()) }()
+
+	<-prober.entered
+	// Reload arrives mid-probe, dropping a source.
+	spec := testCheckerSpec(prober)
+	spec.Sources = spec.Sources[:1]
+	c.Reconfigure(spec)
+	close(prober.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("cycle must complete despite the reload: %v", err)
+	}
+	snap := holder.Load()
+	if snap == nil {
+		t.Fatal("cycle must still publish after a mid-flight reload")
+	}
+	if snap.Stats.SourcesTotal != 2 {
+		t.Fatalf("SourcesTotal = %d, want 2: the cycle must report the spec it started with", snap.Stats.SourcesTotal)
+	}
+}
+
+// countingProber signals every Probe call so a test can wait for the Nth cycle.
+type countingProber struct {
+	calls chan struct{}
+	res   map[string]stable.ProbeResult
+}
+
+func (p *countingProber) Probe(context.Context, []byte) (map[string]stable.ProbeResult, error) {
+	select {
+	case p.calls <- struct{}{}:
+	default:
+	}
+
+	return p.res, nil
+}
+
+func (p *countingProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestReconfigureAppliesIntervalWhileIdle: an interval change landing between
+// cycles must take effect immediately. Run re-reads the interval only after a
+// wakeup, so without Reconfigure poking the loop a shortened interval would sit
+// unapplied until the OLD period elapsed and one more cycle finished.
+func TestReconfigureAppliesIntervalWhileIdle(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#orig\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#z\n",
+	}}
+	prober := &countingProber{
+		calls: make(chan struct{}, 8),
+		res: map[string]stable.ProbeResult{
+			"alpha-001": {Successes: 5, MeanMs: 100},
+			"beta-001":  {Successes: 5, MeanMs: 100},
+		},
+	}
+	spec := testCheckerSpec(prober)
+	spec.Interval = time.Hour
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer },
+		nil, stable.NewHolder(), zerolog.Nop(), nil)
+
+	go c.Run(t.Context()) // cancelled on test cleanup, which stops the loop
+
+	select {
+	case <-prober.calls: // immediate first cycle
+	case <-time.After(5 * time.Second):
+		t.Fatal("first cycle never ran")
+	}
+
+	shortened := testCheckerSpec(prober)
+	shortened.Interval = 10 * time.Millisecond
+	c.Reconfigure(shortened)
+
+	select {
+	case <-prober.calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shortened interval was not applied while the worker sat idle")
 	}
 }

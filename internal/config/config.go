@@ -61,6 +61,9 @@ const (
 	defaultChatGPTMarker      = "unsupported_country"
 	defaultChatGPTTimeout     = 15 * time.Second
 	defaultChatGPTConcurrency = 8
+	defaultTidalEndpoint      = "https://api.tidal.com"
+	defaultTidalTimeout       = 15 * time.Second
+	defaultTidalConcurrency   = 8
 
 	// Free downloadable IP->country databases for the annotate provider chain.
 	// {yyyy-mm} in the dbip URL expands to the current UTC month at fetch time.
@@ -70,7 +73,7 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn, run per-node in preprocess) and
-// through-node filters (gemini/claude/chatgpt/bandwidth, run post-probe in
+// through-node filters (gemini/claude/chatgpt/tidal/bandwidth, run post-probe in
 // stable); which physical stage a type lands in is an implementation detail,
 // not config.
 const (
@@ -79,6 +82,7 @@ const (
 	FilterGemini    = "gemini"
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
+	FilterTidal     = "tidal"
 	FilterBandwidth = "bandwidth"
 
 	ProviderGeofeed  = "geofeed"
@@ -152,11 +156,12 @@ type GeoConfig struct {
 //   - country: Provider (geofeed|asn), ExcludeGroups, ExcludeCountries
 //   - asn:     DenyPatterns
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/claude/chatgpt: selectors; prober params come from
-//     geoblock.{gemini,claude,chatgpt} and may be overridden per-entry
+//   - gemini/claude/chatgpt/tidal: selectors; prober params come from
+//     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden per-entry
 //     (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
-//     Marker/Endpoint/Timeout/Concurrency for chatgpt).
+//     Marker/Endpoint/Timeout/Concurrency for chatgpt;
+//     Endpoint/Timeout/Concurrency for tidal).
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
@@ -173,7 +178,7 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude/chatgpt overrides (fall back to the geoblock sub-block).
+	// gemini/claude/chatgpt/tidal overrides (fall back to the geoblock sub-block).
 	Marker   string `yaml:"marker"`
 	Model    string `yaml:"model"`
 	Endpoint string `yaml:"endpoint"`
@@ -213,6 +218,7 @@ type NodeFilterSpec struct {
 	Gemini    GeminiConfig
 	Claude    ClaudeConfig
 	ChatGPT   ChatGPTConfig
+	Tidal     TidalConfig
 }
 
 // IPFilterSpecs returns the IP-stage filters (country/asn) in config order.
@@ -239,7 +245,7 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 }
 
 // NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
-// bandwidth) in config order.
+// tidal/bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
 	for _, f := range cfg.Filters {
@@ -250,6 +256,8 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 			specs = append(specs, NodeFilterSpec{Type: FilterClaude, Claude: f.mergedClaude(cfg.GeoBlock.Claude)})
 		case FilterChatGPT:
 			specs = append(specs, NodeFilterSpec{Type: FilterChatGPT, ChatGPT: f.mergedChatGPT(cfg.GeoBlock.ChatGPT)})
+		case FilterTidal:
+			specs = append(specs, NodeFilterSpec{Type: FilterTidal, Tidal: f.mergedTidal(cfg.GeoBlock.Tidal)})
 		case FilterBandwidth:
 			specs = append(specs, NodeFilterSpec{Type: FilterBandwidth, Bandwidth: f.bandwidthConfig()})
 		}
@@ -320,6 +328,19 @@ func (f FilterConfig) mergedChatGPT(base ChatGPTConfig) ChatGPTConfig {
 	return base
 }
 
+func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
+	if f.Endpoint != "" {
+		base.Endpoint = f.Endpoint
+	}
+	if f.Timeout != 0 {
+		base.Timeout = f.Timeout
+	}
+	if f.Concurrency != 0 {
+		base.Concurrency = f.Concurrency
+	}
+	return base
+}
+
 func (f FilterConfig) bandwidthConfig() BandwidthConfig {
 	return BandwidthConfig{
 		TestURL:     f.TestURL,
@@ -336,7 +357,7 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the URL-test (latency) prober params only. The through-node
-// filters (gemini/claude/chatgpt/bandwidth) and their params live in the
+// filters (gemini/claude/chatgpt/tidal/bandwidth) and their params live in the
 // top-level filters list, not here.
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
@@ -451,15 +472,21 @@ type ASNConfig struct {
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
-// GeoBlockConfig configures the per-node geo-block list: a SQLite TTL store of
+// GeoBlockConfig configures the per-node geo-block list -- a SQLite TTL store of
 // node hosts that failed a through-node API reachability check (Gemini, Claude,
-// ChatGPT).
+// ChatGPT) -- plus the base params of every through-node API check. Tidal's
+// params live here for uniformity even though the tidal filter deliberately
+// never writes to the store: its verdict is a bare status code, a far weaker
+// signal than the explicit refusal markers the other checks match, so a
+// transient CDN error or rate-limit would otherwise evict the host from every
+// endpoint for the store's whole TTL.
 type GeoBlockConfig struct {
 	DBPath  string        `yaml:"db_path"`
 	TTL     time.Duration `yaml:"ttl"`
 	Gemini  GeminiConfig  `yaml:"gemini"`
 	Claude  ClaudeConfig  `yaml:"claude"`
 	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
+	Tidal   TidalConfig   `yaml:"tidal"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -530,6 +557,24 @@ type ChatGPTConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
+// TidalConfig configures the through-node Tidal reachability check. It needs no
+// API key: GET /v1/country answers 200 {"countryCode":"XX"} for an egress Tidal
+// accepts, and from one it refuses the request never reaches the API at all --
+// CloudFront answers 403 with an HTML error page (measured from a Russian
+// egress).
+//
+// The check deliberately does NOT compare that country against Tidal's list of
+// markets. That list gates where a subscription can be BOUGHT; an existing
+// subscriber streams fine from a country Tidal merely does not sell in (Tidal's
+// terms key on residence, and its help centre documents no travel restriction
+// at all). Only a hard refusal means the node is unusable, so only that drops
+// it.
+type TidalConfig struct {
+	Endpoint    string        `yaml:"endpoint"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
@@ -581,6 +626,16 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if cg.Concurrency == 0 {
 		cg.Concurrency = defaultChatGPTConcurrency
+	}
+	td := &g.Tidal
+	if td.Endpoint == "" {
+		td.Endpoint = defaultTidalEndpoint
+	}
+	if td.Timeout == 0 {
+		td.Timeout = defaultTidalTimeout
+	}
+	if td.Concurrency == 0 {
+		td.Concurrency = defaultTidalConcurrency
 	}
 }
 
@@ -851,13 +906,16 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return cfg.validateCountryFilter(i, f)
 	case FilterASN:
 		return validateASNFilter(i, f)
-	case FilterGemini, FilterClaude, FilterChatGPT:
+	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
 	default:
-		return fmt.Errorf("filters[%d]: unknown type %q (must be %q, %q, %q, %q, %q or %q)",
-			i, f.Type, FilterCountry, FilterASN, FilterGemini, FilterClaude, FilterChatGPT, FilterBandwidth)
+		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
+			strings.Join([]string{
+				FilterCountry, FilterASN, FilterGemini, FilterClaude,
+				FilterChatGPT, FilterTidal, FilterBandwidth,
+			}, ", "))
 	}
 }
 
@@ -865,10 +923,8 @@ func (cfg *Config) validateCountryFilter(i int, f FilterConfig) error {
 	if f.Provider != ProviderGeofeed && f.Provider != ProviderASN {
 		return fmt.Errorf("filters[%d]: country provider must be %q or %q, got %q", i, ProviderGeofeed, ProviderASN, f.Provider)
 	}
-	for _, c := range f.ExcludeCountries {
-		if err := validateCountryCode(fmt.Sprintf("filters[%d].exclude_countries", i), c); err != nil {
-			return err
-		}
+	if err := validateCountryList(fmt.Sprintf("filters[%d].exclude_countries", i), f.ExcludeCountries); err != nil {
+		return err
 	}
 	for _, g := range f.ExcludeGroups {
 		if _, ok := cfg.Groups[g]; !ok {
@@ -893,6 +949,15 @@ func validateAPIFilter(i int, f FilterConfig) error {
 	}
 	if f.Concurrency < 0 {
 		return fmt.Errorf("filters[%d].concurrency must not be negative", i)
+	}
+	return nil
+}
+
+func validateCountryList(name string, codes []string) error {
+	for _, c := range codes {
+		if err := validateCountryCode(name, c); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -986,6 +1051,12 @@ func (g *GeoBlockConfig) validate() error {
 	}
 	if g.ChatGPT.Concurrency < 0 {
 		return errors.New("geoblock.chatgpt.concurrency must not be negative")
+	}
+	if g.Tidal.Timeout < 0 {
+		return errors.New("geoblock.tidal.timeout must not be negative")
+	}
+	if g.Tidal.Concurrency < 0 {
+		return errors.New("geoblock.tidal.concurrency must not be negative")
 	}
 	return nil
 }
@@ -1103,13 +1174,14 @@ func FiltersChanged(old, newCfg Config) bool {
 }
 
 // ProberChanged reports whether the through-node prober settings
-// (gemini/claude/chatgpt) differ; the stable worker must be re-applied when
-// they do. The store-only geoblock fields (db_path, ttl) are covered by
+// (gemini/claude/chatgpt/tidal) differ; the stable worker must be re-applied
+// when they do. The store-only geoblock fields (db_path, ttl) are covered by
 // StoresChanged instead.
 func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
-		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT)
+		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
+		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal)
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at
@@ -1156,10 +1228,8 @@ func (g Groups) Validate() error {
 		if len(countries) == 0 {
 			return fmt.Errorf("groups.%s: must contain at least one country", name)
 		}
-		for _, c := range countries {
-			if err := validateCountryCode(name, c); err != nil {
-				return err
-			}
+		if err := validateCountryList("groups."+name, countries); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1168,10 +1238,10 @@ func (g Groups) Validate() error {
 func validateCountryCode(name, c string) error {
 	c = strings.TrimSpace(c)
 	if len(c) != 2 { //nolint:mnd // ISO 3166-1 alpha-2 country code length
-		return fmt.Errorf("groups.%s: invalid country code %q", name, c)
+		return fmt.Errorf("%s: invalid country code %q", name, c)
 	}
 	if !isASCIILetter(c[0]) || !isASCIILetter(c[1]) {
-		return fmt.Errorf("groups.%s: invalid country code %q", name, c)
+		return fmt.Errorf("%s: invalid country code %q", name, c)
 	}
 	return nil
 }

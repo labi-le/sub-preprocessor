@@ -27,5 +27,5 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 	g := m.geo.Gemini
 	return m.apiCheck(ctx, "stable.GeminiCheck", "gemini check", proxies,
 		m.geminiURL(), nil, g.Timeout, g.Concurrency,
-		func(body string) bool { return markerBlocked(body, g.Marker) })
+		func(_ int, body string) bool { return markerBlocked(body, g.Marker) })
 }

@@ -52,8 +52,8 @@ func TestIPFilterSpecsSplit(t *testing.T) {
 }
 
 // TestNodeFilterSpecsSplit proves the through-node types (gemini/claude/
-// chatgpt/bandwidth) split out in order, with the API configs merged over the
-// geoblock defaults and bandwidth carrying its entry params.
+// chatgpt/tidal/bandwidth) split out in order, with the API configs merged over
+// the geoblock defaults and bandwidth carrying its entry params.
 func TestNodeFilterSpecsSplit(t *testing.T) {
 	t.Parallel()
 
@@ -62,6 +62,7 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8},
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
+			Tidal:   config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
 			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
@@ -69,16 +70,18 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 			{Type: config.FilterBandwidth, MinMbps: new(9), TestURL: "https://speed/x", Timeout: 30 * time.Second, Concurrency: 2},
 			{Type: config.FilterGemini, Model: "override-model"},
 			{Type: config.FilterChatGPT, Concurrency: 3},
+			{Type: config.FilterTidal, Timeout: 30 * time.Second},
 		},
 	}
 
 	got := cfg.NodeFilterSpecs()
-	if len(got) != 4 {
-		t.Fatalf("NodeFilterSpecs() len=%d, want 4", len(got))
+	if len(got) != 5 {
+		t.Fatalf("NodeFilterSpecs() len=%d, want 5", len(got))
 	}
 	if got[0].Type != config.FilterClaude || got[1].Type != config.FilterBandwidth ||
-		got[2].Type != config.FilterGemini || got[3].Type != config.FilterChatGPT {
-		t.Fatalf("order = %s,%s,%s,%s", got[0].Type, got[1].Type, got[2].Type, got[3].Type)
+		got[2].Type != config.FilterGemini || got[3].Type != config.FilterChatGPT ||
+		got[4].Type != config.FilterTidal {
+		t.Fatalf("order = %s,%s,%s,%s,%s", got[0].Type, got[1].Type, got[2].Type, got[3].Type, got[4].Type)
 	}
 
 	// claude: overridden marker, other fields inherited from geoblock base.
@@ -97,6 +100,11 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	// chatgpt: overridden concurrency, endpoint/marker inherited from the base.
 	if got[3].ChatGPT.Concurrency != 3 || got[3].ChatGPT.Endpoint != "https://chatgpt.base" || got[3].ChatGPT.Marker != "base-chatgpt" {
 		t.Fatalf("chatgpt merge wrong: %+v", got[3].ChatGPT)
+	}
+	// tidal: the overridden timeout applies, endpoint and the rest are inherited.
+	if got[4].Tidal.Timeout != 30*time.Second ||
+		got[4].Tidal.Endpoint != "https://tidal.base" || got[4].Tidal.Concurrency != 8 {
+		t.Fatalf("tidal merge wrong: %+v", got[4].Tidal)
 	}
 }
 
@@ -160,6 +168,8 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"bandwidth neg mbps":    {geoBase + "filters:\n  - type: bandwidth\n    min_mbps: -1\n", "min_mbps must not be negative"},
 		"bandwidth neg timeout": {geoBase + "filters:\n  - type: bandwidth\n    timeout: -1s\n", "timeout must be positive"},
 		"bandwidth bad url":     {geoBase + "filters:\n  - type: bandwidth\n    test_url: ftp://x/y\n", "test_url"},
+		"tidal neg concurrency": {geoBase + "filters:\n  - type: tidal\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
+		"tidal neg timeout":     {geoBase + "filters:\n  - type: tidal\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -172,6 +182,28 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 				t.Fatalf("%s: error %q does not contain %q", name, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestLoadTidalFilterInheritsDefaults proves a bare `{type: tidal}` entry
+// resolves to a usable spec with no per-entry config: the keyless endpoint plus
+// the built-in supported-country list come from the geoblock block verbatim.
+func TestLoadTidalFilterInheritsDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+"filters:\n  - type: tidal\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := cfg.NodeFilterSpecs()
+	if len(specs) != 1 || specs[0].Type != config.FilterTidal {
+		t.Fatalf("NodeFilterSpecs() = %+v, want one tidal spec", specs)
+	}
+	if !reflect.DeepEqual(specs[0].Tidal, cfg.GeoBlock.Tidal) {
+		t.Fatalf("bare entry must inherit geoblock.tidal: %+v vs %+v", specs[0].Tidal, cfg.GeoBlock.Tidal)
+	}
+	if specs[0].Tidal.Endpoint == "" {
+		t.Fatalf("tidal spec must be usable unconfigured: %+v", specs[0].Tidal)
 	}
 }
 

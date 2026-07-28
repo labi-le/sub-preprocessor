@@ -430,6 +430,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative claude timeout":       {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
 		"negative chatgpt concurrency":  {base + "geoblock:\n  chatgpt:\n    concurrency: -1\n", "geoblock.chatgpt.concurrency"},
 		"negative chatgpt timeout":      {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
+		"negative tidal concurrency":    {base + "geoblock:\n  tidal:\n    concurrency: -1\n", "geoblock.tidal.concurrency"},
+		"negative tidal timeout":        {base + "geoblock:\n  tidal:\n    timeout: -1s\n", "geoblock.tidal.timeout"},
 		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
 		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
 		"negative asn timeout":          {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
@@ -495,6 +497,24 @@ func TestChatGPTDefaults(t *testing.T) {
 	}
 	if cg.Timeout != 15*time.Second || cg.Concurrency != 8 {
 		t.Fatalf("chatgpt timeout/concurrency defaults: %+v", cg)
+	}
+}
+
+// TestTidalDefaults pins the shipped Tidal check defaults. Keyless and with no
+// country list: the gate only asks whether Tidal answered the egress at all.
+func TestTidalDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadRaw(t, "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	td := cfg.GeoBlock.Tidal
+	if td.Endpoint != "https://api.tidal.com" {
+		t.Fatalf("tidal endpoint default: %+v", td)
+	}
+	if td.Timeout != 15*time.Second || td.Concurrency != 8 {
+		t.Fatalf("tidal timeout/concurrency defaults: %+v", td)
 	}
 }
 
@@ -566,6 +586,11 @@ func TestProberChanged(t *testing.T) {
 	cg.GeoBlock.ChatGPT.Marker = "changed"
 	if !config.ProberChanged(a, cg) {
 		t.Fatal("chatgpt sub-config change must be detected")
+	}
+	td := a
+	td.GeoBlock.Tidal.Endpoint = "https://tidal.changed"
+	if !config.ProberChanged(a, td) {
+		t.Fatal("tidal sub-config change must be detected")
 	}
 	c := a
 	c.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"changed"}}}

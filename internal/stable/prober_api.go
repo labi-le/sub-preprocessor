@@ -27,7 +27,7 @@ const apiTLSHandshakeTimeout = 10 * time.Second
 type APIOutcome struct {
 	Server    string // node host (no port); the geoblock key
 	Reachable bool   // an HTTP response came back through the node
-	Blocked   bool   // the response body carried the geo-block marker
+	Blocked   bool   // the check read the response as a refusal of this egress
 }
 
 // fanoutSem returns the semaphore bounding a through-node fan-out. The acquire
@@ -43,8 +43,10 @@ func fanoutSem(concurrency int) chan struct{} {
 }
 
 // apiCheck fans a through-node API GET out over proxies (bounded by
-// concurrency) and classifies each response with blocked. Every node logs a
-// debug outcome and the progress logger reports each completed 10% decade.
+// concurrency) and classifies each response with blocked, which sees both the
+// status and the body: a service can refuse an egress with either (a marker in
+// the body, or a bare CDN 403). Every node logs a debug outcome and the
+// progress logger reports each completed 10% decade.
 func (m *MihomoProber) apiCheck(
 	ctx context.Context,
 	op, msg string,
@@ -53,7 +55,7 @@ func (m *MihomoProber) apiCheck(
 	header http.Header,
 	timeout time.Duration,
 	concurrency int,
-	blocked func(body string) bool,
+	blocked func(status int, body string) bool,
 ) map[string]APIOutcome {
 	opLog := log.Op(m.logger, op)
 	prog := newProgress(opLog, msg+" progress", len(proxies))
@@ -69,15 +71,15 @@ func (m *MihomoProber) apiCheck(
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			reachable, body := apiProbeOne(ctx, px, target, header, timeout)
+			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout)
 			host, _, splitErr := net.SplitHostPort(px.Addr())
 			if splitErr != nil {
 				host = px.Addr()
 			}
-			o := APIOutcome{Server: host, Reachable: reachable, Blocked: reachable && blocked(body)}
+			o := APIOutcome{Server: host, Reachable: reachable, Blocked: reachable && blocked(status, body)}
 			n := prog.step()
 			opLog.Debug().Str("node", px.Name()).Str("server", host).
-				Bool("reachable", o.Reachable).Bool("blocked", o.Blocked).
+				Bool("reachable", o.Reachable).Int("status", status).Bool("blocked", o.Blocked).
 				Int64("n", n).Int64("of", prog.total).Msg(msg)
 			mu.Lock()
 			out[px.Name()] = o
@@ -96,22 +98,22 @@ func markerBlocked(body, marker string) bool {
 }
 
 // apiProbeOne dials target through px, issues a GET with header, and returns
-// whether a response came back plus its (capped) body. Mirrors mihomo's
-// URLTest transport (a fixed pre-dialed conn) but reads the body, which a
-// HEAD-only URLTest cannot do.
+// whether a response came back, its status, and its (capped) body. Mirrors
+// mihomo's URLTest transport (a fixed pre-dialed conn) but reads the status and
+// body, neither of which a HEAD-only URLTest exposes to a classifier.
 func apiProbeOne(
 	ctx context.Context,
 	px mihomo.Proxy,
 	target string,
 	header http.Header,
 	timeout time.Duration,
-) (reachable bool, body string) {
+) (reachable bool, status int, body string) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	u, err := url.Parse(target)
 	if err != nil {
-		return false, ""
+		return false, 0, ""
 	}
 	port := u.Port()
 	if port == "" {
@@ -119,11 +121,11 @@ func apiProbeOne(
 	}
 	var meta mihomo.Metadata
 	if addrErr := meta.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port)); addrErr != nil {
-		return false, ""
+		return false, 0, ""
 	}
 	conn, err := px.DialContext(tctx, &meta)
 	if err != nil {
-		return false, ""
+		return false, 0, ""
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -142,7 +144,7 @@ func apiProbeOne(
 
 	req, err := http.NewRequestWithContext(tctx, http.MethodGet, target, nil)
 	if err != nil {
-		return false, ""
+		return false, 0, ""
 	}
 	req.Header.Set("User-Agent", browserUserAgent)
 	for k, vs := range header {
@@ -152,10 +154,10 @@ func apiProbeOne(
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, ""
+		return false, 0, ""
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBody))
-	return true, string(b)
+	return true, resp.StatusCode, string(b)
 }

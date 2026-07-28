@@ -480,6 +480,12 @@ linters:
       - text: 'comment on exported \S+ \S+ should be of the form ".+"'
         source: '// ?(nolint|TODO)'
         linters: [ revive, staticcheck ]
+      # staticcheck does not model t.Fatal as terminating, so the idiomatic
+      # test shape "if x == nil { t.Fatal(...) }" followed by using x reads as a
+      # nil dereference. Only silence it in tests; SA5011 stays on for prod code.
+      - text: 'SA5011'
+        path: '_test\.go'
+        linters: [ staticcheck ]
       - path: '_test\.go'
         linters:
           - bodyclose

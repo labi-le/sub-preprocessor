@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mihomo "github.com/metacubex/mihomo/constant"
@@ -23,8 +24,8 @@ type Filterer interface {
 	Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error)
 }
 
-// Blocklist records nodes that failed the Gemini check; declared locally to
-// avoid importing geoblock. A nil Blocklist disables persistence.
+// Blocklist records nodes that failed a through-node API check; declared
+// locally to avoid importing geoblock. A nil Blocklist disables persistence.
 type Blocklist interface {
 	Block(host string) error
 }
@@ -36,54 +37,67 @@ type DeadCache interface {
 	Prune() error
 }
 
-// Checker periodically fetches sources through the preprocess pipeline,
-// merges them, probes the nodes and publishes survivors to the holder.
+// CheckerSpec is the config-derived half of a Checker: everything a config
+// reload can change. RunOnce reads it once per cycle, so a reload landing
+// mid-cycle configures the next cycle instead of rewriting the running one.
+type CheckerSpec struct {
+	Sources       []config.SubscriptionSource
+	Allowed       filter.CountrySet
+	Interval      time.Duration
+	Rounds        int
+	MaxFail       int
+	MaxAvgMs      int
+	SourceTimeout time.Duration
+	Prober        Prober
+	Filters       []NodeFilter
+}
+
+// Checker periodically fetches sources through the preprocess pipeline, merges
+// them, probes the nodes and publishes survivors to the holder. Everything a
+// reload can change lives behind spec; the remaining fields are fixed for the
+// process lifetime. That split is why a reload never restarts the worker: it
+// swaps the spec and the in-flight cycle keeps running to publication.
 type Checker struct {
-	sources       []config.SubscriptionSource
-	allowed       filter.CountrySet
-	interval      time.Duration
-	rounds        int
-	maxFail       int
-	maxAvgMs      int
-	sourceTimeout time.Duration
-	filterer      func() Filterer
-	prober        Prober
-	filters       []NodeFilter
-	dead          DeadCache
-	holder        *Holder
-	logger        zerolog.Logger
-	reporter      Reporter
+	spec atomic.Pointer[CheckerSpec]
+	// reload wakes Run when Reconfigure lands between cycles, so an Interval
+	// change applies now instead of one full old period later. Capacity 1: a
+	// poke sent during a cycle is drained on the next loop and is then a no-op.
+	reload   chan struct{}
+	filterer func() Filterer
+	dead     DeadCache
+	holder   *Holder
+	logger   zerolog.Logger
+	reporter Reporter
 }
 
 func NewChecker(
-	sources []config.SubscriptionSource,
-	allowed filter.CountrySet,
-	interval time.Duration,
-	rounds, maxFail, maxAvgMs int,
-	sourceTimeout time.Duration,
+	spec CheckerSpec,
 	filterer func() Filterer,
-	prober Prober,
-	filters []NodeFilter,
 	dead DeadCache,
 	holder *Holder,
 	logger zerolog.Logger,
 	reporter Reporter,
 ) *Checker {
-	return &Checker{
-		sources:       sources,
-		allowed:       allowed,
-		interval:      interval,
-		rounds:        rounds,
-		maxFail:       maxFail,
-		maxAvgMs:      maxAvgMs,
-		sourceTimeout: sourceTimeout,
-		filterer:      filterer,
-		prober:        prober,
-		filters:       filters,
-		dead:          dead,
-		holder:        holder,
-		logger:        logger,
-		reporter:      reporter,
+	c := &Checker{
+		reload:   make(chan struct{}, 1),
+		filterer: filterer,
+		dead:     dead,
+		holder:   holder,
+		logger:   logger,
+		reporter: reporter,
+	}
+	c.spec.Store(&spec)
+
+	return c
+}
+
+// Reconfigure swaps the settings the next cycle will use. A cycle already in
+// flight keeps the spec it started with, so a reload never discards its work.
+func (c *Checker) Reconfigure(spec CheckerSpec) {
+	c.spec.Store(&spec)
+	select {
+	case c.reload <- struct{}{}:
+	default: // a poke is already pending; Run will re-read the spec anyway
 	}
 }
 
@@ -91,24 +105,35 @@ func NewChecker(
 func (c *Checker) Run(ctx context.Context) {
 	_ = c.RunOnce(ctx)
 
-	ticker := time.NewTicker(c.interval)
+	interval := c.spec.Load().Interval
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.reload:
 		case <-ticker.C:
 			_ = c.RunOnce(ctx)
+		}
+		// Re-read after either wakeup: the reload may have arrived while a cycle
+		// ran or while we sat idle between them.
+		if next := c.spec.Load().Interval; next != interval {
+			interval = next
+			ticker.Reset(interval)
 		}
 	}
 }
 
-// RunOnce executes a single check cycle. On any failure the previously
-// published snapshot is kept untouched; a probe error (including context
-// cancellation) is returned and aborts the cycle before any cache write.
+// RunOnce executes a single check cycle. The spec is read once, up front: a
+// reload landing mid-cycle must not change the parameters this cycle is already
+// running under. On any failure the previously published snapshot is kept
+// untouched; a probe error (including context cancellation) is returned and
+// aborts the cycle before any cache write.
 func (c *Checker) RunOnce(ctx context.Context) error {
 	start := time.Now()
-	bodies, sourceReports := c.fetchSources(ctx)
+	spec := c.spec.Load()
+	bodies, sourceReports := c.fetchSources(ctx, spec)
 
 	entries := Merge(bodies)
 	if len(entries) == 0 {
@@ -124,8 +149,8 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	}
 
 	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", deadSkipped).
-		Int("rounds", c.rounds).Msg("probing merged nodes")
-	res, err := c.prober.Probe(ctx, entriesPayload(probe))
+		Int("rounds", spec.Rounds).Msg("probing merged nodes")
+	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
 		c.reportError()
@@ -139,8 +164,8 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	c.recordDead(probe, res)
 
-	survivors := SelectSurvivors(probe, res, c.rounds, c.maxFail, c.maxAvgMs)
-	survivors, filterReports := c.applyFilters(ctx, survivors)
+	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
+	survivors, filterReports := c.applyFilters(ctx, spec, survivors)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
 		c.reportError()
@@ -157,7 +182,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		UpdatedAt: time.Now(),
 		Stats: Stats{
 			SourcesOK:    len(bodies),
-			SourcesTotal: len(c.sources),
+			SourcesTotal: len(spec.Sources),
 			Merged:       len(entries),
 			Tested:       len(probe),
 			Kept:         len(survivors),
@@ -173,7 +198,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	c.observe(CycleReport{
 		SourcesOK:     len(bodies),
-		SourcesTotal:  len(c.sources),
+		SourcesTotal:  len(spec.Sources),
 		Merged:        len(entries),
 		DeadSkipped:   deadSkipped,
 		Probed:        len(probe),
@@ -249,8 +274,8 @@ func keptCountries(survivors []Survivor) map[string]int {
 // skipped entirely when there is no filter or no survivor; a parse failure logs
 // and passes survivors through unchanged (matching the previous per-filter
 // skip-on-no-proxies behavior).
-func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) ([]Survivor, []FilterReport) {
-	if len(c.filters) == 0 || len(survivors) == 0 {
+func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors []Survivor) ([]Survivor, []FilterReport) {
+	if len(spec.Filters) == 0 || len(survivors) == 0 {
 		return survivors, nil
 	}
 
@@ -258,7 +283,7 @@ func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) ([]Sur
 	for i, s := range survivors {
 		entries[i] = s.Entry
 	}
-	proxies, err := c.prober.ParseProxies(entriesPayload(entries))
+	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
 		return survivors, nil
@@ -273,8 +298,8 @@ func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) ([]Sur
 	for _, px := range proxies {
 		byLabel[px.Name()] = px
 	}
-	reports := make([]FilterReport, 0, len(c.filters))
-	for _, f := range c.filters {
+	reports := make([]FilterReport, 0, len(spec.Filters))
+	for _, f := range spec.Filters {
 		var rep FilterReport
 		survivors, rep = f.apply(ctx, survivors, byLabel)
 		reports = append(reports, rep)
@@ -286,7 +311,7 @@ func (c *Checker) applyFilters(ctx context.Context, survivors []Survivor) ([]Sur
 // fetchSources fetches every configured source concurrently through the
 // preprocess pipeline and returns the successfully-filtered bodies in
 // configuration order, so Merge's first-source-wins dedupe is deterministic.
-func (c *Checker) fetchSources(ctx context.Context) ([]SourceBody, []SourceReport) {
+func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]SourceBody, []SourceReport) {
 	svc := c.filterer()
 
 	type result struct {
@@ -297,10 +322,10 @@ func (c *Checker) fetchSources(ctx context.Context) ([]SourceBody, []SourceRepor
 
 	const fetchConcurrency = 16
 	sem := make(chan struct{}, fetchConcurrency)
-	results := make([]result, len(c.sources))
+	results := make([]result, len(spec.Sources))
 
 	var wg sync.WaitGroup
-	for i, src := range c.sources {
+	for i, src := range spec.Sources {
 		sem <- struct{}{} // bound goroutine creation, not just execution
 		wg.Add(1)
 		go func(i int, src config.SubscriptionSource) {
@@ -308,18 +333,18 @@ func (c *Checker) fetchSources(ctx context.Context) ([]SourceBody, []SourceRepor
 			defer func() { <-sem }()
 
 			c.logger.Debug().Str("source", src.Name).Msg("fetching source")
-			sourceCtx, cancel := context.WithTimeout(ctx, c.sourceTimeout)
+			sourceCtx, cancel := context.WithTimeout(ctx, spec.SourceTimeout)
 			defer cancel()
 
 			var buf bytes.Buffer
 			buf.Grow(sourceBufSize)
 			req := preprocess.FilterRequest{
 				SubscriptionURL:  fetch.SubscriptionURL(src.URL),
-				AllowedCountries: c.allowed,
+				AllowedCountries: spec.Allowed,
 			}
 			if src.Body != "" {
 				// Inline source: filter the pasted payload directly, no fetch.
-				req = preprocess.FilterRequest{Body: []byte(src.Body), AllowedCountries: c.allowed}
+				req = preprocess.FilterRequest{Body: []byte(src.Body), AllowedCountries: spec.Allowed}
 			}
 			stats, err := svc.Filter(sourceCtx, &buf, req)
 			if err != nil {
@@ -334,16 +359,16 @@ func (c *Checker) fetchSources(ctx context.Context) ([]SourceBody, []SourceRepor
 	}
 	wg.Wait()
 
-	bodies := make([]SourceBody, 0, len(c.sources))
-	reports := make([]SourceReport, 0, len(c.sources))
+	bodies := make([]SourceBody, 0, len(spec.Sources))
+	reports := make([]SourceReport, 0, len(spec.Sources))
 	for i, r := range results {
 		if r.err != nil {
-			c.logger.Warn().Str("source", c.sources[i].Name).Err(r.err).Msg("source fetch failed")
+			c.logger.Warn().Str("source", spec.Sources[i].Name).Err(r.err).Msg("source fetch failed")
 			continue
 		}
 		bodies = append(bodies, r.body)
 		reports = append(reports, SourceReport{
-			Name:         c.sources[i].Name,
+			Name:         spec.Sources[i].Name,
 			Total:        r.stats.Total,
 			Kept:         r.stats.Kept,
 			DNSDrop:      r.stats.DNSDrop,

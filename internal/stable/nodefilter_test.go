@@ -104,15 +104,67 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
-	if len(fs) != 4 {
-		t.Fatalf("gemini + claude + chatgpt + bandwidth + unknown -> 4 filters, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
+	if len(fs) != 5 {
+		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
 	}
 	if fs[2].name() != "chatgpt" {
 		t.Fatalf("expected chatgpt filter third, got %q", fs[2].name())
 	}
-	if fs[3].name() != "bandwidth" {
-		t.Fatalf("expected bandwidth filter fourth, got %q", fs[3].name())
+	if fs[3].name() != "tidal" {
+		t.Fatalf("expected tidal filter fourth, got %q", fs[3].name())
+	}
+	if fs[4].name() != "bandwidth" {
+		t.Fatalf("expected bandwidth filter fifth, got %q", fs[4].name())
+	}
+}
+
+// stubBlocklist is a non-nil Blocklist; the assertions below only care whether
+// a filter got one at all.
+type stubBlocklist struct{}
+
+func (stubBlocklist) Block(string) error { return nil }
+
+// TestTidalFilterKeepsNoStore locks a deliberate asymmetry: the tidal gate never
+// persists a drop. Its verdict is a bare status code, weaker than the AI checks'
+// explicit refusal markers, and the store is host-keyed for its whole TTL — one
+// CDN hiccup would otherwise evict the node from every endpoint.
+func TestTidalFilterKeepsNoStore(t *testing.T) {
+	t.Parallel()
+
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fs := buildNodeFilters([]string{"claude", "tidal"}, prober, stubBlocklist{}, false, zerolog.Nop())
+	if len(fs) != 2 {
+		t.Fatalf("claude + tidal -> 2 filters, got %d", len(fs))
+	}
+	claude, ok := fs[0].(*apiFilter)
+	if !ok {
+		t.Fatalf("claude filter has type %T, want *apiFilter", fs[0])
+	}
+	if claude.store == nil {
+		t.Fatal("claude must feed the geoblock store")
+	}
+	tidal, ok := fs[1].(*apiFilter)
+	if !ok {
+		t.Fatalf("tidal filter has type %T, want *apiFilter", fs[1])
+	}
+	if tidal.store != nil {
+		t.Fatal("tidal must not feed the shared geoblock store")
+	}
+
+	// Drive the blocked branch on the filter as built: the `store != nil` guard
+	// in apply is all that stands between this path and a nil interface call,
+	// and no other test reaches it with a nil store.
+	tidal.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Blocked: true}}
+	}
+	kept, rep := tidal.apply(context.Background(), []Survivor{{Entry: Entry{Label: "s-001"}}}, nil)
+	if len(kept) != 0 || rep.Dropped["blocked"] != 1 {
+		t.Fatalf("blocked survivor must drop without a store: kept=%d rep=%+v", len(kept), rep)
 	}
 }
 

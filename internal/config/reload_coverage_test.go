@@ -111,6 +111,9 @@ var reloadClassification = map[string]string{
 	"geoblock.chatgpt.marker":      liveWorker,
 	"geoblock.chatgpt.timeout":     liveWorker,
 	"geoblock.chatgpt.concurrency": liveWorker,
+	"geoblock.tidal.endpoint":      liveWorker,
+	"geoblock.tidal.timeout":       liveWorker,
+	"geoblock.tidal.concurrency":   liveWorker,
 
 	"deadcache.ttl": restartWarned,
 

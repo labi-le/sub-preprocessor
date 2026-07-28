@@ -25,14 +25,15 @@ resolver:
   cache_ttl: 1h
   cache_negative_ttl: 10m
 # Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
-# preprocess; through-node filters (gemini/claude/chatgpt/bandwidth) run post-probe in
-# the stable worker. Order is honoured within each stage.
+# preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
+# post-probe in the stable worker. Order is honoured within each stage.
 filters:
   - type: country
     provider: geofeed
     # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
+  - type: tidal # keyless reachability: keep a node only if api.tidal.com answers it. A refused egress (e.g. RU) dies at CloudFront with a 403 and no JSON. The reported country is NOT checked against Tidal's markets: that gates where a subscription can be bought, not where an existing one plays
   - type: bandwidth # drop nodes slower than min_mbps (last: runs on the fewest nodes)
     test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
     min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
@@ -59,6 +60,9 @@ geoblock:
     timeout: 15s
     concurrency: 8
   chatgpt:
+    timeout: 15s
+    concurrency: 8
+  tidal:
     timeout: 15s
     concurrency: 8
 deadcache:
@@ -116,7 +120,7 @@ subscriptions:
     timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1
     max_avg_ms: 800
-    concurrency: 16 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates measured latency and false-fails live nodes (test on 126 nodes: conc<=16 == serial baseline, conc=64 +107ms, conc=256 +166ms). conc=8 tried in prod for a day: no yield gain (avg kept 335 vs 361 at 16 -- 16 is already below the contention knee) but cycles grew 39->51min, eating the sub-1h margin and widening the crawler-reload collision window. 16 is the sweet spot; do not lower
+    concurrency: 16 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates measured latency and false-fails live nodes (test on 126 nodes: conc<=16 == serial baseline, conc=64 +107ms, conc=256 +166ms). conc=8 tried in prod for a day: no yield gain (avg kept 335 vs 361 at 16 -- 16 is already below the contention knee) but cycles grew 39->51min, eating the sub-1h margin (a reload no longer cancels a cycle, but a cycle longer than the interval still delays every publication). 16 is the sweet spot; do not lower
     source_timeout: 5m
     # test_url: https://www.gstatic.com/generate_204 # default: latency-probe target fetched through each node
     # expected_status: "204" # default: accepted status(es), mihomo IntRanges syntax

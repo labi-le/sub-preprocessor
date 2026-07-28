@@ -76,7 +76,7 @@ Every `subscriptions.interval` it:
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `bandwidth`) on the survivors,
+   `chatgpt` / `tidal` / `bandwidth`) on the survivors,
 9. atomically publishes the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
@@ -119,6 +119,20 @@ probe, routing real requests *through* each surviving node:
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
   `unsupported_country` for an egress it refuses. Also feeds the geoblock
   store.
+- `tidal` — keyless as well, and the only **fail-closed** gate: a node is kept
+  only when Tidal actually answered it, i.e. `GET api.tidal.com/v1/country`
+  returned `200` with a readable `{"countryCode": "XX" }`. Where Tidal refuses
+  an egress the request never reaches the API — measured from a Russian egress,
+  CloudFront answers `403` with an HTML error page and no JSON — so "nothing to
+  parse" is the refusal, not an inconclusive result.
+  The country itself is **not** compared against Tidal's 61 markets: that list
+  gates where a subscription can be *bought*, while an existing subscriber
+  streams fine from a country Tidal merely does not sell in. Only a hard
+  refusal makes a node unusable.
+  It deliberately does **not** feed the geoblock store either: a bare status
+  code is a weaker signal than the other checks' refusal markers, and the store
+  is host-keyed for its whole TTL, so one CDN hiccup would evict the node from
+  every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
   dropped; kept nodes get a `[SPD:<n>M]` tag when annotation is enabled.
@@ -162,7 +176,7 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT); dropped pre-DNS on both endpoints |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
@@ -220,11 +234,13 @@ change; on any reload error the previous settings stay active. Changing
 `server.listen`, `server.metrics_listen`, `geoblock.db_path`/`ttl`, or
 `deadcache.ttl` requires a restart (logged as a warning; listeners and stores
 are built once at startup). Everything else — filters, annotate, groups,
-sources, prober knobs, log level — applies live. A reflection test
-(`TestReloadCoverageComplete`) classifies every config key's reload path, so
-a new key cannot ship without one. The stable worker is
-restarted only when its inputs actually changed, and the new worker is built
-*before* the old one stops.
+sources, prober knobs, log level — applies live; worker-side keys (sources,
+prober knobs, through-node filters) take effect on the worker's next cycle. A
+reflection test (`TestReloadCoverageComplete`) classifies every config key's
+reload path, so a new key cannot ship without one. A reload never restarts the
+stable worker: when its inputs actually changed it is reconfigured in place, so
+the cycle already in flight (20–55 min) runs to publication under the settings
+it started with instead of being cancelled and losing its whole probe pass.
 
 Key sections:
 
@@ -244,9 +260,9 @@ Key sections:
   `providers:` chain. The retired singular `provider:` key is rejected at
   load (`annotate[i]: "provider" was renamed to "providers" (ordered list)`)
   instead of being silently dropped.
-- `geoblock` — store path/TTL plus `gemini.*`, `claude.*` and `chatgpt.*`
-  base params (endpoint, model, marker, key, timeout, concurrency) for the
-  through-node filters.
+- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
+  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
+  for the through-node filters.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline

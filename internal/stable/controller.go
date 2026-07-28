@@ -10,8 +10,15 @@ import (
 	"domains.lst/sub-preprocessor/internal/filter"
 )
 
-// Controller starts and stops the background subscription checker in
-// response to configuration changes.
+// Controller owns the background subscription checker: it starts one on the
+// first enabling config, reconfigures it on every later one, and stops it only
+// on shutdown or when the source list empties.
+//
+// checker/cancel/done are mutated without locking because callers are
+// serialized: app.Run performs the first Apply before starting the config
+// watcher, every later Apply comes from that single watcher goroutine, and the
+// deferred Stop is registered so LIFO joins the watcher first. Calling Apply
+// from a second goroutine would race and could leave two workers running.
 type Controller struct {
 	baseCtx  context.Context
 	holder   *Holder
@@ -21,8 +28,9 @@ type Controller struct {
 	logger   zerolog.Logger
 	reporter Reporter
 
-	cancel context.CancelFunc
-	done   chan struct{}
+	checker *Checker
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 func NewController(ctx context.Context, holder *Holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger zerolog.Logger, reporter Reporter) *Controller {
@@ -51,10 +59,11 @@ func allowedCountries(cfg config.Config) filter.CountrySet {
 	return allowed
 }
 
-// Apply stops any running checker and starts a new one when cfg has
-// subscription sources configured. The prober and node filters are built
-// before the old worker is stopped, so a failed construction leaves the
-// previous checker running.
+// Apply hands cfg to the running checker, or starts one when none is running.
+// The prober and node filters are built first, so a failed construction leaves
+// the previous configuration in place. A reload NEVER restarts a live worker:
+// it swaps the spec the next cycle reads, letting the cycle in flight run to
+// publication instead of being cancelled and losing its whole probe pass.
 func (c *Controller) Apply(cfg config.Config) error {
 	if !cfg.SubscriptionsEnabled() {
 		c.Stop()
@@ -64,7 +73,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	subs := cfg.Subscriptions
 	allowed := allowedCountries(cfg)
 
-	// The gemini/claude/chatgpt prober params default to the geoblock block and
+	// The gemini/claude/chatgpt/tidal prober params default to the geoblock and
 	// are overridden per-entry by the merged NodeFilterSpec; bandwidth params come
 	// entirely from its filter entry.
 	nodeSpecs := cfg.NodeFilterSpecs()
@@ -80,6 +89,8 @@ func (c *Controller) Apply(cfg config.Config) error {
 			geo.Claude = spec.Claude
 		case config.FilterChatGPT:
 			geo.ChatGPT = spec.ChatGPT
+		case config.FilterTidal:
+			geo.Tidal = spec.Tidal
 		case config.FilterBandwidth:
 			bandwidth = spec.Bandwidth
 		}
@@ -96,26 +107,30 @@ func (c *Controller) Apply(cfg config.Config) error {
 	annotate := len(cfg.Annotate) > 0
 	filters := buildNodeFilters(names, prober, c.store, annotate, c.logger)
 
-	c.Stop()
-	checker := NewChecker(
-		subs.Sources,
-		allowed,
-		subs.Interval,
-		subs.Check.Rounds,
-		subs.Check.MaxFail,
-		subs.Check.MaxAvgMs,
-		subs.Check.SourceTimeout,
-		c.filterer,
-		prober,
-		filters,
-		c.dead,
-		c.holder,
-		c.logger,
-		c.reporter,
-	)
+	spec := CheckerSpec{
+		Sources:       subs.Sources,
+		Allowed:       allowed,
+		Interval:      subs.Interval,
+		Rounds:        subs.Check.Rounds,
+		MaxFail:       subs.Check.MaxFail,
+		MaxAvgMs:      subs.Check.MaxAvgMs,
+		SourceTimeout: subs.Check.SourceTimeout,
+		Prober:        prober,
+		Filters:       filters,
+	}
 
+	if c.checker != nil {
+		c.checker.Reconfigure(spec)
+		c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).
+			Msg("subscription checker reconfigured")
+
+		return nil
+	}
+
+	checker := NewChecker(spec, c.filterer, c.dead, c.holder, c.logger, c.reporter)
 	ctx, cancel := context.WithCancel(c.baseCtx)
 	done := make(chan struct{})
+	c.checker = checker
 	c.cancel = cancel
 	c.done = done
 	go func() {
@@ -127,7 +142,9 @@ func (c *Controller) Apply(cfg config.Config) error {
 	return nil
 }
 
-// Stop cancels the running checker, if any, and waits for it to exit.
+// Stop cancels the running checker, if any, and waits for it to exit. This is
+// the hard path, used on shutdown and when the source list empties; a config
+// reload goes through Apply, which reconfigures instead of cancelling.
 func (c *Controller) Stop() {
 	if c.cancel == nil {
 		return
@@ -136,4 +153,5 @@ func (c *Controller) Stop() {
 	<-c.done
 	c.cancel = nil
 	c.done = nil
+	c.checker = nil
 }

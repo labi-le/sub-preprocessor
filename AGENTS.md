@@ -20,7 +20,7 @@ nix-shell --run "make bench"
 - **Comments earn their place.** Write one only for what the code cannot say itself: the *why* (rationale, tradeoffs), non-obvious invariants, ordering/locking/concurrency rules, units, edge-case semantics, gotchas, or external behavior (mihomo quirks, SSRF, protocol details).
 - **Never restate the code.** Delete doc blocks that only echo the name or signature (`// name returns the name`, `// NewX creates a new X`, `// Close closes it`) or narrate the next line. Self-explanatory code gets no comment.
 - **A stale comment is worse than none.** Changing behavior means updating the comment or deleting it — never leave it describing the old world.
-- Removing an obvious doc comment is lint-safe: `.golangci.yml` excludes revive's "exported … should have comment", and `godot` needs no trailing period. Comments that remain must still start with the symbol's name (`godoc`/`staticcheck`).
+- Removing an obvious doc comment is lint-safe: `.golangci.yml` excludes revive's "exported … should have comment", and `godot` needs no trailing period. Comments that remain must still start with the symbol's name (`godoc`/`staticcheck`). staticcheck's SA5011 is off in `_test.go` only — it does not model `t.Fatal` as terminating, so `if x == nil { t.Fatal(...) }` followed by using `x` reads as a nil deref; it stays on for production code.
 
 ## Project overview for LLM agents
 
@@ -53,7 +53,7 @@ source, runs it through the same geo/ASN filter, merges and dedupes by
 `server:port` (first source wins), relabels kept nodes to `<source>-NNN`, probes
 every node with an embedded Mihomo URL test, keeps only those that pass all
 rounds under the latency threshold, then runs the configured through-node
-filters (`gemini`/`claude`/`chatgpt`/`bandwidth`) on the survivors. The result is
+filters (`gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) on the survivors. The result is
 swapped in atomically; the last good list is kept if a cycle fails (`503` only
 until the first cycle completes).
 
@@ -67,6 +67,7 @@ until the first cycle completes).
 - Geofeed sources are explicit in YAML via `geofeed.sources[].url` + `geofeed.sources[].type`.
 - File type is explicit only: `raw` or `gzip`. There is no auto-detection/legacy mode.
 - Geofeed data is cached in memory and reloaded by `geofeed.refresh_interval`.
+- A config reload NEVER restarts the `/stable.txt` worker. `stable.Controller.Apply` swaps a `CheckerSpec` the next cycle reads, so the crawler's hourly `private.yaml` rewrite cannot cancel a 20–55 min cycle in flight and burn a full probe pass.
 
 ## Important security / correctness notes
 
@@ -99,10 +100,10 @@ Important keys:
 - `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
 - `resolver.timeout`
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
-- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`bandwidth`) run post-probe in the stable worker only.
+- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn` + `exclude_groups`/`exclude_countries`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) run post-probe in the stable worker only.
 - `annotate` — ordered tag list (`tag: GEO|IP|ASN`; GEO/ASN take `providers:`, an ordered chain of `geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`; IP takes no providers) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. The retired singular `provider:` key is rejected at load with a rename error.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
-- `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` (`endpoint`, `marker`, `timeout`, `concurrency`; plus `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` in `filters` (a filter entry may override these per-field)
+- `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` / `geoblock.tidal.*` (`endpoint`, `timeout`, `concurrency`; plus `marker` for gemini/claude/chatgpt, `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt`/`tidal` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` / `{type: tidal}` in `filters` (a filter entry may override these per-field). The `tidal` gate is the odd one out twice over. It has no refusal marker: where Tidal refuses an egress the request dies at the CDN (403 + HTML, no JSON, measured from a RU egress), so the gate is **fail-closed** — kept only on 2xx with a parseable `countryCode`. It deliberately does NOT compare that code against Tidal's 61 markets (that list gates where a subscription can be bought; an existing subscriber streams from unsold countries too), and it never writes to the geoblock store (a bare status code is too weak a signal to persist host-wide for the store's TTL).
 - `deadcache.ttl` (in-memory cache of probe-dead nodes keyed by `server:port`; default 2h; skips re-probing; not persisted)
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval`
@@ -125,7 +126,7 @@ Important keys:
 - `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
-- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, bandwidth), checker loop, holder
+- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), checker loop, holder
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
