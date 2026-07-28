@@ -62,9 +62,9 @@ const (
 // geo-blocked node hosts in the store (TTL) so later cycles skip them before
 // probing; a nil store skips that persistence (see the tidal filter). What
 // counts as blocked is the check's own verdict: a geo-block marker in the body
-// for gemini/claude/chatgpt, an unsupported egress country for tidal. A nil
-// enabled func means the check is always active (e.g. Anthropic geo-blocks
-// before authentication, so its check is keyless).
+// for gemini/claude/chatgpt, a refused request for tidal. A nil enabled func
+// means the check is always active (e.g. Anthropic geo-blocks before
+// authentication, so its check is keyless).
 type apiFilter struct {
 	filterName string
 	enabled    func() bool
@@ -204,8 +204,8 @@ func annotateSpeed(line string, mbps int) string {
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
 // support (a resolved API key); the claude, chatgpt and tidal filters are
-// keyless (the first two geo-block before authentication, tidal reports the
-// egress country outright); the bandwidth filter needs a prober with bandwidth
+// keyless (the first two geo-block before authentication, tidal's /v1/country
+// needs no credential); the bandwidth filter needs a prober with bandwidth
 // support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter

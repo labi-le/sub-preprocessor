@@ -366,7 +366,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Through-node filter drops by reason (gemini/claude/chatgpt/tidal/bandwidth)",
+      "title": "Through-node filter drops by reason",
+      "description": "blocked = the service answered but refused this egress; unreachable = the request never completed through the node (it still passed the latency probe, so this is the service refusing at the CDN or the node failing on real traffic); slow = below the bandwidth filter minimum.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -484,6 +485,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Kept-node speed (Mbps): min / p50 / avg / p90 / max",
+      "description": "p50/p90 are interpolated from 7 fixed buckets (5-500 Mbps); a quantile landing above the top bucket reports 500, so p90 pinned at 500 under a higher max means \"faster than 500\", not a plateau. min/max are exact per-cycle values. The whole panel is empty unless a bandwidth filter runs: without one no node has a measured speed.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -580,13 +582,30 @@
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10
-          }
+          },
+          "unit": "s"
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
               "options": "failures/h"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cycles/h"
             },
             "properties": [
               {
