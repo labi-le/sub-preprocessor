@@ -47,16 +47,31 @@ Query params:
 - `subscription_url` (required) — the upstream list to fetch (https only, SSRF-protected).
 - `countries` — comma-separated allow-list of exit countries, and/or
 - `groups` — comma-separated names referencing `groups` in `config.yaml`;
-- `exclude_countries` / `exclude_groups` — subtract from the allow-list.
+- `exclude_countries` / `exclude_groups` — a deny-list of exit countries to drop.
 
-If only exclusion params are given, the allowed set starts from *all*
-countries minus the exclusions. If the resulting set is empty, the request
-fails with `400`.
+`countries`/`groups` and the `exclude_*` params are enforced separately: the
+first is an allow-list, the second a deny-list. A node whose exit IP no geo
+source can place is in no excluded country, so an exclusion-only request keeps
+it; an allow-list request drops it, because it is not in the list either. An
+unknown group name or a country that is not a 2-letter code fails the request
+with `400` naming the offending token. So does a request whose exclusions cover
+every allowed country.
 
 The response is `text/plain` Mihomo-compatible text; node names are annotated
 according to the `annotate` config (default `[GEO:XX][IP:a.b.c.d] <name>`).
 Stats come back in the `X-Preprocessor-Stats` header. This path does **no**
 liveness probing — only IP-stage filtering (see below).
+
+One request is bounded on purpose. fasthttp cannot cancel a handler when the
+client disconnects, so the pipeline runs under an explicit 60 s deadline
+(`504` when it expires), and a body of more than 20 000 parseable nodes is
+refused with `413` before a single DNS lookup — resolution is serial, so an
+unbounded node list would otherwise occupy a goroutine for hours after the
+caller left. A panic in the request path is recovered as a `500` (logged with
+its stack) instead of taking the process down with the in-memory stable list.
+The access log records the subscription URL as `host#<digest>`, never verbatim:
+these links are capability URLs, and the token would otherwise land in
+`docker logs`.
 
 ### 2. Stable subscriptions worker — `GET /stable.txt`
 
@@ -203,7 +218,12 @@ compose sidecar) that discovers new sources automatically:
   expanded only if it itself yielded a live subscription; `CRAWL_DEPTH`
   bounds recursion),
 - remembers productive channels in a JSON state file and re-seeds them on
-  future cycles (pruned after `CRAWL_STATE_TTL` without a live sub),
+  future cycles (pruned after `CRAWL_STATE_TTL` without a live sub, then capped
+  at the 200 most recently productive so cycle cost stays bounded),
+- prunes conservatively: a harvested source is dropped only when the origin
+  proves it gone (404/410/451) or serves no nodes — a 403/429/5xx or a network
+  error keeps it — and a cycle that would delete a large share of the list at
+  once refuses to write until a later cycle confirms the loss,
 - additionally harvests **raw proxy URIs pasted directly in messages**
   (`vless://…` etc.), dedupes them, and packs them into a single inline
   `tg-inline` source with a base64 `body`,
@@ -292,6 +312,11 @@ cycle funnel (`stable_merged_nodes`, `stable_probed_nodes`,
 in/kept/dropped-by-reason counters, kept-node speed histogram, cycle duration,
 success timestamp, and cycle/failure totals.
 
+The metrics listener is bound synchronously at startup, so a port conflict is a
+startup failure like any other rather than a silently missing monitoring
+surface — the service's stable-list health is only observable through these
+metrics.
+
 `deploy/grafana/sub-preprocessor.json` is the provisioned Grafana dashboard;
 `flake.nix` exports `nixosModules.monitoring` (Prometheus scrape job +
 dashboard provisioning) for the NixOS host to import, and
@@ -326,6 +351,10 @@ docker compose up -d --build   # or: make dc-up
   agenix-decrypted secret mounted at `/run/agenix/litellm-env`.
 - `tg-sub-crawler` — the crawler (`command: ["crawl"]`), sharing the
   `./config` volume so its `private.yaml` writes hot-reload the service.
+- Shutdown is graceful and bounded: the server drains for 15 s (long enough for
+  the 5 s DNS/ASN lookup an in-flight request may be blocked in) and the stable
+  worker is joined for another 5 s, hence `stop_grace_period: 30s`. Expiring
+  that budget is logged as a warning, not a failed exit.
 
 ## Package map
 

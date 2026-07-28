@@ -2,6 +2,7 @@ package classify_test
 
 import (
 	"encoding/base64"
+	"net/http"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/classify"
@@ -98,5 +99,29 @@ func TestBodyRejectsHTMLLinks(t *testing.T) {
 		`<link href="https://cdn.example.com:443/s.css"><a href="https://t.me/chan">y</a></html>`)
 	if got := classify.Body(body, "", 1000); got.Nodes != 0 || got.Live() {
 		t.Fatalf("HTML page must not classify as subscription, got %+v", got)
+	}
+}
+
+// TestStatusErrorGone pins which statuses prove a subscription is gone. Callers
+// delete a source on a Gone verdict, so a status that merely means "not now"
+// (WAF challenge, back-pressure, origin failure) must never report true.
+func TestStatusErrorGone(t *testing.T) {
+	t.Parallel()
+
+	gone := []int{http.StatusNotFound, http.StatusGone, http.StatusUnavailableForLegalReasons}
+	transient := []int{
+		http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooEarly,
+		http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+	}
+	for _, code := range gone {
+		if !(&classify.StatusError{Code: code, Status: http.StatusText(code)}).Gone() {
+			t.Errorf("status %d must be definitive", code)
+		}
+	}
+	for _, code := range transient {
+		if (&classify.StatusError{Code: code, Status: http.StatusText(code)}).Gone() {
+			t.Errorf("status %d must not be treated as definitive", code)
+		}
 	}
 }

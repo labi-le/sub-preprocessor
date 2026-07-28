@@ -102,7 +102,8 @@ func TestLoadDBIP_NoRetryPaths(t *testing.T) {
 }
 
 // TestLoadRegistry_SkipsFailedSource mirrors LoadAll: one bad RIR must not fail
-// the load; ALL failing (or zero total ranges) must.
+// the load but must be reported through the failed count; ALL failing (or zero
+// total ranges) must error.
 func TestLoadRegistry_SkipsFailedSource(t *testing.T) {
 	stubFetch(t, func(url fetch.SubscriptionURL, fileType fetch.FileType) ([]byte, error) {
 		if fileType != fetch.FileTypeRaw {
@@ -115,26 +116,30 @@ func TestLoadRegistry_SkipsFailedSource(t *testing.T) {
 	})
 
 	urls := []string{"https://bad.example/delegated", "https://good.example/delegated"}
-	ranges, err := LoadRegistry(context.Background(), urls, zerolog.Nop())
+	ranges, failed, err := LoadRegistry(context.Background(), urls, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("one bad RIR must not fail the load: %v", err)
 	}
 	if len(ranges) != 1 {
 		t.Fatalf("got %d ranges, want 1", len(ranges))
 	}
+	if failed != 1 {
+		t.Fatalf("partial load must report 1 failed RIR, got %d", failed)
+	}
 
 	stubFetch(t, func(fetch.SubscriptionURL, fetch.FileType) ([]byte, error) {
 		return nil, errors.New("boom")
 	})
-	if _, allErr := LoadRegistry(context.Background(), urls, zerolog.Nop()); allErr == nil {
-		t.Fatal("all RIRs failing must return an error")
+	if _, allFailed, allErr := LoadRegistry(context.Background(), urls, zerolog.Nop()); allErr == nil ||
+		allFailed != 2 {
+		t.Fatalf("all RIRs failing must error with failed=2, got failed=%d err=%v", allFailed, allErr)
 	}
 
 	// Fetches succeed but nothing parses: still an error (nothing to serve).
 	stubFetch(t, func(fetch.SubscriptionURL, fetch.FileType) ([]byte, error) {
 		return []byte("2|apnic|20260718|1|19830705|20260717|+1000\n"), nil
 	})
-	if _, emptyErr := LoadRegistry(context.Background(), urls, zerolog.Nop()); emptyErr == nil {
+	if _, _, emptyErr := LoadRegistry(context.Background(), urls, zerolog.Nop()); emptyErr == nil {
 		t.Fatal("zero total ranges must return an error")
 	}
 }

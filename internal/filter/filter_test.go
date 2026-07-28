@@ -85,7 +85,7 @@ func TestCountrySetHas_CaseAndRange(t *testing.T) {
 	}
 }
 
-func TestAllAllowed(t *testing.T) {
+func TestPermitted(t *testing.T) {
 	t.Parallel()
 
 	lookup := geofeed.NewLookup([]geofeed.Entry{
@@ -93,11 +93,11 @@ func TestAllAllowed(t *testing.T) {
 		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Country: geofeed.CountryCode{'D', 'E'}},
 	})
 	allowed := filter.ParseAllowed("NL")
-	got := filter.AllAllowed(lookup, []netip.Addr{
+	got := filter.Permitted(lookup, []netip.Addr{
 		netip.MustParseAddr("198.51.100.10"),
 		netip.MustParseAddr("203.0.113.5"),
 		netip.MustParseAddr("198.51.100.20"),
-	}, allowed)
+	}, allowed, filter.CountrySet{})
 
 	if len(got) != 2 {
 		t.Fatalf("unexpected allowed count: %d", len(got))
@@ -110,7 +110,7 @@ func TestAllAllowed(t *testing.T) {
 	}
 }
 
-func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
+func TestPermitted_ReusesInputBackingArray(t *testing.T) {
 	t.Parallel()
 
 	lookup := geofeed.NewLookup([]geofeed.Entry{
@@ -124,7 +124,7 @@ func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
 		netip.MustParseAddr("198.51.100.20"),
 	}
 
-	got := filter.AllAllowed(lookup, input, allowed)
+	got := filter.Permitted(lookup, input, allowed, filter.CountrySet{})
 
 	if len(got) != 2 {
 		t.Fatalf("unexpected allowed count: %d", len(got))
@@ -134,6 +134,46 @@ func TestAllAllowed_ReusesInputBackingArray(t *testing.T) {
 	}
 	if got[0] != input[0] || got[1] != input[2] {
 		t.Fatalf("unexpected filtered values: %v", got)
+	}
+}
+
+func TestPermitted_DenyListKeepsUnknownCountry(t *testing.T) {
+	t.Parallel()
+
+	// Exclusion-only request: every country allowed, DE denied. The lookup does
+	// not cover 203.0.113.5, so it resolves to the zero CountryCode — that is
+	// "not in DE", not "not allowed", and it must survive.
+	lookup := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'D', 'E'}},
+	})
+	got := filter.Permitted(lookup, []netip.Addr{
+		netip.MustParseAddr("198.51.100.10"),
+		netip.MustParseAddr("203.0.113.5"),
+	}, filter.All(), filter.ParseAllowed("DE"))
+
+	if len(got) != 1 {
+		t.Fatalf("expected only the DE address dropped, kept %d of 2", len(got))
+	}
+	if got[0] != netip.MustParseAddr("203.0.113.5") {
+		t.Fatalf("expected the unplaceable address to survive, got %s", got[0])
+	}
+}
+
+func TestPermits_UnknownCountry(t *testing.T) {
+	t.Parallel()
+
+	var unknown geofeed.CountryCode
+	if !filter.Permits(filter.All(), filter.ParseAllowed("RU"), unknown) {
+		t.Fatal("an exclusion must not drop a country it cannot resolve")
+	}
+	if filter.Permits(filter.ParseAllowed("DE"), filter.CountrySet{}, unknown) {
+		t.Fatal("an allow-list must drop a country it cannot resolve")
+	}
+	if filter.Permits(filter.All(), filter.ParseAllowed("RU"), geofeed.CountryCode{'R', 'U'}) {
+		t.Fatal("a denied country must be dropped")
+	}
+	if !filter.Permits(filter.All(), filter.CountrySet{}, geofeed.CountryCode{'R', 'U'}) {
+		t.Fatal("no allow-list and no deny-list must permit everything")
 	}
 }
 
@@ -196,6 +236,24 @@ func TestCountrySetAll_ExceptExcluded(t *testing.T) {
 				t.Fatalf("%s: got %v, want %v", cc, got, want)
 			}
 		}
+	}
+}
+
+func TestAllMinusEveryCodeIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	// All() must set exactly the 676 addressable bits. Any bit above ZZ is
+	// unreachable by Exclude, and would keep IsEmpty false however much the
+	// caller excludes — making the documented "nothing left" 400 unreachable.
+	set := filter.All()
+	for c1 := byte('A'); c1 <= 'Z'; c1++ {
+		for c2 := byte('A'); c2 <= 'Z'; c2++ {
+			set.Exclude(filter.ParseAllowed(string([]byte{c1, c2})))
+		}
+	}
+
+	if !filter.IsEmpty(set) {
+		t.Fatalf("excluding every code must empty the set, got %v", set)
 	}
 }
 

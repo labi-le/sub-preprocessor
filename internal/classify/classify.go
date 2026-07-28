@@ -79,9 +79,9 @@ func parseExpire(h string) (int64, bool) {
 	return 0, false
 }
 
-// StatusError reports that the origin answered with a definitive non-2xx
-// status: the host is alive and the URL is NOT a subscription (as opposed to
-// transport errors, whose verdict is unknown).
+// StatusError reports that the origin answered with a non-2xx status: the host
+// is alive, but only a Gone code proves the URL is no longer a subscription.
+// Any other status (like a transport error) leaves the verdict undetermined.
 type StatusError struct {
 	Code   int
 	Status string
@@ -89,10 +89,28 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return "bad status: " + e.Status }
 
+// goneCodes are the statuses that prove a URL stopped being a subscription: the
+// origin answered, and its answer is a permanent "not here". Every other non-2xx
+// says nothing about the subscription itself — 403 is what a WAF or geo-block
+// returns to a non-browser client, 408/425/429 are back-pressure, 5xx is the
+// origin failing — so callers that delete on a dead verdict must not delete on
+// those.
+var goneCodes = map[int]bool{
+	http.StatusNotFound:                   true, // 404: no such subscription path
+	http.StatusGone:                       true, // 410: explicit permanent removal
+	http.StatusUnavailableForLegalReasons: true, // 451: withheld at this origin for good
+}
+
+// Gone reports whether the status is a definitive "no longer a subscription"
+// verdict. False means transient: worth retrying and never grounds for deleting
+// the source.
+func (e *StatusError) Gone() bool { return e != nil && goneCodes[e.Code] }
+
 // URL fetches rawURL with the supplied client and classifies the response; the
 // client's dialer owns the IP/SSRF policy (guarded for the CLI, unrestricted for
-// the crawler). A non-2xx status is returned as *StatusError (definitively not a
-// subscription); any other error means the verdict is undetermined.
+// the crawler). A non-2xx status is returned as *StatusError, whose Gone method
+// says whether that status is definitive; any other error means the verdict is
+// undetermined.
 func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error) {
 	if err := fetch.ValidateHTTPSURL(rawURL); err != nil {
 		return Result{}, fmt.Errorf("validate url: %w", err)

@@ -37,26 +37,26 @@ func NewController(ctx context.Context, holder *Holder, filterer func() Filterer
 	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger, reporter: reporter}
 }
 
-// allowedCountries builds the worker's country allow-set: every code except
-// those the country filter entries exclude, directly or through a group.
-func allowedCountries(cfg config.Config) filter.CountrySet {
-	allowed := filter.All()
-	excluded := filter.CountrySet{}
+// deniedCountries builds the worker's country deny-set: the codes the country
+// filter entries exclude, directly or through a group. It is a deny-set, not
+// the complement allow-set, so a node whose IP no geo source covers is kept
+// rather than dropped for being unplaceable.
+func deniedCountries(cfg config.Config) filter.CountrySet {
+	denied := filter.CountrySet{}
 	for _, spec := range cfg.IPFilterSpecs() {
 		if spec.Type != config.FilterCountry {
 			continue
 		}
 		for _, code := range spec.ExcludeCountries {
-			excluded.Add(code)
+			denied.Add(code)
 		}
 		for _, group := range spec.ExcludeGroups {
 			for _, code := range cfg.Groups[group] {
-				excluded.Add(code)
+				denied.Add(code)
 			}
 		}
 	}
-	allowed.Exclude(excluded)
-	return allowed
+	return denied
 }
 
 // Apply hands cfg to the running checker, or starts one when none is running.
@@ -71,7 +71,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	}
 
 	subs := cfg.Subscriptions
-	allowed := allowedCountries(cfg)
+	denied := deniedCountries(cfg)
 
 	// The gemini/claude/chatgpt/tidal prober params default to the geoblock and
 	// are overridden per-entry by the merged NodeFilterSpec; bandwidth params come
@@ -109,7 +109,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 
 	spec := CheckerSpec{
 		Sources:       subs.Sources,
-		Allowed:       allowed,
+		Denied:        denied,
 		Interval:      subs.Interval,
 		Rounds:        subs.Check.Rounds,
 		MaxFail:       subs.Check.MaxFail,

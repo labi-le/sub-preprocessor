@@ -3,8 +3,8 @@
 # The crawler scans these channels, keeps any live subscription links it finds,
 # and follows reposts/@mentions to thematically related channels (bounded by
 # CRAWL_DEPTH / CRAWL_MAX_CHANNELS). Channels that yield a live subscription are
-# remembered in .crawler-state.json and become permanent seeds automatically —
-# so you only need a few good starting points here.
+# remembered in .crawler-state.json and become seeds automatically — the memory
+# keeps the most recently productive ones, so a few good starting points suffice.
 #
 # This file is re-read every crawl cycle: add a channel and it is picked up on
 # the next cycle, no restart needed. Entries may be a bare slug, an @handle, or

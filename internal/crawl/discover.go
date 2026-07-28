@@ -22,8 +22,16 @@ var reservedSlugs = map[string]bool{
 	"bg": true, "login": true, "confirmphone": true, "tg": true, "telegram": true,
 }
 
-// discoveredPages caps how many pages are fetched for non-seed channels.
+// discoveredPages caps how many pages are fetched per cycle for channels the
+// operator did not configure: reposted discoveries and remembered productive
+// seeds alike, since both re-enter every cycle and their number only grows.
 const discoveredPages = 3
+
+// defaultMaxDiscovered bounds discovered (non-seed) visits per cycle when
+// MaxChannels is 0. Unbounded fan-out is not a safe default at CRAWL_DEPTH=3:
+// every productive channel promotes itself to a permanent seed, so each cycle's
+// discoveries widen the next cycle's frontier.
+const defaultMaxDiscovered = 200
 
 // maxInlineAccum caps how many raw inline URIs are accumulated per cycle before
 // dedupe: a single post could paste a huge list, so bound worst-case memory
@@ -31,9 +39,11 @@ const discoveredPages = 3
 const maxInlineAccum = 20000
 
 // scanNode is a channel queued for crawling at a given repost-graph depth.
+// configured marks an operator-supplied seed, which gets the full page budget.
 type scanNode struct {
-	channel string
-	depth   int
+	channel    string
+	depth      int
+	configured bool
 }
 
 // scan performs a relevance-gated breadth-first crawl of the channel repost
@@ -41,8 +51,9 @@ type scanNode struct {
 // channel (st), all crawled at depth 0 and always expanded; a newly discovered
 // channel is expanded only when it itself yielded at least one live
 // subscription (thematic gate). Discovered (non-seed) visits are capped by
-// MaxChannels; recursion depth by MaxDepth. Channels that yield a live sub are
-// recorded into st so they become permanent seeds on future cycles, surviving
+// MaxChannels, or defaultMaxDiscovered when that is 0; recursion depth by
+// MaxDepth. Channels that yield a live sub are recorded into st (bounded by
+// maxProductive) so they become seeds on future cycles, surviving
 // days when their recent pages carry no live sub. Returns every live
 // subscription URL found, mapped to the channel that first yielded it.
 func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []string) {
@@ -57,9 +68,13 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 			Msg("no seed channels; add them to channels.yaml or CRAWL_CHANNELS")
 		return live, inline
 	}
+	maxDiscovered := c.opts.MaxChannels
+	if maxDiscovered <= 0 {
+		maxDiscovered = defaultMaxDiscovered
+	}
 	queue := make([]scanNode, 0, len(seeds))
-	for slug := range seeds {
-		queue = append(queue, scanNode{slug, 0})
+	for slug, configured := range seeds {
+		queue = append(queue, scanNode{channel: slug, configured: configured})
 	}
 
 	for len(queue) > 0 {
@@ -69,7 +84,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 			continue
 		}
 		if n.depth > 0 {
-			if c.opts.MaxChannels > 0 && discovered >= c.opts.MaxChannels {
+			if discovered >= maxDiscovered {
 				continue
 			}
 			discovered++
@@ -78,20 +93,23 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 
 		for _, ch := range c.scanChannel(ctx, n, st, live, &inline) {
 			if !visited[ch] {
-				queue = append(queue, scanNode{ch, n.depth + 1})
+				queue = append(queue, scanNode{channel: ch, depth: n.depth + 1})
 			}
 		}
 	}
 	return live, inline
 }
 
-// buildSeeds collects the depth-0 seed channels: configured channels, the
-// hot-reloaded channels file, and remembered productive channels.
-func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
-	seeds := map[string]struct{}{}
+// buildSeeds collects the depth-0 seed channels mapped to whether the operator
+// configured them (CRAWL_CHANNELS or the channels file). Remembered productive
+// channels are seeds too — always expanded — but not configured: they pay the
+// shallower discovered page budget, because they accumulate across cycles and
+// paying full Pages for each is what makes a cycle cost more than the last.
+func (c *Crawler) buildSeeds(st *state) map[string]bool {
+	seeds := map[string]bool{}
 	addSeed := func(s string) {
 		if slug := normalizeSlug(s); slug != "" {
-			seeds[slug] = struct{}{}
+			seeds[slug] = true
 		}
 	}
 	for _, s := range c.opts.Channels {
@@ -101,7 +119,9 @@ func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
 		addSeed(s)
 	}
 	for _, slug := range st.seeds() {
-		seeds[slug] = struct{}{}
+		if _, ok := seeds[slug]; !ok {
+			seeds[slug] = false
+		}
 	}
 	return seeds
 }
@@ -110,7 +130,7 @@ func (c *Crawler) buildSeeds(st *state) map[string]struct{} {
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
 func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string) []string {
-	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n.depth))
+	pages := c.scrapeChannel(ctx, n.channel, c.pagesFor(n))
 	if len(pages) == 0 {
 		return nil
 	}
@@ -180,16 +200,14 @@ func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) 
 	return out
 }
 
-// pagesFor returns how many pages to fetch at a given depth: full depth for
-// seeds, shallower for discovered channels to bound fan-out cost.
-func (c *Crawler) pagesFor(depth int) int {
-	if depth == 0 {
+// pagesFor returns how many pages to fetch for a node: the full Pages budget for
+// operator-configured seeds, the shallower discovered budget for everything else
+// (remembered seeds and repost discoveries), bounding per-cycle cost.
+func (c *Crawler) pagesFor(n scanNode) int {
+	if n.configured {
 		return c.opts.Pages
 	}
-	if c.opts.Pages < discoveredPages {
-		return c.opts.Pages
-	}
-	return discoveredPages
+	return min(c.opts.Pages, discoveredPages)
 }
 
 // extractChannels returns the distinct channel slugs referenced across pages,

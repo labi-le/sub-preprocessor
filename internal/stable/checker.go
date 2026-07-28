@@ -42,7 +42,7 @@ type DeadCache interface {
 // mid-cycle configures the next cycle instead of rewriting the running one.
 type CheckerSpec struct {
 	Sources       []config.SubscriptionSource
-	Allowed       filter.CountrySet
+	Denied        filter.CountrySet
 	Interval      time.Duration
 	Rounds        int
 	MaxFail       int
@@ -338,13 +338,18 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 
 			var buf bytes.Buffer
 			buf.Grow(sourceBufSize)
+			// The worker imposes no allow-list: the configured country filters
+			// only ever exclude, and an exclusion must not drop a node whose IP
+			// no geo source covers.
 			req := preprocess.FilterRequest{
 				SubscriptionURL:  fetch.SubscriptionURL(src.URL),
-				AllowedCountries: spec.Allowed,
+				AllowedCountries: filter.All(),
+				DeniedCountries:  spec.Denied,
 			}
 			if src.Body != "" {
 				// Inline source: filter the pasted payload directly, no fetch.
-				req = preprocess.FilterRequest{Body: []byte(src.Body), AllowedCountries: spec.Allowed}
+				req.SubscriptionURL = ""
+				req.Body = []byte(src.Body)
 			}
 			stats, err := svc.Filter(sourceCtx, &buf, req)
 			if err != nil {

@@ -11,6 +11,16 @@ type CountryLookup interface {
 	LookupCountry(ip netip.Addr) CountryCode
 }
 
+// SizedLookup is a CountryLookup that reports how many ranges it indexes. The
+// lookups returned by NewLookup and NewRangeLookup implement it; the reload
+// guards in preprocess use the size to refuse a swap that would shrink a live
+// database. It is separate from CountryLookup so stub implementations
+// elsewhere need not grow a method they cannot answer.
+type SizedLookup interface {
+	CountryLookup
+	Len() int
+}
+
 // Range is an inclusive IP range with its associated country. Start and End
 // must be the same address family; netip.Addr pairs (not Prefix) because DB-IP
 // and RIR v4 ranges are not CIDR-aligned.
@@ -195,6 +205,11 @@ func NewLookup(entries []Entry) CountryLookup {
 //nolint:ireturn // constructor intentionally returns the lookup interface
 func NewRangeLookup(ranges []Range) CountryLookup {
 	return newIndexedLookup(ranges)
+}
+
+// Len reports the number of indexed ranges across both address families.
+func (l *indexedLookup) Len() int {
+	return len(l.v4) + len(l.v6)
 }
 
 func (l *indexedLookup) LookupCountry(ip netip.Addr) CountryCode {

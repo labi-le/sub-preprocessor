@@ -14,6 +14,9 @@ services:
       - ./config:/config:rw
       # agenix-decrypted secret; the Gemini key is read from it (geoblock.gemini.key_file)
       - /run/agenix/litellm-env:/run/agenix/litellm-env:ro
+    # Must exceed internal/app's shutdownTimeout (15s) + controllerStopTimeout
+    # (5s) so a graceful stop finishes instead of being SIGKILLed mid-drain.
+    stop_grace_period: 30s
     restart: always
 
   tg-sub-crawler:
@@ -36,7 +39,7 @@ services:
       - CRAWL_PAGES=6
       - CRAWL_PRUNE=1
       - CRAWL_DEPTH=3          # repost-graph recursion depth; higher = wider fan-out + longer cycles
-      - CRAWL_MAX_CHANNELS=0   # 0 = no cap (visited-set still prevents re-visiting channels within a cycle)
+      - CRAWL_MAX_CHANNELS=0   # 0 = built-in per-cycle cap on discovered channels (see defaultMaxDiscovered)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
     restart: unless-stopped

@@ -13,7 +13,6 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/fetch"
-	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/stable"
 )
@@ -59,7 +58,6 @@ func testSources() []config.SubscriptionSource {
 func testCheckerSpec(prober stable.Prober) stable.CheckerSpec {
 	return stable.CheckerSpec{
 		Sources:       testSources(),
-		Allowed:       filter.All(),
 		Interval:      time.Hour,
 		Rounds:        5,
 		MaxFail:       0,

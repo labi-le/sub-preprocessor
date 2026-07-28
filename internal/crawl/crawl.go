@@ -63,10 +63,10 @@ type Options struct {
 	Channels      []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
 	ChannelsPath  string   // YAML file of seed channels, re-read each cycle for hot-reload
 	PrivatePath   string
-	Pages         int           // t.me/s pages (~20 msgs each) to walk back per seed channel
-	Prune         bool          // drop managed sources that no longer classify as live
+	Pages         int           // t.me/s pages (~20 msgs each) to walk back per configured seed channel
+	Prune         bool          // drop managed sources proven no longer live
 	MaxDepth      int           // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels   int           // safety cap on discovered (non-seed) channels per cycle; 0 = unlimited
+	MaxChannels   int           // cap on discovered (non-seed) channels per cycle; 0 = defaultMaxDiscovered
 	StatePath     string        // persisted productive-channel memory; empty disables persistence
 	StateTTL      time.Duration // drop a productive channel from memory after this long without a live sub
 	InlineEnabled bool          // harvest raw inline proxy URIs pasted in channel messages
@@ -137,9 +137,11 @@ func New(opts Options, logger zerolog.Logger) *Crawler {
 
 // Run executes a cycle immediately, then every interval until ctx is done.
 // Cycles go through runGuarded, so a tick that fires while a cycle (scheduled
-// or HTTP-triggered) is still running is skipped rather than overlapped.
+// or HTTP-triggered) is still running is skipped rather than overlapped, and
+// each cycle is bounded by cycleBudget so it cannot starve the schedule.
 func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
-	c.runGuarded(ctx)
+	budget := cycleBudget(interval)
+	c.runGuarded(ctx, budget)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -147,7 +149,7 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if !c.runGuarded(ctx) {
+			if !c.runGuarded(ctx, budget) {
 				c.logger.Warn().Msg("previous crawl cycle still running; skipping scheduled tick")
 			}
 		}
@@ -159,6 +161,7 @@ func (c *Crawler) Run(ctx context.Context, interval time.Duration) {
 // done. Unlike Run it does not fire immediately — it waits for the scheduled
 // time.
 func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
+	budget := cycleBudget(oneDay)
 	for {
 		next := nextDaily(time.Now(), hour, minute)
 		c.logger.Info().Time("next_run", next).Str("in", time.Until(next).Truncate(time.Second).String()).
@@ -169,7 +172,7 @@ func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
 			t.Stop()
 			return
 		case <-t.C:
-			if !c.runGuarded(ctx) {
+			if !c.runGuarded(ctx, budget) {
 				c.logger.Warn().Msg("previous crawl cycle still running; skipping scheduled run")
 			}
 		}
@@ -180,14 +183,40 @@ func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
 // TryLocks the cycle mutex: on success it runs RunOnce and returns true; if a
 // cycle is already running it returns false immediately without waiting, so a
 // scheduled tick or an HTTP trigger that collides with a live cycle is skipped
-// safely rather than queued.
-func (c *Crawler) runGuarded(ctx context.Context) bool {
+// safely rather than queued. A non-zero budget bounds the cycle's wall clock.
+func (c *Crawler) runGuarded(ctx context.Context, budget time.Duration) bool {
 	if !c.running.TryLock() {
 		return false
 	}
 	defer c.running.Unlock()
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	c.RunOnce(ctx)
 	return true
+}
+
+const (
+	// maxCycleBudget caps the per-cycle wall clock for schedules long enough
+	// that a fraction of the interval bounds nothing (CRAWL_AT is daily). A
+	// cycle still running after this long is not converging, and cutting it
+	// short costs little: an aborted cycle writes nothing, and the sources it
+	// never reached are simply rechecked next cycle.
+	maxCycleBudget = 2 * time.Hour
+	// cycleBudgetNum/cycleBudgetDen: a cycle may spend three quarters of its
+	// schedule interval. The remaining quarter is slack, so an overrunning
+	// cycle is aborted and its tick skipped rather than every later tick
+	// queueing behind it.
+	cycleBudgetNum = 3
+	cycleBudgetDen = 4
+)
+
+// cycleBudget bounds one cycle to its share of the schedule interval, so a crawl
+// whose fan-out grows can never outrun the next tick.
+func cycleBudget(interval time.Duration) time.Duration {
+	return min(interval*cycleBudgetNum/cycleBudgetDen, maxCycleBudget)
 }
 
 // nextDaily returns the next instant at hour:min (local) strictly after now.
@@ -201,7 +230,9 @@ func nextDaily(now time.Time, hour, minute int) time.Time {
 
 // RunOnce performs one crawl+classify+merge cycle. The private overlay is only
 // rewritten when the managed source set actually changes, so an unchanged cycle
-// triggers no reload.
+// triggers no reload, and never when the cycle failed to learn anything or wants
+// to delete a large slice of the corpus at once (see recheckResult.dark and
+// allowShrink).
 func (c *Crawler) RunOnce(ctx context.Context) {
 	pf, err := loadPrivate(c.opts.PrivatePath)
 	if err != nil {
@@ -215,20 +246,30 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	st := loadState(c.opts.StatePath)
 	live, inline := c.scan(ctx, &st)
 	if ctx.Err() != nil {
-		c.logger.Info().Msg("shutdown mid-scan; skipping state save and merge")
+		c.logger.Warn().Str("reason", abortReason(ctx.Err())).
+			Msg("cycle aborted mid-scan; skipping state save and merge")
 		return
 	}
 	st.prune(time.Now().Add(-c.opts.StateTTL))
 	if saveErr := saveState(c.opts.StatePath, st); saveErr != nil {
 		c.logger.Warn().Err(saveErr).Msg("save crawler state failed")
 	}
-	c.logger.Info().Int("discovered", len(live)).Int("productive", len(st.Productive)).
+	// Captured before recheckManaged folds revived URLs into live.
+	discovered := len(live)
+	c.logger.Info().Int("discovered", discovered).Int("productive", len(st.Productive)).
 		Msg("live subscriptions discovered")
 
-	managedURL, unknown := c.recheckManaged(ctx, pf, live)
+	rr := c.recheckManaged(ctx, pf, live)
 	if ctx.Err() != nil {
-		c.logger.Info().Msg("shutdown mid-recheck; skipping merge")
+		c.logger.Warn().Str("reason", abortReason(ctx.Err())).
+			Msg("cycle aborted mid-recheck; skipping merge")
 		return
+	}
+	prune := c.opts.Prune
+	if prune && rr.dark(discovered) {
+		c.logger.Error().Int("rechecked", rr.checked).
+			Msg("cycle discovered no subscription and revived none; treating as crawler-side fault, pruning nothing")
+		prune = false
 	}
 	// A cycle takes minutes to hours; re-load private.yaml so the merge sees
 	// concurrent hand edits instead of clobbering them with a stale snapshot.
@@ -237,7 +278,8 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		c.logger.Error().Err(err).Str("path", c.opts.PrivatePath).Msg("re-read private.yaml failed")
 		return
 	}
-	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
+	before := managedCount(pf)
+	next, managed := c.mergeManaged(pf, live, rr, prune)
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
@@ -249,6 +291,9 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		c.logger.Info().Int("managed", len(managed)).Msg("no change")
 		return
 	}
+	if !c.allowShrink(&st, before, len(managed)) {
+		return
+	}
 	pf.Subscriptions.Sources = next
 	if writeErr := writePrivate(c.opts.PrivatePath, pf); writeErr != nil {
 		c.logger.Error().Err(writeErr).Msg("write private.yaml failed")
@@ -257,15 +302,42 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	c.logger.Info().Int("managed", len(managed)).Int("inline", inlineCount).Int("total", len(next)).Msg("private.yaml updated")
 }
 
+// abortReason names why a cycle stopped early: its own budget (see cycleBudget)
+// or process shutdown. Either way the merge is skipped — a partial cycle is
+// never evidence that a source died.
+func abortReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "cycle budget exhausted"
+	}
+	return "shutdown"
+}
+
+// recheckResult is what the recheck phase learned about the managed set.
+type recheckResult struct {
+	managedURL map[string]bool // every managed URL in the cycle-start snapshot
+	unknown    map[string]bool // rechecked URLs whose verdict is undetermined
+	checked    int             // URLs rechecked (not rediscovered in a channel)
+	revived    int             // rechecked URLs that answered as a live subscription
+}
+
+// dark reports a cycle that learned nothing anywhere: no live subscription found
+// in any channel and not one recheck answering live, with rechecks actually
+// attempted. That shape is a crawler-side fault — egress down, DNS interception,
+// a proxy answering every request with an error page — not every panel dying in
+// the same hour, so such a cycle must prune nothing.
+func (r recheckResult) dark(discovered int) bool {
+	return discovered == 0 && r.checked > 0 && r.revived == 0
+}
+
 // recheckManaged records the URLs of existing managed sources and re-classifies
 // the ones not rediscovered this cycle, marking any still live in live so prune
-// can drop the dead ones. URLs whose recheck failed on transport (DNS, timeout,
-// TLS, read) land in unknown: their status is undetermined, so they must be
-// retained rather than pruned. A definitive non-2xx answer (classify.StatusError)
-// is NOT unknown — the host is alive and the subscription is gone.
-func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]string) (managedURL, unknown map[string]bool) {
-	managedURL = map[string]bool{}
-	var recheck []string
+// can drop the dead ones. Only a definitively gone answer prunes: a recheck that
+// failed on transport (DNS, timeout, TLS, read) or answered a transient status
+// (403, 408, 425, 429, any 5xx) lands in unknown, because none of those show the
+// subscription is gone — see classify.StatusError.Gone.
+func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]string) recheckResult {
+	rr := recheckResult{managedURL: map[string]bool{}}
+	var pending []string
 	for _, s := range pf.Subscriptions.Sources {
 		if !strings.HasPrefix(s.Name, managedPrefix) {
 			continue
@@ -275,28 +347,32 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 			// fresh each cycle; never recheck or classify them.
 			continue
 		}
-		managedURL[s.URL] = true
+		rr.managedURL[s.URL] = true
 		if _, ok := live[s.URL]; !ok {
-			recheck = append(recheck, s.URL)
+			pending = append(pending, s.URL)
 		}
 	}
-	relive, unknown := c.classifyAll(ctx, recheck)
+	relive, unknown := c.classifyAll(ctx, pending)
+	rr.unknown = unknown
+	rr.checked = len(pending)
+	rr.revived = len(relive)
 	for u := range relive {
 		// Revived by recheck, not seen in a channel this cycle: origin unknown.
 		if _, ok := live[u]; !ok {
 			live[u] = ""
 		}
 	}
-	return managedURL, unknown
+	return rr
 }
 
 // mergeManaged combines the retained hand-added sources with the current managed
 // set (deduped and sorted by name) and returns the full next source list plus
 // the managed subset for logging. Managed sources that are not live are still
-// retained when their status is unknown (transient recheck error), when they
-// appeared in the re-loaded file mid-cycle (never checked), or when pruning is
-// disabled; only a definitive not-live verdict prunes.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, managedURL, unknown map[string]bool) (kept, managed []source) {
+// retained when their status is undetermined, when they appeared in the re-loaded
+// file mid-cycle (never checked), or when prune is off; only a definitive
+// not-live verdict prunes. prune is the cycle's decision, not opts.Prune: a
+// cycle that learned nothing prunes nothing.
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool) (kept, managed []source) {
 	all := map[string]struct{}{}
 	existing := map[string]string{}
 	for _, s := range pf.Subscriptions.Sources {
@@ -331,23 +407,87 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, managedUR
 	for _, u := range urls {
 		_, isLive := live[u]
 		keep := isLive
-		if !keep && !managedURL[u] {
+		if !keep && !rr.managedURL[u] {
 			// In the re-loaded file but absent from the cycle-start snapshot:
 			// added mid-cycle, never checked — retain rather than drop unseen.
 			keep = true
 		}
-		if !keep && managedURL[u] && (unknown[u] || !c.opts.Prune) {
+		if !keep && rr.managedURL[u] && (rr.unknown[u] || !prune) {
 			keep = true
 		}
-		if keep {
-			name := sourceName(u, existing[u], live[u], used)
-			used[name] = true
-			managed = append(managed, source{Name: name, URL: u})
+		if !keep {
+			continue
 		}
+		// Last gate before the URL reaches private.yaml: the crawler fetches
+		// through an unrestricted client, but config.Load runs every source
+		// through ValidatePublicHTTPSURL and fails the WHOLE config on one bad
+		// entry — which is fatal at service startup, not just at reload.
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err != nil {
+			c.logger.Warn().Err(err).Str("url", u).Msg("dropping managed source the service would refuse to load")
+			continue
+		}
+		name := sourceName(u, existing[u], live[u], used)
+		used[name] = true
+		managed = append(managed, source{Name: name, URL: u})
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
 	return kept, managed
+}
+
+const (
+	// bulkPruneMinDrop and bulkPrunePercent are the cycle-level prune floor: a
+	// single cycle may not delete more than bulkPrunePercent of the managed
+	// corpus unless the drop is also small in absolute terms. BOTH thresholds
+	// must be exceeded to trip it, so ordinary churn flows through — 20 expired
+	// panels out of 150 clear the count but not the ratio, and a young corpus of
+	// 12 losing 4 clears the ratio but not the count — while a correlated fault
+	// condemning a third of the corpus in one hour is stopped.
+	// The corpus is unrecoverable if lost: there is no backup, and a dropped URL
+	// only returns if the same channel post is rescraped.
+	bulkPruneMinDrop = 10
+	bulkPrunePercent = 30
+	percentScale     = 100
+)
+
+// managedCount counts the managed URL sources of a private file: the corpus the
+// prune floor protects. Inline (Body) sources are regenerated every cycle and
+// hand-added ones are never touched, so neither belongs in the comparison.
+func managedCount(pf privateFile) int {
+	n := 0
+	for _, s := range pf.Subscriptions.Sources {
+		if s.Body == "" && strings.HasPrefix(s.Name, managedPrefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// allowShrink applies the prune floor to a proposed write, persisting and
+// logging a refusal. False means the caller must skip the write and leave the
+// previous private.yaml intact; a drop that big is only carried out once a later
+// cycle re-proposes it (state.confirmBulkPrune), so no single cycle can wipe the
+// harvested corpus while a genuine mass expiry still converges.
+func (c *Crawler) allowShrink(st *state, before, after int) bool {
+	dropped := before - after
+	was := st.BulkPruneAt
+	allow := true
+	if dropped > bulkPruneMinDrop && dropped*percentScale > before*bulkPrunePercent {
+		allow = st.confirmBulkPrune(time.Now())
+	} else {
+		st.clearBulkPrune()
+	}
+	if !st.BulkPruneAt.Equal(was) {
+		if err := saveState(c.opts.StatePath, *st); err != nil {
+			c.logger.Warn().Err(err).Msg("save crawler state failed")
+		}
+	}
+	if !allow {
+		c.logger.Error().Int("managed_before", before).Int("managed_after", after).
+			Int("dropped", dropped).Str("confirm_after", bulkPruneConfirmAfter.String()).
+			Msg("bulk prune floor tripped; private.yaml left unchanged pending confirmation by a later cycle")
+	}
+	return allow
 }
 
 // sourceName picks the managed name for url u. An already-attributed name is
@@ -400,9 +540,11 @@ func channelSlug(ch string) string {
 }
 
 // classifyAll classifies urls with bounded concurrency, returning the set that
-// classify as live and the set whose verdict is undetermined (transport-level
-// error). A URL in neither set is definitively not a live subscription: it
-// either classified dead or the origin answered non-2xx (classify.StatusError).
+// classify as live and the set whose verdict is undetermined. A URL lands in
+// neither set only when it is provably not a live subscription: it was fetched
+// and parsed but carries no usable node, or the origin answered a definitively
+// gone status. Everything else — transport failure, transient status, oversized
+// body — is undetermined, because callers prune on the absence of both verdicts.
 func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown map[string]bool) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
@@ -422,10 +564,15 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown
 			defer mu.Unlock()
 			var statusErr *classify.StatusError
 			switch {
-			case err != nil && !errors.As(err, &statusErr):
+			case err == nil:
+				// Fetched and parsed: live, or definitively nodeless.
+				if res.Live() {
+					live[u] = true
+				}
+			case !errors.As(err, &statusErr) || !statusErr.Gone():
+				// Transport failure, or a status that proves nothing about the
+				// subscription: the verdict stays undetermined.
 				unknown[u] = true
-			case err == nil && res.Live():
-				live[u] = true
 			}
 		}(u)
 	}
@@ -501,13 +648,16 @@ func pageCursor(page string) string {
 }
 
 // candidate reports whether a URL is worth fetching: not obvious Telegram noise
-// and a well-formed https URL (scheme-only check — no IP guard).
+// and a URL the service itself would accept. The IP guard matters even though
+// the crawler's own client is unrestricted — a harvested literal-private-IP
+// source is one config.Load rejects, and channel content is third-party
+// controlled.
 func candidate(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || isNoiseHost(u.Hostname()) {
 		return false
 	}
-	return fetch.ValidateHTTPSURL(fetch.SubscriptionURL(raw)) == nil
+	return fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)) == nil
 }
 
 // isNoiseHost matches hosts that never serve subscriptions (Telegram itself and
@@ -541,7 +691,40 @@ func loadPrivate(path string) (privateFile, error) {
 	return pf, nil
 }
 
+// sourceNameRe mirrors config's source-name alphabet; a name outside it makes
+// the service reject the whole config.
+var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// validatePrivate re-checks the whole list against the rules the consumer
+// applies in config.SubscriptionsConfig.Validate (name alphabet, unique names,
+// public https URL unless the source carries an inline Body). Keep the two in
+// sync: one bad entry fails config.Load for the entire config, which is fatal at
+// service startup, so refusing to write is always the better outcome — including
+// when the offending source was hand-added.
+func validatePrivate(pf privateFile) error {
+	seen := make(map[string]struct{}, len(pf.Subscriptions.Sources))
+	for _, s := range pf.Subscriptions.Sources {
+		if !sourceNameRe.MatchString(s.Name) {
+			return fmt.Errorf("invalid source name %q", s.Name)
+		}
+		if _, dup := seen[s.Name]; dup {
+			return fmt.Errorf("duplicate source name %q", s.Name)
+		}
+		seen[s.Name] = struct{}{}
+		if strings.TrimSpace(s.Body) != "" {
+			continue
+		}
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(s.URL)); err != nil {
+			return fmt.Errorf("source %s: %w", s.Name, err)
+		}
+	}
+	return nil
+}
+
 func writePrivate(path string, pf privateFile) error {
+	if err := validatePrivate(pf); err != nil {
+		return fmt.Errorf("private.yaml would be unloadable: %w", err)
+	}
 	b, err := yaml.Marshal(pf)
 	if err != nil {
 		return fmt.Errorf("marshal private.yaml: %w", err)

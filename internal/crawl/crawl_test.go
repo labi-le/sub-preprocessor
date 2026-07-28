@@ -1,6 +1,7 @@
 package crawl //nolint:testpackage // exercises unexported crawl helpers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,8 +149,8 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	}
 
 	live := map[string]string{}
-	managedURL, unknown := c.recheckManaged(context.Background(), pf, live)
-	next, managed := c.mergeManaged(pf, live, managedURL, unknown)
+	rr := c.recheckManaged(context.Background(), pf, live)
+	next, managed := c.mergeManaged(pf, live, rr, true)
 
 	byURL := map[string]bool{}
 	for _, s := range next {
@@ -164,13 +166,116 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		t.Error("definitively dead managed source must be pruned")
 	}
 	if byURL[urlGone] {
-		t.Error("managed source answering non-2xx must be pruned (host alive, subscription gone)")
+		t.Error("managed source answering a definitively gone status must be pruned")
 	}
 	if !byURL[urlErr] {
 		t.Error("managed source with unknown (errored) status must be retained, not pruned")
 	}
 	if len(managed) != 2 {
 		t.Errorf("managed = %v, want live+unknown (2 entries)", managed)
+	}
+}
+
+// TestClassifyAllTreatsTransientStatusAsUnknown pins the verdict per status
+// code. A URL missing from both sets is what makes the caller delete it, so only
+// a definitively gone answer may land there; every retryable status has to be
+// undetermined.
+func TestClassifyAllTreatsTransientStatusAsUnknown(t *testing.T) {
+	t.Parallel()
+
+	transient := []int{
+		http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooEarly,
+		http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+	}
+	gone := []int{http.StatusNotFound, http.StatusGone, http.StatusUnavailableForLegalReasons}
+
+	urlFor := func(code int) string { return fmt.Sprintf("https://s%d.example/sub", code) }
+	code := map[string]int{}
+	urls := make([]string, 0, len(transient)+len(gone))
+	for _, status := range append(append([]int{}, transient...), gone...) {
+		u := urlFor(status)
+		urls = append(urls, u)
+		code[u] = status
+	}
+
+	c := &Crawler{
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			status := code[string(u)]
+			return classify.Result{}, &classify.StatusError{Code: status, Status: http.StatusText(status)}
+		},
+		logger: zerolog.Nop(),
+	}
+	live, unknown := c.classifyAll(context.Background(), urls)
+
+	if len(live) != 0 {
+		t.Fatalf("live = %v, want none: no URL answered 2xx", live)
+	}
+	for _, status := range transient {
+		if !unknown[urlFor(status)] {
+			t.Errorf("status %d must be undetermined, not a death sentence", status)
+		}
+	}
+	for _, status := range gone {
+		if unknown[urlFor(status)] {
+			t.Errorf("status %d is definitive; it must not be undetermined", status)
+		}
+	}
+}
+
+// TestRecheckKeepsTransientStatusPrunesGone is the anti-data-loss contract of the
+// recheck: a rate-limited panel (429), a provider mid-deploy (503) and a WAF
+// refusing a non-browser client (403) all keep their source, because a pruned URL
+// is unrecoverable — it only returns if the same channel post is rescraped.
+func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlLive        = "https://live.example/sub"
+		urlRateLimited = "https://ratelimited.example/sub"
+		urlDeploying   = "https://deploying.example/sub"
+		urlBlocked     = "https://blocked.example/sub"
+		urlNotFound    = "https://notfound.example/sub"
+	)
+	status := map[string]int{
+		urlRateLimited: http.StatusTooManyRequests,
+		urlDeploying:   http.StatusServiceUnavailable,
+		urlBlocked:     http.StatusForbidden,
+		urlNotFound:    http.StatusNotFound,
+	}
+	c := &Crawler{
+		opts: Options{Prune: true},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if code, bad := status[string(u)]; bad {
+				return classify.Result{}, &classify.StatusError{Code: code, Status: http.StatusText(code)}
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+	var pf privateFile
+	for _, u := range []string{urlLive, urlRateLimited, urlDeploying, urlBlocked, urlNotFound} {
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+
+	live := map[string]string{}
+	rr := c.recheckManaged(context.Background(), pf, live)
+	_, managed := c.mergeManaged(pf, live, rr, true)
+
+	kept := map[string]bool{}
+	for _, s := range managed {
+		kept[s.URL] = true
+	}
+	if !kept[urlLive] {
+		t.Error("a source that still serves nodes must be kept")
+	}
+	for _, u := range []string{urlRateLimited, urlDeploying, urlBlocked} {
+		if !kept[u] {
+			t.Errorf("%s answered %d, which is transient: the source must be kept", u, status[u])
+		}
+	}
+	if kept[urlNotFound] {
+		t.Error("404 is definitive: the source must be pruned")
 	}
 }
 
@@ -188,7 +293,7 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
 
-	next, managed := c.mergeManaged(pf, map[string]string{}, map[string]bool{}, map[string]bool{})
+	next, managed := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true)
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -205,7 +310,7 @@ func TestCandidate(t *testing.T) {
 		"https://host.example/sub":            true,
 		"https://t.me/chan":                   false, // telegram noise
 		"https://cdn4.telesco.pe/file/x.jpg":  false, // telegram media cdn
-		"https://192.168.1.1/sub":             true,  // private ip allowed: crawler client is unrestricted
+		"https://192.168.1.1/sub":             false, // literal private ip: config.Load would reject the source
 		"http://host.example/sub":             false, // not https
 	}
 	for u, want := range cases {
@@ -307,7 +412,7 @@ func TestMergeUpgradesLegacyName(t *testing.T) {
 	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u}}
 
 	live := map[string]string{u: "VPN_Channel"}
-	next, managed := c.mergeManaged(pf, live, map[string]bool{u: true}, map[string]bool{})
+	next, managed := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true)
 	if len(next) != 1 || len(managed) != 1 {
 		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
 	}
@@ -730,5 +835,192 @@ func TestRunOnceNoInlineNodes(t *testing.T) {
 
 	if hasInlineSource(t, priv) {
 		t.Fatal("tg-inline source written despite no inline nodes")
+	}
+}
+
+// TestRunOnceRefusesBulkPrune: a cycle that would delete most of the managed
+// corpus at once must write nothing and log an error. private.yaml has no backup,
+// so one bad cycle may never wipe it — a later cycle has to confirm the deletion.
+func TestRunOnceRefusesBulkPrune(t *testing.T) {
+	t.Parallel()
+
+	const total = 20
+	urls := make([]string, 0, total)
+	var pf privateFile
+	for i := range total {
+		u := fmt.Sprintf("https://p%02d.example/sub", i)
+		urls = append(urls, u)
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := writePrivate(priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, Prune: true},
+		client: pageFetcher{},
+		// urls[0] still answers, so this is not a learned-nothing cycle: the
+		// bulk-prune floor alone has to stop the write.
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) == urls[0] {
+				return classify.Result{Nodes: 1}, nil
+			}
+			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(got.Subscriptions.Sources) != total {
+		t.Fatalf("private.yaml holds %d sources, want the original %d untouched", len(got.Subscriptions.Sources), total)
+	}
+	if !strings.Contains(logBuf.String(), "bulk prune floor tripped") {
+		t.Errorf("prune floor must log at error level, got %q", logBuf.String())
+	}
+}
+
+// TestRunOnceDarkCycleWritesNothing: a cycle that discovers nothing and revives
+// nothing has learned nothing about its sources — a crawler egress fault (tunnel
+// down, DNS interception, a proxy answering every request itself) looks exactly
+// like this — so it must prune nothing, however definitive the answers look. The
+// set here is small enough that the bulk-prune floor would not have caught it.
+func TestRunOnceDarkCycleWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	const total = 5
+	var pf privateFile
+	for i := range total {
+		u := fmt.Sprintf("https://d%02d.example/sub", i)
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := writePrivate(priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, Prune: true},
+		client: pageFetcher{},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(got.Subscriptions.Sources) != total {
+		t.Fatalf("private.yaml holds %d sources, want all %d retained", len(got.Subscriptions.Sources), total)
+	}
+	if !strings.Contains(logBuf.String(), "pruning nothing") {
+		t.Errorf("a learned-nothing cycle must log at error level, got %q", logBuf.String())
+	}
+}
+
+// TestConfirmBulkPruneRequiresLaterCycle: the first proposal to delete a large
+// slice of the corpus is refused and remembered, only a cycle at least
+// bulkPruneConfirmAfter later carries it out, and doing so consumes the record so
+// the next mass deletion earns its own confirmation.
+func TestConfirmBulkPruneRequiresLaterCycle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	var st state
+	if st.confirmBulkPrune(now) {
+		t.Fatal("the first proposal must be refused")
+	}
+	if st.BulkPruneAt.IsZero() {
+		t.Fatal("a refusal must be remembered for a later cycle to confirm")
+	}
+	if st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter - time.Minute)) {
+		t.Error("a proposal inside the confirmation window must still be refused")
+	}
+	if !st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter)) {
+		t.Error("a proposal past the confirmation window must be honoured")
+	}
+	if !st.BulkPruneAt.IsZero() {
+		t.Error("an honoured proposal must be consumed, not left standing")
+	}
+	st.BulkPruneAt = now
+	st.clearBulkPrune()
+	if !st.BulkPruneAt.IsZero() {
+		t.Error("clearBulkPrune must forget the pending proposal")
+	}
+}
+
+// TestStatePruneCapsProductive: the productive memory is the seed set, and seeds
+// drive the whole cycle's cost, so it must stay bounded — the TTL alone lets one
+// live sub a month keep a channel forever.
+func TestStatePruneCapsProductive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	var st state
+	const extra = 50
+	for i := range maxProductive + extra {
+		st.record(fmt.Sprintf("chan%04d", i), now.Add(-time.Duration(i)*time.Minute))
+	}
+
+	st.prune(now.Add(-720 * time.Hour)) // nothing is stale; only the cap applies
+
+	if len(st.Productive) != maxProductive {
+		t.Fatalf("productive = %d entries, want the cap %d", len(st.Productive), maxProductive)
+	}
+	if _, ok := st.Productive["chan0000"]; !ok {
+		t.Error("the most recently productive channel must survive the cap")
+	}
+	last := fmt.Sprintf("chan%04d", maxProductive+extra-1)
+	if _, ok := st.Productive[last]; ok {
+		t.Errorf("%s is the least recently productive channel; it must be dropped", last)
+	}
+}
+
+// TestPagesForBudget: only operator-configured seeds get the full page budget.
+// Remembered seeds and repost discoveries pay the shallower one — they accumulate
+// across cycles, and paying full price for each is what made every cycle cost
+// more than the last.
+func TestPagesForBudget(t *testing.T) {
+	t.Parallel()
+
+	c := &Crawler{opts: Options{Pages: 6}}
+	if got := c.pagesFor(scanNode{channel: "a", configured: true}); got != 6 {
+		t.Errorf("configured seed budget = %d, want 6", got)
+	}
+	if got := c.pagesFor(scanNode{channel: "b"}); got != discoveredPages {
+		t.Errorf("remembered seed budget = %d, want %d", got, discoveredPages)
+	}
+	small := &Crawler{opts: Options{Pages: 1}}
+	if got := small.pagesFor(scanNode{channel: "b", depth: 2}); got != 1 {
+		t.Errorf("budget = %d, want never more than Pages (1)", got)
+	}
+}
+
+// TestWritePrivateRefusesUnloadableSource: the crawler must never author a file
+// the service cannot load. One rejected source fails config.Load for the whole
+// config, which is fatal at startup, and compose restarts the container forever.
+func TestWritePrivateRefusesUnloadableSource(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{{Name: "tg-abc123", URL: "https://10.0.0.5/sub"}}
+
+	if err := writePrivate(path, pf); err == nil {
+		t.Fatal("writePrivate must refuse a source with a non-public literal-IP host")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a refused write must not create the file; stat err = %v", err)
 	}
 }

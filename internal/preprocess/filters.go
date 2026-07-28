@@ -20,9 +20,10 @@ type asnResolver interface {
 	Resolve(ctx context.Context, ip netip.Addr) (asn.Result, error)
 }
 
-// GeofeedFilter keeps IPs whose geofeed country is in the allowed set. When the
-// allowed set is full (no exclusions in effect) the filter is a no-op and keeps
-// every IP, including those whose country is unknown.
+// GeofeedFilter applies the request's country policy to the geofeed lookup: an
+// IP must be in the allow-list, unless the caller asked for none, and must not
+// be in the deny-list. An IP the geofeed cannot place has an unknown country,
+// which is in no excluded country, so only the allow-list can drop it.
 type GeofeedFilter struct{}
 
 func NewGeofeedFilter() *GeofeedFilter {
@@ -30,18 +31,18 @@ func NewGeofeedFilter() *GeofeedFilter {
 }
 
 func (f *GeofeedFilter) Process(_ context.Context, ips []netip.Addr, pctx *PipelineContext) []netip.Addr {
-	if filter.IsFull(pctx.Allowed) {
+	if filter.IsFull(pctx.Allowed) && filter.IsEmpty(pctx.Denied) {
 		return ips
 	}
-	result := filter.AllAllowed(pctx.Lookup, ips, pctx.Allowed)
+	result := filter.Permitted(pctx.Lookup, ips, pctx.Allowed, pctx.Denied)
 	if len(result) == 0 {
 		pctx.Stats.GeoDrop++
 	}
 	return result
 }
 
-// ASNFilter drops nodes whose AS name matches configured deny patterns
-// and whose ASN-resolved country is not in the allowed set.
+// ASNFilter drops nodes whose AS name matches configured deny patterns and
+// nodes whose ASN-resolved country the request's country policy rejects.
 type ASNFilter struct {
 	resolver asnResolver
 	patterns []*regexp.Regexp
@@ -78,7 +79,7 @@ func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, pctx *Pipelin
 			asnDrop = true
 			continue
 		}
-		if !pctx.Allowed.Has(result.Country) {
+		if !filter.Permits(pctx.Allowed, pctx.Denied, result.Country) {
 			geoDrop = true
 			continue
 		}

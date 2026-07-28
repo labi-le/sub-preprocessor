@@ -15,19 +15,19 @@ import (
 
 // LoadRegistry fetches and parses the RIR delegated-extended files, skipping
 // (with a warning) any single RIR that fails so one registry outage cannot
-// take down startup (mirrors LoadAll). It fails only when NO ranges load.
-func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) ([]Range, error) {
-	var ranges []Range
-	var failed int
+// take down startup (mirrors LoadAll). It fails only when NO ranges load;
+// failed reports how many RIRs were skipped, so a caller that already holds a
+// good database can refuse to replace it with a partial one.
+func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) (ranges []Range, failed int, err error) {
 	for _, url := range urls {
 		if url == "" {
 			continue
 		}
 
-		body, err := fetchBytes(ctx, fetch.SubscriptionURL(url), maxGeofeedSize, fetch.FileTypeRaw)
-		if err != nil {
+		body, fetchErr := fetchBytes(ctx, fetch.SubscriptionURL(url), maxGeofeedSize, fetch.FileTypeRaw)
+		if fetchErr != nil {
 			failed++
-			logger.Warn().Err(err).Str("url", url).Msg("registry source fetch failed; skipping")
+			logger.Warn().Err(fetchErr).Str("url", url).Msg("registry source fetch failed; skipping")
 			continue
 		}
 
@@ -41,9 +41,9 @@ func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) ([]
 	}
 
 	if len(ranges) == 0 {
-		return nil, fmt.Errorf("no registry ranges loaded (%d source(s) failed)", failed)
+		return nil, failed, fmt.Errorf("no registry ranges loaded (%d source(s) failed)", failed)
 	}
-	return ranges, nil
+	return ranges, failed, nil
 }
 
 // ParseDelegated parses an RIR delegated-extended body:

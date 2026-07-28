@@ -3,8 +3,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -31,6 +35,20 @@ const defaultBuilderCapacity = 4096
 // readTimeout bounds reading the full request (slowloris hardening); handler
 // execution and the response write are not covered by it.
 const readTimeout = 30 * time.Second
+
+// indexRequestTimeout bounds the total work a single GET / request may cause.
+// fasthttp's RequestCtx reports no deadline and its Done channel closes only on
+// server shutdown, so nothing else stops the pipeline once the client walks
+// away. Node resolution is serial with a 5s per-hostname DNS timeout, so an
+// abandoned request would otherwise keep resolving hosts for hours. 60s is
+// orders of magnitude above a warm request (milliseconds) and still admits a
+// cold subscription of a few thousand hostnames.
+const indexRequestTimeout = 60 * time.Second
+
+// redactedURLDigestBytes is how much of the subscription URL digest goes into
+// the log line: 12 hex chars are enough to tell subscriptions apart while
+// staying short enough to read.
+const redactedURLDigestBytes = 6
 
 func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
@@ -72,7 +90,7 @@ func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *sta
 			Str("method", c.Method()).
 			Str("path", c.Path()).
 			Str("remote", c.IP()).
-			Str("subscription_url", subscriptionURL).
+			Str("subscription_url", redactSubscriptionURL(subscriptionURL)).
 			Str("countries", rawCountries).
 			Int("status", status).
 			Int("size", respSize).
@@ -84,6 +102,8 @@ func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *sta
 		}
 		return nil
 	})
+
+	app.Use(newRecoveryMiddleware(logger))
 
 	app.Get("/healthz", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -98,6 +118,29 @@ func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *sta
 	app.Get("/stable.txt", newStableHandler(stableHolder))
 
 	return &Server{listen: listen, app: app, logger: logger}
+}
+
+// newRecoveryMiddleware turns a handler panic into a 500. Neither fiber nor
+// fasthttp recovers one, so a panic would otherwise kill the process and with
+// it the in-memory stable list (/stable.txt then 503s until the worker
+// republishes) — and the `/` pipeline runs hand-rolled index arithmetic over
+// untrusted bytes, so that is a live risk. It is registered inside the logging
+// middleware so a recovered panic still produces an access-log line, and the
+// panic value and stack go to the log only, never to the client.
+func newRecoveryMiddleware(logger zerolog.Logger) fiber.Handler {
+	return func(c *fiber.Ctx) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error().
+					Str("panic", fmt.Sprint(r)).
+					Str("path", c.Path()).
+					Str("stack", string(debug.Stack())).
+					Msg("recovered panic in handler")
+				err = fiber.NewError(fiber.StatusInternalServerError, "internal server error")
+			}
+		}()
+		return c.Next()
+	}
 }
 
 // stableRetryAfter (seconds) is the Retry-After hint on the warm-up 503, before
@@ -145,13 +188,21 @@ func newIndexHandler(holder *Holder) fiber.Handler {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
-		allowed := buildCountrySet(rawCountries, rawGroups, snap.Groups)
-		excluded := buildCountrySet(rawExcludeCountries, rawExcludeGroups, snap.Groups)
+		allowed, bad := buildCountrySet(rawCountries, rawGroups, snap.Groups)
+		denied, badExclude := buildCountrySet(rawExcludeCountries, rawExcludeGroups, snap.Groups)
+		bad = append(bad, badExclude...)
+		if len(bad) > 0 {
+			return fiber.NewError(fiber.StatusBadRequest, "unknown group or country code: "+strings.Join(bad, ","))
+		}
 		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
 			allowed = filter.All()
 		}
-		allowed.Exclude(excluded)
-		if isEmpty(allowed) {
+		// The exclusions are enforced downstream as a deny-list so an IP no geo
+		// source covers survives them; this only answers the documented "nothing
+		// is left to serve" case, which needs the subtraction spelled out.
+		remaining := allowed
+		remaining.Exclude(denied)
+		if filter.IsEmpty(remaining) {
 			return fiber.NewError(fiber.StatusBadRequest, "no allowed countries left after exclusions")
 		}
 
@@ -161,9 +212,22 @@ func newIndexHandler(holder *Holder) fiber.Handler {
 		req := preprocess.FilterRequest{
 			SubscriptionURL:  subURL,
 			AllowedCountries: allowed,
+			DeniedCountries:  denied,
 		}
-		stats, err := snap.Svc.Filter(c.Context(), &sb, req)
+		// fasthttp's request context carries no deadline and never cancels on
+		// client disconnect; keeping it as the parent preserves the cancellation
+		// fasthttp does deliver, on shutdown.
+		reqCtx, cancel := context.WithTimeout(c.Context(), indexRequestTimeout)
+		defer cancel()
+
+		stats, err := snap.Svc.Filter(reqCtx, &sb, req)
 		if err != nil {
+			switch {
+			case errors.Is(err, preprocess.ErrTooManyNodes):
+				return fiber.NewError(fiber.StatusRequestEntityTooLarge, err.Error())
+			case errors.Is(err, context.DeadlineExceeded):
+				return fiber.NewError(fiber.StatusGatewayTimeout, "subscription preprocessing timed out")
+			}
 			return fiber.NewError(fiber.StatusBadGateway, "failed to preprocess subscription")
 		}
 
@@ -175,29 +239,55 @@ func newIndexHandler(holder *Holder) fiber.Handler {
 	}
 }
 
-func buildCountrySet(rawCountries, rawGroups string, groupsMap map[string][]string) filter.CountrySet {
-	var parts []string
-	if rawCountries != "" {
-		parts = append(parts, rawCountries)
+// redactSubscriptionURL renders a subscription URL for the access log. Provider
+// subscription links are capability URLs — the credential sits in the query
+// string or in the path — so only the host is kept verbatim, followed by a
+// short digest of the whole URL so repeated requests for one subscription stay
+// correlatable in the logs.
+func redactSubscriptionURL(raw string) string {
+	if raw == "" {
+		return ""
 	}
-	if rawGroups != "" {
-		for part := range strings.SplitSeq(rawGroups, ",") {
-			part = strings.TrimSpace(part)
-			if countries, ok := groupsMap[part]; ok {
-				parts = append(parts, countries...)
-			}
-		}
+	host := "invalid"
+	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+		host = parsed.Host
 	}
-	return filter.ParseAllowed(parts...)
+	sum := sha256.Sum256([]byte(raw))
+	return host + "#" + hex.EncodeToString(sum[:redactedURLDigestBytes])
 }
 
-func isEmpty(set filter.CountrySet) bool {
-	for _, v := range set {
-		if v != 0 {
-			return false
+// buildCountrySet expands the countries/groups query parameters into a set,
+// returning every token it could not resolve: an unknown group name, or a token
+// that is not an ISO 3166-1 alpha-2 code. A filter the server cannot honour is
+// a client error — silently narrowing an exclusion to nothing would serve nodes
+// in exactly the jurisdictions the caller asked to avoid.
+func buildCountrySet(rawCountries, rawGroups string, groupsMap map[string][]string) (filter.CountrySet, []string) {
+	var set filter.CountrySet
+	var bad []string
+	for part := range strings.SplitSeq(rawCountries, ",") {
+		code := strings.TrimSpace(part)
+		if code == "" {
+			continue
+		}
+		if !set.Add(code) {
+			bad = append(bad, code)
 		}
 	}
-	return true
+	for part := range strings.SplitSeq(rawGroups, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		countries, ok := groupsMap[name]
+		if !ok {
+			bad = append(bad, name)
+			continue
+		}
+		for _, code := range countries {
+			set.Add(code)
+		}
+	}
+	return set, bad
 }
 
 func (s *Server) Listen() error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -20,27 +21,88 @@ import (
 )
 
 const defaultConfigPath = "./config/config.yaml"
-const shutdownTimeout = 3 * time.Second
+
+// shutdownTimeout must exceed the longest blocking call an in-flight request
+// can be sitting in — a 5s DNS or ASN lookup, which cannot observe the
+// cancellation fasthttp delivers until it returns — or an ordinary SIGTERM
+// during a lookup reports a deadline error. 15s leaves margin for one queued
+// lookup plus the response write, and 15s + controllerStopTimeout stays under
+// docker-compose's stop_grace_period.
+const shutdownTimeout = 15 * time.Second
+
+// controllerStopTimeout bounds the join on the stable worker. Every stage of a
+// cycle takes the cancelled context, so it normally unwinds in milliseconds;
+// the bound exists so a future non-cooperative stage cannot make the process
+// unkillable.
+const controllerStopTimeout = 5 * time.Second
+
 const metricsReadHeaderTimeout = 5 * time.Second
 
-func startMetrics(addr string, m *metrics.Metrics, logger zerolog.Logger) *http.Server {
-	if addr == "" {
-		return nil
+// startMetrics binds the metrics listener synchronously so a bind failure is
+// reported like every other startup failure, and "started" is logged only once
+// the port is actually held. Callers must skip an empty addr.
+func startMetrics(ctx context.Context, addr string, m *metrics.Metrics, logger zerolog.Logger) (*http.Server, error) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen metrics on %s: %w", addr, err)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())
 	srv := &http.Server{
-		Addr:              addr,
+		// The bound address, not the requested one: a ":0" or hostname addr
+		// resolves here, and the log line (and callers) should say where the
+		// listener actually is.
+		Addr:              ln.Addr().String(),
 		Handler:           mux,
 		ReadHeaderTimeout: metricsReadHeaderTimeout,
 	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error().Err(err).Msg("metrics listener error")
+		if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			logger.Error().Err(serveErr).Msg("metrics listener error")
 		}
 	}()
-	logger.Info().Str("addr", addr).Msg("metrics listener started")
-	return srv
+	logger.Info().Str("addr", srv.Addr).Msg("metrics listener started")
+	return srv, nil
+}
+
+// stopController cancels the stable worker and joins it under a bound, so a
+// stage that ignores its context degrades to a logged warning instead of a hung
+// shutdown.
+func stopController(ctl *stable.Controller, logger zerolog.Logger) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctl.Stop()
+	}()
+	select {
+	case <-done:
+	case <-time.After(controllerStopTimeout):
+		logger.Warn().Dur("budget", controllerStopTimeout).Msg("stable worker did not stop in time, abandoning it")
+	}
+}
+
+// gracefulShutdown drains the HTTP server within shutdownTimeout. An expired
+// budget is a warning, not an error: abandoning a request that outlived the
+// budget is the expected outcome of a bounded graceful shutdown, and a routine
+// SIGTERM must still exit 0. The error stays in the log line instead.
+func gracefulShutdown(ctx context.Context, srv *serverpkg.Server, logger zerolog.Logger) error {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	logger.Info().Msg("shutting down")
+
+	switch err := srv.Shutdown(shutdownCtx); {
+	case err == nil:
+		logger.Info().Msg("shutdown complete")
+	case errors.Is(err, context.DeadlineExceeded):
+		logger.Warn().
+			Err(err).
+			Dur("budget", shutdownTimeout).
+			Msg("shutdown deadline exceeded, abandoning in-flight requests")
+	default:
+		return fmt.Errorf("server shutdown: %w", err)
+	}
+	return nil
 }
 
 // buildStores constructs the optional geoblock store and dead-node cache from
@@ -130,11 +192,15 @@ func Run(ctx context.Context) error {
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
-	defer ctl.Stop()
+	defer stopController(ctl, logger)
 
 	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
 
-	if metricsSrv := startMetrics(cfg.Server.MetricsListen, m, logger); metricsSrv != nil {
+	if cfg.Server.MetricsListen != "" {
+		metricsSrv, metricsErr := startMetrics(ctx, cfg.Server.MetricsListen, m, logger)
+		if metricsErr != nil {
+			return metricsErr
+		}
 		defer func() { _ = metricsSrv.Close() }()
 	}
 
@@ -144,9 +210,9 @@ func Run(ctx context.Context) error {
 	}
 
 	// Watcher runs under a derived context; the deferred cancel+join is
-	// registered AFTER the ctl.Stop/gbStore.Close defers so (LIFO) the watcher
-	// is joined FIRST on every return path — an in-flight Reload→ctl.Apply can
-	// never race controller/store teardown.
+	// registered AFTER the stopController/gbStore.Close defers so (LIFO) the
+	// watcher is joined FIRST on every return path — an in-flight
+	// Reload→ctl.Apply can never race controller/store teardown.
 	watcherCtx, cancelWatcher := context.WithCancel(ctx)
 	watcherDone := make(chan struct{})
 	go func() {
@@ -167,16 +233,9 @@ func Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		defer cancel()
-		logger.Info().Msg("shutting down")
-		shutdownErr := srv.Shutdown(shutdownCtx)
+		shutdownErr := gracefulShutdown(ctx, srv, logger)
 		<-watcherDone
-		if shutdownErr != nil {
-			return fmt.Errorf("server shutdown: %w", shutdownErr)
-		}
-		logger.Info().Msg("shutdown complete")
-		return nil
+		return shutdownErr
 	case listenErr := <-errCh:
 		return listenErr
 	}

@@ -41,36 +41,36 @@ type Source struct {
 
 // LoadAll fetches and parses every source, skipping (with a warning) any single
 // source that fails to fetch or parse so one flaky third-party feed cannot take
-// down startup. It fails only when NO source yields entries.
-func LoadAll(ctx context.Context, sources []Source, logger zerolog.Logger) ([]Entry, error) {
-	var entries []Entry
-	var failed int
+// down startup. It fails only when NO source yields entries; failed reports how
+// many sources were skipped, so a caller that already holds a good database can
+// refuse to replace it with a partial one.
+func LoadAll(ctx context.Context, sources []Source, logger zerolog.Logger) (entries []Entry, failed int, err error) {
 	for _, source := range sources {
 		if source.URL == "" {
 			continue
 		}
 
-		body, err := fetchBytes(ctx, fetch.SubscriptionURL(source.URL), maxGeofeedSize, source.Type)
-		if err != nil {
+		body, fetchErr := fetchBytes(ctx, fetch.SubscriptionURL(source.URL), maxGeofeedSize, source.Type)
+		if fetchErr != nil {
 			failed++
-			logger.Warn().Err(err).Str("url", source.URL).Msg("geofeed source fetch failed; skipping")
+			logger.Warn().Err(fetchErr).Str("url", source.URL).Msg("geofeed source fetch failed; skipping")
 			continue
 		}
 
-		part, err := Parse(body)
-		if err != nil {
+		part, parseErr := Parse(body)
+		if parseErr != nil {
 			failed++
-			logger.Warn().Err(err).Str("url", source.URL).Msg("geofeed source parse failed; skipping")
+			logger.Warn().Err(parseErr).Str("url", source.URL).Msg("geofeed source parse failed; skipping")
 			continue
 		}
 		entries = append(entries, part...)
 	}
 
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("no geofeed entries loaded (%d source(s) failed)", failed)
+		return nil, failed, fmt.Errorf("no geofeed entries loaded (%d source(s) failed)", failed)
 	}
 
-	return entries, nil
+	return entries, failed, nil
 }
 
 // Parse parses a geofeed CSV body (prefix, country, region, city per line).

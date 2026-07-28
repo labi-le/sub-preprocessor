@@ -21,6 +21,24 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const (
+	// reloadRetryInterval is how soon a background geo reload retries after a
+	// failure or a refused swap. The configured refresh interval is a freshness
+	// budget for good data (24h in production); reusing it as the retry delay
+	// would pin the service to a broken snapshot for a day.
+	reloadRetryInterval = 5 * time.Minute
+
+	// maxRetryBackoffShift caps the doubling in retryDelay so the shift cannot
+	// overflow; the refresh interval clamps the result long before this.
+	maxRetryBackoffShift = 12
+
+	// minSwapRatio is the smallest fraction of the live database a background
+	// reload may come back with. A source can answer 200 with a truncated body,
+	// which reports no error at all, so relative size is the only signal left
+	// that the swap would blackhole most lookups.
+	minSwapRatio = 0.5
+)
+
 type Options struct {
 	GeofeedSources      []geofeed.Source
 	RefreshInterval     time.Duration
@@ -48,8 +66,13 @@ type Options struct {
 }
 
 type FilterRequest struct {
-	SubscriptionURL  fetch.SubscriptionURL
+	SubscriptionURL fetch.SubscriptionURL
+	// AllowedCountries is the allow-list; the full set (filter.All()) means the
+	// caller asked for none. DeniedCountries is the deny-list, matched only
+	// against a positively resolved country, so an IP no geo source covers is
+	// never dropped by an exclusion alone.
 	AllowedCountries filter.CountrySet
+	DeniedCountries  filter.CountrySet
 	// Body, when non-empty, is an inline subscription payload filtered directly
 	// without any HTTP fetch. It is normalized with the same base64-tolerant
 	// decoder used for fetched subscriptions. Takes precedence over SubscriptionURL.
@@ -64,18 +87,29 @@ type Blocklist interface {
 }
 
 type Processor struct {
-	mu              sync.RWMutex
-	reloadMu        sync.Mutex
-	logger          zerolog.Logger
-	countryLookup   geofeed.CountryLookup
-	sources         []geofeed.Source
-	loadedAt        time.Time
+	mu            sync.RWMutex
+	reloadMu      sync.Mutex
+	logger        zerolog.Logger
+	countryLookup geofeed.CountryLookup
+	loadedAt      time.Time
+	// retryAt, when non-zero, is the authoritative next-attempt time after a
+	// reload that failed or was refused. loadedAt keeps pointing at the last
+	// GOOD data (callers carry it across config reloads), so without retryAt a
+	// failure would either read as fresh for a full interval or as stale on
+	// every single request. reloadFailures counts consecutive failures and
+	// drives the backoff in retryDelay.
+	retryAt         time.Time
+	reloadFailures  int
 	refreshInterval time.Duration
 	resolver        *resolver.Resolver
 	filters         []Filter
 	blocklist       Blocklist
 	annotator       *annotator
 	fetchTimeout    time.Duration
+	// loadEntries fetches and parses the configured geofeed sources, reporting
+	// how many of them failed. It is a field, like geoDB.load, so reload tests
+	// can drive doReload without network access.
+	loadEntries func(ctx context.Context) (entries []geofeed.Entry, failed int, err error)
 	// dbip/registry are the lazily-built in-memory geo databases; nil when no
 	// annotate entry references them (no download, no refresh goroutine).
 	dbip     *geoDB
@@ -84,15 +118,19 @@ type Processor struct {
 
 // geoDB holds one downloadable in-memory IP->country database (dbip or
 // registry) under the same mutex discipline as the processor's geofeed state:
-// mu guards lookup/loadedAt, reloadMu serializes background refreshes.
+// mu guards lookup/loadedAt/retryAt, reloadMu serializes background refreshes.
 type geoDB struct {
 	mu       sync.RWMutex
 	reloadMu sync.Mutex
 	name     string
 	lookup   geofeed.CountryLookup
 	loadedAt time.Time
-	interval time.Duration
-	load     func(ctx context.Context) ([]geofeed.Range, error)
+	// retryAt mirrors Processor.retryAt: the next-attempt gate after a failed
+	// or refused reload, with reloadFailures driving its backoff.
+	retryAt        time.Time
+	reloadFailures int
+	interval       time.Duration
+	load           func(ctx context.Context) (ranges []geofeed.Range, failed int, err error)
 }
 
 type Stats struct {
@@ -110,6 +148,7 @@ type PipelineContext struct {
 	Buffer   *bytes.Buffer
 	Lookup   geofeed.CountryLookup
 	Allowed  filter.CountrySet
+	Denied   filter.CountrySet
 	Resolved map[string][]netip.Addr
 	Stats    *Stats
 	// Scratch is a per-request buffer reused across nodes so filters can
@@ -152,6 +191,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	var (
 		lookup   geofeed.CountryLookup
 		loadedAt time.Time
+		retryAt  time.Time
 	)
 	if opts.PreloadedGeofeed != nil {
 		initLog.Info().Msg("using preloaded geofeed lookup")
@@ -159,9 +199,17 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		loadedAt = opts.PreloadedLoadedAt
 	} else {
 		initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
-		entries, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
+		entries, failed, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
 		if err != nil {
 			return nil, fmt.Errorf("load geofeed: %w", err)
+		}
+		if failed > 0 {
+			// Startup takes a partial feed because there is nothing better to
+			// keep, but must not wait a whole refresh interval to complete it.
+			delay := retryDelay(0, opts.RefreshInterval)
+			retryAt = time.Now().Add(delay)
+			initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
+				Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
 		}
 		initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
 		lookup = geofeed.NewLookup(entries)
@@ -179,30 +227,39 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		return nil, errBuild
 	}
 
+	sources := append([]geofeed.Source(nil), opts.GeofeedSources...)
 	p := &Processor{
 		logger:          logger,
 		countryLookup:   lookup,
-		sources:         append([]geofeed.Source(nil), opts.GeofeedSources...),
 		loadedAt:        loadedAt,
+		retryAt:         retryAt,
 		refreshInterval: opts.RefreshInterval,
 		resolver:        resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL),
 		blocklist:       opts.Blocklist,
 		fetchTimeout:    opts.FetchTimeout,
 		filters:         filters,
+		loadEntries: func(ctx context.Context) ([]geofeed.Entry, int, error) {
+			return geofeed.LoadAll(ctx, sources, logger)
+		},
 	}
 	if wantDBIP {
 		url := opts.DBIP.URL
 		p.dbip = newGeoDB(ctx, initLog, config.ProviderDBIP, opts.DBIP.RefreshInterval,
 			opts.PreloadedDBIP, opts.PreloadedDBIPLoadedAt,
-			func(ctx context.Context) ([]geofeed.Range, error) {
-				return geofeed.LoadDBIP(ctx, url, logger)
+			func(ctx context.Context) ([]geofeed.Range, int, error) {
+				// One source: any failure is a total failure, never a partial.
+				ranges, err := geofeed.LoadDBIP(ctx, url, logger)
+				if err != nil {
+					return nil, 0, fmt.Errorf("load dbip: %w", err)
+				}
+				return ranges, 0, nil
 			})
 	}
 	if wantRegistry {
 		urls := append([]string(nil), opts.Registry.URLs...)
 		p.registry = newGeoDB(ctx, initLog, config.ProviderRegistry, opts.Registry.RefreshInterval,
 			opts.PreloadedRegistry, opts.PreloadedRegistryLoadedAt,
-			func(ctx context.Context) ([]geofeed.Range, error) {
+			func(ctx context.Context) ([]geofeed.Range, int, error) {
 				return geofeed.LoadRegistry(ctx, urls, logger)
 			})
 	}
@@ -239,14 +296,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	p.maybeRefreshGeoDBs(ctx)
 
 	allowed := req.AllowedCountries
-	isEmpty := true
-	for _, v := range allowed {
-		if v != 0 {
-			isEmpty = false
-			break
-		}
-	}
-	if isEmpty {
+	if filter.IsEmpty(allowed) {
 		return Stats{}, errors.New("no allowed countries provided")
 	}
 
@@ -278,6 +328,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 		Buffer:      b,
 		Lookup:      lookup,
 		Allowed:     allowed,
+		Denied:      req.DeniedCountries,
 		Resolved:    resolved,
 		Stats:       &stats,
 		IsFirstNode: true,
@@ -305,10 +356,29 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	return stats, nil
 }
 
+// maxSubscriptionNodes caps how many parseable nodes one Filter call accepts.
+// Nodes are resolved serially with a per-hostname DNS timeout, so an unbounded
+// node list turns a single request into hours of lookups; the 10 MiB fetch cap
+// holds roughly 380k minimal node URIs. The ceiling sits well above any real
+// source (the crawler emits at most 500 nodes per inline source), so only a
+// hostile body reaches it.
+const maxSubscriptionNodes = 20_000
+
+// ErrTooManyNodes reports a body above maxSubscriptionNodes. The body, not the
+// service, is at fault, so callers answer 4xx rather than 502.
+var ErrTooManyNodes = fmt.Errorf("subscription has more than %d nodes", maxSubscriptionNodes)
+
 // processBody parses the subscription body and runs each node through the
-// pipeline. It returns the context error when the request was cancelled so a
-// truncated node list is never served as success.
+// pipeline. Bodies above maxSubscriptionNodes are rejected before any lookup.
+// It returns the context error when the request was cancelled so a truncated
+// node list is never served as success.
 func (p *Processor) processBody(ctx context.Context, body []byte, pctx *PipelineContext) error {
+	// Checked up front: the ceiling has to bite before the first lookup, or a
+	// hostile body has already cost maxSubscriptionNodes serial DNS resolutions
+	// by the time a running counter trips.
+	if tooManyNodes(body) {
+		return ErrTooManyNodes
+	}
 	subscription.Parse(body, func(node subscription.Node) bool {
 		select {
 		case <-ctx.Done():
@@ -322,6 +392,29 @@ func (p *Processor) processBody(ctx context.Context, body []byte, pctx *Pipeline
 		return fmt.Errorf("preprocess cancelled: %w", err)
 	}
 	return nil
+}
+
+// tooManyNodes reports whether body holds more than maxSubscriptionNodes
+// parseable nodes. Parse yields at most one node per line, so the newline count
+// is a cheap upper bound (one vectorized pass): only a body that clears it pays
+// for an exact count, which keeps the check off the hot path for real
+// subscriptions.
+func tooManyNodes(body []byte) bool {
+	if bytes.Count(body, []byte{'\n'})+1 <= maxSubscriptionNodes {
+		return false
+	}
+	return countNodes(body, maxSubscriptionNodes) > maxSubscriptionNodes
+}
+
+// countNodes counts the parseable nodes in body, stopping as soon as limit is
+// exceeded so the pre-check costs one bounded parse pass and no DNS.
+func countNodes(body []byte, limit int) int {
+	count := 0
+	subscription.Parse(body, func(subscription.Node) bool {
+		count++
+		return count <= limit
+	})
+	return count
 }
 
 // resolveNode returns the IPv4 addresses for a node's server. Bare IPs are
@@ -431,28 +524,99 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	return lookup
 }
 
+// swapRefusal reports why a freshly loaded geo database must not replace the
+// live one, or "" when the swap is safe. It protects only a database worth
+// protecting: an empty lookup, or one whose size is unknown (a carried-over
+// stub that does not implement geofeed.SizedLookup), is always replaced.
+func swapRefusal(current, loaded geofeed.CountryLookup, failed int) string {
+	currentLen := lookupLen(current)
+	if currentLen <= 0 {
+		return ""
+	}
+	if failed > 0 {
+		return "partial load"
+	}
+	if float64(lookupLen(loaded)) < float64(currentLen)*minSwapRatio {
+		return "catastrophic shrink"
+	}
+	return ""
+}
+
+// lookupLen reports how many ranges a lookup indexes, or -1 when it does not
+// report a size. An unknown size disables the swap guards: there is no
+// baseline to compare against.
+func lookupLen(lookup geofeed.CountryLookup) int {
+	if sized, ok := lookup.(geofeed.SizedLookup); ok {
+		return sized.Len()
+	}
+	return -1
+}
+
+// retryDelay is the wait before the next attempt after failures consecutive
+// failed or refused reloads: reloadRetryInterval doubling each time, clamped
+// to the refresh interval. A transient outage is therefore retried within
+// minutes, while a permanently dead source degrades to the normal refresh
+// cadence instead of re-downloading every five minutes forever.
+func retryDelay(failures int, interval time.Duration) time.Duration {
+	delay := reloadRetryInterval << min(failures, maxRetryBackoffShift)
+	if interval > 0 && delay > interval {
+		return interval
+	}
+	return delay
+}
+
+// scheduleRetryLocked arms the next reload attempt after a failed or refused
+// swap and returns the delay it picked. Callers must hold p.mu.
+func (p *Processor) scheduleRetryLocked() time.Duration {
+	delay := retryDelay(p.reloadFailures, p.refreshInterval)
+	p.reloadFailures++
+	p.retryAt = time.Now().Add(delay)
+	return delay
+}
+
 func (p *Processor) doReload(ctx context.Context) {
-	entries, err := geofeed.LoadAll(ctx, p.sources, p.logger)
+	entries, failed, err := p.loadEntries(ctx)
+	// Index outside the lock: sorting half a million ranges under p.mu would
+	// stall every in-flight request behind the reload.
+	var next geofeed.CountryLookup
+	if err == nil {
+		next = geofeed.NewLookup(entries)
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.loadedAt = time.Now()
-
 	if err != nil {
-		p.logger.Error().Err(err).Msg("background geofeed reload failed, keeping stale data")
+		p.logger.Error().Err(err).Dur("retry_in", p.scheduleRetryLocked()).
+			Msg("background geofeed reload failed, keeping stale data")
 		return
 	}
 
-	p.countryLookup = geofeed.NewLookup(entries)
+	if reason := swapRefusal(p.countryLookup, next, failed); reason != "" {
+		p.logger.Error().Str("reason", reason).Int("sources_failed", failed).
+			Int("loaded", lookupLen(next)).Int("current", lookupLen(p.countryLookup)).
+			Dur("retry_in", p.scheduleRetryLocked()).
+			Msg("background geofeed reload refused, keeping existing data")
+		return
+	}
+
+	p.countryLookup = next
+	p.loadedAt = time.Now()
+	p.retryAt = time.Time{}
+	p.reloadFailures = 0
 	p.logger.Info().Int("entries", len(entries)).Msg("geofeed reloaded in background")
 }
 
 // shouldReloadGeofeedLocked reports whether the geofeed is stale. Callers must
-// hold p.mu (read or write).
+// hold p.mu (read or write). A pending retryAt overrides the interval in both
+// directions: loadedAt still marks the last GOOD data, which after a failure
+// reads as permanently stale and would re-download the feeds on every request.
 func (p *Processor) shouldReloadGeofeedLocked(now time.Time) bool {
 	if p.refreshInterval <= 0 {
 		return false
+	}
+	if !p.retryAt.IsZero() {
+		return !now.Before(p.retryAt)
 	}
 	if p.loadedAt.IsZero() {
 		return true
@@ -498,8 +662,9 @@ func (p *Processor) maybeRefreshGeoDBs(ctx context.Context) {
 // newGeoDB builds the state for one lazily-referenced geo database. A
 // preloaded lookup (reload carry-over) is used as-is; otherwise the initial
 // load runs inline but, unlike geofeed, a failure only WARNs and starts with
-// an empty lookup and a zero loadedAt (so the next request-triggered refresh
-// retries): startup must never depend on a third-party database mirror.
+// an empty lookup: startup must never depend on a third-party database
+// mirror. A failed or partial initial load schedules a short retry instead of
+// waiting out the full refresh interval.
 func newGeoDB(
 	ctx context.Context,
 	logger zerolog.Logger,
@@ -507,7 +672,7 @@ func newGeoDB(
 	interval time.Duration,
 	preloaded geofeed.CountryLookup,
 	preloadedAt time.Time,
-	load func(ctx context.Context) ([]geofeed.Range, error),
+	load func(ctx context.Context) (ranges []geofeed.Range, failed int, err error),
 ) *geoDB {
 	db := &geoDB{name: name, interval: interval, load: load}
 	if preloaded != nil {
@@ -517,12 +682,19 @@ func newGeoDB(
 		return db
 	}
 	logger.Info().Str("db", name).Msg("loading geo database")
-	ranges, err := load(ctx)
+	ranges, failed, err := load(ctx)
 	if err != nil {
-		logger.Warn().Err(err).Str("db", name).
-			Msg("initial geo database load failed; starting empty, retrying on next refresh")
 		db.lookup = geofeed.NewRangeLookup(nil)
+		logger.Warn().Err(err).Str("db", name).Dur("retry_in", db.scheduleRetryLocked()).
+			Msg("initial geo database load failed; starting empty, retrying shortly")
 		return db
+	}
+	if failed > 0 {
+		// Same rule as the geofeed startup load: take what there is, but do
+		// not call it fresh for a whole interval.
+		logger.Warn().Str("db", name).Int("sources_failed", failed).Int("ranges", len(ranges)).
+			Dur("retry_in", db.scheduleRetryLocked()).
+			Msg("initial geo database load is partial; retrying shortly")
 	}
 	db.lookup = geofeed.NewRangeLookup(ranges)
 	db.loadedAt = time.Now()
@@ -566,11 +738,14 @@ func (db *geoDB) maybeRefresh(ctx context.Context, logger zerolog.Logger) {
 }
 
 // staleLocked reports whether the database needs a reload. Callers must hold
-// db.mu (read or write). A zero loadedAt (failed initial load) is always
-// stale so the next trigger retries.
+// db.mu (read or write). A pending retryAt (failed or refused load) gates the
+// next attempt; otherwise a zero loadedAt (never loaded) is always stale.
 func (db *geoDB) staleLocked(now time.Time) bool {
 	if db.interval <= 0 {
 		return false
+	}
+	if !db.retryAt.IsZero() {
+		return !now.Before(db.retryAt)
 	}
 	if db.loadedAt.IsZero() {
 		return true
@@ -578,23 +753,45 @@ func (db *geoDB) staleLocked(now time.Time) bool {
 	return now.Sub(db.loadedAt) >= db.interval
 }
 
+// scheduleRetryLocked arms the next reload attempt after a failed or refused
+// swap and returns the delay it picked. Callers must hold db.mu (newGeoDB runs
+// before the database is reachable, so it needs no lock).
+func (db *geoDB) scheduleRetryLocked() time.Duration {
+	delay := retryDelay(db.reloadFailures, db.interval)
+	db.reloadFailures++
+	db.retryAt = time.Now().Add(delay)
+	return delay
+}
+
 func (db *geoDB) doReload(ctx context.Context, logger zerolog.Logger) {
-	ranges, err := db.load(ctx)
+	ranges, failed, err := db.load(ctx)
+	// Index outside the lock so the sort does not block snapshot readers.
+	var next geofeed.CountryLookup
+	if err == nil {
+		next = geofeed.NewRangeLookup(ranges)
+	}
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	// Stamp even on failure (geofeed doReload pattern) so a broken mirror is
-	// retried once per interval, not on every request.
-	db.loadedAt = time.Now()
-
 	if err != nil {
-		logger.Error().Err(err).Str("db", db.name).
+		logger.Error().Err(err).Str("db", db.name).Dur("retry_in", db.scheduleRetryLocked()).
 			Msg("background geo database reload failed, keeping stale data")
 		return
 	}
 
-	db.lookup = geofeed.NewRangeLookup(ranges)
+	if reason := swapRefusal(db.lookup, next, failed); reason != "" {
+		logger.Error().Str("db", db.name).Str("reason", reason).Int("sources_failed", failed).
+			Int("loaded", lookupLen(next)).Int("current", lookupLen(db.lookup)).
+			Dur("retry_in", db.scheduleRetryLocked()).
+			Msg("background geo database reload refused, keeping existing data")
+		return
+	}
+
+	db.lookup = next
+	db.loadedAt = time.Now()
+	db.retryAt = time.Time{}
+	db.reloadFailures = 0
 	logger.Info().Str("db", db.name).Int("ranges", len(ranges)).Msg("geo database reloaded in background")
 }
 

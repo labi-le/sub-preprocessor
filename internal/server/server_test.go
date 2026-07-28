@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ type recordingService struct {
 	called  bool
 	ctx     context.Context
 	allowed filter.CountrySet
+	denied  filter.CountrySet
 	err     error
 }
 
@@ -37,6 +39,7 @@ func (s *recordingService) Filter(ctx context.Context, b *bytes.Buffer, req prep
 	s.called = true
 	s.ctx = ctx
 	s.allowed = req.AllowedCountries
+	s.denied = req.DeniedCountries
 	if s.err != nil {
 		return preprocess.Stats{}, s.err
 	}
@@ -295,14 +298,19 @@ func TestServerExcludesCountries(t *testing.T) {
 	if !svc.called {
 		t.Fatal("service should be called")
 	}
-	if !svc.allowed.Has(geofeed.CountryCode{'F', 'I'}) {
+	if !filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'F', 'I'}) {
 		t.Fatal("expected FI to remain after exclusion")
 	}
-	if svc.allowed.Has(geofeed.CountryCode{'D', 'E'}) {
+	if filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'D', 'E'}) {
 		t.Fatal("expected DE to be excluded")
 	}
-	if svc.allowed.Has(geofeed.CountryCode{'E', 'E'}) {
+	if filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'E', 'E'}) {
 		t.Fatal("expected EE to be excluded")
+	}
+	// countries= was supplied, so the allow-list still governs: a country the
+	// caller never listed is dropped even though it was never excluded either.
+	if filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'R', 'U'}) {
+		t.Fatal("expected an unlisted country to stay outside the allow-list")
 	}
 }
 
@@ -325,10 +333,10 @@ func TestServerExcludesGroup(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
-	if !svc.allowed.Has(geofeed.CountryCode{'F', 'I'}) {
+	if !filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'F', 'I'}) {
 		t.Fatal("expected FI from nordics")
 	}
-	if svc.allowed.Has(geofeed.CountryCode{'E', 'E'}) {
+	if filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{'E', 'E'}) {
 		t.Fatal("expected EE to be excluded")
 	}
 }
@@ -355,10 +363,15 @@ func TestServerExcludeOnly(t *testing.T) {
 		for c2 := byte('A'); c2 <= 'Z'; c2++ {
 			cc := geofeed.CountryCode{c1, c2}
 			want := c1 != 'D' || c2 != 'E'
-			if got := svc.allowed.Has(cc); got != want {
+			if got := filter.Permits(svc.allowed, svc.denied, cc); got != want {
 				t.Fatalf("%s: got %v, want %v", cc, got, want)
 			}
 		}
+	}
+	// exclude_countries is a deny-list, not "every country except DE": an IP no
+	// geo source can place is in no excluded country and must survive.
+	if !filter.Permits(svc.allowed, svc.denied, geofeed.CountryCode{}) {
+		t.Fatal("exclusion-only request must keep an unknown-country IP")
 	}
 }
 
@@ -382,7 +395,7 @@ func TestServerExcludesAllAllowedReturnsError(t *testing.T) {
 	}
 }
 
-func TestServerUnknownExcludeGroupIgnored(t *testing.T) {
+func TestServerUnknownExcludeGroupRejected(t *testing.T) {
 	t.Parallel()
 
 	groups := map[string][]string{
@@ -390,21 +403,37 @@ func TestServerUnknownExcludeGroupIgnored(t *testing.T) {
 	}
 	svc := &recordingService{}
 	srv := newServer(svc, groups)
-	req := httptest.NewRequest(http.MethodGet, "/?subscription_url=https://mifa.world/vless&groups=nordics&exclude_groups=unknown", nil)
-	resp, err := srv.TestApp().Test(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	status, body := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&groups=nordics&exclude_groups=unknown")
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", status)
 	}
-	if !svc.allowed.Has(geofeed.CountryCode{'F', 'I'}) {
-		t.Fatal("expected FI from nordics")
+	if !strings.Contains(body, "unknown") {
+		t.Fatalf("error must name the offending token, got %q", body)
 	}
-	if !svc.allowed.Has(geofeed.CountryCode{'S', 'E'}) {
-		t.Fatal("expected SE from nordics")
+	if svc.called {
+		t.Fatal("an exclusion the server cannot honour must not be silently dropped")
+	}
+}
+
+func TestServerExcludeEveryCountryReturnsError(t *testing.T) {
+	t.Parallel()
+
+	var every []string
+	for c1 := byte('A'); c1 <= 'Z'; c1++ {
+		for c2 := byte('A'); c2 <= 'Z'; c2++ {
+			every = append(every, string([]byte{c1, c2}))
+		}
+	}
+	svc := &recordingService{}
+	srv := newServer(svc, map[string][]string{"everything": every})
+	status, _ := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&exclude_groups=everything")
+
+	if status != http.StatusBadRequest {
+		t.Fatalf("excluding every country must fail with 400, got %d", status)
+	}
+	if svc.called {
+		t.Fatal("service should not be called when nothing is left to serve")
 	}
 }
 
@@ -576,5 +605,107 @@ func TestServerReadsSnapshotPerRequest(t *testing.T) {
 	}
 	if stubA.allowed.Has(geofeed.CountryCode{'D', 'E'}) {
 		t.Fatal("snapshot A service must not handle the post-swap request")
+	}
+}
+
+// panicService reproduces what a hand-rolled index expression does on a
+// malformed node: it panics inside the request path.
+type panicService struct{}
+
+func (panicService) Filter(_ context.Context, _ *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
+	panic("index out of range [7] with length 3")
+}
+
+func TestServerRecoversHandlerPanic(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(panicService{}, nil)
+	status, body := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusInternalServerError {
+		t.Fatalf("panicking handler must answer 500, got %d", status)
+	}
+	if strings.Contains(body, "index out of range") {
+		t.Fatalf("panic value leaked to the client: %q", body)
+	}
+
+	// The process — and with it the in-memory stable list — must have survived.
+	status, body = doGet(t, srv, "/healthz")
+	if status != http.StatusOK || body != "ok" {
+		t.Fatalf("server unusable after a recovered panic: status=%d body=%q", status, body)
+	}
+}
+
+// TestServerBoundsPipelineWithDeadline pins the bound on a single request:
+// fasthttp's RequestCtx reports no deadline and never cancels on client
+// disconnect, so the handler has to install one itself.
+func TestServerBoundsPipelineWithDeadline(t *testing.T) {
+	t.Parallel()
+
+	svc := &recordingService{}
+	srv := newServer(svc, nil)
+
+	status, _ := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusOK {
+		t.Fatalf("unexpected status: %d", status)
+	}
+
+	deadline, ok := svc.ctx.Deadline()
+	if !ok {
+		t.Fatal("pipeline context carries no deadline: an abandoned request would resolve nodes unbounded")
+	}
+	if until := time.Until(deadline); until > 5*time.Minute {
+		t.Fatalf("pipeline deadline is %v away, far too loose to bound one request", until)
+	}
+}
+
+func TestServerRejectsTooManyNodes(t *testing.T) {
+	t.Parallel()
+
+	svc := &recordingService{err: preprocess.ErrTooManyNodes}
+	srv := newServer(svc, nil)
+
+	status, body := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized node list must answer 413, got %d", status)
+	}
+	if !strings.Contains(body, "nodes") {
+		t.Fatalf("client should learn the body was too large: %q", body)
+	}
+}
+
+func TestServerReportsPipelineTimeout(t *testing.T) {
+	t.Parallel()
+
+	svc := &recordingService{err: context.DeadlineExceeded}
+	srv := newServer(svc, nil)
+
+	status, body := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusGatewayTimeout {
+		t.Fatalf("a request that hit its deadline must answer 504, got %d", status)
+	}
+	if strings.Contains(body, "context") {
+		t.Fatalf("internal error leaked to client: %q", body)
+	}
+}
+
+func TestLoggedSubscriptionURLIsRedacted(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}, Groups: nil})
+	srv := server.New(zerolog.New(&logs), ":8080", holder, stable.NewHolder())
+
+	const secret = "https://provider.example/api/v1/client/subscribe?token=s3cr3t"
+	status, _ := doGet(t, srv, "/?subscription_url="+url.QueryEscape(secret)+"&countries=FI,EE")
+	if status != http.StatusOK {
+		t.Fatalf("unexpected status: %d", status)
+	}
+
+	line := logs.String()
+	if strings.Contains(line, "s3cr3t") || strings.Contains(line, "subscribe") {
+		t.Fatalf("credential-bearing subscription URL logged verbatim: %q", line)
+	}
+	if !strings.Contains(line, "provider.example") {
+		t.Fatalf("redacted log line lost the host, leaving nothing to debug with: %q", line)
 	}
 }
