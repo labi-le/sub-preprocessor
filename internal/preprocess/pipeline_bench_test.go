@@ -56,10 +56,9 @@ func benchBody() []byte {
 func newBenchProcessor(b *testing.B) *Processor {
 	b.Helper()
 	p, err := NewProcessor(context.Background(), zerolog.Nop(), Options{
-		PreloadedGeofeed:  benchGeofeed(),
-		PreloadedLoadedAt: time.Now(),
-		IPFilters:         []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
-		Annotate:          []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}, {Tag: config.TagIP}},
+		PreloadedGeofeed: GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()},
+		IPFilters:        []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}, {Tag: config.TagIP}},
 	})
 	if err != nil {
 		b.Fatalf("NewProcessor: %v", err)
@@ -74,7 +73,7 @@ func newBenchProcessor(b *testing.B) *Processor {
 func BenchmarkProcessBodyPipeline(b *testing.B) {
 	p := newBenchProcessor(b)
 	body := benchBody()
-	lookup, _ := p.GeofeedState()
+	lookup := p.GeofeedState().Lookup
 	allowed := filter.ParseAllowed("NL")
 
 	buf := &bytes.Buffer{}

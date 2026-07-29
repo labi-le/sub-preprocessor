@@ -251,9 +251,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	st.prune(time.Now().Add(-c.opts.StateTTL))
-	if saveErr := saveState(c.opts.StatePath, st); saveErr != nil {
-		c.logger.Warn().Err(saveErr).Msg("save crawler state failed")
-	}
+	c.persistState(st)
 	// Captured before recheckManaged folds revived URLs into live.
 	discovered := len(live)
 	c.logger.Info().Int("discovered", discovered).Int("productive", len(st.Productive)).
@@ -283,7 +281,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// minutes to hours and an operator retiring a source expects the block to
 	// take effect on the write it is racing.
 	blocked := blockedSet(loadChannels(c.opts.ChannelsPath, c.logger).Blocked)
-	next, managed := c.mergeManaged(pf, live, rr, prune, blocked)
+	next, managed, deleted := c.mergeManaged(pf, live, rr, prune, blocked)
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
@@ -292,10 +290,15 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		}
 	}
 	if sameSources(pf.Subscriptions.Sources, next) {
+		// A merge that reproduces the file exactly proposes no deletion at all,
+		// which withdraws any earlier bulk-prune proposal — otherwise six quiet
+		// hours would leave that refusal standing to authorize whatever the
+		// next fault comes up with.
+		c.withdrawBulkPrune(&st)
 		c.logger.Info().Int("managed", len(managed)).Msg("no change")
 		return
 	}
-	if !c.allowShrink(&st, before, len(managed)) {
+	if !c.allowShrink(&st, before, deleted, len(managed)) {
 		return
 	}
 	pf.Subscriptions.Sources = next
@@ -335,10 +338,11 @@ func (r recheckResult) dark(discovered int) bool {
 
 // recheckManaged records the URLs of existing managed sources and re-classifies
 // the ones not rediscovered this cycle, marking any still live in live so prune
-// can drop the dead ones. Only a definitively gone answer prunes: a recheck that
-// failed on transport (DNS, timeout, TLS, read) or answered a transient status
-// (403, 408, 425, 429, any 5xx) lands in unknown, because none of those show the
-// subscription is gone — see classify.StatusError.Gone.
+// can drop the dead ones. Only a definitive answer prunes — a gone status
+// (404/410/451) or an origin-advertised expiry. A recheck that failed on
+// transport (DNS, timeout, TLS, read), answered a transient status (403, 408,
+// 425, 429, any 5xx) or answered 2xx with no node at all lands in unknown, since
+// none of those show the subscription is gone; see classifyAll.
 func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]string) recheckResult {
 	rr := recheckResult{managedURL: map[string]bool{}}
 	var pending []string
@@ -370,15 +374,17 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 }
 
 // mergeManaged combines the retained hand-added sources with the current managed
-// set (deduped and sorted by name) and returns the full next source list plus
-// the managed subset for logging. Which of the not-live managed URLs survive is
-// retainManaged's decision.
+// set (deduped and sorted by name) and returns the full next source list, the
+// managed subset for logging, and deleted: the cycle-start managed URLs this
+// merge drops, in sorted order, which is both the size and the identity of the
+// deletion the prune floor rules on (see allowShrink). Which of the not-live
+// managed URLs survive is retainManaged's decision.
 //
 // blocked is the operator's retirement list (channels.yaml `blocked:`). It is
 // applied here, the single funnel every candidate URL passes through, so a
 // blocked source cannot re-enter from the re-loaded file, from rediscovery in
 // a channel, or from a recheck reviving it.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source) {
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string) {
 	all := map[string]struct{}{}
 	existing := map[string]string{}
 	for _, s := range pf.Subscriptions.Sources {
@@ -412,11 +418,18 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 	sort.Strings(urls)
 	blockedDropped := 0
 	for _, u := range urls {
+		_, wasManaged := existing[u]
 		if _, isBlocked := blocked[u]; isBlocked {
+			// An operator block is a deliberate removal, so it is deliberately
+			// NOT counted as a deletion: the prune floor exists to catch the
+			// crawler deleting sources by mistake, not to throttle the operator.
 			blockedDropped++
 			continue
 		}
 		if !retainManaged(u, live, rr, prune) {
+			if wasManaged {
+				deleted = append(deleted, u)
+			}
 			continue
 		}
 		// Last gate before the URL reaches private.yaml: the crawler fetches
@@ -424,6 +437,9 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 		// through ValidatePublicHTTPSURL and fails the WHOLE config on one bad
 		// entry — which is fatal at service startup, not just at reload.
 		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err != nil {
+			if wasManaged {
+				deleted = append(deleted, u)
+			}
 			c.logger.Warn().Err(err).Str("url", u).Msg("dropping managed source the service would refuse to load")
 			continue
 		}
@@ -436,7 +452,7 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
-	return kept, managed
+	return kept, managed, deleted
 }
 
 // retainManaged decides whether one managed URL survives the cycle. Only a
@@ -487,28 +503,48 @@ func managedCount(pf privateFile) int {
 // allowShrink applies the prune floor to a proposed write, persisting and
 // logging a refusal. False means the caller must skip the write and leave the
 // previous private.yaml intact; a drop that big is only carried out once a later
-// cycle re-proposes it (state.confirmBulkPrune), so no single cycle can wipe the
-// harvested corpus while a genuine mass expiry still converges.
-func (c *Crawler) allowShrink(st *state, before, after int) bool {
-	dropped := before - after
-	was := st.BulkPruneAt
-	allow := true
-	if dropped > bulkPruneMinDrop && dropped*percentScale > before*bulkPrunePercent {
-		allow = st.confirmBulkPrune(time.Now())
-	} else {
-		st.clearBulkPrune()
+// cycle re-proposes the same deletion (state.confirmBulkPrune), so no single
+// cycle can wipe the harvested corpus while a genuine mass expiry still
+// converges.
+//
+// deleted names the cycle-start managed sources this cycle would remove; its
+// length is the drop, NOT the net change in corpus size. Netting them off would
+// let each newly discovered source buy back one deletion: a cycle that condemns
+// 75 of 206 while finding 15 nets to 60, which slips under a 30% floor and
+// deletes 36% of the corpus. The URLs themselves matter too — they fingerprint
+// the proposal, so a refusal recorded for one set cannot authorize another.
+func (c *Crawler) allowShrink(st *state, before int, deleted []string, after int) bool {
+	drop := len(deleted)
+	if drop <= bulkPruneMinDrop || drop*percentScale <= before*bulkPrunePercent {
+		c.withdrawBulkPrune(st)
+		return true
 	}
-	if !st.BulkPruneAt.Equal(was) {
-		if err := saveState(c.opts.StatePath, *st); err != nil {
-			c.logger.Warn().Err(err).Msg("save crawler state failed")
-		}
+	allow, changed := st.confirmBulkPrune(time.Now(), deleted)
+	if changed {
+		c.persistState(*st)
 	}
 	if !allow {
 		c.logger.Error().Int("managed_before", before).Int("managed_after", after).
-			Int("dropped", dropped).Str("confirm_after", bulkPruneConfirmAfter.String()).
+			Int("deleted", drop).Str("confirm_after", bulkPruneConfirmAfter.String()).
 			Msg("bulk prune floor tripped; private.yaml left unchanged pending confirmation by a later cycle")
 	}
 	return allow
+}
+
+// withdrawBulkPrune forgets any refused bulk-prune proposal and persists the
+// withdrawal. Every cycle that reaches the merge and proposes no bulk deletion
+// must call it: leaving the record on disk is what lets a refusal survive hours
+// of quiet cycles and then rubber-stamp whatever the next fault proposes.
+func (c *Crawler) withdrawBulkPrune(st *state) {
+	if st.clearBulkPrune() {
+		c.persistState(*st)
+	}
+}
+
+func (c *Crawler) persistState(st state) {
+	if err := saveState(c.opts.StatePath, st); err != nil {
+		c.logger.Warn().Err(err).Msg("save crawler state failed")
+	}
 }
 
 // sourceName picks the managed name for url u. An already-attributed name is
@@ -562,10 +598,11 @@ func channelSlug(ch string) string {
 
 // classifyAll classifies urls with bounded concurrency, returning the set that
 // classify as live and the set whose verdict is undetermined. A URL lands in
-// neither set only when it is provably not a live subscription: it was fetched
-// and parsed but carries no usable node, or the origin answered a definitively
-// gone status. Everything else — transport failure, transient status, oversized
-// body — is undetermined, because callers prune on the absence of both verdicts.
+// neither set only when it is provably no longer a subscription: the origin
+// answered a definitively gone status, or it advertised an expiry already in the
+// past. Everything else — transport failure, transient status, oversized body,
+// or a 2xx carrying no node — is undetermined, because callers prune on the
+// absence of both verdicts.
 func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown map[string]bool) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
@@ -585,16 +622,27 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown
 			defer mu.Unlock()
 			var statusErr *classify.StatusError
 			switch {
-			case err == nil:
-				// Fetched and parsed: live, or definitively nodeless.
-				if res.Live() {
-					live[u] = true
+			case err != nil:
+				if !errors.As(err, &statusErr) || !statusErr.Gone() {
+					// Transport failure, or a status that proves nothing about
+					// the subscription: the verdict stays undetermined.
+					unknown[u] = true
 				}
-			case !errors.As(err, &statusErr) || !statusErr.Gone():
-				// Transport failure, or a status that proves nothing about the
-				// subscription: the verdict stays undetermined.
+			case res.Live():
+				live[u] = true
+			case !res.Expired:
+				// A 2xx carrying no proxy-scheme node is not proof of death.
+				// The parser counts only real node schemes (PP-07), so a
+				// captive portal, a Cloudflare interstitial, a panel login page
+				// and a JSON error object all arrive here with zero nodes —
+				// the same "host is alive and told us nothing" condition that,
+				// delivered as 403 or 503, is already undetermined. A panel
+				// whose pool is momentarily empty looks identical.
 				unknown[u] = true
 			}
+			// The remaining case — fetched, not live, Expired — is the only 2xx
+			// answer that proves the subscription is over, because the origin
+			// itself advertised the expiry. It joins neither set, so it prunes.
 		}(u)
 	}
 	wg.Wait()

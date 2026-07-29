@@ -9,9 +9,12 @@ geo:
   # Lite monthly CSV, 24h) and `registry:` (urls, refresh_interval; default:
   # the 5 RIR delegated-extended files, 24h) configure the downloadable
   # in-memory databases used by the matching annotate providers; the defaults
-  # suffice, so they are omitted here.
+  # suffice, so they are omitted here. Their refresh_interval reads 0 (and
+  # unset) as the 24h default -- NOT as "never", unlike geofeed's below: both
+  # are month-stamped mirrors that go stale on their own, so refresh rarely
+  # with a long interval (e.g. 720h) instead of disabling.
   geofeed:
-    refresh_interval: 24h
+    refresh_interval: 24h # unset => 24h; an explicit 0 loads once at startup and never refreshes
     sources:
       - url: https://github.com/ipanalytics/GeoFeed-Harvester/releases/latest/download/geofeed.csv.gz
         type: gzip

@@ -47,12 +47,14 @@ func TestBandwidthFilterApply(t *testing.T) {
 	if !strings.Contains(kept[0].Tagged, "[SPD:50M]") {
 		t.Fatalf("missing speed tag: %q", kept[0].Tagged)
 	}
-	// Only the sub-floor node is worth remembering: re-measuring it every hour
-	// is the waste the reject cache exists to stop. s-003 answered nothing, and
-	// an unreachable endpoint is as likely to be the endpoint's fault as the
-	// node's, so it must stay out of the cache and be retried next cycle.
-	if len(rejected) != 1 || rejected[0] != "h2:443" {
-		t.Fatalf("slow node must be the only cached reject, got %v", rejected)
+	// Nothing is cached. Both drop reasons here describe our side, not the
+	// node: s-003 answered nothing, and s-002's sub-floor speed is measured
+	// over a host uplink shared by the concurrent downloads. Caching either
+	// would hide the node from /stable.txt for the whole cache TTL -- and
+	// because filterDead consults that cache before the probe, a bad minute on
+	// our uplink would take the whole batch out for hours.
+	if len(rejected) != 0 {
+		t.Fatalf("a bandwidth verdict must never be cached, got %v", rejected)
 	}
 
 	// annotate=false: kept but no tag injected.
@@ -180,8 +182,13 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	if len(kept) != 0 || rep.Dropped["blocked"] != 1 {
 		t.Fatalf("blocked survivor must drop without a store: kept=%d rep=%+v", len(kept), rep)
 	}
-	if len(rejected) != 1 || rejected[0] != "h1:443" {
-		t.Fatalf("a refusal must still be cached briefly by address, got %v", rejected)
+	// The nil store now governs BOTH persistence paths. tidalBlocked is
+	// fail-closed on any non-2xx, so a single 429 from api.tidal.com marks
+	// every node in the batch Blocked; filterDead reads the reject cache
+	// before the probe, so remembering that would drop the whole batch from
+	// /stable.txt for hours over one rate-limit. It drops for this cycle only.
+	if len(rejected) != 0 {
+		t.Fatalf("a bare-status verdict must not be cached, got %v", rejected)
 	}
 }
 
@@ -265,29 +272,39 @@ func (p *replayProber) Probe(_ context.Context, payload []byte) (map[string]Prob
 
 func (p *replayProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
 
-// TestCheckerCachesFilterRejects: a through-node rejection used to be
-// unrepeatable knowledge. recordDead can only mark nodes ABSENT from the probe
-// results, and a filter reject is by construction present (it passed the
-// latency probe), so tidal and bandwidth re-ran their full test on the same
-// known-bad nodes every hour forever. Here the slow node must be probed once
-// and then skipped, while the fast one keeps being probed.
-func TestCheckerCachesFilterRejects(t *testing.T) {
-	t.Parallel()
+// Addresses carried by the fixture body below; the API check refuses the second.
+const (
+	rejectFastAddr = "1.1.1.1:443"
+	rejectSlowAddr = "2.2.2.2:443"
+)
 
-	const (
-		fastAddr = "1.1.1.1:443"
-		slowAddr = "2.2.2.2:443"
-	)
-	filterer := staticFilterer{body: "vless://u@" + fastAddr + "#fast\nvless://u@" + slowAddr + "#slow\n"}
-	prober := &replayProber{}
-	// Merge relabels to <source>-NNN in body order, so the outcomes key on
-	// those labels rather than the original names.
-	check := func(context.Context, []mihomo.Proxy) map[string]BandwidthOutcome {
-		return map[string]BandwidthOutcome{
-			"alpha-001": {Server: "1.1.1.1", Reachable: true, Mbps: 50},
-			"alpha-002": {Server: "2.2.2.2", Reachable: true, Mbps: 1},
-		}
+// refuseSlowAddr is the through-node verdict every reject-cache test starts from.
+// Merge relabels to <source>-NNN in body order, so the outcomes key on those
+// labels rather than the original names.
+func refuseSlowAddr(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+	return map[string]APIOutcome{
+		"alpha-001": {Server: "1.1.1.1", Reachable: true},
+		"alpha-002": {Server: "2.2.2.2", Reachable: true, Blocked: true},
 	}
+}
+
+// storeBackedFilter builds the only kind of filter allowed to seed the reject
+// cache: a non-nil store is exactly what "trusted enough to persist a verdict"
+// means. enabled is the filter's own precondition (nil = always active).
+func storeBackedFilter(enabled func() bool) *apiFilter {
+	return &apiFilter{
+		filterName: "claude",
+		enabled:    enabled,
+		check:      refuseSlowAddr,
+		store:      &stubBlocklist{},
+		logger:     zerolog.Nop(),
+	}
+}
+
+// rejectCacheChecker wires a checker over one source carrying both addresses.
+// The returned spec is a copy, ready to be edited and handed to Reconfigure.
+func rejectCacheChecker(filter NodeFilter, params NodeFilterParams) (*Checker, *replayProber, CheckerSpec) {
+	prober := &replayProber{}
 	spec := CheckerSpec{
 		Sources:       []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example/sub"}},
 		Interval:      time.Hour,
@@ -295,27 +312,50 @@ func TestCheckerCachesFilterRejects(t *testing.T) {
 		MaxAvgMs:      1000,
 		SourceTimeout: time.Minute,
 		Prober:        prober,
-		Filters: []NodeFilter{
-			&bandwidthFilter{minMbps: 10, check: check, logger: zerolog.Nop()},
-		},
+		Filters:       []NodeFilter{filter},
+		FilterParams:  params,
 	}
-	c := NewChecker(spec, func() Filterer { return filterer }, nil, nil, NewHolder(), zerolog.Nop(), nil)
+	filterer := staticFilterer{
+		body: "vless://u@" + rejectFastAddr + "#fast\nvless://u@" + rejectSlowAddr + "#slow\n",
+	}
 
-	for cycle := 1; cycle <= 2; cycle++ {
-		if err := c.RunOnce(context.Background()); err != nil {
-			t.Fatalf("cycle %d: %v", cycle, err)
-		}
+	return NewChecker(spec, func() Filterer { return filterer }, nil, nil, NewHolder(), zerolog.Nop(), nil), prober, spec
+}
+
+func runCycle(t *testing.T, c *Checker, label string) {
+	t.Helper()
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("%s: %v", label, err)
 	}
+}
+
+// TestCheckerCachesFilterRejects: a through-node rejection used to be
+// unrepeatable knowledge. recordDead can only mark nodes ABSENT from the probe
+// results, and a filter reject is by construction present (it passed the
+// latency probe), so the API checks re-ran their full test on the same
+// known-bad nodes every hour forever. Here the refused node must be probed
+// once and then skipped, while the accepted one keeps being probed.
+//
+// The filter under test is a store-backed API check on purpose: only a check
+// trusted enough to persist a verdict may seed the reject cache. bandwidth and
+// tidal are excluded by construction, which their own tests pin.
+func TestCheckerCachesFilterRejects(t *testing.T) {
+	t.Parallel()
+
+	c, prober, spec := rejectCacheChecker(storeBackedFilter(nil), NodeFilterParams{})
+	runCycle(t, c, "cycle 1")
+	runCycle(t, c, "cycle 2")
+
 	if len(prober.payloads) != 2 {
 		t.Fatalf("want one probe per cycle, got %d", len(prober.payloads))
 	}
-	if !strings.Contains(prober.payloads[0], slowAddr) {
-		t.Fatalf("cycle 1 must probe the slow node to learn it is slow: %q", prober.payloads[0])
+	if !strings.Contains(prober.payloads[0], rejectSlowAddr) {
+		t.Fatalf("cycle 1 must probe the refused node to learn it is refused: %q", prober.payloads[0])
 	}
-	if strings.Contains(prober.payloads[1], slowAddr) {
-		t.Errorf("cycle 2 must skip the node the bandwidth filter already rejected: %q", prober.payloads[1])
+	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
+		t.Errorf("cycle 2 must skip the node the API filter already refused: %q", prober.payloads[1])
 	}
-	if !strings.Contains(prober.payloads[1], fastAddr) {
+	if !strings.Contains(prober.payloads[1], rejectFastAddr) {
 		t.Errorf("cycle 2 must still probe the node that passed: %q", prober.payloads[1])
 	}
 
@@ -323,10 +363,61 @@ func TestCheckerCachesFilterRejects(t *testing.T) {
 	// filter and its rejects stop suppressing anything, immediately.
 	spec.Filters = nil
 	c.Reconfigure(spec)
-	if err := c.RunOnce(context.Background()); err != nil {
-		t.Fatalf("cycle 3: %v", err)
+	runCycle(t, c, "cycle 3")
+	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
+		t.Errorf("removing the API filter must un-suppress its rejects: %q", prober.payloads[2])
 	}
-	if !strings.Contains(prober.payloads[2], slowAddr) {
-		t.Errorf("removing the bandwidth filter must un-suppress its rejects: %q", prober.payloads[2])
+}
+
+// TestReconfigureDropsRejectsOnParamsChange: a name scopes a verdict to a filter,
+// not to the parameters it was reached under. Lowering the bandwidth floor is the
+// documented remedy when capacity drops, so verdicts surviving that edit would
+// make the operator's corrective action look inert: every node rejected under the
+// OLD floor stays out of the probe -- and therefore out of /stable.txt -- for the
+// rest of the 6h TTL, never re-measured against the new one.
+func TestReconfigureDropsRejectsOnParamsChange(t *testing.T) {
+	t.Parallel()
+
+	params := NodeFilterParams{
+		Names:     []string{"claude", "bandwidth"},
+		Bandwidth: config.BandwidthConfig{MinMbps: new(50)},
+	}
+	c, prober, spec := rejectCacheChecker(storeBackedFilter(nil), params)
+	runCycle(t, c, "cycle 1")
+	runCycle(t, c, "cycle 2")
+	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
+		t.Fatalf("cycle 2 must skip the refused node, or the rest proves nothing: %q", prober.payloads[1])
+	}
+
+	// A fresh pointer, as a reloaded config would produce: the comparison has to
+	// look through it, not at it.
+	spec.FilterParams.Bandwidth.MinMbps = new(20)
+	c.Reconfigure(spec)
+	runCycle(t, c, "cycle 3")
+	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
+		t.Errorf("a min_mbps edit must not inherit verdicts measured under the old floor: %q", prober.payloads[2])
+	}
+}
+
+// TestFilterDeadIgnoresDisabledFilter: a gemini whose key file becomes unreadable
+// is rebuilt with enabled() == false, and apply then keeps every survivor. Its
+// remembered rejects must stop suppressing as well, or a check nobody performs
+// any more keeps nodes out of /stable.txt for the rest of the TTL. Nothing about
+// the config changed here, so the params reset cannot cover this case.
+func TestFilterDeadIgnoresDisabledFilter(t *testing.T) {
+	t.Parallel()
+
+	live := true
+	c, prober, _ := rejectCacheChecker(storeBackedFilter(func() bool { return live }), NodeFilterParams{})
+	runCycle(t, c, "cycle 1")
+	runCycle(t, c, "cycle 2")
+	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
+		t.Fatalf("cycle 2 must skip the refused node, or the rest proves nothing: %q", prober.payloads[1])
+	}
+
+	live = false
+	runCycle(t, c, "cycle 3")
+	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
+		t.Errorf("a disabled filter drops nobody, so its rejects must not suppress either: %q", prober.payloads[2])
 	}
 }

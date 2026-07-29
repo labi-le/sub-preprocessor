@@ -82,8 +82,7 @@ func setupReloader(
 	}
 
 	opts := reload.OptionsFromConfig(cfg)
-	opts.PreloadedGeofeed = stubLookup{}
-	opts.PreloadedLoadedAt = loadedAt
+	opts.PreloadedGeofeed = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: loadedAt}
 	proc, err := preprocess.NewProcessor(ctx, logger, opts)
 	if err != nil {
 		t.Fatalf("initial processor: %v", err)
@@ -184,20 +183,20 @@ func assertPipelineOptions(t *testing.T, opts preprocess.Options, cfg config.Con
 // mapping that filled these in would hand the startup path stale objects.
 func assertNoPreloadedState(t *testing.T, opts preprocess.Options) {
 	t.Helper()
-	if opts.PreloadedGeofeed != nil {
-		t.Error("OptionsFromConfig must not set PreloadedGeofeed")
-	}
-	if !opts.PreloadedLoadedAt.IsZero() {
-		t.Error("OptionsFromConfig must not set PreloadedLoadedAt")
-	}
-	if opts.PreloadedDBIP != nil || !opts.PreloadedDBIPLoadedAt.IsZero() {
-		t.Error("OptionsFromConfig must not set PreloadedDBIP state")
-	}
-	if opts.PreloadedRegistry != nil || !opts.PreloadedRegistryLoadedAt.IsZero() {
-		t.Error("OptionsFromConfig must not set PreloadedRegistry state")
-	}
+	assertZeroGeoState(t, "PreloadedGeofeed", opts.PreloadedGeofeed)
+	assertZeroGeoState(t, "PreloadedDBIP", opts.PreloadedDBIP)
+	assertZeroGeoState(t, "PreloadedRegistry", opts.PreloadedRegistry)
 	if opts.PreloadedResolver != nil || opts.PreloadedASN != nil {
 		t.Error("OptionsFromConfig must not set the preloaded resolvers")
+	}
+}
+
+// assertZeroGeoState checks a carry-over slot is untouched in every field, so a
+// mapping that started filling in the retry schedule alone would still fail.
+func assertZeroGeoState(t *testing.T, name string, state preprocess.GeoState) {
+	t.Helper()
+	if state.Lookup != nil || !state.LoadedAt.IsZero() || !state.RetryAt.IsZero() || state.Failures != 0 {
+		t.Errorf("OptionsFromConfig must not set %s: got %+v", name, state)
 	}
 }
 
@@ -271,12 +270,12 @@ func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
 	}
-	lookup, at := newProc.GeofeedState()
-	if lookup == nil {
+	state := newProc.GeofeedState()
+	if state.Lookup == nil {
 		t.Fatal("geofeed lookup must be carried over (non-nil)")
 	}
-	if !at.Equal(loadedAt) {
-		t.Fatalf("AC8: LoadedAt must be carried over: got %v want %v", at, loadedAt)
+	if !state.LoadedAt.Equal(loadedAt) {
+		t.Fatalf("AC8: LoadedAt must be carried over: got %v want %v", state.LoadedAt, loadedAt)
 	}
 }
 
@@ -296,12 +295,57 @@ func TestReloadFirstReloadCarriesLoadedAt(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
 	}
-	_, at := newProc.GeofeedState()
-	if !at.Equal(loadedAt) {
+	if at := newProc.GeofeedState().LoadedAt; !at.Equal(loadedAt) {
 		t.Fatalf("AC12: first reload must carry LoadedAt: got %v want %v", at, loadedAt)
 	}
 	if len(after.Groups["nordics"]) != 2 {
 		t.Fatalf("AC12: new groups must be applied in the swapped snapshot, got %v", after.Groups)
+	}
+}
+
+// TestReloadCarriesGeofeedRetrySchedule pins VP-02 at the reload seam. loadedAt
+// marks the last GOOD data, so after a failed load only retryAt holds the next
+// attempt back; rebuilding the Processor without it re-downloads every geofeed
+// source on the next request. The crawler rewrites private.yaml hourly, so a
+// reload lands before any backoff longer than an hour ever comes due — carrying
+// the data but not its schedule leaves the backoff permanently at attempt one.
+func TestReloadCarriesGeofeedRetrySchedule(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, baseGeofeedYAML)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+
+	// What a chronically failing geofeed source leaves behind.
+	failed := preprocess.GeoState{
+		Lookup:   stubLookup{},
+		LoadedAt: time.Now().Add(-25 * time.Hour),
+		RetryAt:  time.Now().Add(20 * time.Minute),
+		Failures: 3,
+	}
+	opts := reload.OptionsFromConfig(cfg)
+	opts.PreloadedGeofeed = failed
+	proc, err := preprocess.NewProcessor(ctx, zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("initial processor: %v", err)
+	}
+
+	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
+
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
+	r.Reload(ctx)
+
+	carried := reloadedProcessor(t, holder).GeofeedState()
+	if !carried.RetryAt.Equal(failed.RetryAt) {
+		t.Fatalf("reload must carry the geofeed retry deadline: got %v want %v", carried.RetryAt, failed.RetryAt)
+	}
+	if carried.Failures != failed.Failures {
+		t.Fatalf("reload must carry the consecutive-failure count: got %d want %d", carried.Failures, failed.Failures)
 	}
 }
 
@@ -559,12 +603,9 @@ func setupGeoDBReloader(
 	}
 
 	opts := reload.OptionsFromConfig(cfg)
-	opts.PreloadedGeofeed = stubLookup{}
-	opts.PreloadedLoadedAt = geofeedAt
-	opts.PreloadedDBIP = stubLookup{}
-	opts.PreloadedDBIPLoadedAt = dbipAt
-	opts.PreloadedRegistry = stubLookup{}
-	opts.PreloadedRegistryLoadedAt = registryAt
+	opts.PreloadedGeofeed = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: geofeedAt}
+	opts.PreloadedDBIP = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: dbipAt}
+	opts.PreloadedRegistry = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: registryAt}
 	proc, err := preprocess.NewProcessor(ctx, zerolog.Nop(), opts)
 	if err != nil {
 		t.Fatalf("initial processor: %v", err)
@@ -597,19 +638,19 @@ func TestReloadCarriesDBIPAndRegistry(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
 	}
-	lookup, at := newProc.DBIPState()
-	if lookup == nil {
+	dbip := newProc.DBIPState()
+	if dbip.Lookup == nil {
 		t.Fatal("dbip lookup must be carried over (non-nil)")
 	}
-	if !at.Equal(dbipAt) {
-		t.Fatalf("dbip LoadedAt must be carried over: got %v want %v", at, dbipAt)
+	if !dbip.LoadedAt.Equal(dbipAt) {
+		t.Fatalf("dbip LoadedAt must be carried over: got %v want %v", dbip.LoadedAt, dbipAt)
 	}
-	lookup, at = newProc.RegistryState()
-	if lookup == nil {
+	registry := newProc.RegistryState()
+	if registry.Lookup == nil {
 		t.Fatal("registry lookup must be carried over (non-nil)")
 	}
-	if !at.Equal(registryAt) {
-		t.Fatalf("registry LoadedAt must be carried over: got %v want %v", at, registryAt)
+	if !registry.LoadedAt.Equal(registryAt) {
+		t.Fatalf("registry LoadedAt must be carried over: got %v want %v", registry.LoadedAt, registryAt)
 	}
 }
 
@@ -633,15 +674,14 @@ func TestReloadRefetchesDBIPOnConfigChange(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", holder.Load().Svc)
 	}
-	lookup, at := newProc.DBIPState()
-	if lookup == nil {
+	dbip := newProc.DBIPState()
+	if dbip.Lookup == nil {
 		t.Fatal("changed dbip must still be built (empty lookup), not nil")
 	}
-	if !at.IsZero() {
-		t.Fatalf("changed dbip must not carry LoadedAt: got %v", at)
+	if !dbip.LoadedAt.IsZero() {
+		t.Fatalf("changed dbip must not carry LoadedAt: got %v", dbip.LoadedAt)
 	}
-	_, at = newProc.RegistryState()
-	if !at.Equal(registryAt) {
+	if at := newProc.RegistryState().LoadedAt; !at.Equal(registryAt) {
 		t.Fatalf("unchanged registry must be carried over: got %v want %v", at, registryAt)
 	}
 }
@@ -688,8 +728,7 @@ func TestReloadCarriesResolverCaches(t *testing.T) {
 		t.Fatalf("initial config load: %v", err)
 	}
 	opts := reload.OptionsFromConfig(cfg)
-	opts.PreloadedGeofeed = stubLookup{}
-	opts.PreloadedLoadedAt = time.Now().Add(-time.Hour)
+	opts.PreloadedGeofeed = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: time.Now().Add(-time.Hour)}
 	proc, err := preprocess.NewProcessor(ctx, zerolog.Nop(), opts)
 	if err != nil {
 		t.Fatalf("initial processor: %v", err)

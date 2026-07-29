@@ -37,6 +37,11 @@ type Result struct {
 }
 
 // Live reports a usable subscription: at least one node and not past expiry.
+// Its negation is NOT a death verdict. A 2xx body with no proxy-scheme node is
+// what a captive portal, a CDN interstitial or a panel login page serves, so
+// only Expired — an expiry the origin itself advertised — and a Gone status
+// prove a URL stopped being a subscription; callers that delete on a dead
+// verdict must not delete on a merely nodeless one.
 func (r Result) Live() bool { return r.Nodes > 0 && !r.Expired }
 
 // Body classifies an already-fetched subscription body. subUserinfo is the raw

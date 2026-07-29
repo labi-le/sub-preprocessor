@@ -86,6 +86,45 @@ func TestLoadGeofeedRefreshInterval(t *testing.T) {
 	}
 }
 
+// TestLoadGeoDBRefreshIntervalZeroDefaults pins the asymmetry with the geofeed
+// sibling above: for the two downloadable databases an explicit 0 means the 24h
+// default, exactly as it did before RefreshInterval became a pointer. Reading it
+// as "load once, never refresh" would both flip a deployed config's behaviour
+// silently and strand a failed initial download, because preprocess's geoDB
+// short-circuits staleLocked on a non-positive interval before it consults the
+// retry it armed.
+func TestLoadGeoDBRefreshIntervalZeroDefaults(t *testing.T) {
+	t.Parallel()
+
+	const geoYAML = "geo:\n" +
+		"  geofeed:\n" +
+		"    sources:\n" +
+		"      - url: https://example.com/geofeed.csv.gz\n" +
+		"        type: gzip\n"
+
+	// Both spelled "0s": a bare `0` is not a duration at all and fails the
+	// decode outright, so the only explicit zero an operator can actually write
+	// is this one.
+	cfg, err := loadRaw(t, geoYAML+"  dbip:\n    refresh_interval: 0s\n  registry:\n    refresh_interval: 0s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Geo.DBIP.RefreshInterval == nil || *cfg.Geo.DBIP.RefreshInterval != 24*time.Hour {
+		t.Errorf("explicit dbip 0 must default to 24h, got %v", cfg.Geo.DBIP.RefreshInterval)
+	}
+	if cfg.Geo.Registry.RefreshInterval == nil || *cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
+		t.Errorf("explicit registry 0 must default to 24h, got %v", cfg.Geo.Registry.RefreshInterval)
+	}
+
+	// The coercion must not swallow a negative: that is a typo, not a request
+	// for the default.
+	for _, block := range []string{"dbip", "registry"} {
+		if _, err = loadRaw(t, geoYAML+"  "+block+":\n    refresh_interval: -1s\n"); err == nil {
+			t.Errorf("geo.%s.refresh_interval: -1s must be rejected", block)
+		}
+	}
+}
+
 func TestLoadGroups(t *testing.T) {
 	t.Parallel()
 

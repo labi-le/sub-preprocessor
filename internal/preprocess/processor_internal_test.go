@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/resolver"
@@ -498,7 +499,8 @@ func TestFilterHTMLErrorPageFails(t *testing.T) {
 // TestCountryChainConsultsEveryLoadedDatabase pins PP-02. The country filter
 // used to judge nodes against the geofeed alone while the GEO tag resolved
 // through the whole provider chain, so a node DB-IP places in DE was dropped as
-// unplaceable by an exclusion the tag said did not apply to it.
+// unplaceable by an exclusion the tag said did not apply to it. countryOrder is
+// the shipped GEO chain, geofeed ahead of dbip.
 func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 	t.Parallel()
 
@@ -514,6 +516,7 @@ func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 			loadedAt:        time.Now(),
 			refreshInterval: 24 * time.Hour,
 			filters:         []Filter{NewGeofeedFilter()},
+			countryOrder:    []string{config.ProviderGeofeed, config.ProviderDBIP},
 			dbip: &geoDB{
 				name:     "dbip",
 				lookup:   geofeed.NewRangeLookup(dbipOnly),
@@ -549,5 +552,206 @@ func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 	}
 	if stats.Kept != 0 || stats.GeoDrop != 1 {
 		t.Fatalf("stats = %+v, want kept=0 geo_drop=1: exclude DE must reach a dbip-placed node", stats)
+	}
+}
+
+// TestReloadCarryKeepsGeofeedBackoff pins VP-02. loadedAt marks the last GOOD
+// data, so after a failed reload it reads as permanently stale and only retryAt
+// throttles the next attempt. A config reload builds a fresh Processor from the
+// carried state; if the retry schedule does not travel with the data, the very
+// next request re-downloads every geofeed source. The crawler rewrites
+// private.yaml hourly, so that is once an hour, forever, against a source that
+// is already failing — the round-2 backoff never gets to grow.
+func TestReloadCarryKeepsGeofeedBackoff(t *testing.T) {
+	t.Parallel()
+
+	p := staleProcessor(t, func(context.Context) ([]geofeed.Entry, int, error) {
+		return nil, 2, errors.New("no geofeed entries loaded")
+	})
+	p.doReload(t.Context())
+
+	failed := p.GeofeedState()
+	if failed.RetryAt.IsZero() || failed.Failures == 0 {
+		t.Fatalf("precondition: a failed reload must arm the backoff, got %+v", failed)
+	}
+
+	next, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
+		PreloadedGeofeed: failed,
+		RefreshInterval:  24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor from carried state: %v", err)
+	}
+
+	if next.shouldReloadGeofeedLocked(time.Now()) {
+		t.Fatal("a config reload must not reset the geofeed backoff into an immediate re-download")
+	}
+	if !next.shouldReloadGeofeedLocked(failed.RetryAt) {
+		t.Fatal("the carried retry must still come due at its own deadline")
+	}
+	if got := next.GeofeedState().Failures; got != failed.Failures {
+		t.Fatalf("carried failure count = %d, want %d: the backoff must keep growing across reloads", got, failed.Failures)
+	}
+}
+
+// TestReloadCarryKeepsGeoDBBackoff is VP-02 on the geoDB half, where dropping
+// the retry schedule is a regression rather than a missed improvement: a failed
+// load used to stamp loadedAt=now and that stamp was carried, so a broken mirror
+// was retried once per interval. With loadedAt reserved for good data, a carry
+// without retryAt means a full DB-IP or RIR download attempt on the first
+// request after every reload.
+func TestReloadCarryKeepsGeoDBBackoff(t *testing.T) {
+	t.Parallel()
+
+	failing := func(context.Context) ([]geofeed.Range, int, error) {
+		return nil, 0, errors.New("mirror down")
+	}
+	db := newGeoDB(t.Context(), zerolog.Nop(), "dbip", 24*time.Hour, GeoState{}, failing)
+
+	failed := db.state()
+	if failed.RetryAt.IsZero() || failed.Failures == 0 {
+		t.Fatalf("precondition: a failed initial load must arm the backoff, got %+v", failed)
+	}
+
+	next := newGeoDB(t.Context(), zerolog.Nop(), "dbip", 24*time.Hour, failed, failing)
+	if next.staleLocked(time.Now()) {
+		t.Fatal("a config reload must not reset the geo database backoff into an immediate re-download")
+	}
+	if !next.staleLocked(failed.RetryAt) {
+		t.Fatal("the carried retry must still come due at its own deadline")
+	}
+	if next.reloadFailures != failed.Failures {
+		t.Fatalf("carried failure count = %d, want %d", next.reloadFailures, failed.Failures)
+	}
+}
+
+// TestCountryChainFollowsConfiguredProviderOrder pins VP-03. countryChain used
+// to hardcode geofeed -> dbip -> registry while the annotator walks whatever
+// order the operator wrote, so a config preferring dbip ahead of geofeed got a
+// filter verdict and a [GEO:xx] tag that disagreed — the divergence PP-02
+// closed, reintroduced in the opposite direction.
+func TestCountryChainFollowsConfiguredProviderOrder(t *testing.T) {
+	t.Parallel()
+
+	// One IP, two answers: the published geofeed places it in NL, DB-IP in DE.
+	ip := netip.MustParseAddr("203.0.113.9")
+	geofeedNL := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.PrefixFrom(ip, 32), Country: geofeed.CountryCode{'N', 'L'}},
+	})
+	dbipDE := geofeed.NewRangeLookup([]geofeed.Range{
+		{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}},
+	})
+	body := []byte("vless://u@203.0.113.9:443#n\n")
+
+	cases := []struct {
+		name     string
+		order    []string
+		wantKept int
+	}{
+		{"geofeed first: NL wins, exclude DE misses", []string{config.ProviderGeofeed, config.ProviderDBIP}, 1},
+		{"dbip first: DE wins, exclude DE drops", []string{config.ProviderDBIP, config.ProviderGeofeed}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
+				RefreshInterval:  24 * time.Hour,
+				DNSTimeout:       time.Second,
+				PreloadedGeofeed: GeoState{Lookup: geofeedNL, LoadedAt: time.Now()},
+				PreloadedDBIP:    GeoState{Lookup: dbipDE, LoadedAt: time.Now()},
+				// SSRF-unreachable: the preload proves no download is attempted.
+				DBIP:      config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+				IPFilters: []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+				Annotate:  []config.AnnotateSpec{{Tag: config.TagGEO, Providers: tc.order}},
+			})
+			if err != nil {
+				t.Fatalf("NewProcessor: %v", err)
+			}
+
+			var buf bytes.Buffer
+			stats, errFilter := p.Filter(t.Context(), &buf, FilterRequest{
+				Body:             body,
+				AllowedCountries: filter.All(),
+				DeniedCountries:  filter.ParseAllowed("DE"),
+			})
+			if errFilter != nil {
+				t.Fatalf("Filter failed: %v", errFilter)
+			}
+			if stats.Kept != tc.wantKept {
+				t.Fatalf("kept = %d, want %d: the filter must judge with the configured GEO order %v",
+					stats.Kept, tc.wantKept, tc.order)
+			}
+		})
+	}
+}
+
+// TestCountryChainOrderDerivation covers the rest of VP-03: asn is never a
+// filter source (it is a per-IP Cymru round trip, not a local table), a
+// provider the process did not build is dropped before it can be dereferenced,
+// and every order equivalent to "the geofeed alone" collapses to nil so
+// countryChain hands the filter the lookup itself instead of a one-element
+// chain.
+func TestCountryChainOrderDerivation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		annotate     []config.AnnotateSpec
+		haveDBIP     bool
+		haveRegistry bool
+		want         []string
+	}{
+		{
+			name: "shipped chain keeps its order and drops asn",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagIP},
+				{Tag: config.TagGEO, Providers: []string{
+					config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN,
+				}},
+			},
+			haveDBIP: true, haveRegistry: true,
+			want: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry},
+		},
+		{
+			name: "operator order is preserved verbatim",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderGeofeed}},
+			},
+			haveDBIP: true,
+			want:     []string{config.ProviderDBIP, config.ProviderGeofeed},
+		},
+		{
+			name: "a GEO chain of asn alone falls back to the geofeed",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderASN}},
+			},
+		},
+		{
+			name: "a geofeed-only chain collapses",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+			},
+		},
+		{
+			name: "a database the process did not build is skipped",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderRegistry}},
+			},
+		},
+		{
+			name:     "no GEO entry falls back to the geofeed",
+			annotate: []config.AnnotateSpec{{Tag: config.TagIP}, {Tag: config.TagASN, Providers: []string{config.ProviderASN}}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := countryChainOrder(tc.annotate, tc.haveDBIP, tc.haveRegistry)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("countryChainOrder = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

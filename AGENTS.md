@@ -100,8 +100,8 @@ Important keys:
 - `server.listen`
 - `server.metrics_listen` — internal Prometheus `/metrics` endpoint (default `:9090`; docker-compose publishes it loopback-only on `127.0.0.1:9091`, never public)
 - `geo.geofeed.refresh_interval` (default 24h when unset, explicit `0` = load once and never refresh) / `geo.geofeed.sources[].url` / `geo.geofeed.sources[].type` (`raw` or `gzip`)
-- `geo.dbip.url` / `geo.dbip.refresh_interval` — DB-IP Country Lite monthly gzip CSV (`{yyyy-mm}`-templated URL, default built-in, 24h refresh); in-memory IP→country DB for the `dbip` annotate provider, built only when an annotate chain references it
-- `geo.registry.urls[]` / `geo.registry.refresh_interval` — the five RIR delegated-extended files (defaults built-in, 24h refresh); in-memory registration-country DB for the `registry` annotate provider, built only when referenced
+- `geo.dbip.url` / `geo.dbip.refresh_interval` — DB-IP Country Lite monthly gzip CSV (`{yyyy-mm}`-templated URL, default built-in, 24h refresh; unlike the geofeed sibling, an explicit `0` means that same default — a month-stamped mirror frozen for the process lifetime is never what an operator wants, and a non-positive interval also blocks the retry a failed initial download arms); in-memory IP→country DB for the `dbip` annotate provider, built only when an annotate chain references it
+- `geo.registry.urls[]` / `geo.registry.refresh_interval` — the five RIR delegated-extended files (defaults built-in, 24h refresh; explicit `0` = that default, as for `geo.dbip`); in-memory registration-country DB for the `registry` annotate provider, built only when referenced
 - `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
 - `resolver.timeout`
 - `resolver.address` — upstream DNS server, passed verbatim to the dialer, so it MUST be `host:port` (`1.1.1.1:53`); a portless value is rejected at load, because it dials nothing and would drop every node as a DNS failure. Empty keeps the system resolver

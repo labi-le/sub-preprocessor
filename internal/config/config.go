@@ -433,12 +433,13 @@ func (cfg *Config) SubscriptionsEnabled() bool {
 	return len(cfg.Subscriptions.Sources) > 0
 }
 
-// GeofeedConfig configures the published-geofeed IP->country sources. Like its
-// dbip/registry siblings, RefreshInterval is a pointer so an unset value
-// defaults (nil -> defaultGeoDBRefresh) while an explicit 0 is preserved and
-// means "load once, never refresh" (preprocess treats a non-positive interval
-// as disable). Before that distinction existed, omitting the key froze the
-// geofeed for the whole process lifetime.
+// GeofeedConfig configures the published-geofeed IP->country sources.
+// RefreshInterval is a pointer so an unset value defaults (nil ->
+// defaultGeoDBRefresh) while an explicit 0 is preserved and means "load once,
+// never refresh" (preprocess treats a non-positive interval as disable). Before
+// that distinction existed, omitting the key froze the geofeed for the whole
+// process lifetime. The dbip/registry siblings spell 0 differently -- see
+// DBIPConfig.applyDefaults.
 type GeofeedConfig struct {
 	Sources         []geofeed.Source `yaml:"sources"`
 	RefreshInterval *time.Duration   `yaml:"refresh_interval"`
@@ -455,16 +456,28 @@ func (g *GeofeedConfig) applyDefaults() {
 // to the current UTC month at fetch time.
 type DBIPConfig struct {
 	URL string `yaml:"url"`
-	// RefreshInterval carries the same nil-defaults / explicit-0-disables
-	// semantics as GeofeedConfig.RefreshInterval.
+	// RefreshInterval is a pointer only so all three geo blocks decode alike;
+	// nil and an explicit 0 mean the same thing here, unlike GeofeedConfig.
 	RefreshInterval *time.Duration `yaml:"refresh_interval"`
 }
 
+// applyDefaults reads an explicit 0 as "use the default", which is what it
+// meant before RefreshInterval became a pointer; taking it as "load once, never
+// refresh" would silently flip the behaviour of a config already in the field.
+// Disabling has no legitimate use for these two either: both defaults are
+// moving targets (DB-IP's {yyyy-mm} URL rotates monthly, the RIR
+// delegated-extended files are rewritten daily), so a frozen copy only rots,
+// and refreshing rarely is already expressible as a long interval. It also keeps
+// preprocess's geoDB out of a dead end -- with a non-positive interval
+// staleLocked returns false before it consults retryAt, so the retry a failed
+// initial download arms could never fire and the provider would stay empty for
+// the process lifetime while the startup log promises one. A negative value
+// still reaches Validate, so a typo stays loud.
 func (d *DBIPConfig) applyDefaults() {
 	if d.URL == "" {
 		d.URL = defaultDBIPURL
 	}
-	if d.RefreshInterval == nil {
+	if d.RefreshInterval == nil || *d.RefreshInterval == 0 {
 		d.RefreshInterval = new(defaultGeoDBRefresh)
 	}
 }
@@ -476,15 +489,18 @@ func (d *DBIPConfig) validate() error {
 // RegistryConfig configures the RIR delegated-extended IP->country database
 // downloads (annotate provider "registry"), one URL per RIR.
 type RegistryConfig struct {
-	URLs            []string       `yaml:"urls"`
+	URLs []string `yaml:"urls"`
+	// RefreshInterval carries DBIPConfig.RefreshInterval's semantics.
 	RefreshInterval *time.Duration `yaml:"refresh_interval"`
 }
 
+// applyDefaults treats an explicit 0 as the default for the reasons spelled out
+// on DBIPConfig.applyDefaults.
 func (r *RegistryConfig) applyDefaults() {
 	if len(r.URLs) == 0 {
 		r.URLs = slices.Clone(defaultRegistryURLs)
 	}
-	if r.RefreshInterval == nil {
+	if r.RefreshInterval == nil || *r.RefreshInterval == 0 {
 		r.RefreshInterval = new(defaultGeoDBRefresh)
 	}
 }

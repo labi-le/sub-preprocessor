@@ -81,8 +81,7 @@ func TestNewProcessorUsesPreloadedGeofeed(t *testing.T) {
 
 	fixedTime := time.Now().Add(-time.Hour)
 	opts := preprocess.Options{
-		PreloadedGeofeed:  fakeCountryLookup{},
-		PreloadedLoadedAt: fixedTime,
+		PreloadedGeofeed: preprocess.GeoState{Lookup: fakeCountryLookup{}, LoadedAt: fixedTime},
 		// SSRF-unreachable loopback: err==nil proves LoadAll was skipped.
 		GeofeedSources: []geofeed.Source{{URL: "https://127.0.0.1:1/nonexistent", Type: "raw"}},
 	}
@@ -92,12 +91,12 @@ func TestNewProcessorUsesPreloadedGeofeed(t *testing.T) {
 		t.Fatalf("NewProcessor with preloaded geofeed must not fetch or error: %v", err)
 	}
 
-	lookup, at := p.GeofeedState()
-	if lookup == nil {
+	state := p.GeofeedState()
+	if state.Lookup == nil {
 		t.Fatal("expected preloaded lookup to be carried over, got nil")
 	}
-	if !at.Equal(fixedTime) {
-		t.Fatalf("expected LoadedAt to carry over preloaded time %v, got %v", fixedTime, at)
+	if !state.LoadedAt.Equal(fixedTime) {
+		t.Fatalf("expected LoadedAt to carry over preloaded time %v, got %v", fixedTime, state.LoadedAt)
 	}
 }
 
@@ -121,23 +120,24 @@ func TestNewProcessorLoadsGeofeedWhenNotPreloaded(t *testing.T) {
 		t.Fatalf("NewProcessor must load geofeed when not preloaded: %v", err)
 	}
 
-	lookup, at := p.GeofeedState()
-	if lookup == nil {
+	state := p.GeofeedState()
+	if state.Lookup == nil {
 		t.Fatal("expected freshly loaded lookup, got nil")
 	}
-	if at.Before(before) || time.Since(at) > 5*time.Second {
-		t.Fatalf("expected LoadedAt within 5s of now, got %v (before=%v)", at, before)
+	if state.LoadedAt.Before(before) || time.Since(state.LoadedAt) > 5*time.Second {
+		t.Fatalf("expected LoadedAt within 5s of now, got %v (before=%v)", state.LoadedAt, before)
 	}
 }
 
 // TestNewProcessorSkipsUnreferencedGeoDBs: when no annotate entry references
-// dbip/registry, the databases are never built — the state getters return nil
-// even though the configs carry (unreachable) URLs that a build would hit.
+// dbip/registry, the databases are never built — the state getters return the
+// zero GeoState even though the configs carry (unreachable) URLs that a build
+// would hit.
 func TestNewProcessorSkipsUnreferencedGeoDBs(t *testing.T) {
 	t.Parallel()
 
 	opts := preprocess.Options{
-		PreloadedGeofeed: fakeCountryLookup{},
+		PreloadedGeofeed: preprocess.GeoState{Lookup: fakeCountryLookup{}},
 		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
 		DBIP:             config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
 		Registry:         config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
@@ -148,11 +148,11 @@ func TestNewProcessorSkipsUnreferencedGeoDBs(t *testing.T) {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 
-	if lookup, at := p.DBIPState(); lookup != nil || !at.IsZero() {
-		t.Fatalf("unreferenced dbip must not be built: got (%v, %v)", lookup, at)
+	if state := p.DBIPState(); state.Lookup != nil || !state.LoadedAt.IsZero() {
+		t.Fatalf("unreferenced dbip must not be built: got %+v", state)
 	}
-	if lookup, at := p.RegistryState(); lookup != nil || !at.IsZero() {
-		t.Fatalf("unreferenced registry must not be built: got (%v, %v)", lookup, at)
+	if state := p.RegistryState(); state.Lookup != nil || !state.LoadedAt.IsZero() {
+		t.Fatalf("unreferenced registry must not be built: got %+v", state)
 	}
 }
 
@@ -165,16 +165,14 @@ func TestNewProcessorUsesPreloadedGeoDBs(t *testing.T) {
 	dbipAt := time.Now().Add(-time.Hour)
 	registryAt := time.Now().Add(-2 * time.Hour)
 	opts := preprocess.Options{
-		PreloadedGeofeed: fakeCountryLookup{},
+		PreloadedGeofeed: preprocess.GeoState{Lookup: fakeCountryLookup{}},
 		Annotate: []config.AnnotateSpec{
 			{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry}},
 		},
-		DBIP:                      config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
-		Registry:                  config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
-		PreloadedDBIP:             fakeCountryLookup{},
-		PreloadedDBIPLoadedAt:     dbipAt,
-		PreloadedRegistry:         fakeCountryLookup{},
-		PreloadedRegistryLoadedAt: registryAt,
+		DBIP:              config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+		Registry:          config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
+		PreloadedDBIP:     preprocess.GeoState{Lookup: fakeCountryLookup{}, LoadedAt: dbipAt},
+		PreloadedRegistry: preprocess.GeoState{Lookup: fakeCountryLookup{}, LoadedAt: registryAt},
 	}
 
 	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts)
@@ -182,13 +180,13 @@ func TestNewProcessorUsesPreloadedGeoDBs(t *testing.T) {
 		t.Fatalf("NewProcessor with preloaded geo DBs must not fetch or error: %v", err)
 	}
 
-	lookup, at := p.DBIPState()
-	if lookup == nil || !at.Equal(dbipAt) {
-		t.Fatalf("dbip preload not used: got (%v, %v), want LoadedAt %v", lookup, at, dbipAt)
+	dbip := p.DBIPState()
+	if dbip.Lookup == nil || !dbip.LoadedAt.Equal(dbipAt) {
+		t.Fatalf("dbip preload not used: got %+v, want LoadedAt %v", dbip, dbipAt)
 	}
-	lookup, at = p.RegistryState()
-	if lookup == nil || !at.Equal(registryAt) {
-		t.Fatalf("registry preload not used: got (%v, %v), want LoadedAt %v", lookup, at, registryAt)
+	registry := p.RegistryState()
+	if registry.Lookup == nil || !registry.LoadedAt.Equal(registryAt) {
+		t.Fatalf("registry preload not used: got %+v, want LoadedAt %v", registry, registryAt)
 	}
 }
 
@@ -199,7 +197,7 @@ func TestNewProcessorGeoDBLoadFailureDegrades(t *testing.T) {
 	t.Parallel()
 
 	opts := preprocess.Options{
-		PreloadedGeofeed: fakeCountryLookup{},
+		PreloadedGeofeed: preprocess.GeoState{Lookup: fakeCountryLookup{}},
 		Annotate: []config.AnnotateSpec{
 			{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderRegistry}},
 		},
@@ -213,18 +211,18 @@ func TestNewProcessorGeoDBLoadFailureDegrades(t *testing.T) {
 		t.Fatalf("geo DB load failure must degrade, not fail startup: %v", err)
 	}
 
-	lookup, at := p.DBIPState()
-	if lookup == nil {
+	dbip := p.DBIPState()
+	if dbip.Lookup == nil {
 		t.Fatal("failed dbip load must yield an empty lookup, not nil")
 	}
-	if !at.IsZero() {
-		t.Fatalf("failed dbip load must leave LoadedAt zero for retry, got %v", at)
+	if !dbip.LoadedAt.IsZero() {
+		t.Fatalf("failed dbip load must leave LoadedAt zero for retry, got %v", dbip.LoadedAt)
 	}
-	if c := lookup.LookupCountry(netip.MustParseAddr("1.2.3.4")); c != (geofeed.CountryCode{}) {
+	if c := dbip.Lookup.LookupCountry(netip.MustParseAddr("1.2.3.4")); c != (geofeed.CountryCode{}) {
 		t.Fatalf("empty dbip lookup must miss every IP, got %v", c)
 	}
-	lookup, at = p.RegistryState()
-	if lookup == nil || !at.IsZero() {
-		t.Fatalf("failed registry load must yield empty lookup + zero LoadedAt, got (%v, %v)", lookup, at)
+	registry := p.RegistryState()
+	if registry.Lookup == nil || !registry.LoadedAt.IsZero() {
+		t.Fatalf("failed registry load must yield empty lookup + zero LoadedAt, got %+v", registry)
 	}
 }

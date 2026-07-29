@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -62,7 +63,9 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 			case "https://gone.example/sub":
 				return classify.Result{}, fmt.Errorf("wrap: %w", &classify.StatusError{Code: 404, Status: "404 Not Found"})
 			default:
-				return classify.Result{}, nil // definitively not live
+				// The origin advertised an expiry already past: the one 2xx
+				// answer that proves the subscription is over.
+				return classify.Result{Nodes: 9, Expired: true}, nil
 			}
 		},
 		logger: zerolog.Nop(),
@@ -78,6 +81,56 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 	}
 	if unknown["https://gone.example/sub"] {
 		t.Error("a definitive non-2xx answer (StatusError) must not be treated as unknown")
+	}
+	if unknown["https://dead.example/sub"] {
+		t.Error("an origin-advertised past expiry is definitive; it must not be treated as unknown")
+	}
+}
+
+// TestClassifyAllKeepsNodeless200Undetermined pins CRAWL-V3: a 200 carrying no
+// proxy-scheme node means the host answered and told us nothing, not that the
+// subscription is gone. PP-07 tightened the parser to count only real node
+// schemes, so a captive portal, a Cloudflare interstitial and a panel login page
+// all arrive here with Nodes == 0 — and a URL in neither returned set is one
+// mergeManaged deletes, unrecoverably. Only a gone status and an
+// origin-advertised expiry may stay definitive.
+func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlPortal  = "https://portal.example/sub"  // 200 + interstitial HTML
+		urlEmpty   = "https://empty.example/sub"   // 200 + empty body
+		urlExpired = "https://expired.example/sub" // 200 + nodes, past expiry
+		urlGone    = "https://gone.example/sub"    // 404
+	)
+	c := &Crawler{
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			switch string(u) {
+			case urlExpired:
+				return classify.Result{Nodes: 12, Expired: true}, nil
+			case urlGone:
+				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+			default:
+				return classify.Result{}, nil
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone})
+
+	if len(live) != 0 {
+		t.Fatalf("live = %v, want none: no URL served a node", live)
+	}
+	for _, u := range []string{urlPortal, urlEmpty} {
+		if !unknown[u] {
+			t.Errorf("%s answered 200 with no node: undetermined, not a death sentence", u)
+		}
+	}
+	if unknown[urlExpired] {
+		t.Error("an origin-advertised past expiry is definitive; it must stay prunable")
+	}
+	if unknown[urlGone] {
+		t.Error("404 is definitive; it must stay prunable")
 	}
 }
 
@@ -117,11 +170,12 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	t.Parallel()
 
 	const (
-		urlHand = "https://hand.example/sub"
-		urlLive = "https://live.example/sub"
-		urlDead = "https://dead.example/sub"
-		urlErr  = "https://err.example/sub"
-		urlGone = "https://gone.example/sub"
+		urlHand     = "https://hand.example/sub"
+		urlLive     = "https://live.example/sub"
+		urlDead     = "https://dead.example/sub"
+		urlErr      = "https://err.example/sub"
+		urlGone     = "https://gone.example/sub"
+		urlNodeless = "https://nodeless.example/sub"
 	)
 	c := &Crawler{
 		opts: Options{Prune: true},
@@ -133,8 +187,11 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 				return classify.Result{}, errors.New("transient network error")
 			case urlGone:
 				return classify.Result{}, &classify.StatusError{Code: 410, Status: "410 Gone"}
+			case urlNodeless:
+				return classify.Result{}, nil // 200, but not one node in the body
 			default:
-				return classify.Result{}, nil // definitively not live
+				// Definitively over: the origin advertised a past expiry.
+				return classify.Result{Nodes: 4, Expired: true}, nil
 			}
 		},
 		logger: zerolog.Nop(),
@@ -146,11 +203,12 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		{Name: managedName(urlDead), URL: urlDead},
 		{Name: managedName(urlErr), URL: urlErr},
 		{Name: managedName(urlGone), URL: urlGone},
+		{Name: managedName(urlNodeless), URL: urlNodeless},
 	}
 
 	live := map[string]string{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	next, managed := c.mergeManaged(pf, live, rr, true, nil)
+	next, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
 
 	byURL := map[string]bool{}
 	for _, s := range next {
@@ -163,7 +221,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 		t.Error("still-live managed source must be kept")
 	}
 	if byURL[urlDead] {
-		t.Error("definitively dead managed source must be pruned")
+		t.Error("a managed source whose origin advertised a past expiry must be pruned")
 	}
 	if byURL[urlGone] {
 		t.Error("managed source answering a definitively gone status must be pruned")
@@ -171,8 +229,11 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	if !byURL[urlErr] {
 		t.Error("managed source with unknown (errored) status must be retained, not pruned")
 	}
-	if len(managed) != 2 {
-		t.Errorf("managed = %v, want live+unknown (2 entries)", managed)
+	if !byURL[urlNodeless] {
+		t.Error("a managed source answering 200 with no node is undetermined: it must be retained")
+	}
+	if len(managed) != 3 {
+		t.Errorf("managed = %v, want live+errored+nodeless (3 entries)", managed)
 	}
 }
 
@@ -260,7 +321,7 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 
 	live := map[string]string{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	_, managed := c.mergeManaged(pf, live, rr, true, nil)
+	_, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
 
 	kept := map[string]bool{}
 	for _, s := range managed {
@@ -293,7 +354,7 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
 
-	next, managed := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true, nil)
+	next, managed, _ := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true, nil)
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -412,7 +473,7 @@ func TestMergeUpgradesLegacyName(t *testing.T) {
 	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u}}
 
 	live := map[string]string{u: "VPN_Channel"}
-	next, managed := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
+	next, managed, _ := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
 	if len(next) != 1 || len(managed) != 1 {
 		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
 	}
@@ -886,6 +947,233 @@ func TestRunOnceRefusesBulkPrune(t *testing.T) {
 	}
 }
 
+// TestRunOnceKeepsNodeless200PrunesGone is the cycle-level acceptance contract
+// for CRAWL-V3: a source answering 200 with no proxy-scheme node in the body — a
+// captive portal, an interstitial, a panel login page — stays in private.yaml,
+// while a 404 is still removed. Before the fix both left the URL out of live and
+// out of unknown, which mergeManaged reads identically: delete.
+func TestRunOnceKeepsNodeless200PrunesGone(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlLive     = "https://live.example/sub"
+		urlPortal   = "https://portal.example/sub"
+		urlNotFound = "https://notfound.example/sub"
+	)
+	var pf privateFile
+	for _, u := range []string{urlLive, urlPortal, urlNotFound} {
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := writePrivate(priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, Prune: true},
+		client: pageFetcher{},
+		// urlLive revives, so the cycle is not a learned-nothing one and prune
+		// stays enabled; three sources are far under the bulk-prune floor.
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			switch string(u) {
+			case urlLive:
+				return classify.Result{Nodes: 3}, nil
+			case urlNotFound:
+				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+			default:
+				return classify.Result{}, nil
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, s := range got.Subscriptions.Sources {
+		kept[s.URL] = true
+	}
+	if !kept[urlLive] {
+		t.Error("a source still serving nodes must be kept")
+	}
+	if !kept[urlPortal] {
+		t.Errorf("a 200 with zero nodes must keep the source, got %+v", got.Subscriptions.Sources)
+	}
+	if kept[urlNotFound] {
+		t.Error("404 is definitive: the source must be pruned")
+	}
+}
+
+// TestRunOnceStaleRefusalCannotAuthorizeADifferentPrune is the cycle-level
+// acceptance contract for CRAWL-V2. The state file carries a bulk-prune refusal
+// recorded seven hours ago for some other proposal (a bare timestamp is exactly
+// what the pre-fix code wrote). This cycle condemns 15 of 40 sources — a set that
+// record never described — and the old code, seeing only that the timestamp was
+// older than bulkPruneConfirmAfter, honoured it and deleted all 15 on the spot.
+func TestRunOnceStaleRefusalCannotAuthorizeADifferentPrune(t *testing.T) {
+	t.Parallel()
+
+	const (
+		total  = 40
+		doomed = 15
+	)
+	urls := make([]string, 0, total)
+	var pf privateFile
+	for i := range total {
+		u := fmt.Sprintf("https://s%02d.example/sub", i)
+		urls = append(urls, u)
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := writePrivate(priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+	statePath := filepath.Join(dir, "state.json")
+	if err := saveState(statePath, state{BulkPruneAt: time.Now().Add(-7 * time.Hour)}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	gone := map[string]bool{}
+	for _, u := range urls[:doomed] {
+		gone[u] = true
+	}
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, StatePath: statePath, Prune: true},
+		client: pageFetcher{},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if gone[string(u)] {
+				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(got.Subscriptions.Sources) != total {
+		t.Fatalf("private.yaml holds %d sources, want all %d: a refusal recorded for another proposal authorized this one",
+			len(got.Subscriptions.Sources), total)
+	}
+	if !strings.Contains(logBuf.String(), "bulk prune floor tripped") {
+		t.Errorf("the unmatched proposal must be refused and logged, got %q", logBuf.String())
+	}
+	// The refusal must now describe THIS proposal, so the confirming cycle can
+	// be checked against it.
+	after := loadState(statePath, zerolog.Nop())
+	if len(after.BulkPruneURLs) != doomed {
+		t.Errorf("recorded proposal = %v, want the %d condemned URLs", after.BulkPruneURLs, doomed)
+	}
+}
+
+// TestRunOnceNoChangeWithdrawsBulkPruneRecord: a cycle whose merge reproduces
+// private.yaml exactly proposes no deletion, which withdraws any pending
+// bulk-prune refusal. Without this the record survived every quiet cycle —
+// clearBulkPrune was reachable only from allowShrink, which five earlier returns
+// in RunOnce skip — and stood ready to authorize whatever the next fault proposed.
+func TestRunOnceNoChangeWithdrawsBulkPruneRecord(t *testing.T) {
+	t.Parallel()
+
+	const total = 6
+	var pf privateFile
+	for i := range total {
+		u := fmt.Sprintf("https://q%02d.example/sub", i)
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := writePrivate(priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+	statePath := filepath.Join(dir, "state.json")
+	pending := state{BulkPruneAt: time.Now().Add(-time.Hour), BulkPruneURLs: condemnedSet(20)}
+	if err := saveState(statePath, pending); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, StatePath: statePath, Prune: true},
+		client: pageFetcher{},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	c.RunOnce(context.Background())
+
+	if !strings.Contains(logBuf.String(), "no change") {
+		t.Fatalf("expected a no-change cycle, got %q", logBuf.String())
+	}
+	after := loadState(statePath, zerolog.Nop())
+	if !after.BulkPruneAt.IsZero() || after.BulkPruneURLs != nil {
+		t.Errorf("pending proposal survived a cycle that proposed nothing: at=%v urls=%v",
+			after.BulkPruneAt, after.BulkPruneURLs)
+	}
+}
+
+// condemnedSet builds the sorted set of n distinct managed URLs a cycle proposes
+// to delete. The %03d keeps lexical and numeric order identical, which
+// sameProposal's merge walk requires.
+func condemnedSet(n int) []string {
+	out := make([]string, 0, n)
+	for i := range n {
+		out = append(out, fmt.Sprintf("https://c%03d.example/sub", i))
+	}
+	return out
+}
+
+// TestAllowShrinkCountsDeletionsNotNetChange: the floor used to compare the
+// managed count before and after, but "after" includes every source the same
+// cycle discovered, so each new find bought back one deletion. A correlated
+// death event that also discovered a few sources slipped straight under the
+// documented 30% ceiling and deleted far more than it.
+func TestAllowShrinkCountsDeletionsNotNetChange(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name                   string
+		before, deleted, after int
+		want                   bool
+	}{
+		// 15 of 40 condemned while 10 are discovered: net shrink is only 5, so
+		// the old net-based floor waved it through and deleted 37% of the
+		// corpus. Keyed on deletions it is 15/40 = 37% and must be refused.
+		{"discoveries mask a mass deletion", 40, 15, 35, false},
+		// The same deletions with no discoveries: the old code caught this one,
+		// so the case guards against over-correcting in the other direction.
+		{"mass deletion, nothing found", 40, 15, 25, false},
+		// Ordinary churn on a large corpus: over the absolute floor, well under
+		// the ratio.
+		{"routine churn", 150, 20, 130, true},
+		// Small corpus: 4 of 12 is 33%, over the ratio but under the absolute
+		// floor, so it proceeds. Both conditions must hold to refuse.
+		{"small corpus below the absolute floor", 12, 4, 8, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := &Crawler{opts: Options{}, logger: zerolog.Nop()}
+			var st state
+			if got := c.allowShrink(&st, tc.before, condemnedSet(tc.deleted), tc.after); got != tc.want {
+				t.Fatalf("allowShrink(before=%d, deleted=%d, after=%d) = %v, want %v",
+					tc.before, tc.deleted, tc.after, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunOnceDarkCycleWritesNothing: a cycle that discovers nothing and revives
 // nothing has learned nothing about its sources — a crawler egress fault (tunnel
 // down, DNS interception, a proxy answering every request itself) looks exactly
@@ -937,26 +1225,117 @@ func TestConfirmBulkPruneRequiresLaterCycle(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
+	proposal := condemnedSet(20)
 	var st state
-	if st.confirmBulkPrune(now) {
-		t.Fatal("the first proposal must be refused")
+	if allow, changed := st.confirmBulkPrune(now, proposal); allow || !changed {
+		t.Fatalf("first proposal: allow=%v changed=%v, want false and a record to persist", allow, changed)
 	}
-	if st.BulkPruneAt.IsZero() {
-		t.Fatal("a refusal must be remembered for a later cycle to confirm")
+	if st.BulkPruneAt.IsZero() || !slices.Equal(st.BulkPruneURLs, proposal) {
+		t.Fatalf("a refusal must remember when and what: at=%v urls=%v", st.BulkPruneAt, st.BulkPruneURLs)
 	}
-	if st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter - time.Minute)) {
-		t.Error("a proposal inside the confirmation window must still be refused")
+	if allow, changed := st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter-time.Minute), proposal); allow || changed {
+		t.Errorf("inside the window the same proposal must be refused and leave the record alone, got allow=%v changed=%v", allow, changed)
 	}
-	if !st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter)) {
-		t.Error("a proposal past the confirmation window must be honoured")
+	if !st.BulkPruneAt.Equal(now) {
+		t.Errorf("BulkPruneAt = %v, want the original %v: re-arming every cycle pushes the deadline out forever", st.BulkPruneAt, now)
 	}
-	if !st.BulkPruneAt.IsZero() {
+	if allow, _ := st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter), proposal); !allow {
+		t.Error("the same proposal past the confirmation window must be honoured")
+	}
+	if !st.BulkPruneAt.IsZero() || st.BulkPruneURLs != nil {
 		t.Error("an honoured proposal must be consumed, not left standing")
 	}
-	st.BulkPruneAt = now
-	st.clearBulkPrune()
-	if !st.BulkPruneAt.IsZero() {
+	st.BulkPruneAt, st.BulkPruneURLs = now, proposal
+	if !st.clearBulkPrune() {
+		t.Error("clearBulkPrune must report that it forgot a pending proposal")
+	}
+	if !st.BulkPruneAt.IsZero() || st.BulkPruneURLs != nil {
 		t.Error("clearBulkPrune must forget the pending proposal")
+	}
+	if st.clearBulkPrune() {
+		t.Error("clearBulkPrune must report no change when nothing is pending")
+	}
+}
+
+// TestConfirmBulkPruneRefusesADifferentProposal pins CRAWL-V2 at the record
+// level: the stored refusal is consent to nothing, so a later cycle condemning a
+// different set must start its own waiting period instead of inheriting this one.
+// With a bare timestamp the second proposal below was honoured on the spot and
+// deleted a set no cycle had ever refused.
+func TestConfirmBulkPruneRefusesADifferentProposal(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	first := condemnedSet(20)
+	// A disjoint set of the same size, so neither direction of the overlap test
+	// can mistake it for the recorded proposal.
+	other := make([]string, 0, len(first))
+	for i := range len(first) {
+		other = append(other, fmt.Sprintf("https://z%03d.example/sub", i))
+	}
+
+	var st state
+	if allow, _ := st.confirmBulkPrune(now, first); allow {
+		t.Fatal("the first proposal must be refused")
+	}
+
+	later := now.Add(bulkPruneConfirmAfter)
+	if allow, _ := st.confirmBulkPrune(later, other); allow {
+		t.Error("a refusal recorded for one set must not authorize deleting a different one")
+	}
+	if !st.BulkPruneAt.Equal(later) || !slices.Equal(st.BulkPruneURLs, other) {
+		t.Errorf("the different proposal must replace the record with its own: at=%v urls=%v", st.BulkPruneAt, st.BulkPruneURLs)
+	}
+	// The superseded set has no standing either: it is now the odd one out.
+	if allow, _ := st.confirmBulkPrune(later.Add(bulkPruneConfirmAfter), first); allow {
+		t.Error("a superseded proposal must not be confirmable")
+	}
+}
+
+// TestConfirmBulkPruneToleratesProposalDrift: the fingerprint must not demand an
+// identical set, or a real mass expiry would never converge — one source
+// recovering or one more dying between the two cycles would restart the wait
+// forever. Within bulkPruneOverlap the proposal is the same event.
+func TestConfirmBulkPruneToleratesProposalDrift(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	first := condemnedSet(20)
+	// Two of the twenty recovered and one new death joined, so 18 of the 20
+	// recorded URLs are re-proposed: 90%, inside bulkPruneOverlap.
+	drifted := append(slices.Clone(first[2:]), "https://d999.example/sub")
+
+	var st state
+	if allow, _ := st.confirmBulkPrune(now, first); allow {
+		t.Fatal("the first proposal must be refused")
+	}
+	if allow, _ := st.confirmBulkPrune(now.Add(bulkPruneConfirmAfter), drifted); !allow {
+		t.Errorf("a proposal within %d%% of the refused set must confirm it, not restart the wait", bulkPruneOverlap)
+	}
+}
+
+// TestConfirmBulkPruneExpiresAStaleRecord: consent gathered a day ago is consent
+// on day-old evidence. Past bulkPruneRecordTTL the same proposal counts as brand
+// new, so it is refused and has to wait again.
+func TestConfirmBulkPruneExpiresAStaleRecord(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	proposal := condemnedSet(20)
+	var st state
+	if allow, _ := st.confirmBulkPrune(now, proposal); allow {
+		t.Fatal("the first proposal must be refused")
+	}
+
+	stale := now.Add(bulkPruneRecordTTL + time.Minute)
+	if allow, _ := st.confirmBulkPrune(stale, proposal); allow {
+		t.Error("a record older than bulkPruneRecordTTL must not authorize a deletion")
+	}
+	if !st.BulkPruneAt.Equal(stale) {
+		t.Errorf("BulkPruneAt = %v, want the re-armed %v", st.BulkPruneAt, stale)
+	}
+	if allow, _ := st.confirmBulkPrune(stale.Add(bulkPruneConfirmAfter), proposal); !allow {
+		t.Error("the re-armed record must confirm once its own window elapses")
 	}
 }
 

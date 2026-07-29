@@ -52,17 +52,14 @@ type Options struct {
 	Annotate            []config.AnnotateSpec
 	DBIP                config.DBIPConfig
 	Registry            config.RegistryConfig
-	PreloadedGeofeed    geofeed.CountryLookup
-	PreloadedLoadedAt   time.Time
-	// PreloadedDBIP / PreloadedRegistry carry an already-loaded database (and
-	// its load time) across config reloads, mirroring PreloadedGeofeed. They
-	// are used only when the matching provider is referenced by Annotate.
-	PreloadedDBIP             geofeed.CountryLookup
-	PreloadedDBIPLoadedAt     time.Time
-	PreloadedRegistry         geofeed.CountryLookup
-	PreloadedRegistryLoadedAt time.Time
-	Blocklist                 Blocklist
-	FetchTimeout              time.Duration
+	PreloadedGeofeed    GeoState
+	// PreloadedDBIP / PreloadedRegistry carry an already-loaded database across
+	// config reloads, mirroring PreloadedGeofeed. They are used only when the
+	// matching provider is referenced by Annotate.
+	PreloadedDBIP     GeoState
+	PreloadedRegistry GeoState
+	Blocklist         Blocklist
+	FetchTimeout      time.Duration
 	// PreloadedResolver / PreloadedASN carry the live DNS and Cymru caches
 	// across a config reload. Both bake their timeouts and TTLs in at
 	// construction, so a caller must only pass them on when the whole
@@ -70,6 +67,30 @@ type Options struct {
 	// config.ASNChanged); otherwise the new knobs would be silently ignored.
 	PreloadedResolver *resolver.Resolver
 	PreloadedASN      *asn.Resolver
+}
+
+// GeoState is everything one processor hands its replacement about a single
+// country database across a config reload: the loaded data and the retry
+// schedule that belongs to it.
+//
+// The four values are one type because they are only correct together. A carry
+// that kept Lookup/LoadedAt but dropped RetryAt/Failures would make a source
+// whose last reload failed look permanently stale — LoadedAt marks the last
+// GOOD data, so it sits behind the refresh interval until a load succeeds —
+// and the first request after every reload would re-download it; the crawler
+// rewrites private.yaml hourly, so that is a fresh download attempt per hour
+// against a source that is already failing. The reverse split, a retry
+// deadline carried without the data it throttles, would gate the initial load
+// of a database this processor never had. Grouping them makes both
+// unrepresentable rather than merely fixed.
+type GeoState struct {
+	Lookup   geofeed.CountryLookup
+	LoadedAt time.Time
+	// RetryAt, when non-zero, is the next-attempt deadline armed by a reload
+	// that failed or was refused; Failures counts the consecutive ones that
+	// drove its backoff. See retryDelay.
+	RetryAt  time.Time
+	Failures int
 }
 
 type FilterRequest struct {
@@ -125,6 +146,10 @@ type Processor struct {
 	// annotate entry references them (no download, no refresh goroutine).
 	dbip     *geoDB
 	registry *geoDB
+	// countryOrder is the provider order countryChain walks, derived from the
+	// configured GEO annotate chain; empty means "the geofeed alone". Written
+	// once in NewProcessor before the processor is published, read-only after.
+	countryOrder []string
 }
 
 // geoDB holds one downloadable in-memory IP->country database (dbip or
@@ -216,15 +241,11 @@ func providerNeeds(opts Options) (needsASN, wantDBIP, wantRegistry bool) {
 func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
 	initLog := log.Op(logger, "processor.New")
 
-	var (
-		lookup   geofeed.CountryLookup
-		loadedAt time.Time
-		retryAt  time.Time
-	)
-	if opts.PreloadedGeofeed != nil {
+	var geoState GeoState
+	if opts.PreloadedGeofeed.Lookup != nil {
 		initLog.Info().Msg("using preloaded geofeed lookup")
-		lookup = opts.PreloadedGeofeed
-		loadedAt = opts.PreloadedLoadedAt
+		// Adopted whole, retry schedule included: see GeoState.
+		geoState = opts.PreloadedGeofeed
 	} else {
 		initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
 		entries, failed, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
@@ -235,13 +256,13 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 			// Startup takes a partial feed because there is nothing better to
 			// keep, but must not wait a whole refresh interval to complete it.
 			delay := retryDelay(0, opts.RefreshInterval)
-			retryAt = time.Now().Add(delay)
+			geoState.RetryAt = time.Now().Add(delay)
 			initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
 				Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
 		}
 		initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
-		lookup = geofeed.NewLookup(entries)
-		loadedAt = time.Now()
+		geoState.Lookup = geofeed.NewLookup(entries)
+		geoState.LoadedAt = time.Now()
 	}
 	needsASN, wantDBIP, wantRegistry := providerNeeds(opts)
 
@@ -269,9 +290,10 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	sources := append([]geofeed.Source(nil), opts.GeofeedSources...)
 	p := &Processor{
 		logger:          logger,
-		countryLookup:   lookup,
-		loadedAt:        loadedAt,
-		retryAt:         retryAt,
+		countryLookup:   geoState.Lookup,
+		loadedAt:        geoState.LoadedAt,
+		retryAt:         geoState.RetryAt,
+		reloadFailures:  geoState.Failures,
 		refreshInterval: opts.RefreshInterval,
 		resolver:        dnsR,
 		blocklist:       opts.Blocklist,
@@ -285,7 +307,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	if wantDBIP {
 		url := opts.DBIP.URL
 		p.dbip = newGeoDB(ctx, initLog, config.ProviderDBIP, *opts.DBIP.RefreshInterval,
-			opts.PreloadedDBIP, opts.PreloadedDBIPLoadedAt,
+			opts.PreloadedDBIP,
 			func(ctx context.Context) ([]geofeed.Range, int, error) {
 				// One source: any failure is a total failure, never a partial.
 				ranges, err := geofeed.LoadDBIP(ctx, url, logger)
@@ -298,11 +320,13 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	if wantRegistry {
 		urls := append([]string(nil), opts.Registry.URLs...)
 		p.registry = newGeoDB(ctx, initLog, config.ProviderRegistry, *opts.Registry.RefreshInterval,
-			opts.PreloadedRegistry, opts.PreloadedRegistryLoadedAt,
+			opts.PreloadedRegistry,
 			func(ctx context.Context) ([]geofeed.Range, int, error) {
 				return geofeed.LoadRegistry(ctx, urls, logger)
 			})
 	}
+
+	p.countryOrder = countryChainOrder(opts.Annotate, p.dbip != nil, p.registry != nil)
 
 	// The annotator receives only the providers that were actually built: the
 	// lazy rule above guarantees every name referenced by opts.Annotate is
@@ -575,16 +599,18 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 }
 
 // countryChain returns the lookup the country filter judges nodes with: the
-// geofeed, then every downloadable database this process actually loaded, in
-// the same geofeed -> dbip -> registry precedence the annotate chain uses.
+// local country databases the configured GEO annotate chain names, in the
+// order it names them.
 //
 // Filtering and annotation ask one question — "which country is this IP in?" —
 // and used to answer it from different sources: the filter saw the geofeed
 // alone, so a node DB-IP places in DE was geo-dropped as unknown while the tag
-// it would have been published with said [GEO:DE]. The databases are already
-// in memory (the lazy-build rule in NewProcessor downloads them only when an
-// annotate entry names them), so consulting them costs a binary search on the
-// IPs the geofeed misses and nothing else.
+// it would have been published with said [GEO:DE]. Reading the order off the
+// same config entry the annotator walks keeps the two answers identical for
+// any ordering an operator writes, not just the one config.yaml ships. The
+// databases are already in memory (the lazy-build rule in NewProcessor
+// downloads them only when an annotate entry names them), so consulting them
+// costs a binary search on the IPs the earlier providers miss and nothing else.
 //
 // The asn provider stays out: it is a per-IP Cymru round trip, not a local
 // table, and the config exposes it as an explicit `{type: country, provider:
@@ -593,18 +619,68 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 //
 //nolint:ireturn // returns the CountryLookup interface, like currentEntries
 func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
+	// currentEntries doubles as the opportunistic background-reload trigger, so
+	// it runs on every request whether or not the geofeed is in the chain.
 	lookup := p.currentEntries(ctx)
-	if p.dbip == nil && p.registry == nil {
+	if len(p.countryOrder) == 0 {
 		return lookup
 	}
-	chain := chainLookup{lookup}
-	if p.dbip != nil {
-		chain = append(chain, p.dbip.snapshot())
-	}
-	if p.registry != nil {
-		chain = append(chain, p.registry.snapshot())
+	chain := make(chainLookup, len(p.countryOrder))
+	for i, name := range p.countryOrder {
+		switch name {
+		case config.ProviderDBIP:
+			chain[i] = p.dbip.snapshot()
+		case config.ProviderRegistry:
+			chain[i] = p.registry.snapshot()
+		default:
+			// countryChainOrder emits nothing but the three local providers,
+			// and the two above are taken: the remainder is the geofeed.
+			chain[i] = lookup
+		}
 	}
 	return chain
+}
+
+// countryChainOrder is the provider order countryChain walks, taken from the
+// first GEO annotate entry so the filter's verdict and the [GEO:xx] tag resolve
+// an IP through the same databases in the same precedence. asn is dropped (see
+// countryChain), as is any provider this process did not build — the lazy-build
+// rule in NewProcessor makes the latter unreachable for a GEO chain, but a nil
+// geoDB in the chain would panic and that is too sharp an edge to leave resting
+// on an argument made elsewhere.
+//
+// A geofeed-only chain collapses to an empty order, as does a chain naming
+// nothing local (GEO through asn alone) and a config with no GEO entry at all:
+// countryChain then hands the filter the geofeed lookup directly instead of
+// wrapping a single element. The geofeed is the one database every processor
+// loads, so it is the only sound fallback when the config expresses no
+// preference.
+func countryChainOrder(annotate []config.AnnotateSpec, haveDBIP, haveRegistry bool) []string {
+	for _, a := range annotate {
+		if a.Tag != config.TagGEO {
+			continue
+		}
+		order := make([]string, 0, len(a.Providers))
+		for _, prov := range a.Providers {
+			switch prov {
+			case config.ProviderGeofeed:
+				order = append(order, prov)
+			case config.ProviderDBIP:
+				if haveDBIP {
+					order = append(order, prov)
+				}
+			case config.ProviderRegistry:
+				if haveRegistry {
+					order = append(order, prov)
+				}
+			}
+		}
+		if len(order) == 1 && order[0] == config.ProviderGeofeed {
+			return nil
+		}
+		return order
+	}
+	return nil
 }
 
 // chainLookup resolves an IP against several country databases in order and
@@ -720,25 +796,32 @@ func (p *Processor) shouldReloadGeofeedLocked(now time.Time) bool {
 	return now.Sub(p.loadedAt) >= p.refreshInterval
 }
 
-//nolint:ireturn // returns the countryLookup interface so callers can carry geofeed state across reloads
-func (p *Processor) GeofeedState() (geofeed.CountryLookup, time.Time) {
+// GeofeedState hands this processor's geofeed database to its replacement
+// across a config reload; DBIPState and RegistryState do the same for theirs.
+// Each snapshot is taken under the read lock and returned whole, so a retry
+// schedule can never travel without the data it throttles. A zero GeoState
+// means the provider was not built in this processor.
+func (p *Processor) GeofeedState() GeoState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.countryLookup, p.loadedAt
+	return GeoState{
+		Lookup:   p.countryLookup,
+		LoadedAt: p.loadedAt,
+		RetryAt:  p.retryAt,
+		Failures: p.reloadFailures,
+	}
 }
 
-//nolint:ireturn // returns the CountryLookup interface so callers can carry dbip state across reloads
-func (p *Processor) DBIPState() (geofeed.CountryLookup, time.Time) {
+func (p *Processor) DBIPState() GeoState {
 	if p.dbip == nil {
-		return nil, time.Time{}
+		return GeoState{}
 	}
 	return p.dbip.state()
 }
 
-//nolint:ireturn // returns the CountryLookup interface so callers can carry registry state across reloads
-func (p *Processor) RegistryState() (geofeed.CountryLookup, time.Time) {
+func (p *Processor) RegistryState() GeoState {
 	if p.registry == nil {
-		return nil, time.Time{}
+		return GeoState{}
 	}
 	return p.registry.state()
 }
@@ -765,25 +848,28 @@ func (p *Processor) maybeRefreshGeoDBs(ctx context.Context) {
 }
 
 // newGeoDB builds the state for one lazily-referenced geo database. A
-// preloaded lookup (reload carry-over) is used as-is; otherwise the initial
-// load runs inline but, unlike geofeed, a failure only WARNs and starts with
-// an empty lookup: startup must never depend on a third-party database
-// mirror. A failed or partial initial load schedules a short retry instead of
-// waiting out the full refresh interval.
+// preloaded state (reload carry-over) is adopted whole — data, load time and
+// the retry schedule in flight — so a mirror that is currently failing keeps
+// its backoff instead of being re-downloaded on the first request after every
+// config reload. Otherwise the initial load runs inline but, unlike geofeed, a
+// failure only WARNs and starts with an empty lookup: startup must never depend
+// on a third-party database mirror. A failed or partial initial load schedules
+// a short retry instead of waiting out the full refresh interval.
 func newGeoDB(
 	ctx context.Context,
 	logger zerolog.Logger,
 	name string,
 	interval time.Duration,
-	preloaded geofeed.CountryLookup,
-	preloadedAt time.Time,
+	preloaded GeoState,
 	load func(ctx context.Context) (ranges []geofeed.Range, failed int, err error),
 ) *geoDB {
 	db := &geoDB{name: name, interval: interval, load: load}
-	if preloaded != nil {
+	if preloaded.Lookup != nil {
 		logger.Info().Str("db", name).Msg("using preloaded geo database")
-		db.lookup = preloaded
-		db.loadedAt = preloadedAt
+		db.lookup = preloaded.Lookup
+		db.loadedAt = preloaded.LoadedAt
+		db.retryAt = preloaded.RetryAt
+		db.reloadFailures = preloaded.Failures
 		return db
 	}
 	logger.Info().Str("db", name).Msg("loading geo database")
@@ -817,11 +903,17 @@ func (db *geoDB) snapshot() geofeed.CountryLookup {
 	return db.lookup
 }
 
-//nolint:ireturn // returns the CountryLookup interface so callers can carry state across reloads
-func (db *geoDB) state() (geofeed.CountryLookup, time.Time) {
+// state returns the carry-over snapshot: the data and the retry schedule that
+// belongs to it, read together under the lock.
+func (db *geoDB) state() GeoState {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	return db.lookup, db.loadedAt
+	return GeoState{
+		Lookup:   db.lookup,
+		LoadedAt: db.loadedAt,
+		RetryAt:  db.retryAt,
+		Failures: db.reloadFailures,
+	}
 }
 
 // maybeRefresh kicks an opportunistic background reload when the database is

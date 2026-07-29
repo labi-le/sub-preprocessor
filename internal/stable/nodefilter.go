@@ -17,6 +17,10 @@ import (
 // select which run.
 type NodeFilter interface {
 	name() string
+	// active reports whether this filter will actually test anything. A
+	// configured-but-disabled filter drops nobody, so the checker also refuses
+	// to let its remembered rejects suppress nodes.
+	active() bool
 	// apply narrows survivors using the shared, pre-parsed proxies keyed by
 	// node label. The checker owns the proxies' lifecycle; filters only read.
 	//
@@ -68,13 +72,13 @@ const (
 
 // apiFilter keeps only survivors that pass a through-node API check, and records
 // geo-blocked node hosts in the store (TTL) so later cycles skip them before
-// probing; a nil store skips that persistence (see the tidal filter). Either
-// way the refusal is returned to the checker as a short-lived reject, so the
-// next cycle does not repeat the check. What counts as blocked is the check's
-// own verdict: a geo-block marker in the body for gemini/claude/chatgpt, a
-// refused request for tidal. A nil enabled func means the check is always
-// active (e.g. Anthropic geo-blocks before authentication, so its check is
-// keyless).
+// probing. A nil store (see the tidal filter) skips that persistence AND the
+// short-lived reject the checker caches: both mean "this verdict is solid
+// enough to act on beyond this cycle", so one flag decides both. What counts as
+// blocked is the check's own verdict: a geo-block marker in the body for
+// gemini/claude/chatgpt, a refused request for tidal. A nil enabled func means
+// the check is always active (e.g. Anthropic geo-blocks before authentication,
+// so its check is keyless).
 type apiFilter struct {
 	filterName string
 	enabled    func() bool
@@ -85,9 +89,11 @@ type apiFilter struct {
 
 func (f *apiFilter) name() string { return f.filterName }
 
+func (f *apiFilter) active() bool { return f.enabled == nil || f.enabled() }
+
 func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, []string, FilterReport) {
 	rep := FilterReport{Name: f.filterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
-	if f.enabled != nil && !f.enabled() {
+	if !f.active() {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter configured but disabled; skipping")
 		return survivors, nil, rep
 	}
@@ -118,8 +124,16 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		switch {
 		case o.Blocked:
 			blocked++
-			rejected = append(rejected, s.Addr)
+			// Cached only when this check is trusted enough to persist a
+			// verdict at all, which is exactly what a non-nil store means. The
+			// weak checks are weak in the same way for both: tidal's verdict is
+			// a bare status code, so a 429 from api.tidal.com marks the whole
+			// batch Blocked -- and since filterDead consults the reject cache
+			// BEFORE the probe, caching that would drop every one of those
+			// nodes from /stable.txt for the cache's whole TTL instead of for
+			// one cycle. One rule, one place: no store, no memory.
 			if f.store != nil {
+				rejected = append(rejected, s.Addr)
 				if err := f.store.Block(o.Server); err != nil {
 					f.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
 				}
@@ -156,6 +170,10 @@ type bandwidthFilter struct {
 
 func (f *bandwidthFilter) name() string { return bandwidthFilterName }
 
+// active is unconditional: the bandwidth check needs no credential, and a zero
+// minMbps still measures every node for the [SPD:] annotation.
+func (f *bandwidthFilter) active() bool { return true }
+
 func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, []string, FilterReport) {
 	rep := FilterReport{Name: bandwidthFilterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	subset := make([]mihomo.Proxy, 0, len(survivors))
@@ -175,7 +193,6 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 	}
 
 	kept := make([]Survivor, 0, len(survivors))
-	var rejected []string
 	var slow, unreachable int
 	for _, s := range survivors {
 		o := outcomes[s.Label]
@@ -185,8 +202,13 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 			// transfer too, which is the endpoint's mood as much as the node's.
 			unreachable++
 		case f.minMbps > 0 && o.Mbps < f.minMbps:
+			// Not cached either, for the same reason as unreachable above: the
+			// concurrent downloads share one host uplink -- config.yaml says
+			// outright that this "can under-report fast nodes" -- so a dip on
+			// our side puts the whole batch under the floor. Remembering that
+			// would hide those nodes for the cache's TTL rather than re-measure
+			// them next cycle, which is cheap.
 			slow++
-			rejected = append(rejected, s.Addr)
 		default:
 			s.Mbps = o.Mbps
 			if f.annotate {
@@ -199,7 +221,9 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 		Int("kept", len(kept)).Int("slow", slow).Int("unreachable", unreachable).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{"slow": slow, "unreachable": unreachable}
-	return kept, rejected, rep
+	// Never any reject: neither drop reason is stable enough to remember, and
+	// both say so above.
+	return kept, nil, rep
 }
 
 // annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses
@@ -279,10 +303,10 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 			// a far weaker signal than the explicit refusal markers the AI
 			// checks match. The store is keyed by host with no service
 			// dimension and lives for its whole TTL, so a transient CDN error
-			// or rate-limit would evict the node from every endpoint. The
-			// refusal is still returned as a reject, so the checker's own
-			// short-lived, filter-scoped cache stops the re-testing churn
-			// without any of that blast radius.
+			// or rate-limit would evict the node from every endpoint. Having no
+			// store also means no remembered reject (apply seeds the reject
+			// cache only for store-backed checks), so a rate-limited batch
+			// costs this one cycle instead of the cache's whole TTL.
 			filters = append(filters, &apiFilter{
 				filterName: tidalFilterName,
 				check:      td.TidalCheck,

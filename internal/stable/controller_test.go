@@ -42,7 +42,9 @@ func (emptyFilterer) Filter(context.Context, *bytes.Buffer, preprocess.FilterReq
 	return preprocess.Stats{}, nil
 }
 
-func testControllerConfig(interval time.Duration, sources ...string) config.Config {
+// The interval is fixed: every caller wants a cycle that never fires a second
+// time on its own, so the test drives Apply/Reconfigure rather than the clock.
+func testControllerConfig(sources ...string) config.Config {
 	srcs := make([]config.SubscriptionSource, 0, len(sources))
 	for _, s := range sources {
 		srcs = append(srcs, config.SubscriptionSource{Name: s, URL: "https://" + s + ".example/sub"})
@@ -50,7 +52,7 @@ func testControllerConfig(interval time.Duration, sources ...string) config.Conf
 
 	return config.Config{
 		Subscriptions: config.SubscriptionsConfig{
-			Interval: interval,
+			Interval: time.Hour,
 			Check: config.CheckConfig{
 				Rounds: 1, MaxFail: 0, MaxAvgMs: 1000,
 				SourceTimeout: time.Minute, ExpectedStatus: "204",
@@ -74,7 +76,7 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 		nil, nil, zerolog.Nop(), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig(time.Hour, "alpha")); err != nil {
+	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	first := ctl.checker
@@ -82,7 +84,7 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 		t.Fatal("first Apply must start a worker")
 	}
 
-	if err := ctl.Apply(testControllerConfig(time.Hour, "alpha", "beta")); err != nil {
+	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	if ctl.checker != first {
@@ -110,7 +112,7 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 		nil, nil, zerolog.New(&logBuf), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig(time.Hour, "alpha")); err != nil {
+	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	running := ctl.checker
@@ -139,5 +141,66 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 	}
 	if idle.checker != nil {
 		t.Fatal("a zero-source config must not start a worker")
+	}
+}
+
+// bandwidthFilterConfig is a fully-specified bandwidth filter entry; only the
+// floor varies between the two Applies below.
+func bandwidthFilterConfig(minMbps int) []config.FilterConfig {
+	return []config.FilterConfig{{
+		Type:        config.FilterBandwidth,
+		MinMbps:     &minMbps,
+		TestURL:     "https://speed.example.com/x",
+		Timeout:     20 * time.Second,
+		Concurrency: 4,
+	}}
+}
+
+// TestApplyDropsRejectsWhenFilterParamsChange pins the whole chain a reload takes
+// from config to the reject cache. The cached verdicts are derived state of the
+// filter params: keeping them across a min_mbps edit suppresses nodes under a
+// floor that no longer exists, for up to the cache's 6h TTL (x1.5 jitter), which
+// is most of a day of the operator's remedy appearing to do nothing.
+//
+// The second half is the reason the reset is conditional rather than
+// unconditional: the crawler rewrites private.yaml every hour and the cycle
+// interval is 1h, so dropping the cache on every source-list edit would leave it
+// empty at every cycle -- exactly the re-testing churn it was added to stop.
+func TestApplyDropsRejectsWhenFilterParamsChange(t *testing.T) {
+	t.Parallel()
+
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, zerolog.Nop(), nil)
+	defer ctl.Stop()
+
+	cfg := testControllerConfig("alpha")
+	cfg.Filters = bandwidthFilterConfig(50)
+	if err := ctl.Apply(cfg); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	worker := ctl.checker
+	if worker == nil {
+		t.Fatal("first Apply must start a worker")
+	}
+
+	lowered := cfg
+	lowered.Filters = bandwidthFilterConfig(20)
+	_ = worker.rejects.Block(rejectKey("bandwidth", "1.1.1.1:443"))
+	if err := ctl.Apply(lowered); err != nil {
+		t.Fatalf("lowered-floor Apply: %v", err)
+	}
+	if got := worker.rejects.Len(); got != 0 {
+		t.Errorf("a min_mbps edit must drop verdicts reached under the old floor, %d left", got)
+	}
+
+	sourcesOnly := testControllerConfig("alpha", "beta")
+	sourcesOnly.Filters = lowered.Filters
+	_ = worker.rejects.Block(rejectKey("bandwidth", "1.1.1.1:443"))
+	if err := ctl.Apply(sourcesOnly); err != nil {
+		t.Fatalf("sources-only Apply: %v", err)
+	}
+	if got := worker.rejects.Len(); got != 1 {
+		t.Errorf("a sources-only reload must keep the verdicts its filters still stand behind, %d left", got)
 	}
 }

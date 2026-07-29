@@ -42,6 +42,51 @@ func TestMaybeDecodeGzip(t *testing.T) {
 	}
 }
 
+// TestMaybeDecodeAcceptsRealGeofeedRatio pins the guard against the workload it
+// actually runs on. The configured geofeed source measures 17.70:1 (4.47 MB on
+// the wire, 79.16 MB inflated, 519k rows that repeat the same registrar URLs
+// and timestamps), so a ratio anywhere near it is a live hazard: LoadAll treats
+// a guard trip as one skipped source and returns the other source's few hundred
+// lines with a NIL error, so the service would restart into a country database
+// of ~300 ranges and geo-drop nearly every node. This fixture reproduces that
+// shape -- highly repetitive CSV, not random bytes -- and must pass untouched.
+func TestMaybeDecodeAcceptsRealGeofeedRatio(t *testing.T) {
+	t.Parallel()
+
+	var raw bytes.Buffer
+	for i := 0; raw.Len() < 16<<20; i++ {
+		fmt.Fprintf(&raw, "203.0.%d.%d/24,DE,DE-BE,Berlin,10115,ripe,https://rdap.db.ripe.net/ip/203.0.113.0,2026-07-28T00:00:00Z,true,true,true,0.95,\n",
+			(i/256)%256, i%256)
+	}
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write(raw.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ratio := float64(raw.Len()) / float64(gz.Len())
+	if ratio < 15 {
+		t.Fatalf("fixture must be at least as compressible as the real feed, got %.1f:1", ratio)
+	}
+
+	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(gz.Bytes()))}
+	rc, err := fetch.MaybeDecode(resp, fetch.FileTypeGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	n, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatalf("a %.1f:1 geofeed must not trip the bomb guard: %v (inflated %d of %d)", ratio, err, n, raw.Len())
+	}
+	if n != int64(raw.Len()) {
+		t.Fatalf("inflated %d bytes, want the whole %d", n, raw.Len())
+	}
+}
+
 // TestMaybeDecodeGzipBombIsCutOff: the caller's size limit bounds the INFLATED
 // body, so a few KB of crafted gzip is otherwise free to allocate the whole
 // 256 MiB geo cap (three of those load concurrently). The guard compares

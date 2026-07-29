@@ -40,9 +40,20 @@ const (
 
 const (
 	// maxWireExpansion bounds how far a compressed body may inflate relative
-	// to the bytes actually received. The geo datasets are text and land near
-	// 5:1; a decompression bomb is orders of magnitude past that.
-	maxWireExpansion = 20
+	// to the bytes actually received.
+	//
+	// Measured, not guessed: the configured geofeed source (GeoFeed-Harvester's
+	// geofeed.csv.gz) is 4.47 MB on the wire and 79.16 MB inflated -- 17.70:1,
+	// because every one of its 519k rows repeats the same registrar URLs and
+	// timestamps. An earlier 20:1 guard left that 13% of headroom, and the cost
+	// of crossing it is not a rejected download: LoadAll counts the failure as
+	// one skipped source and returns the OTHER source's 310 lines with a nil
+	// error, so a restart would come up serving ~300 country ranges instead of
+	// 519k and geo-drop nearly every node. 100:1 keeps the guard useful --
+	// a real bomb is 400:1 and up, and the all-zero fixture in
+	// TestMaybeDecodeGzipBombIsCutOff measures ~1000:1 -- with room for the
+	// feed to grow more repetitive, which it does as it adds rows.
+	maxWireExpansion = 100
 	// expansionFloor is the output size below which the ratio is not checked.
 	// The flate reader pulls its input in fixed blocks, so the start of any
 	// stream is legitimately far ahead of the wire bytes consumed so far.

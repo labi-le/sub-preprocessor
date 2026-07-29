@@ -113,12 +113,15 @@ two stages:
 **IP-stage filters** — run per node on **both** `/` and the stable worker,
 after DNS resolution, before any probing:
 
-- `country` — keep nodes whose IP's country is in the allowed set. The
-  IP→country source is selectable per filter: `provider: geofeed` (CSV
-  geofeed sources, in-memory indexed lookup) or `provider: asn` (Team Cymru
-  DNS). `exclude_groups` / `exclude_countries` are **worker-only**: they build
-  the `/stable.txt` deny-set and never reach the `/` chain, where the allowed
-  and denied sets come from the query params alone.
+- `country` — keep nodes whose IP's country is allowed, drop those whose
+  country is denied. `provider: geofeed` judges against the same in-memory
+  database chain the `GEO` annotation resolves through (see
+  [Annotation](#annotation)); `provider: asn` judges against a Team Cymru
+  lookup instead. An IP no source can place has no country, so only an
+  allow-list can drop it. `exclude_groups` / `exclude_countries` are
+  **worker-only**: they build the `/stable.txt` deny-set and never reach the
+  `/` chain, where the allowed and denied sets come from the query params
+  alone.
 - `asn` — drop nodes whose AS name matches `deny_patterns` (regexps), and
   nodes whose Cymru-resolved country is not allowed.
 
@@ -183,10 +186,21 @@ Available providers:
 | `asn` | Team Cymru DNS | cached last resort |
 
 The `dbip`/`registry` databases are downloaded and indexed in memory only when
-an annotate chain actually references them. Note the filter/annotator
-asymmetry: the country **filter** still uses a single `provider:`
-(`geofeed`/`asn`), so a node's `[GEO:...]` tag may come from dbip while the
-filter consulted only geofeed/asn.
+an annotate chain actually references them.
+
+The country **filter** (`provider: geofeed`) judges nodes with that same chain,
+in the order the `GEO` entry's `providers:` list gives it: it consults every
+local database that list names. A node only DB-IP can place is therefore
+dropped by an `exclude_countries` naming that country and kept by a `countries`
+allow-list naming it — the filter's verdict and the `[GEO:...]` tag can no
+longer disagree. Two asymmetries remain:
+
+- `asn` is skipped by the filter: it is a per-IP Cymru round trip, not a local
+  table. A node only Cymru can place counts as unplaceable for the filter while
+  its tag names the country. Operators who want that lookup in the filter too
+  configure it explicitly as `{type: country, provider: asn}`.
+- with no `GEO` annotate entry (or one naming only `asn`), the filter falls
+  back to the geofeed alone — the one database every process loads.
 
 The DB-IP data is the free Country Lite edition, licensed CC BY 4.0 —
 [IP Geolocation by DB-IP](https://db-ip.com) (this link is the required
@@ -210,7 +224,9 @@ references them. A failed startup download logs a warning and starts empty —
 the provider chain degrades to the next provider and the next
 request-triggered refresh retries; a failed background refresh keeps the
 stale data. Loaded databases are carried across hot reloads when their config
-block is unchanged, so a reload never re-downloads them.
+block is unchanged, together with the retry schedule of a download that is
+currently failing, so a reload neither re-downloads a healthy database nor
+resets a failing one's backoff.
 
 ## Telegram crawler
 

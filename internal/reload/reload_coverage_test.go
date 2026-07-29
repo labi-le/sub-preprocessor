@@ -1,10 +1,13 @@
 package reload_test
 
 import (
+	"bytes"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -327,10 +330,13 @@ func TestReloadCoverageComplete(t *testing.T) {
 }
 
 // TestReloadClassificationMatchesBehaviour changes one key at a time and asserts
-// the recorded class is the path Reload actually takes for it: which of the
-// holder inputs (Options + Groups) the edit rebuilds, whether it trips the
-// subsAffected gate that re-applies the worker, and whether it only earns a
-// restart warning. Without this, a row could claim any reach it liked.
+// the recorded class matches where the edit lands: which of the holder inputs
+// (Options + Groups) it rebuilds, whether it trips a subsAffected gate that
+// re-applies the worker, and whether it only earns a restart warning. Without
+// this, a row could claim any reach it liked. It measures through the production
+// helpers rather than through Reload itself, because a Config pair is all a
+// mutator produces; TestReloadGatesMatchHelpers is what ties those helpers back
+// to the reloader's own gate lists.
 func TestReloadClassificationMatchesBehaviour(t *testing.T) {
 	t.Parallel()
 
@@ -431,7 +437,11 @@ func requestPathAffected(base, changed config.Config) bool {
 	return optsChanged || config.GroupsChanged(base, changed)
 }
 
-// workerAffected mirrors the reloader's subsAffected condition verbatim.
+// workerAffected re-declares the reloader's subsAffected condition, because a
+// config.Config pair is all mutatedReach has and Reload only speaks YAML files.
+// A copy nothing compares against is free to drift from the original, so
+// TestReloadGatesMatchHelpers measures both sides of every gate against a real
+// Reload before this is trusted as its mirror.
 func workerAffected(base, changed config.Config) bool {
 	return config.SubscriptionsChanged(base, changed) ||
 		config.GroupsChanged(base, changed) ||
@@ -440,7 +450,121 @@ func workerAffected(base, changed config.Config) bool {
 		config.AnnotateChanged(base, changed)
 }
 
-// restartAffected covers the three diffs Reload only warns about.
+// reloadGateFixtures pairs every gate Reload consults -- the five in its
+// subsAffected condition and the three it only warns about -- with a single-block
+// edit on top of subsYAML aimed at that gate, plus one edit aimed at none of
+// them. Written as YAML rather than as a Config mutator on purpose: Reload's only
+// inputs are the file on disk and the config it last committed, so nothing short
+// of a file exercises the real gate lists.
+var reloadGateFixtures = []struct {
+	name  string
+	yaml  string
+	apply bool // Reload hands the new config to the stable worker
+	warn  bool // Reload logs a restart-required warning
+}{
+	{
+		name:  "subscriptions",
+		yaml:  baseGeofeedYAML + "subscriptions:\n  sources:\n    - name: beta\n      url: https://example.com/sub.txt\n",
+		apply: true,
+	},
+	{name: "groups", yaml: subsYAML + "groups:\n  nordics:\n    - FI\n", apply: true},
+	{name: "filters", yaml: subsYAML + "filters:\n  - type: country\n    provider: geofeed\n", apply: true},
+	{name: "prober", yaml: subsYAML + "geoblock:\n  claude:\n    endpoint: https://other.example.com\n", apply: true},
+	{name: "annotate", yaml: subsYAML + "annotate:\n  - tag: IP\n", apply: true},
+	{name: "listen", yaml: subsYAML + "server:\n  listen: :9999\n", warn: true},
+	{name: "metrics_listen", yaml: subsYAML + "server:\n  metrics_listen: :9991\n", warn: true},
+	{name: "stores", yaml: subsYAML + "deadcache:\n  ttl: 4h\n", warn: true},
+	// The negative case: an edit no gate covers must neither re-apply the worker
+	// (or every reload would) nor claim a restart is needed.
+	{name: "unrelated", yaml: subsYAML + "resolver:\n  timeout: 10s\n"},
+}
+
+// TestReloadGatesMatchHelpers holds workerAffected and restartAffected against
+// the behaviour they claim to describe: for each fixture it drives a real
+// Reloader.Reload and compares whether ctl.Apply ran and whether a
+// restart-required warning was logged with what the two helpers say about the
+// same pair of configs. Deleting a gate from either side then fails here, which
+// the classification test alone could not catch: it never calls Reload, so a
+// FiltersChanged or GroupsChanged dropped from reloader.go left the suite green.
+func TestReloadGatesMatchHelpers(t *testing.T) {
+	t.Parallel()
+
+	for _, f := range reloadGateFixtures {
+		t.Run(f.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := reloadFixture(t, f.yaml)
+			if got.applied != f.apply {
+				t.Errorf("Reload applied=%v, want %v: this edit no longer reaches the worker", got.applied, f.apply)
+			}
+			if got.warned != f.warn {
+				t.Errorf("Reload warned=%v, want %v: this edit no longer earns its restart warning", got.warned, f.warn)
+			}
+			if w := workerAffected(got.base, got.changed); w != got.applied {
+				t.Errorf("workerAffected=%v but Reload applied=%v: the subsAffected gate list in reloader.go and its copy here have drifted", w, got.applied)
+			}
+			if r := restartAffected(got.base, got.changed); r != got.warned {
+				t.Errorf("restartAffected=%v but Reload warned=%v: the restart-warning conditions in reloader.go and their copy here have drifted", r, got.warned)
+			}
+		})
+	}
+}
+
+// reloadOutcome is what one fixture reload produced: the two configs the reloader
+// compared, plus the observable effects of its gates.
+type reloadOutcome struct {
+	base    config.Config
+	changed config.Config
+	applied bool
+	warned  bool
+}
+
+// reloadFixture commits subsYAML as the reloader's current config, then reloads
+// content on top of it. The subsYAML baseline is what isolates one gate:
+// setupReloader primes the reloader with a config that has no subscriptions
+// block, so without it every fixture would also trip SubscriptionsChanged and
+// prove nothing about its own gate.
+func reloadFixture(t *testing.T, content string) reloadOutcome {
+	t.Helper()
+
+	var logBuf bytes.Buffer
+	fake := &fakeApplier{}
+	r, _, path := setupReloader(t, zerolog.New(&logBuf), time.Now().Add(-time.Hour), fake)
+
+	writeConfig(t, path, subsYAML)
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("the subscriptions baseline must be applied and committed, got %d Apply calls", fake.calls)
+	}
+	out := reloadOutcome{base: loadFixture(t, path)}
+
+	fake.calls = 0
+	logBuf.Reset()
+	writeConfig(t, path, content)
+	r.Reload(t.Context())
+	out.changed = loadFixture(t, path)
+	if config.Equal(out.base, out.changed) {
+		t.Fatal("fixture changed nothing, so it proves nothing")
+	}
+	out.applied = fake.calls > 0
+	out.warned = strings.Contains(logBuf.String(), "requires restart")
+
+	return out
+}
+
+func loadFixture(t *testing.T, path string) config.Config {
+	t.Helper()
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load fixture config: %v", err)
+	}
+
+	return cfg
+}
+
+// restartAffected covers the three diffs Reload only warns about; like
+// workerAffected it is a copy, pinned to the real thing by
+// TestReloadGatesMatchHelpers.
 func restartAffected(base, changed config.Config) bool {
 	return config.ListenChanged(base, changed) ||
 		config.MetricsListenChanged(base, changed) ||

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,11 +44,12 @@ type DeadCache interface {
 
 // rejectCacheTTL bounds how long a through-node filter's verdict is reused
 // without re-testing the node. Deliberately far shorter than the geoblock
-// store's TTL: "the node never answered" is stable, but "measured below the
-// floor" or "the service refused this egress right now" can reverse, so a
-// recovered node must come back within a handful of cycles (the shipped
-// interval is 1h). DeadSet's jitter keeps those expiries from landing as one
-// batch.
+// store's TTL: "the node never answered" is stable, but "the service refused
+// this egress right now" can reverse, so a recovered node must come back within
+// a handful of cycles (the shipped interval is 1h). DeadSet's jitter keeps those
+// expiries from landing as one batch. The TTL only bounds staleness in time; a
+// verdict is also dropped outright when the config behind it changes, see
+// Reconfigure.
 const rejectCacheTTL = 6 * time.Hour
 
 // CheckerSpec is the config-derived half of a Checker: everything a config
@@ -63,6 +65,24 @@ type CheckerSpec struct {
 	SourceTimeout time.Duration
 	Prober        Prober
 	Filters       []NodeFilter
+	// FilterParams is the through-node filter configuration Filters was built
+	// from. It exists so Reconfigure can tell a filter-chain change from an
+	// unrelated one; a NodeFilter is an opaque closure and cannot be compared.
+	FilterParams NodeFilterParams
+}
+
+// NodeFilterParams is everything that can change what a through-node filter
+// makes of a node: which filters run and in what order, plus the merged params
+// each was built from. Deliberately not the whole GeoBlockConfig -- db_path and
+// ttl configure the store, not a verdict, and a reload that only moves the
+// database must not throw away good verdicts.
+type NodeFilterParams struct {
+	Names     []string
+	Gemini    config.GeminiConfig
+	Claude    config.ClaudeConfig
+	ChatGPT   config.ChatGPTConfig
+	Tidal     config.TidalConfig
+	Bandwidth config.BandwidthConfig
 }
 
 // Checker periodically fetches sources through the preprocess pipeline, merges
@@ -82,10 +102,10 @@ type Checker struct {
 	store Blocklist
 	dead  DeadCache
 	// rejects remembers through-node filter verdicts, keyed by filter name and
-	// Entry.Addr, so tidal and bandwidth stop re-testing the same rejects every
-	// cycle. Separate from dead (different lifetime) and from store (the
-	// geoblock store is host-keyed, service-less and 30 days long, which is the
-	// wrong shape for a speed or CDN verdict). Never nil.
+	// Entry.Addr, so the store-backed API checks stop re-testing the same
+	// refusals every cycle. Separate from dead (different lifetime) and from
+	// store (the geoblock store is host-keyed, service-less and 30 days long,
+	// which is the wrong shape for a per-service reject). Never nil.
 	rejects  *DeadSet
 	holder   *Holder
 	logger   zerolog.Logger
@@ -118,7 +138,19 @@ func NewChecker(
 
 // Reconfigure swaps the settings the next cycle will use. A cycle already in
 // flight keeps the spec it started with, so a reload never discards its work.
+//
+// A changed filter chain also drops the reject cache: those verdicts are derived
+// state of the params that produced them, so after a min_mbps or endpoint edit
+// they are evidence about a rule no longer in force -- and since filterDead
+// consults the cache BEFORE the probe, keeping them would make the operator's
+// corrective edit look inert for the rest of the TTL. The reset is deliberately
+// NOT unconditional: the crawler rewrites private.yaml every hour, and dropping
+// the cache on every source-list edit would leave it empty at every cycle, which
+// is precisely the churn it exists to stop.
 func (c *Checker) Reconfigure(spec CheckerSpec) {
+	if !reflect.DeepEqual(c.spec.Load().FilterParams, spec.FilterParams) {
+		c.rejects.Reset()
+	}
 	c.spec.Store(&spec)
 	select {
 	case c.reload <- struct{}{}:
@@ -424,7 +456,7 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 // counted apart so a log line says which cache is holding a node back.
 type skipCounts struct {
 	Dead   int // a recent probe found the node unreachable
-	Reject int // a through-node filter still in the chain rejected it
+	Reject int // an active through-node filter rejected it in a recent cycle
 }
 
 func (s skipCounts) Total() int { return s.Dead + s.Reject }
@@ -432,17 +464,30 @@ func (s skipCounts) Total() int { return s.Dead + s.Reject }
 // rejectKey scopes a cached filter verdict to the filter that produced it, so
 // dropping a filter from the config immediately stops its verdicts from
 // suppressing nodes — the alternative, a bare address key, would keep hiding
-// them for the rest of the TTL under a rule no longer in force.
+// them for the rest of the TTL under a rule no longer in force. A name cannot
+// tell one min_mbps or endpoint from another, which is why Reconfigure drops the
+// whole cache when a filter's params change.
 func rejectKey(filterName, addr string) string {
 	return filterName + "\x00" + addr
 }
 
 // filterDead drops nodes a recent cycle already ruled out so the probe only
 // re-tests live/unknown nodes: nodes the dead cache saw fail their probe, and
-// nodes a through-node filter in the CURRENT chain rejected for a stable
-// reason. It returns the nodes to probe, the skip breakdown, and false when
-// nothing remains to probe (caller keeps the previous list).
+// nodes a through-node filter that is in the CURRENT chain AND active rejected
+// for a stable reason. It returns the nodes to probe, the skip breakdown, and
+// false when nothing remains to probe (caller keeps the previous list).
 func (c *Checker) filterDead(spec *CheckerSpec, entries []Entry) (probe []Entry, skipped skipCounts, ok bool) {
+	// Resolved once per cycle rather than per node: a filter that will not run
+	// this cycle (a gemini whose key file went unreadable, say) keeps every
+	// survivor in apply, so letting its old verdicts drop nodes here would
+	// suppress them under a check nothing is performing any more.
+	suppressing := make([]string, 0, len(spec.Filters))
+	for _, f := range spec.Filters {
+		if f.active() {
+			suppressing = append(suppressing, f.name())
+		}
+	}
+
 	probe = make([]Entry, 0, len(entries))
 entry:
 	for _, e := range entries {
@@ -450,8 +495,8 @@ entry:
 			skipped.Dead++
 			continue
 		}
-		for _, f := range spec.Filters {
-			if c.rejects.Blocked(rejectKey(f.name(), e.Addr)) {
+		for _, name := range suppressing {
+			if c.rejects.Blocked(rejectKey(name, e.Addr)) {
 				skipped.Reject++
 				continue entry
 			}

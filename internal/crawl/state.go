@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"time"
 
@@ -20,12 +21,16 @@ type channelState struct {
 
 // state is the crawler's persistent memory across cycles: which channels proved
 // productive (they become depth-0 seeds until they go stale past the TTL), and
-// whether a cycle already asked to bulk-prune the managed corpus.
+// which bulk-prune proposal a cycle already made and was refused.
 type state struct {
 	Productive map[string]channelState `json:"productive"`
-	// BulkPruneAt is when a cycle first proposed deleting a large slice of the
-	// managed corpus and was refused; see confirmBulkPrune.
-	BulkPruneAt time.Time `json:"bulk_prune_at,omitzero"`
+	// BulkPruneAt and BulkPruneURLs are the refused proposal: when a cycle
+	// first asked to delete a large slice of the managed corpus, and the sorted
+	// set of URLs it asked to delete. The URL set is half the record — a bare
+	// timestamp lets a refusal recorded for one deletion authorize a completely
+	// different one made later. See confirmBulkPrune.
+	BulkPruneAt   time.Time `json:"bulk_prune_at,omitzero"`
+	BulkPruneURLs []string  `json:"bulk_prune_urls,omitempty"`
 	// loadFailed marks state that stands in for a file loadState could not
 	// read or parse. saveState refuses to write it: the real file may hold
 	// weeks of productive-channel memory that nothing can reconstruct, and a
@@ -82,34 +87,98 @@ func (s *state) prune(cutoff time.Time) {
 	}
 }
 
-// bulkPruneConfirmAfter is how long a refused bulk prune must stand before a
-// later cycle may carry it out. Six hours outlasts the faults that fabricate a
-// mass-death verdict (tunnel restarts, provider outages, a captive portal
-// answering 404 for everything) yet still lets a genuine mass expiry converge
-// the same day.
-const bulkPruneConfirmAfter = 6 * time.Hour
+const (
+	// bulkPruneConfirmAfter is how long a refused bulk prune must stand before a
+	// later cycle may carry it out. Six hours outlasts the faults that fabricate
+	// a mass-death verdict (tunnel restarts, provider outages, a captive portal
+	// answering 404 for everything) yet still lets a genuine mass expiry converge
+	// the same day.
+	bulkPruneConfirmAfter = 6 * time.Hour
 
-// confirmBulkPrune reports whether a cycle may delete a large slice of the
-// managed corpus. The first such cycle is refused and remembered; only a cycle
-// at least bulkPruneConfirmAfter later is honoured, and honouring it consumes
-// the record so the next mass deletion must earn its own confirmation. With no
-// state file (StatePath empty) nothing is remembered and every bulk prune is
-// refused — the safe direction.
-func (s *state) confirmBulkPrune(now time.Time) bool {
-	if s.BulkPruneAt.IsZero() {
+	// bulkPruneRecordTTL bounds how long a refusal stays confirmable. Cycles run
+	// hourly, so a real mass expiry re-proposes itself on the first cycle past
+	// the six-hour mark; a record still unconfirmed a day later means every
+	// cycle in between either found those sources alive or never reached the
+	// merge, and consenting then would be consenting on day-old evidence. Past
+	// the TTL the proposal counts as brand new: refused, and re-armed.
+	bulkPruneRecordTTL = 24 * time.Hour
+
+	// bulkPruneOverlap is how much of the refused set, in percent, a later cycle
+	// must re-propose for the record to authorize it. Demanding an identical set
+	// would never converge on a real mass expiry — one source recovering, or one
+	// more dying, between the two cycles would restart the wait forever. Asking
+	// only that the new proposal contain the old one would let a refusal covering
+	// 12 sources authorize deleting 200. So the test is symmetric on the larger
+	// set: neither proposal may differ from the other by more than a fifth.
+	bulkPruneOverlap = 80
+)
+
+// confirmBulkPrune reports whether a cycle may delete the managed URLs in
+// condemned (which must be sorted), and whether the record changed and has to
+// be persisted.
+//
+// The first proposal is refused and remembered. Only a cycle that re-proposes
+// substantially the same deletion (sameProposal), between bulkPruneConfirmAfter
+// and bulkPruneRecordTTL after that refusal, is honoured — and honouring it
+// consumes the record, so the next mass deletion earns its own confirmation.
+// Anything else is itself a first proposal: refused, with the record replaced by
+// it. With no state file (StatePath empty) nothing is remembered and every bulk
+// prune is refused — the safe direction.
+func (s *state) confirmBulkPrune(now time.Time, condemned []string) (allow, changed bool) {
+	if s.BulkPruneAt.IsZero() ||
+		now.After(s.BulkPruneAt.Add(bulkPruneRecordTTL)) ||
+		!sameProposal(s.BulkPruneURLs, condemned) {
 		s.BulkPruneAt = now
-		return false
+		s.BulkPruneURLs = slices.Clone(condemned)
+		return false, true
 	}
 	if now.Before(s.BulkPruneAt.Add(bulkPruneConfirmAfter)) {
-		return false
+		// The record already describes this proposal, so its timestamp stays
+		// put: re-arming on every hourly cycle would push the deadline out
+		// forever and a genuine mass expiry would never converge. The recorded
+		// URL set is frozen for the same reason — refreshing it to each cycle's
+		// slightly different set would let the proposal drift arbitrarily far
+		// from the one that was actually refused.
+		return false, false
 	}
-	s.BulkPruneAt = time.Time{}
-	return true
+	s.BulkPruneAt, s.BulkPruneURLs = time.Time{}, nil
+	return true, true
 }
 
-// clearBulkPrune forgets a pending proposal, so an old refusal can never
+// sameProposal reports whether proposed re-proposes substantially the recorded
+// refused set (bulkPruneOverlap). Both slices must be sorted, which makes the
+// intersection a merge walk that allocates nothing.
+func sameProposal(recorded, proposed []string) bool {
+	if len(recorded) == 0 || len(proposed) == 0 {
+		return false
+	}
+	common := 0
+	for i, j := 0, 0; i < len(recorded) && j < len(proposed); {
+		switch {
+		case recorded[i] == proposed[j]:
+			common++
+			i++
+			j++
+		case recorded[i] < proposed[j]:
+			i++
+		default:
+			j++
+		}
+	}
+	return common*percentScale >= max(len(recorded), len(proposed))*bulkPruneOverlap
+}
+
+// clearBulkPrune forgets a pending proposal, reporting whether there was one to
+// forget. A cycle that reaches the merge and proposes no bulk deletion has
+// withdrawn any earlier one, so an old refusal can never be left standing to
 // authorize a later, unrelated mass deletion.
-func (s *state) clearBulkPrune() { s.BulkPruneAt = time.Time{} }
+func (s *state) clearBulkPrune() (changed bool) {
+	if s.BulkPruneAt.IsZero() && s.BulkPruneURLs == nil {
+		return false
+	}
+	s.BulkPruneAt, s.BulkPruneURLs = time.Time{}, nil
+	return true
+}
 
 // seeds returns the persisted productive channel slugs.
 func (s *state) seeds() []string {

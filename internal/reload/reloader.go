@@ -62,12 +62,12 @@ func NewReloader(
 }
 
 // Reload loads the config from disk and, if it changed and is valid, builds a
-// new Processor and atomically swaps it into the holder. Geofeed data (lookup +
-// LoadedAt) is carried over when geofeed.sources are unchanged, avoiding a
-// re-download; dbip/registry data is carried the same way when its config
-// block is unchanged, as are the DNS and ASN resolvers (with their caches)
-// when resolver.*/geo.asn.* are unchanged. Any error keeps the previously
-// applied settings.
+// new Processor and atomically swaps it into the holder. Geofeed state (the
+// lookup, its load time and the retry schedule in flight) is carried over when
+// geofeed.sources are unchanged, avoiding a re-download; dbip/registry state is
+// carried the same way when its config block is unchanged, as are the DNS and
+// ASN resolvers (with their caches) when resolver.*/geo.asn.* are unchanged.
+// Any error keeps the previously applied settings.
 func (r *Reloader) Reload(ctx context.Context) {
 	newCfg, err := config.Load(r.path)
 	if err != nil {
@@ -93,21 +93,15 @@ func (r *Reloader) Reload(ctx context.Context) {
 	// failed Apply the two diverge, and carrying geofeed data across the wrong
 	// source set would serve stale countries.
 	if !config.GeofeedSourcesChanged(r.currentProcCfg, newCfg) {
-		lookup, at := r.currentProc.GeofeedState()
-		opts.PreloadedGeofeed = lookup
-		opts.PreloadedLoadedAt = at
+		opts.PreloadedGeofeed = r.currentProc.GeofeedState()
 	}
-	// Same discipline for the downloaded geo databases; a nil state (provider
+	// Same discipline for the downloaded geo databases; a zero state (provider
 	// not built in the current processor) simply leaves the preload unset.
 	if !config.DBIPChanged(r.currentProcCfg, newCfg) {
-		lookup, at := r.currentProc.DBIPState()
-		opts.PreloadedDBIP = lookup
-		opts.PreloadedDBIPLoadedAt = at
+		opts.PreloadedDBIP = r.currentProc.DBIPState()
 	}
 	if !config.RegistryChanged(r.currentProcCfg, newCfg) {
-		lookup, at := r.currentProc.RegistryState()
-		opts.PreloadedRegistry = lookup
-		opts.PreloadedRegistryLoadedAt = at
+		opts.PreloadedRegistry = r.currentProc.RegistryState()
 	}
 	// The DNS and Cymru caches are the only carried state whose value is the
 	// cache itself rather than a download: dropping them re-resolves every
