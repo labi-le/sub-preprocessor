@@ -40,8 +40,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/theavel/free-vless-proxy/main/all.txt
     - name: yafeisun
       url: https://raw.githubusercontent.com/yafeisun/v2raynode/refs/heads/main/result/karing.txt
-    - name: jagger
-      url: https://raw.githubusercontent.com/jagger235711/V2rayCollector/main/results/vless.txt
     - name: wlunlocker
       url: https://raw.githubusercontent.com/wlunlocker/vpn-configs/main/blacklist_vpn1.txt
     - name: ishalumi
@@ -54,8 +52,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
     - name: prince
       url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
-    - name: qjlxg
-      url: https://raw.githubusercontent.com/qjlxg/eastmoney/main/all_nodes.txt
     - name: niqonopin
       url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
     - name: wind7077
@@ -66,14 +62,6 @@ subscriptions:
       url: https://etoneya.su/other
     - name: etoneya-best
       url: https://etoneya.best/other
-    - name: etoneya-alley
-      url: https://alley.serv00.net/other
-    - name: etoneya-tenshi
-      url: https://internet-tenshi.kangel.tech/other
-    - name: etoneya-blacklist
-      url: https://blacklist.etoneya.baby
-    - name: etoneya-etoskam
-      url: https://etoskam.ru/other
     - name: etoneyaproject
       url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
     - name: bywarm-selected
@@ -82,8 +70,6 @@ subscriptions:
       url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/wl.txt
     - name: bywarm-merged
       url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt
-    - name: wlrus
-      url: https://wlrus.lol/confs/blackl.txt
     - name: goida
       url: https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
     - name: igareck-white
@@ -104,12 +90,8 @@ subscriptions:
       url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
     - name: genlib
       url: https://raw.githubusercontent.com/gergew452/Generation-Liberty/refs/heads/main/githubmirror/best.txt
-    - name: noname-de
-      url: https://white-lists.vercel.app/api/filter?code=DE&type=white&min=false
     - name: gbr
       url: https://gbr.mydan.online/configs
-    - name: mygala
-      url: https://mygala.ru/vpn/subscription.txt
     - name: whitelist-sanuyyq
       url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
     - name: lime
@@ -122,3 +104,19 @@ subscriptions:
       url: https://rostunnel.vercel.app/mega.txt
     - name: abikus
       url: https://cdn.jsdelivr.net/gh/AbikusSudo/RussiaVPN@main/docs/index.html
+    - name: zmxoo
+      url: https://tian.zmxoo.xyz/linkapi
+    - name: flat447
+      url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
+    - name: fastnodes-se
+      url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/countries/SE.txt
+    - name: fastnodes-fi
+      url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/countries/FI.txt
+    - name: vify
+      url: https://raw.githubusercontent.com/Mr-Meshky/vify/main/configs/alive.txt
+    - name: bocchi2b
+      url: https://links.bocchi2b.top/clash
+    - name: zhuhaiuk
+      url: https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt
+    - name: xrayvip
+      url: https://www.xrayvip.com/free.txt
