@@ -34,6 +34,7 @@ filters:
   - type: country
     provider: geofeed
     # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop. NOTE: this key only ever affects /stable.txt -- on / the countries come from the query params
+  - type: gemini # keyed gate: the location verdict is visible ONLY to a valid credential (geoblock.gemini.key_file/key_var) -- keyless the API answers 403 "unregistered callers", a junk key 400 API_KEY_INVALID, both decided BEFORE it looks at the egress country. A rejected key no longer passes as "not blocked": the check warns and counts those nodes
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: tidal # keyless reachability: keep a node only if api.tidal.com answers it. A refused egress (e.g. RU) dies at CloudFront with a 403 and no JSON. The reported country is NOT checked against Tidal's markets: that gates where a subscription can be bought, not where an existing one plays

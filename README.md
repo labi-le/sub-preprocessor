@@ -135,7 +135,16 @@ probe, routing real requests *through* each surviving node:
   do). Blocked hosts are recorded in the geoblock store and dropped.
   Requires an API key (`geoblock.gemini.key_file` in agenix `KEY=VALUE`
   format, `key_var`, or inline `api_key`); without a key the filter is
-  skipped.
+  skipped — and it cannot be made keyless. Measured from a geo-blocked
+  egress, the API answers in this order: caller identity (403 `Method
+  doesn't allow unregistered callers` when no key is sent), key validity
+  (400 `API_KEY_INVALID` for a junk key), and only then the location
+  precondition (400 `FAILED_PRECONDITION` + the marker) — so the verdict
+  this gate reads is invisible to anything but a working credential. For
+  the same reason a response that never reached the location check — key
+  rotated or restricted, wrong `model` (404), quota (429) — is not read as
+  "not blocked": those nodes are counted, warned about, and kept
+  unverified.
 - `claude` — same idea, keyless: the Anthropic endpoint answers 403
   `Request not allowed` from blocked regions. Also feeds the geoblock store.
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
