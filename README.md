@@ -151,15 +151,15 @@ probe, routing real requests *through* each surviving node:
   `unsupported_country` for an egress it refuses. Also feeds the geoblock
   store.
 - `tidal` — keyless as well, and the only **fail-closed** gate: a node is kept
-  only when Tidal actually answered it, i.e. `GET api.tidal.com/v1/country`
-  returned `200` with a readable `{"countryCode": "XX" }`. Where Tidal refuses
+  only when `GET api.tidal.com/v1/country` came back `2xx`. Where Tidal refuses
   an egress the request never reaches the API — measured from a Russian egress,
-  CloudFront answers `403` with an HTML error page and no JSON — so "nothing to
-  parse" is the refusal, not an inconclusive result.
-  The country itself is **not** compared against Tidal's 61 markets: that list
-  gates where a subscription can be *bought*, while an existing subscriber
-  streams fine from a country Tidal merely does not sell in. Only a hard
-  refusal makes a node unusable.
+  CloudFront answers `403` with an HTML error page — so there is no refusal
+  marker to match and the status is the whole verdict (redirects are not
+  followed, so a `3xx` interstitial is a refusal too). The response body is not
+  read at all: the country it carries only says where Tidal *sells*
+  subscriptions, not where an existing one streams. The tradeoff of judging by
+  status alone: a node whose upstream answers `2xx` from something that is not
+  Tidal (ISP block page, captive portal) counts as passed.
   It deliberately does **not** feed the geoblock store either: a bare status
   code is a weaker signal than the other checks' refusal markers, and the store
   is host-keyed for its whole TTL, so one CDN hiccup would evict the node from
