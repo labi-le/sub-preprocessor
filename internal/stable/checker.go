@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,16 +41,6 @@ type DeadCache interface {
 	Prune() error
 }
 
-// rejectCacheTTL bounds how long a through-node filter's verdict is reused
-// without re-testing the node. Deliberately far shorter than the geoblock
-// store's TTL: "the node never answered" is stable, but "the service refused
-// this egress right now" can reverse, so a recovered node must come back within
-// a handful of cycles (the shipped interval is 1h). DeadSet's jitter keeps those
-// expiries from landing as one batch. The TTL only bounds staleness in time; a
-// verdict is also dropped outright when the config behind it changes, see
-// Reconfigure.
-const rejectCacheTTL = 6 * time.Hour
-
 // CheckerSpec is the config-derived half of a Checker: everything a config
 // reload can change. RunOnce reads it once per cycle, so a reload landing
 // mid-cycle configures the next cycle instead of rewriting the running one.
@@ -65,24 +54,6 @@ type CheckerSpec struct {
 	SourceTimeout time.Duration
 	Prober        Prober
 	Filters       []NodeFilter
-	// FilterParams is the through-node filter configuration Filters was built
-	// from. It exists so Reconfigure can tell a filter-chain change from an
-	// unrelated one; a NodeFilter is an opaque closure and cannot be compared.
-	FilterParams NodeFilterParams
-}
-
-// NodeFilterParams is everything that can change what a through-node filter
-// makes of a node: which filters run and in what order, plus the merged params
-// each was built from. Deliberately not the whole GeoBlockConfig -- db_path and
-// ttl configure the store, not a verdict, and a reload that only moves the
-// database must not throw away good verdicts.
-type NodeFilterParams struct {
-	Names     []string
-	Gemini    config.GeminiConfig
-	Claude    config.ClaudeConfig
-	ChatGPT   config.ChatGPTConfig
-	Tidal     config.TidalConfig
-	Bandwidth config.BandwidthConfig
 }
 
 // Checker periodically fetches sources through the preprocess pipeline, merges
@@ -99,14 +70,8 @@ type Checker struct {
 	filterer func() Filterer
 	// store is the same Blocklist the apiFilters write through. The checker
 	// holds it only to prune it once per cycle; it never writes to it.
-	store Blocklist
-	dead  DeadCache
-	// rejects remembers through-node filter verdicts, keyed by filter name and
-	// Entry.Addr, so the store-backed API checks stop re-testing the same
-	// refusals every cycle. Separate from dead (different lifetime) and from
-	// store (the geoblock store is host-keyed, service-less and 30 days long,
-	// which is the wrong shape for a per-service reject). Never nil.
-	rejects  *DeadSet
+	store    Blocklist
+	dead     DeadCache
 	holder   *Holder
 	logger   zerolog.Logger
 	reporter Reporter
@@ -126,7 +91,6 @@ func NewChecker(
 		filterer: filterer,
 		store:    store,
 		dead:     dead,
-		rejects:  NewDeadSet(rejectCacheTTL),
 		holder:   holder,
 		logger:   logger,
 		reporter: reporter,
@@ -138,19 +102,7 @@ func NewChecker(
 
 // Reconfigure swaps the settings the next cycle will use. A cycle already in
 // flight keeps the spec it started with, so a reload never discards its work.
-//
-// A changed filter chain also drops the reject cache: those verdicts are derived
-// state of the params that produced them, so after a min_mbps or endpoint edit
-// they are evidence about a rule no longer in force -- and since filterDead
-// consults the cache BEFORE the probe, keeping them would make the operator's
-// corrective edit look inert for the rest of the TTL. The reset is deliberately
-// NOT unconditional: the crawler rewrites private.yaml every hour, and dropping
-// the cache on every source-list edit would leave it empty at every cycle, which
-// is precisely the churn it exists to stop.
 func (c *Checker) Reconfigure(spec CheckerSpec) {
-	if !reflect.DeepEqual(c.spec.Load().FilterParams, spec.FilterParams) {
-		c.rejects.Reset()
-	}
 	c.spec.Store(&spec)
 	select {
 	case c.reload <- struct{}{}:
@@ -199,14 +151,13 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
-	probe, skipped, ok := c.filterDead(spec, entries)
+	probe, skipped, ok := c.filterDead(entries)
 	if !ok {
 		c.reportError()
 		return nil
 	}
 
-	c.logger.Info().Int("nodes", len(probe)).
-		Int("dead_skipped", skipped.Dead).Int("reject_skipped", skipped.Reject).
+	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", skipped).
 		Int("rounds", spec.Rounds).Msg("probing merged nodes")
 	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
 	if err != nil {
@@ -250,8 +201,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.logger.Info().
 		Int("sources_ok", len(bodies)).
 		Int("merged", len(entries)).
-		Int("dead_skipped", skipped.Dead).
-		Int("reject_skipped", skipped.Reject).
+		Int("dead_skipped", skipped).
 		Int("probed", len(probe)).
 		Int("kept", len(survivors)).
 		Msg("stable list updated")
@@ -260,7 +210,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		SourcesOK:     len(bodies),
 		SourcesTotal:  len(spec.Sources),
 		Merged:        len(entries),
-		DeadSkipped:   skipped.Total(),
+		DeadSkipped:   skipped,
 		Probed:        len(probe),
 		Kept:          len(survivors),
 		GeoUnknown:    geoUnknownCount(survivors),
@@ -360,12 +310,8 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 	}
 	reports := make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {
-		var (
-			rep      FilterReport
-			rejected []string
-		)
-		survivors, rejected, rep = f.apply(ctx, survivors, byLabel)
-		c.recordRejects(f.name(), rejected)
+		var rep FilterReport
+		survivors, rep = f.apply(ctx, survivors, byLabel)
 		reports = append(reports, rep)
 	}
 
@@ -451,64 +397,29 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 	return bodies, reports
 }
 
-// skipCounts breaks down the merged nodes a cycle chose not to probe. Both
-// reasons feed one funnel gauge (merged = skipped + probed), but they are
-// counted apart so a log line says which cache is holding a node back.
-type skipCounts struct {
-	Dead   int // a recent probe found the node unreachable
-	Reject int // an active through-node filter rejected it in a recent cycle
-}
-
-func (s skipCounts) Total() int { return s.Dead + s.Reject }
-
-// rejectKey scopes a cached filter verdict to the filter that produced it, so
-// dropping a filter from the config immediately stops its verdicts from
-// suppressing nodes — the alternative, a bare address key, would keep hiding
-// them for the rest of the TTL under a rule no longer in force. A name cannot
-// tell one min_mbps or endpoint from another, which is why Reconfigure drops the
-// whole cache when a filter's params change.
-func rejectKey(filterName, addr string) string {
-	return filterName + "\x00" + addr
-}
-
-// filterDead drops nodes a recent cycle already ruled out so the probe only
-// re-tests live/unknown nodes: nodes the dead cache saw fail their probe, and
-// nodes a through-node filter that is in the CURRENT chain AND active rejected
-// for a stable reason. It returns the nodes to probe, the skip breakdown, and
-// false when nothing remains to probe (caller keeps the previous list).
-func (c *Checker) filterDead(spec *CheckerSpec, entries []Entry) (probe []Entry, skipped skipCounts, ok bool) {
-	// Resolved once per cycle rather than per node: a filter that will not run
-	// this cycle (a gemini whose key file went unreadable, say) keeps every
-	// survivor in apply, so letting its old verdicts drop nodes here would
-	// suppress them under a check nothing is performing any more.
-	suppressing := make([]string, 0, len(spec.Filters))
-	for _, f := range spec.Filters {
-		if f.active() {
-			suppressing = append(suppressing, f.name())
-		}
-	}
-
+// filterDead drops the nodes the dead cache saw fail a recent probe, so the
+// probe only re-tests live/unknown ones. It returns the nodes to probe, how
+// many it skipped, and false when nothing remains to probe (caller keeps the
+// previous list).
+//
+// A through-node filter's verdict is deliberately absent here: the checks whose
+// verdict is worth reusing write the geoblock store instead, and preprocess
+// drops those hosts a whole stage earlier, before the node is ever merged.
+func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, ok bool) {
 	probe = make([]Entry, 0, len(entries))
-entry:
 	for _, e := range entries {
 		if c.dead != nil && c.dead.Blocked(e.Addr) {
-			skipped.Dead++
+			deadSkipped++
 			continue
-		}
-		for _, name := range suppressing {
-			if c.rejects.Blocked(rejectKey(name, e.Addr)) {
-				skipped.Reject++
-				continue entry
-			}
 		}
 		probe = append(probe, e)
 	}
 	if len(probe) == 0 {
-		c.logger.Warn().Int("dead_skipped", skipped.Dead).Int("reject_skipped", skipped.Reject).
+		c.logger.Warn().Int("dead_skipped", deadSkipped).
 			Msg("every merged node was recently ruled out; keeping previous stable list")
-		return nil, skipped, false
+		return nil, deadSkipped, false
 	}
-	return probe, skipped, true
+	return probe, deadSkipped, true
 }
 
 // recordDead caches nodes that returned no successful probe so later cycles
@@ -524,19 +435,6 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
 	}
 }
 
-// recordRejects remembers the nodes one through-node filter rejected, so the
-// next cycle skips them instead of paying for the same test again. An empty
-// address is dropped rather than stored: it is not a node key, and one such
-// entry would match every address-less lookup at once.
-func (c *Checker) recordRejects(filterName string, addrs []string) {
-	for _, addr := range addrs {
-		if addr == "" {
-			continue
-		}
-		_ = c.rejects.Block(rejectKey(filterName, addr))
-	}
-}
-
 // pruneCaches sheds expired entries from every TTL cache this cycle wrote to.
 // One call site on purpose: the geoblock store spent its life pruned only at
 // process start precisely because its cleanup lived nowhere in the cycle.
@@ -544,7 +442,6 @@ func (c *Checker) pruneCaches() {
 	if c.dead != nil {
 		_ = c.dead.Prune()
 	}
-	_ = c.rejects.Prune()
 	if c.store != nil {
 		_ = c.store.Prune()
 	}

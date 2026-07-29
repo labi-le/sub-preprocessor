@@ -87,7 +87,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_sources_ok", "Sources that returned a usable body last cycle.", float64(r.SourcesOK))
 	gauge(w, "stable_sources_total", "Sources configured.", float64(r.SourcesTotal))
 	gauge(w, "stable_merged_nodes", "Unique nodes after merge/dedupe.", float64(r.Merged))
-	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: recently dead, or recently rejected by a through-node filter.", float64(r.DeadSkipped))
+	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: a recent probe found them dead.", float64(r.DeadSkipped))
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))

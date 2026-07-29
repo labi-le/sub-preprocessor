@@ -85,17 +85,16 @@ Every `subscriptions.interval` it:
 3. merges and dedupes nodes by lowercased `server:port` (first source wins,
    config order),
 4. relabels each kept node to `<source>-NNN`,
-5. skips nodes a recent cycle already ruled out — proven dead (in-memory dead
-   cache, `deadcache.ttl`) or rejected by a through-node filter that is still
-   configured (in-memory reject cache, 6h),
+5. skips nodes a recent probe already proved dead (in-memory dead cache,
+   `deadcache.ttl`),
 6. probes the rest with an embedded **Mihomo URL test** (HEAD requests through
    each node, `check.rounds` rounds, one shared concurrency semaphore),
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `bandwidth`) on the survivors; a refusal or a
-   below-floor speed goes into the reject cache so the next cycle does not
-   repeat the test,
+   `chatgpt` / `tidal` / `bandwidth`) on the survivors; a `gemini`/`claude`/
+   `chatgpt` geo-block writes the node's host to the geoblock store, so step 2
+   drops it on every later cycle. Every other drop lasts this cycle only,
 9. atomically publishes the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
@@ -210,9 +209,8 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Expired entries are swept once per worker cycle, not only at startup |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
-| reject cache (6h, not configurable) | in-memory, not persisted | `server:port` of nodes a through-node filter rejected (service refusal, speed below `min_mbps`), keyed per filter so removing a filter clears its effect at once; skipped before probing. Short and jittered on purpose: unlike "never answered", these verdicts reverse |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
 | geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
@@ -341,7 +339,7 @@ hand-rolled Prometheus text exposition (no `client_golang` — the
 `protobuf => metacubex/protobuf-go` replace in `go.mod` makes it risky):
 cycle funnel (`stable_merged_nodes`, `stable_probed_nodes`,
 `stable_kept_nodes`, `stable_dead_skipped_nodes` — the last counts every node
-skipped before probing, dead-cached or filter-rejected, so the funnel closes),
+skipped before probing, all of them dead-cached, so the funnel closes),
 per-source and per-filter in/kept/dropped-by-reason counters, kept-node speed
 histogram, cycle duration, success timestamp, and cycle/failure totals.
 

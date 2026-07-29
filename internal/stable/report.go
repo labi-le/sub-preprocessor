@@ -9,9 +9,8 @@ type CycleReport struct {
 	SourcesOK    int
 	SourcesTotal int
 	Merged       int
-	// DeadSkipped counts merged nodes the cycle did not probe because a recent
-	// cycle already ruled them out — the dead cache, or a through-node filter
-	// still in the chain. Both together, so the funnel adds up:
+	// DeadSkipped counts merged nodes the cycle did not probe because the dead
+	// cache still holds a recent failed probe for them, so the funnel adds up:
 	// Merged = DeadSkipped + Probed.
 	DeadSkipped int
 	Probed      int

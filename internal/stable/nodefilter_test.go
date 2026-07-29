@@ -1,18 +1,15 @@
 package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
-	"time"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
-	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -37,7 +34,7 @@ func TestBandwidthFilterApply(t *testing.T) {
 	}
 
 	f := &bandwidthFilter{minMbps: 10, annotate: true, check: check, logger: zerolog.Nop()}
-	kept, rejected, _ := f.apply(context.Background(), survivors, nil)
+	kept, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 || kept[0].Label != "s-001" {
 		t.Fatalf("expected only s-001 kept, got %+v", kept)
 	}
@@ -47,33 +44,24 @@ func TestBandwidthFilterApply(t *testing.T) {
 	if !strings.Contains(kept[0].Tagged, "[SPD:50M]") {
 		t.Fatalf("missing speed tag: %q", kept[0].Tagged)
 	}
-	// Nothing is cached. Both drop reasons here describe our side, not the
-	// node: s-003 answered nothing, and s-002's sub-floor speed is measured
-	// over a host uplink shared by the concurrent downloads. Caching either
-	// would hide the node from /stable.txt for the whole cache TTL -- and
-	// because filterDead consults that cache before the probe, a bad minute on
-	// our uplink would take the whole batch out for hours.
-	if len(rejected) != 0 {
-		t.Fatalf("a bandwidth verdict must never be cached, got %v", rejected)
-	}
 
 	// annotate=false: kept but no tag injected.
 	f2 := &bandwidthFilter{minMbps: 10, annotate: false, check: check, logger: zerolog.Nop()}
-	kept2, _, _ := f2.apply(context.Background(), survivors, nil)
+	kept2, _ := f2.apply(context.Background(), survivors, nil)
 	if len(kept2) != 1 || strings.Contains(kept2[0].Tagged, "[SPD:") {
 		t.Fatalf("annotate=false must not inject SPD: %q", kept2[0].Tagged)
 	}
 
 	// minMbps=0: keep all reachable (no floor).
 	f3 := &bandwidthFilter{minMbps: 0, annotate: false, check: check, logger: zerolog.Nop()}
-	if kept3, _, _ := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
+	if kept3, _ := f3.apply(context.Background(), survivors, nil); len(kept3) != 2 {
 		t.Fatalf("minMbps=0 keeps all reachable, got %d", len(kept3))
 	}
 
 	// cancelled ctx: no-op, survivors unchanged.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got, _, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
+	if got, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
 		t.Fatalf("cancelled ctx must pass survivors through, got %d", len(got))
 	}
 }
@@ -89,7 +77,7 @@ func TestBandwidthFilterAnnotatesVmess(t *testing.T) {
 		return map[string]BandwidthOutcome{"s-001": {Server: "1.2.3.4", Reachable: true, Mbps: 42}}
 	}
 	f := &bandwidthFilter{minMbps: 1, annotate: true, check: check, logger: zerolog.Nop()}
-	kept, _, _ := f.apply(context.Background(), survivors, nil)
+	kept, _ := f.apply(context.Background(), survivors, nil)
 	if len(kept) != 1 {
 		t.Fatalf("expected 1 kept, got %d", len(kept))
 	}
@@ -120,14 +108,29 @@ func TestBuildNodeFilters(t *testing.T) {
 	if len(fs) != 5 {
 		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
 	}
-	if fs[2].name() != "chatgpt" {
-		t.Fatalf("expected chatgpt filter third, got %q", fs[2].name())
+	if got := builtFilterName(fs[2]); got != "chatgpt" {
+		t.Fatalf("expected chatgpt filter third, got %q", got)
 	}
-	if fs[3].name() != "tidal" {
-		t.Fatalf("expected tidal filter fourth, got %q", fs[3].name())
+	if got := builtFilterName(fs[3]); got != "tidal" {
+		t.Fatalf("expected tidal filter fourth, got %q", got)
 	}
-	if fs[4].name() != "bandwidth" {
-		t.Fatalf("expected bandwidth filter fifth, got %q", fs[4].name())
+	if got := builtFilterName(fs[4]); got != "bandwidth" {
+		t.Fatalf("expected bandwidth filter fifth, got %q", got)
+	}
+}
+
+// builtFilterName identifies a built filter for the order assertions above.
+// NodeFilter carries no name accessor -- nothing in production needs one, the
+// per-filter report name is set inside apply -- so the test reads the concrete
+// types buildNodeFilters returns.
+func builtFilterName(f NodeFilter) string {
+	switch v := f.(type) {
+	case *apiFilter:
+		return v.filterName
+	case *bandwidthFilter:
+		return bandwidthFilterName
+	default:
+		return ""
 	}
 }
 
@@ -141,9 +144,8 @@ func (stubBlocklist) Prune() error       { return nil }
 // TestTidalFilterKeepsNoStore locks a deliberate asymmetry: the tidal gate never
 // persists a drop. Its verdict is a bare status code, weaker than the AI checks'
 // explicit refusal markers, and the store is host-keyed for its whole TTL — one
-// CDN hiccup would otherwise evict the node from every endpoint. It still
-// reports the refusal as a short-lived reject, which is where a fail-closed
-// verdict belongs.
+// CDN hiccup would otherwise evict the node from every endpoint. Its refusal
+// therefore costs the node exactly this cycle.
 func TestTidalFilterKeepsNoStore(t *testing.T) {
 	t.Parallel()
 
@@ -177,18 +179,10 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	tidal.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
 		return map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Blocked: true}}
 	}
-	kept, rejected, rep := tidal.apply(context.Background(),
+	kept, rep := tidal.apply(context.Background(),
 		[]Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
 	if len(kept) != 0 || rep.Dropped["blocked"] != 1 {
 		t.Fatalf("blocked survivor must drop without a store: kept=%d rep=%+v", len(kept), rep)
-	}
-	// The nil store now governs BOTH persistence paths. tidalBlocked is
-	// fail-closed on any non-2xx, so a single 429 from api.tidal.com marks
-	// every node in the batch Blocked; filterDead reads the reject cache
-	// before the probe, so remembering that would drop the whole batch from
-	// /stable.txt for hours over one rate-limit. It drops for this cycle only.
-	if len(rejected) != 0 {
-		t.Fatalf("a bare-status verdict must not be cached, got %v", rejected)
 	}
 }
 
@@ -235,7 +229,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		return out
 	}
 	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
-	kept, _, _ := f.apply(context.Background(), survivors, proxies)
+	kept, _ := f.apply(context.Background(), survivors, proxies)
 	if len(kept) != 2 {
 		t.Fatalf("expected s-001 and s-002 kept, got %+v", kept)
 	}
@@ -243,181 +237,5 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		if s.Label == "s-003" {
 			t.Fatal("s-003 (absent from proxy map) must be dropped as unreachable")
 		}
-	}
-}
-
-// staticFilterer returns the same preprocessed body for every source, so a
-// cycle runs end to end with no network and a stable merge result.
-type staticFilterer struct{ body string }
-
-func (f staticFilterer) Filter(_ context.Context, b *bytes.Buffer, _ preprocess.FilterRequest) (preprocess.Stats, error) {
-	b.WriteString(f.body)
-	return preprocess.Stats{}, nil
-}
-
-// replayProber records every payload it is asked to probe and reports every
-// node in it as healthy, so the only thing that can shrink the probe set
-// between cycles is the checker's own bookkeeping.
-type replayProber struct{ payloads []string }
-
-func (p *replayProber) Probe(_ context.Context, payload []byte) (map[string]ProbeResult, error) {
-	p.payloads = append(p.payloads, string(payload))
-	res := make(map[string]ProbeResult)
-	subscription.Parse(payload, func(n subscription.Node) bool {
-		res[n.Name] = ProbeResult{Successes: 5, MeanMs: 10}
-		return true
-	})
-	return res, nil
-}
-
-func (p *replayProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
-
-// Addresses carried by the fixture body below; the API check refuses the second.
-const (
-	rejectFastAddr = "1.1.1.1:443"
-	rejectSlowAddr = "2.2.2.2:443"
-)
-
-// refuseSlowAddr is the through-node verdict every reject-cache test starts from.
-// Merge relabels to <source>-NNN in body order, so the outcomes key on those
-// labels rather than the original names.
-func refuseSlowAddr(context.Context, []mihomo.Proxy) map[string]APIOutcome {
-	return map[string]APIOutcome{
-		"alpha-001": {Server: "1.1.1.1", Reachable: true},
-		"alpha-002": {Server: "2.2.2.2", Reachable: true, Blocked: true},
-	}
-}
-
-// storeBackedFilter builds the only kind of filter allowed to seed the reject
-// cache: a non-nil store is exactly what "trusted enough to persist a verdict"
-// means. enabled is the filter's own precondition (nil = always active).
-func storeBackedFilter(enabled func() bool) *apiFilter {
-	return &apiFilter{
-		filterName: "claude",
-		enabled:    enabled,
-		check:      refuseSlowAddr,
-		store:      &stubBlocklist{},
-		logger:     zerolog.Nop(),
-	}
-}
-
-// rejectCacheChecker wires a checker over one source carrying both addresses.
-// The returned spec is a copy, ready to be edited and handed to Reconfigure.
-func rejectCacheChecker(filter NodeFilter, params NodeFilterParams) (*Checker, *replayProber, CheckerSpec) {
-	prober := &replayProber{}
-	spec := CheckerSpec{
-		Sources:       []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example/sub"}},
-		Interval:      time.Hour,
-		Rounds:        5,
-		MaxAvgMs:      1000,
-		SourceTimeout: time.Minute,
-		Prober:        prober,
-		Filters:       []NodeFilter{filter},
-		FilterParams:  params,
-	}
-	filterer := staticFilterer{
-		body: "vless://u@" + rejectFastAddr + "#fast\nvless://u@" + rejectSlowAddr + "#slow\n",
-	}
-
-	return NewChecker(spec, func() Filterer { return filterer }, nil, nil, NewHolder(), zerolog.Nop(), nil), prober, spec
-}
-
-func runCycle(t *testing.T, c *Checker, label string) {
-	t.Helper()
-	if err := c.RunOnce(context.Background()); err != nil {
-		t.Fatalf("%s: %v", label, err)
-	}
-}
-
-// TestCheckerCachesFilterRejects: a through-node rejection used to be
-// unrepeatable knowledge. recordDead can only mark nodes ABSENT from the probe
-// results, and a filter reject is by construction present (it passed the
-// latency probe), so the API checks re-ran their full test on the same
-// known-bad nodes every hour forever. Here the refused node must be probed
-// once and then skipped, while the accepted one keeps being probed.
-//
-// The filter under test is a store-backed API check on purpose: only a check
-// trusted enough to persist a verdict may seed the reject cache. bandwidth and
-// tidal are excluded by construction, which their own tests pin.
-func TestCheckerCachesFilterRejects(t *testing.T) {
-	t.Parallel()
-
-	c, prober, spec := rejectCacheChecker(storeBackedFilter(nil), NodeFilterParams{})
-	runCycle(t, c, "cycle 1")
-	runCycle(t, c, "cycle 2")
-
-	if len(prober.payloads) != 2 {
-		t.Fatalf("want one probe per cycle, got %d", len(prober.payloads))
-	}
-	if !strings.Contains(prober.payloads[0], rejectSlowAddr) {
-		t.Fatalf("cycle 1 must probe the refused node to learn it is refused: %q", prober.payloads[0])
-	}
-	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
-		t.Errorf("cycle 2 must skip the node the API filter already refused: %q", prober.payloads[1])
-	}
-	if !strings.Contains(prober.payloads[1], rejectFastAddr) {
-		t.Errorf("cycle 2 must still probe the node that passed: %q", prober.payloads[1])
-	}
-
-	// The cache is scoped to the filter that produced the verdict: drop that
-	// filter and its rejects stop suppressing anything, immediately.
-	spec.Filters = nil
-	c.Reconfigure(spec)
-	runCycle(t, c, "cycle 3")
-	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
-		t.Errorf("removing the API filter must un-suppress its rejects: %q", prober.payloads[2])
-	}
-}
-
-// TestReconfigureDropsRejectsOnParamsChange: a name scopes a verdict to a filter,
-// not to the parameters it was reached under. Lowering the bandwidth floor is the
-// documented remedy when capacity drops, so verdicts surviving that edit would
-// make the operator's corrective action look inert: every node rejected under the
-// OLD floor stays out of the probe -- and therefore out of /stable.txt -- for the
-// rest of the 6h TTL, never re-measured against the new one.
-func TestReconfigureDropsRejectsOnParamsChange(t *testing.T) {
-	t.Parallel()
-
-	params := NodeFilterParams{
-		Names:     []string{"claude", "bandwidth"},
-		Bandwidth: config.BandwidthConfig{MinMbps: new(50)},
-	}
-	c, prober, spec := rejectCacheChecker(storeBackedFilter(nil), params)
-	runCycle(t, c, "cycle 1")
-	runCycle(t, c, "cycle 2")
-	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
-		t.Fatalf("cycle 2 must skip the refused node, or the rest proves nothing: %q", prober.payloads[1])
-	}
-
-	// A fresh pointer, as a reloaded config would produce: the comparison has to
-	// look through it, not at it.
-	spec.FilterParams.Bandwidth.MinMbps = new(20)
-	c.Reconfigure(spec)
-	runCycle(t, c, "cycle 3")
-	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
-		t.Errorf("a min_mbps edit must not inherit verdicts measured under the old floor: %q", prober.payloads[2])
-	}
-}
-
-// TestFilterDeadIgnoresDisabledFilter: a gemini whose key file becomes unreadable
-// is rebuilt with enabled() == false, and apply then keeps every survivor. Its
-// remembered rejects must stop suppressing as well, or a check nobody performs
-// any more keeps nodes out of /stable.txt for the rest of the TTL. Nothing about
-// the config changed here, so the params reset cannot cover this case.
-func TestFilterDeadIgnoresDisabledFilter(t *testing.T) {
-	t.Parallel()
-
-	live := true
-	c, prober, _ := rejectCacheChecker(storeBackedFilter(func() bool { return live }), NodeFilterParams{})
-	runCycle(t, c, "cycle 1")
-	runCycle(t, c, "cycle 2")
-	if strings.Contains(prober.payloads[1], rejectSlowAddr) {
-		t.Fatalf("cycle 2 must skip the refused node, or the rest proves nothing: %q", prober.payloads[1])
-	}
-
-	live = false
-	runCycle(t, c, "cycle 3")
-	if !strings.Contains(prober.payloads[2], rejectSlowAddr) {
-		t.Errorf("a disabled filter drops nobody, so its rejects must not suppress either: %q", prober.payloads[2])
 	}
 }

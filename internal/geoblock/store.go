@@ -3,19 +3,25 @@
 // expiry (TTL). Reads are served from an in-memory cache (the filter hot path);
 // the SQLite file is touched only on writes, prune, and startup load, so it
 // survives restarts.
+//
+// Hosts are DNS names, which are case-insensitive, so every key is folded to
+// lower case on write, read and load: two sources listing the same host in
+// different case must resolve to one entry, not two.
 package geoblock
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite" (works with CGO_ENABLED=0)
 )
 
-// Store is a TTL blocklist keyed by node host (server), backed by SQLite.
+// Store is a TTL blocklist keyed by the lowercased node host (server), backed
+// by SQLite.
 type Store struct {
 	db  *sql.DB
 	ttl time.Duration
@@ -67,7 +73,14 @@ func (s *Store) load() error {
 		if scanErr := rows.Scan(&host, &exp); scanErr != nil {
 			return fmt.Errorf("geoblock scan: %w", scanErr)
 		}
-		s.blocked[host] = exp
+		// Rows written before the keys were normalised keep their original
+		// casing, so two of them can fold onto one key here; the later expiry
+		// wins, which keeps the merge independent of row order. Their
+		// mixed-case rows are never refreshed again and age out under the TTL.
+		key := strings.ToLower(host)
+		if exp > s.blocked[key] {
+			s.blocked[key] = exp
+		}
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
 		return fmt.Errorf("geoblock rows: %w", rowsErr)
@@ -76,12 +89,14 @@ func (s *Store) load() error {
 }
 
 // Blocked reports whether host is currently blocked (present and not expired).
+// The lookup is case-insensitive.
 func (s *Store) Blocked(host string) bool {
 	if host == "" {
 		return false
 	}
+	key := strings.ToLower(host)
 	s.mu.RLock()
-	exp, ok := s.blocked[host]
+	exp, ok := s.blocked[key]
 	s.mu.RUnlock()
 	return ok && exp > time.Now().UnixNano()
 }
@@ -91,17 +106,18 @@ func (s *Store) Block(host string) error {
 	if host == "" {
 		return nil
 	}
+	key := strings.ToLower(host)
 	exp := time.Now().Add(s.ttl).UnixNano()
 	s.mu.Lock()
-	s.blocked[host] = exp
+	s.blocked[key] = exp
 	s.mu.Unlock()
 	_, err := s.db.ExecContext(
 		context.Background(),
 		`INSERT INTO geoblock(host, blocked_until) VALUES(?, ?) ON CONFLICT(host) DO UPDATE SET blocked_until=excluded.blocked_until`,
-		host, exp,
+		key, exp,
 	)
 	if err != nil {
-		return fmt.Errorf("geoblock write %q: %w", host, err)
+		return fmt.Errorf("geoblock write %q: %w", key, err)
 	}
 	return nil
 }

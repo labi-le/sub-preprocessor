@@ -105,16 +105,6 @@ func (c *Controller) Apply(cfg config.Config) error {
 		SourceTimeout: subs.Check.SourceTimeout,
 		Prober:        prober,
 		Filters:       filters,
-		// Carried alongside the built filters so Reconfigure can see whether the
-		// chain that produced the cached rejects is still the chain it has.
-		FilterParams: NodeFilterParams{
-			Names:     names,
-			Gemini:    geo.Gemini,
-			Claude:    geo.Claude,
-			ChatGPT:   geo.ChatGPT,
-			Tidal:     geo.Tidal,
-			Bandwidth: bandwidth,
-		},
 	}
 
 	if c.checker != nil {

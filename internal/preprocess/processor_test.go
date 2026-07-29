@@ -5,11 +5,14 @@ import (
 	"context"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/filter"
+	"domains.lst/sub-preprocessor/internal/geoblock"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/rewrite"
@@ -224,5 +227,56 @@ func TestNewProcessorGeoDBLoadFailureDegrades(t *testing.T) {
 	registry := p.RegistryState()
 	if registry.Lookup == nil || !registry.LoadedAt.IsZero() {
 		t.Fatalf("failed registry load must yield empty lookup + zero LoadedAt, got %+v", registry)
+	}
+}
+
+// TestGeoBlockedHostDroppedRegardlessOfCase drives the real *geoblock.Store
+// through the pipeline, because this drop is the ONLY thing that carries a
+// through-node API refusal past the cycle that found it: gemini/claude/chatgpt
+// write the refused host here, and `processNode` drops it before DNS on every
+// later cycle, so it never reaches the probe or /stable.txt again.
+//
+// The lookup must be case-insensitive. A host is a DNS name, and a second source
+// is free to spell it differently; that mixed-case duplicate used to walk
+// straight past a blocked host.
+func TestGeoBlockedHostDroppedRegardlessOfCase(t *testing.T) {
+	t.Parallel()
+
+	store, err := geoblock.Open(filepath.Join(t.TempDir(), "gb.db"), 720*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	// The casing an API check would have written: APIOutcome.Server comes from
+	// the mihomo proxy's Addr(), i.e. from whichever source line built it.
+	if blockErr := store.Block("Blocked.Example.COM"); blockErr != nil {
+		t.Fatal(blockErr)
+	}
+
+	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), preprocess.Options{
+		PreloadedGeofeed: preprocess.GeoState{Lookup: fakeCountryLookup{}, LoadedAt: time.Now()},
+		Blocklist:        store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	// The blocked host lowercased, plus a bare-IP control that needs no DNS.
+	stats, err := p.Filter(context.Background(), &buf, preprocess.FilterRequest{
+		Body:             []byte("vless://u@blocked.example.com:443#blocked\nvless://u@192.0.2.7:443#ok\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if stats.GeoBlockDrop != 1 {
+		t.Errorf("geoblock_drop = %d, want 1: a blocked host drops whatever case the source used", stats.GeoBlockDrop)
+	}
+	if strings.Contains(buf.String(), "blocked.example.com") {
+		t.Errorf("a geo-blocked host was republished:\n%s", buf.String())
+	}
+	if stats.Kept != 1 || !strings.Contains(buf.String(), "192.0.2.7") {
+		t.Errorf("the unblocked node must survive: kept=%d out=%q", stats.Kept, buf.String())
 	}
 }

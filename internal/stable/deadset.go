@@ -62,17 +62,6 @@ func (d *DeadSet) Prune() error {
 	return nil
 }
 
-// Reset drops every entry, expired or not. Used when the config that produced
-// the entries changed: a TTL says when a verdict goes stale, it cannot say that
-// the rule behind the verdict no longer exists. Safe to call while the worker
-// goroutine reads through Blocked: the map is emptied in place under the same
-// lock every other method takes, and is never handed out.
-func (d *DeadSet) Reset() {
-	d.mu.Lock()
-	clear(d.m)
-	d.mu.Unlock()
-}
-
 // Len returns the current entry count (may include not-yet-pruned expired ones).
 func (d *DeadSet) Len() int {
 	d.mu.RLock()
