@@ -17,6 +17,7 @@ channels:
   - immalware
   - whitelistbypass
   - surfboardv2ray   # research find: Type-A https sub (sub.suffusion.workers.dev), 134 nodes verified
+  - DailyV2RY   # research find: daily rotating bin.mudfish.net pastes, 42% novelty measured; isolated in the repost graph so BFS cannot reach it
 
 # Subscription URLs the crawler must never manage. Deleting a tg-* source from
 # private.yaml by hand does not stick: the next cycle rediscovers the URL in a
@@ -51,3 +52,39 @@ blocked:
   - "https://sync.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=MbCk4NgPdZKPG0j3Mr3fSfiVFRd88ZvYbkkwIA6DPbfjhOazFnz0fIbUd05CWyleBwxZ819AtmQOux15VYwzs5sxkKQRsWRw33iw%2BN2Kydzsoic51goPCQUChzmoNjbWlDt4q/FcDJsvrQ6RCNv0Hw%3D%3D"
   - "https://sync.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=bcqZxhq/h7UAGJxmJ4co5DW3tc5p9H2I1o3K/EoNSyqfjbMQEZVs%2ByUrwLjn9M%2B0KDcgiCuyqci3W/pl0%2BCVSeZMYXwDyrUQr0WUi0YL5Bg3RJoTV4h3uus3BHYw5WwH"
   - "https://sync.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=o0zzW/IVw7heaNegxMRWnvOGdov9uDB7Gr7VBKTiJlAn6iNqo3aoy/zMxIDT4BSa5xJBUMv3ptHzjS24R8jVwcWOcTRQ1UHdikX0sjc1J1xRHDZNYCrRrxKyE2sJ5E%2BE"
+  - "https://commsub.215216777.xyz/sub/OTVhMjcyODktMjcyMy00ZDA4LTkwNGMtNTk0N2ExN2YwNjA5OjM5NTQ0ODU1NA=="
+  - "https://etoneya.su/whitelist"
+  - "https://raw.githubusercontent.com/JavidnamanIran-at-Telegram/x-ray_sub/refs/heads/main/x-ray_sub.txt"
+  - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt"
+  - "https://bot.omuvpn.tech/omuvpn_sub/hgrb2n/8514543396"
+  - "https://bot.mymigrantik.online/migrantvpn_sub/75kldgb0/7894817023"
+  - "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=gtPYzu0zYkYFaGTJPLYqcmS5sX5xk61lTv%2BVUB1XyHFAIPpX0TALK7KgY31MsrPMuTdMkI/2Yie17kmruFYvwg%3D%3D"
+  - "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/refs/heads/main/Protocols/trojan.txt"
+  - "https://channel.tradeip.store:2096/sub/t.me.TradeIP#TradeIP"
+  - "https://raw.githubusercontent.com/luxxuria/harvester/main/speed_tested.txt#harvester"
+  - "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/vless.txt"
+  - "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/main/githubmirror/23.txt"
+  - "https://raw.githubusercontent.com/justVisiting992/xray-Config-Collector/main/hy2_iran.txt"
+  - "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/ss.txt"
+  - "https://v2.alicivil.workers.dev/?list=999&count=10000&locations=&shuffle=true&unique=false&protocol=vless,vmess&type=tls"
+  - "https://v2.alicivil.workers.dev/?list=random&shuffle=true&unique=true&count=5000"
+  - "https://raw.githubusercontent.com/Surfboardv2ray/Proxy-sorter/refs/heads/main/selector/random.txt"
+  - "https://channel2.tradeip.store:2096/sub/t.me.TradeIP"
+  - "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/main/vless.html"
+  - "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/main/vmess.html"
+  - "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/main/ss.html"
+  - "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/main/hy2.html"
+  - "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/main/trojan.html"
+  - "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=leC2/2b7OOWtjocvon2mPZjr4QtZ66yWGC8pRWBuYzFn02HJLkdMTxaggaD%2BhbanIY5X0jgKGa0iUdMtOEh%2BYCSPxxCZAj/xve75kXWVpaY%3D"
+  - "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Sub3.txt"
+  - "https://raw.githubusercontent.com/masir-sefid/Sub/main/Telegram-Channel-@Masir_Sefid.txt"
+  - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
+  - "https://mifa.world/trojan"
+  - "https://github.com/hrostami/SNI-balancer"
+  - "https://raw.githubusercontent.com/masir-sefid/Sub/main/@Masir_Sefid.txt"
+  - "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Sub2.txt"
+  - "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub1.txt"
+  - "https://mifa.world/vless"
+  - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt"
+  - "https://channel.tradeip.store:2096/sub/t.me.TradeIP"
+  - "https://etoneya.best/whitelist"
