@@ -104,8 +104,6 @@ subscriptions:
       url: https://rostunnel.vercel.app/mega.txt
     - name: abikus
       url: https://cdn.jsdelivr.net/gh/AbikusSudo/RussiaVPN@main/docs/index.html
-    - name: zmxoo
-      url: https://tian.zmxoo.xyz/linkapi
     - name: flat447
       url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
     - name: fastnodes-se
