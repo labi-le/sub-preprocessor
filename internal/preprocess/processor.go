@@ -423,11 +423,19 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 
 // maxSubscriptionNodes caps how many parseable nodes one Filter call accepts.
 // Nodes are resolved serially with a per-hostname DNS timeout, so an unbounded
-// node list turns a single request into hours of lookups; the 10 MiB fetch cap
-// holds roughly 380k minimal node URIs. The ceiling sits well above any real
-// source (the crawler emits at most 500 nodes per inline source), so only a
-// hostile body reaches it.
-const maxSubscriptionNodes = 20_000
+// node list turns a single request into hours of lookups.
+//
+// This is a denial-of-service bound, NOT a quality filter: real aggregator
+// sources do reach five digits. The first 20 000 ceiling dropped a configured
+// 36 421-node source outright, so the number has to clear the largest source an
+// operator would legitimately configure, not the largest one seen so far.
+//
+// It is not the binding constraint, though: subscription.maxSubscriptionSize
+// (10 MiB) rejects the body first for any realistic URI length. That same source
+// measured 8.92 MB over 36 421 nodes — 245 B/node, so the byte cap bites at
+// ~43k. Raising this ceiling alone buys a source of that shape ~6k nodes of
+// growth, not ~14k; both numbers have to move to buy more.
+const maxSubscriptionNodes = 50_000
 
 // ErrTooManyNodes reports a body above maxSubscriptionNodes. The body, not the
 // service, is at fault, so callers answer 4xx rather than 502.

@@ -145,7 +145,7 @@ Important keys:
   - `subscription_url`
   - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`)
   - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. (Folding exclusions into `All()` used to drop every unplaceable IP the moment one country was excluded.) Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
-- `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 20k node ceiling (`413`)
+- `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 33.4k-node aggregator source outright
 - `GET /stable.txt` serves the worker's current list; `503` until the first cycle completes. Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
 - `/` stats are returned in `X-Preprocessor-Stats`
