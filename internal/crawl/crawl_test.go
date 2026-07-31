@@ -708,24 +708,29 @@ func TestExtractInlineNodes(t *testing.T) {
 		`ssr://c3NyYmFzZTY0 tuic://uuid@h6.example:443#tu ` +
 		`hysteria://p@h7.example:443 hysteria2://p@h3.example:443 ` +
 		`hy2://p@h4.example:443 anytls://p@h5.example:443 ` +
+		`mierus://u:pw@h8.example?port=2999&protocol=TCP#mi ` +
 		`escaped vless://u@h.example:443?x=1&amp;y=2#e ` +
 		`just prose with a classy word and no proxies here ` +
+		// A portful http/socks URI parses as a Node, so only inlineRe keeps a
+		// client-setup snippet out of the harvest; both must stay uncaptured.
+		`set your client to socks5://127.0.0.1:1080 or read https://example.com:8443/docs ` +
 		// scheme-substring tokens must NOT be captured (boundary guard).
 		`pass://foo access://bar class://baz`
 
 	got := extractInlineNodes(page)
 	want := map[string]bool{
-		"vless://uuid@1.2.3.4:443?security=tls#fast": true,
-		"vmess://eyJhZGQiOiIxLjEuMS4xIn0=":           true, // trailing comma trimmed
-		"trojan://pass@host.example:8443#t":          true,
-		"ss://YWVzOnBhc3M@2.2.2.2:8388#s":            true, // trailing period trimmed
-		"ssr://c3NyYmFzZTY0":                         true,
-		"tuic://uuid@h6.example:443#tu":              true,
-		"hysteria://p@h7.example:443":                true,
-		"hysteria2://p@h3.example:443":               true,
-		"hy2://p@h4.example:443":                     true,
-		"anytls://p@h5.example:443":                  true,
-		"vless://u@h.example:443?x=1&y=2#e":          true, // &amp; unescaped
+		"vless://uuid@1.2.3.4:443?security=tls#fast":         true,
+		"vmess://eyJhZGQiOiIxLjEuMS4xIn0=":                   true, // trailing comma trimmed
+		"trojan://pass@host.example:8443#t":                  true,
+		"ss://YWVzOnBhc3M@2.2.2.2:8388#s":                    true, // trailing period trimmed
+		"ssr://c3NyYmFzZTY0":                                 true,
+		"tuic://uuid@h6.example:443#tu":                      true,
+		"hysteria://p@h7.example:443":                        true,
+		"hysteria2://p@h3.example:443":                       true,
+		"hy2://p@h4.example:443":                             true,
+		"anytls://p@h5.example:443":                          true,
+		"mierus://u:pw@h8.example?port=2999&protocol=TCP#mi": true,
+		"vless://u@h.example:443?x=1&y=2#e":                  true, // &amp; unescaped
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d inline nodes %v, want %d", len(got), got, len(want))

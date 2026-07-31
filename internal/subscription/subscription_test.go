@@ -86,6 +86,21 @@ func mustParseOne(t *testing.T, line string) subscription.Node {
 	return node
 }
 
+// rejectOne asserts that a URI-shaped line yields no node AND is counted as
+// rejected, so a regression that silently drops the line — invisible in
+// Stats.Unsupported — cannot pass.
+func rejectOne(t *testing.T, line string) {
+	t.Helper()
+	kept := 0
+	rejected := subscription.Parse([]byte(line), func(subscription.Node) bool {
+		kept++
+		return true
+	})
+	if kept != 0 || rejected != 1 {
+		t.Fatalf("%q: kept %d nodes and counted %d rejected, want 0 kept and 1 rejected", line, kept, rejected)
+	}
+}
+
 func TestNormalizeURLSafeBase64(t *testing.T) {
 	t.Parallel()
 
@@ -244,5 +259,62 @@ func TestParseIPv6UnbracketedIsWholeHost(t *testing.T) {
 	}
 	if node.Port != "443" {
 		t.Errorf("port: got %q, want default %q", node.Port, "443")
+	}
+}
+
+// TestParseProxySchemesRequireExplicitPort: an HTTP/SOCKS proxy node is
+// host:port by definition and mihomo drops a portless one, so a bare web URL in
+// a source body — a channel link, a panel notice — must not be published as a
+// node.
+func TestParseProxySchemesRequireExplicitPort(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{
+		"https://t.me/somechannel",
+		"https://example.com",
+		"http://example.com/sub",
+		"http://user:pass@example.com#Proxy",
+		"socks://1.2.3.4",
+		"socks5://1.2.3.4#Proxy",
+		"socks5h://proxy.example?udp=true",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			rejectOne(t, line)
+		})
+	}
+}
+
+func TestParseProxySchemesWithPort(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		line       string
+		wantServer string
+		wantPort   string
+		wantName   string
+	}{
+		{"https://example.com:8443/docs", "example.com", "8443", "example.com"},
+		{"http://user:pass@1.2.3.4:8080#Proxy", "1.2.3.4", "8080", "Proxy"},
+		{"socks5://1.2.3.4:1080", "1.2.3.4", "1080", "1.2.3.4"},
+		{"socks5h://proxy.example:9050#S", "proxy.example", "9050", "S"},
+		{"socks://proxy.example:1080?udp=true#S", "proxy.example", "1080", "S"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			t.Parallel()
+
+			node := mustParseOne(t, tc.line)
+			if node.Server != tc.wantServer {
+				t.Errorf("server: got %q, want %q", node.Server, tc.wantServer)
+			}
+			if node.Port != tc.wantPort {
+				t.Errorf("port: got %q, want %q", node.Port, tc.wantPort)
+			}
+			if node.Name != tc.wantName {
+				t.Errorf("name: got %q, want %q", node.Name, tc.wantName)
+			}
+		})
 	}
 }

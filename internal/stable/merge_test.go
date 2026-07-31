@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/common/convert"
+
 	"domains.lst/sub-preprocessor/internal/stable"
 )
 
@@ -80,6 +83,91 @@ func TestMergeRelabelsVmessViaPs(t *testing.T) {
 	if m["add"] != "1.2.3.4" {
 		t.Errorf("add lost: got %v", m["add"])
 	}
+}
+
+// ssrLink builds a share link whose payload is base64 of
+// "host:port:protocol:method:obfs:password/?query" — an ssr node carries its
+// server, port and display name there and nowhere in the URI.
+func ssrLink(remarks string) string {
+	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	payload := "1.2.3.4:8388:origin:aes-256-cfb:plain:" + b64("secret") +
+		"/?obfsparam=" + b64("obfs.example.com") + "&remarks=" + b64(remarks)
+	return "ssr://" + b64(payload)
+}
+
+// mihomoProxyMap runs one already-relabeled share link through the production
+// convert path and returns the single proxy map it must yield.
+//
+// The count assertion is the point: ConvertsV2Ray drops a link it cannot
+// decode with `continue` and returns no error, so a relabel that corrupts the
+// link surfaces here as zero proxies rather than as a failure — and in
+// production as a permanently unselectable node plus a poisoned dead cache.
+func mihomoProxyMap(t *testing.T, link string) map[string]any {
+	t.Helper()
+
+	mappings, err := convert.ConvertsV2Ray([]byte(link))
+	if err != nil {
+		t.Fatalf("ConvertsV2Ray(%q): %v", link, err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("got %d proxies from %q, want 1", len(mappings), link)
+	}
+	px, parseErr := adapter.ParseProxy(mappings[0])
+	if parseErr != nil {
+		t.Fatalf("ParseProxy(%q): %v", link, parseErr)
+	}
+	t.Cleanup(func() { _ = px.Close() })
+
+	return mappings[0]
+}
+
+// TestMergeRelabelsSSRViaRemarks: ssr keeps its display name in the base64
+// payload's "remarks", and mihomo base64-decodes EVERYTHING after "ssr://" —
+// so the generic "<raw>#<label>" relabel produces a link that converts to
+// nothing at all, not merely to a wrongly named proxy.
+func TestMergeRelabelsSSRViaRemarks(t *testing.T) {
+	t.Parallel()
+
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: []byte(ssrLink("Original") + "\n")}})
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Label != "src-001" {
+		t.Errorf("label: got %q, want src-001", e.Label)
+	}
+	if e.Addr != "1.2.3.4:8388" {
+		t.Errorf("addr: got %q, want the decoded 1.2.3.4:8388", e.Addr)
+	}
+	if strings.ContainsRune(e.Raw, '#') {
+		t.Errorf("a relabeled ssr link must carry no fragment, got %q", e.Raw)
+	}
+	if e.Tagged != e.Raw {
+		t.Errorf("untagged ssr node: Tagged (%q) must equal Raw (%q)", e.Tagged, e.Raw)
+	}
+
+	m := mihomoProxyMap(t, e.Raw)
+	wantString(t, m, "name", "src-001")
+	wantString(t, m, "server", "1.2.3.4")
+	wantString(t, m, "type", "ssr")
+}
+
+// TestMergeKeepsGeoTagSSR: the published copy folds the [GEO][IP] tags into
+// "remarks" too — an ssr node must never reach the fragment path, tagged or not.
+func TestMergeKeepsGeoTagSSR(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(ssrLink("[GEO:FI][IP:1.2.3.4] orig") + "\n")
+	entries := stable.Merge([]stable.SourceBody{{Name: "src", Body: body}})
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Country != "FI" {
+		t.Errorf("country: got %q, want FI", e.Country)
+	}
+	wantString(t, mihomoProxyMap(t, e.Raw), "name", "src-001")
+	wantString(t, mihomoProxyMap(t, e.Tagged), "name", "[GEO:FI][IP:1.2.3.4] src-001")
 }
 
 func TestMergeKeepsGeoTag(t *testing.T) {

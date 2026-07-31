@@ -27,10 +27,20 @@ ready-to-use list over HTTP.
 | `GET /metrics` | Prometheus exposition, on a **separate internal listener** (`server.metrics_listen`, default `:9090`) |
 
 Node parsing is scheme-generic: any `scheme://` URI line is parsed (`vless`,
-`vmess`, `trojan`, `ss`, `hysteria2`, `tuic`, …), with `vmess` base64-JSON
-additionally decoded so its name (`ps`) can be rewritten. Only the crawler's
-classifier restricts itself to a fixed proxy-scheme list, to reject pages
-full of ordinary `https://` links.
+`trojan`, `hysteria2`, `tuic`, …) — there is deliberately no whitelist of
+mihomo-known schemes. Four schemes need more than that generic walk, because
+the fields the pipeline needs are not in the URI: `vmess` hides server, port
+and name in a base64 payload, the legacy `ss` form hides server and port there
+(its name stays in the `#fragment`), `ssr` hides all three — its display name
+being a base64 `remarks` query value — and `mierus` carries its port list in
+the query. Each decoder mirrors mihomo's own accept rule, so a
+node kept here is a node the prober can convert. Portless `http`, `https`,
+`socks`, `socks5` and `socks5h` lines are the one outright rejection: such a
+proxy is `host:port` by definition and mihomo refuses it, so a bare
+`https://t.me/somechannel` in a source body is now counted in `unsupported=`
+(see `X-Preprocessor-Stats` below) instead of being published as a node. The
+portful form is still a node — which is why the crawler's classifier keeps its
+own fixed proxy-scheme list, to reject pages full of ordinary `https://` links.
 
 ### 1. On-demand filter — `GET /`
 
@@ -180,9 +190,13 @@ GEO and ASN entries take `providers:` — an **ordered lookup chain** (e.g.
 `providers: [geofeed, dbip, registry, asn]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
 `[GEO:??]` / `[ASN:??]`. An empty `annotate` list disables annotation
-(original names pass through). Rewriting is scheme-aware: URI schemes fold
-tags into the `#fragment`, vmess into the base64 `ps` field. Known stale tags
-from upstream are stripped first.
+(original names pass through). Rewriting is scheme-aware: vmess folds tags into
+the base64 `ps` field, `ssr` into the base64 `remarks` query value, every other
+scheme into the `#fragment`. For `ssr` the fragment is not merely unused but
+corrupting — mihomo base64-decodes everything after `ssr://`, an appended
+`#name` included — so a payload neither rewriter can decode is published
+verbatim: unannotated beats mangled. Known stale tags from upstream are
+stripped first.
 
 Available providers:
 

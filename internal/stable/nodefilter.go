@@ -16,15 +16,19 @@ import (
 // entries of the unified filters list (gemini/claude/chatgpt/tidal/bandwidth)
 // select which run.
 type NodeFilter interface {
-	// apply narrows survivors using the shared, pre-parsed proxies keyed by
-	// node label. The checker owns the proxies' lifecycle; filters only read.
+	// apply narrows survivors using the shared, pre-parsed proxies grouped by
+	// node label. One label can hold several proxies — mihomo expands a
+	// mierus:// link into one per configured port — and ALL of them belong in
+	// the check subset, so a port that is dead on our egress cannot mask a
+	// live sibling. The check folds their outcomes back onto the label. The
+	// checker owns the proxies' lifecycle; filters only read.
 	//
 	// A drop lasts exactly this cycle: the checker remembers nothing a filter
 	// decides. A verdict worth outliving the cycle goes to the long-lived
 	// geoblock store, which the filter writes itself through its own store
 	// field (see apiFilter) and which preprocess then honours on every later
 	// cycle, dropping the node before it is even merged.
-	apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) (kept []Survivor, rep FilterReport)
+	apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) (kept []Survivor, rep FilterReport)
 }
 
 // geminiChecker is the through-node Gemini capability of a Prober.
@@ -63,6 +67,17 @@ const (
 	bandwidthFilterName = "bandwidth"
 )
 
+// Drop reasons a through-node filter reports in FilterReport.Dropped, and the
+// matching log keys. They are not free prose: internal/metrics publishes each
+// one verbatim as stable_filter_dropped_nodes{reason=...}, and the Grafana
+// dashboard documents them by name, so the VALUES are a wire format — rename
+// the identifiers freely, never the strings.
+const (
+	dropBlocked     = "blocked"
+	dropUnreachable = "unreachable"
+	dropSlow        = "slow"
+)
+
 // apiFilter keeps only survivors that pass a through-node API check, and records
 // geo-blocked node hosts in the store (TTL) so later cycles drop them in
 // preprocess, before they are ever merged. A nil store (see the tidal filter)
@@ -79,19 +94,14 @@ type apiFilter struct {
 	logger     zerolog.Logger
 }
 
-func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
 	rep := FilterReport{Name: f.filterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	if f.enabled != nil && !f.enabled() {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter configured but disabled; skipping")
 		return survivors, rep
 	}
 
-	subset := make([]mihomo.Proxy, 0, len(survivors))
-	for _, s := range survivors {
-		if px, ok := proxies[s.Label]; ok {
-			subset = append(subset, px)
-		}
-	}
+	subset := filterSubset(survivors, proxies)
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter skipped: no outcomes")
@@ -131,19 +141,19 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		}
 	}
 	f.logger.Info().Str("filter", f.filterName).Int("survivors", len(survivors)).Int("kept", len(kept)).
-		Int("blocked", blocked).Int("unreachable", unreachable).Msg("node filter")
+		Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).Msg("node filter")
 	rep.Kept = len(kept)
-	rep.Dropped = map[string]int{"blocked": blocked, "unreachable": unreachable}
+	rep.Dropped = map[string]int{dropBlocked: blocked, dropUnreachable: unreachable}
 	return kept, rep
 }
 
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps (minMbps==0 disables the floor and keeps all
 // reachable nodes). It records Mbps on each kept survivor and, when annotate is
-// set, prepends a [SPD:<n>M] tag to the published name via the vmess-aware
-// relabel path. No store: a speed measurement is far too volatile for the
-// host-keyed, month-long geoblock store, so a sub-floor node is dropped for
-// this cycle and re-measured next.
+// set, prepends a [SPD:<n>M] tag to the published name through annotateSpeed.
+// No store: a speed measurement is far too volatile for the host-keyed,
+// month-long geoblock store, so a sub-floor node is dropped for this cycle and
+// re-measured next.
 type bandwidthFilter struct {
 	minMbps  int
 	annotate bool
@@ -151,14 +161,9 @@ type bandwidthFilter struct {
 	logger   zerolog.Logger
 }
 
-func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string]mihomo.Proxy) ([]Survivor, FilterReport) {
+func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
 	rep := FilterReport{Name: bandwidthFilterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
-	subset := make([]mihomo.Proxy, 0, len(survivors))
-	for _, s := range survivors {
-		if px, ok := proxies[s.Label]; ok {
-			subset = append(subset, px)
-		}
-	}
+	subset := filterSubset(survivors, proxies)
 	outcomes := f.check(ctx, subset)
 	if outcomes == nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter skipped: no outcomes")
@@ -195,16 +200,38 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 		}
 	}
 	f.logger.Info().Str("filter", bandwidthFilterName).Int("survivors", len(survivors)).
-		Int("kept", len(kept)).Int("slow", slow).Int("unreachable", unreachable).Msg("node filter")
+		Int("kept", len(kept)).Int(dropSlow, slow).Int(dropUnreachable, unreachable).Msg("node filter")
 	rep.Kept = len(kept)
-	rep.Dropped = map[string]int{"slow": slow, "unreachable": unreachable}
+	rep.Dropped = map[string]int{dropSlow: slow, dropUnreachable: unreachable}
 	return kept, rep
 }
 
+// filterSubset flattens the proxies of every survivor into the slice a
+// through-node check fans out over. Capacity comes from the proxy count, not
+// the survivor count: a mierus:// survivor contributes one proxy per
+// configured port, so sizing by survivors would grow-and-copy the slice on
+// every filter of every cycle that sees a multi-port node.
+func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mihomo.Proxy {
+	n := 0
+	for _, s := range survivors {
+		n += len(proxies[s.Label])
+	}
+	subset := make([]mihomo.Proxy, 0, n)
+	for _, s := range survivors {
+		subset = append(subset, proxies[s.Label]...)
+	}
+
+	return subset
+}
+
 // annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses
-// the line and relabels through relabelNode so vmess (base64 ps) and URI
-// (#fragment) nodes are both handled; on any parse failure the line is returned
-// unchanged (annotation is best-effort, never fatal).
+// the line and relabels through relabelNode, which reaches the name where each
+// scheme keeps it: the vmess "ps" field, the ssr "remarks" query value, or the
+// URI #fragment. ssr is why this path cannot shortcut to the fragment -- an ssr
+// line arriving here is already a RewriteSSRName product, and appending
+// "#<name>" to one destroys it rather than renaming it (see relabelNode). On
+// any parse failure the line is returned unchanged (annotation is best-effort,
+// never fatal).
 func annotateSpeed(line string, mbps int) string {
 	var out string
 	found := false

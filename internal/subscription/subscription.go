@@ -20,6 +20,23 @@ var doubleSlash = []byte("://")
 // Scheme is a strict URI scheme type.
 type Scheme string
 
+// Schemes whose server, port or display name does NOT live where the generic
+// URI parser looks for it. Everything else is handled by the scheme-agnostic
+// authority/fragment path; these three each need a dedicated decoder:
+//
+//	ss      - the legacy form base64-encodes "method:pass@host:port" as the
+//	          whole authority, so there is no host to read
+//	ssr     - base64-encodes host, port AND the display name (a "remarks"
+//	          query param) in one payload, and carries no URI fragment
+//	mierus  - the port list lives in the query, never in the authority
+//
+// SchemeVmess is declared in vmess.go beside its own decoder.
+const (
+	SchemeSS    Scheme = "ss"
+	SchemeSSR   Scheme = "ssr"
+	SchemeMieru Scheme = "mierus"
+)
+
 type Node struct {
 	Raw         string
 	Scheme      Scheme
@@ -70,7 +87,13 @@ const schemeSep = "://"
 
 // parseNode extracts node fields from a URI string using a lightweight parser.
 // It replaces url.Parse to avoid per-node heap allocations.
-// One string alloc per call (for Node.Raw, reused by all string fields via substrings).
+//
+// The generic path allocates nothing: Node.Raw is the caller's line and
+// Server, Port and Name are substrings of it. The three dedicated decoders
+// (vmess, ss legacy, ssr) each allocate one base64 buffer per node, and their
+// Server/Port/Name are views into THAT buffer rather than into Raw — so what a
+// retained node string keeps alive is scheme-dependent, which is why
+// stable.tagCountry (merge.go) clones instead of slicing.
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {
@@ -100,12 +123,26 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	authority := rest[:authEnd]
-	if authority == "" {
-		return Node{}, false
-	}
-
 	server, port := splitHostPort(authority)
-	if server == "" {
+
+	// Each case is one call so the schemes with nothing to correct — the
+	// vless/trojan/hysteria bulk — pay only the jump and the shared ok test.
+	ok := true
+	switch scheme { //nolint:exhaustive // vmess returned above; every scheme without a case keeps the generic authority result
+	case SchemeSSR:
+		return parseSSR(line, rest)
+	case SchemeSS:
+		server, port, ok = ssFields(authority, server, port)
+	case SchemeMieru:
+		port, ok = mieruPort(rest[authEnd:])
+	case "http", "https", "socks", "socks5", "socks5h":
+		// An HTTP/SOCKS proxy node is host:port by definition, and mihomo
+		// refuses a portless one (convert/converter.go:543-546). Accepting it
+		// publishes any bare web URL in a source body — a Telegram channel
+		// link, a panel notice — as a node.
+		ok = port != ""
+	}
+	if !ok || server == "" {
 		return Node{}, false
 	}
 	if port == "" {
@@ -126,6 +163,26 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port, FragmentIdx: hashIdx}, true
+}
+
+// ssFields resolves the server and port of an ss:// link, given what the
+// generic authority split already produced. The port is the discriminator, and
+// it is mihomo's too (convert/converter.go:396-407): with a port the link is
+// SIP002 and keeps its host in the authority, without one the whole authority
+// is base64 of "method:pass@host:port" and only decodeSSLegacy can find a host.
+//
+// The '@' cannot stand in for the port even though every SIP002 link carries
+// one. "ss://<b64userinfo>@host" is SIP002-shaped but portless, and mihomo
+// drops it — it RawStd-decodes the bare host, which is not base64 — whereas the
+// generic path defaults the port to 443 and publishes a node under a port it
+// does not have, then probes it and parks it in the 2h dead cache. The reverse
+// misread cannot happen: a legacy authority is base64, an alphabet holding no
+// ':', so it can never look portful.
+func ssFields(authority, server, port string) (string, string, bool) {
+	if port != "" {
+		return server, port, true
+	}
+	return decodeSSLegacy(authority)
 }
 
 // validScheme reports whether s has the RFC 3986 scheme shape
@@ -185,6 +242,34 @@ func splitHostPort(authority string) (host, port string) {
 	}
 
 	return authority, ""
+}
+
+// portNumber parses a bare decimal in 1..65535, the range a TCP port can name.
+// It is hand-rolled rather than strconv.Atoi'd because a rejected value must
+// stay allocation-free: Atoi's failure builds a *NumError holding a copy of the
+// input, and this runs once per candidate port of every mierus:// and ssr://
+// line of every source.
+func portNumber(s string) (int, bool) {
+	const (
+		base10   = 10
+		maxPort  = 65535
+		maxWidth = 5 // digits in maxPort; bounding the length is what lets n accumulate unchecked
+	)
+	if s == "" || len(s) > maxWidth {
+		return 0, false
+	}
+	n := 0
+	for i := range len(s) {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*base10 + int(c-'0')
+	}
+	if n < 1 || n > maxPort {
+		return 0, false
+	}
+	return n, true
 }
 
 func Normalize(body []byte) []byte {
