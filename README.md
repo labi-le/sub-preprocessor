@@ -29,10 +29,11 @@ ready-to-use list over HTTP.
 Node parsing is scheme-generic: any `scheme://` URI line is parsed (`vless`,
 `trojan`, `hysteria2`, `tuic`, …) — there is deliberately no whitelist of
 mihomo-known schemes. Four schemes need more than that generic walk, because
-the fields the pipeline needs are not in the URI: `vmess` and the legacy `ss`
-form hide server, port and name inside a base64 payload, `ssr` hides those and
-its display name (a base64 `remarks` query value), and `mierus` carries its
-port list in the query. Each decoder mirrors mihomo's own accept rule, so a
+the fields the pipeline needs are not in the URI: `vmess` hides server, port
+and name in a base64 payload, the legacy `ss` form hides server and port there
+(its name stays in the `#fragment`), `ssr` hides all three — its display name
+being a base64 `remarks` query value — and `mierus` carries its port list in
+the query. Each decoder mirrors mihomo's own accept rule, so a
 node kept here is a node the prober can convert. Portless `http`, `https`,
 `socks`, `socks5` and `socks5h` lines are the one outright rejection: such a
 proxy is `host:port` by definition and mihomo refuses it, so a bare
