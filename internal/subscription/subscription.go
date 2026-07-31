@@ -189,14 +189,23 @@ func splitHostPort(authority string) (host, port string) {
 
 func Normalize(body []byte) []byte {
 	body = bytes.TrimSpace(body)
+	if converted, ok := maybeXrayJSON(body); ok {
+		return converted
+	}
 	if bytes.Contains(body, doubleSlash) {
 		return body
 	}
 
 	s := stripWhitespace(ioutil.UnsafeString(body))
 
-	if decoded, ok := decodeBase64Tolerant(s); ok && bytes.Contains(decoded, doubleSlash) {
-		return bytes.TrimSpace(decoded)
+	if decoded, ok := decodeBase64Tolerant(s); ok {
+		decoded = bytes.TrimSpace(decoded)
+		if converted, convOK := maybeXrayJSON(decoded); convOK {
+			return converted
+		}
+		if bytes.Contains(decoded, doubleSlash) {
+			return decoded
+		}
 	}
 
 	return body

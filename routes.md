@@ -270,9 +270,9 @@ ASN resolver using Team Cymru DNS (`origin.asn.cymru.com` + `asn.cymru.com`). Re
 
 ## `internal/subscription`
 
-`./internal/subscription/subscription.go`
+`./internal/subscription/subscription.go`, `xray.go`
 
-Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations. `Normalize` trims, uses a fast-path single-pass ASCII whitespace stripper, then attempts a tolerant base64 decode (all four alphabets, shared with the vmess decoder).
+Subscription fetch, normalize (base64 → raw, Xray JSON → share links), and URI parsing. Lightweight node parser avoids `url.Parse` heap allocations. `Normalize` trims, converts an Xray config document when it sees one, uses a fast-path single-pass ASCII whitespace stripper, then attempts a tolerant base64 decode (all four alphabets, shared with the vmess decoder) and converts again if the decoded body turns out to be JSON.
 
 **Key types:**
 - `Scheme` — strict URI scheme type alias
@@ -281,7 +281,8 @@ Subscription fetch, normalize (base64 → raw), and URI parsing. Lightweight nod
 **Key functions:**
 - `Load(ctx, url fetch.SubscriptionURL) ([]byte, error)` — fetch + normalize
 - `Parse(body, yield) (rejected int)` — iterate lines via `ioutil.Lines`, parse URIs containing `://`; the return is how many URI-shaped lines `parseNode` refused (they never reach `yield`), which `preprocess.processBody` books as `Stats.Unsupported`
-- `Normalize(body) []byte` — trim + strip ASCII whitespace + base64 decode + URI detection
+- `Normalize(body) []byte` — trim + Xray-JSON conversion + strip ASCII whitespace + base64 decode + URI detection. The JSON branch runs BEFORE the `://` fast path: real configs carry DoH server URLs and an observatory probe destination, so 4 of the 5 bodies measured contain `://` and would otherwise return untouched
+- `convertXrayJSON(body) ([]byte, bool)` (`xray.go`) — renders the **vless** outbounds of an Xray config document (single object or the array a panel serves) as newline-joined share links, so `Parse`, `classify`, the geo pipeline, `Merge` and `rewrite` need no JSON awareness. False on anything that is not an Xray config or carries no vless outbound, which is what keeps every existing JSON-serving source classified exactly as before. Maps Xray's `raw` transport to `tcp` (mihomo's share-link handler has no `raw` case, so the name would reach `adapter.ParseProxy` as `network: "raw"`), brackets IPv6 authorities, and reads the ws `Host` header case-insensitively. `maxJSONOutbounds` (50 000) bounds the expansion, which `preprocess.processBody`'s node ceiling then sees post-expansion. Measured on one t.me/hiddifycode post: 158 vless outbounds across 5 JSON links against 8 nodes in the post's single URI-list link; 34 of its endpoints were absent from the live pool and 15 of those published (44%, against the pool's 0.35% end-to-end)
 - `parseNode(line) (Node, bool)` — scheme → authority → host:port → fragment; the fragment is the FIRST `#` after the authority (later `#`s stay in the name); bracketed IPv6 hosts are returned without brackets, unbracketed multi-colon authorities are treated as a portless IPv6 host. The text before `://` must have the RFC 3986 scheme shape (`validScheme`: ALPHA then alnum/`+`/`-`/`.`) — the parser stays scheme-generic, but without that check an HTML error page or Clash YAML document parses as a healthy node list (`<a href="https` was a valid scheme)
 - `parseVmess(line, schemeEnd) (Node, bool)` — base64 JSON payload (`add`/`port`/`ps`); when `ps` is absent the display name falls back to the URI fragment, then to the server host
 

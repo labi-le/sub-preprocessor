@@ -60,6 +60,7 @@ until the first cycle completes).
 ## Important current design decisions
 
 - Parsing is **generic URI parsing**, not hardcoded to `vless://` only.
+- A subscription URL may also answer with an **Xray JSON config** instead of a URI list — panel software (Hiddify) does. `subscription.Normalize` converts such a document's outbounds into share links, so nothing downstream (`Parse`, `classify`, the geo pipeline, `Merge`, `rewrite`) knows about JSON. The asymmetry with the line above is deliberate, not an oversight: URI parsing is scheme-generic, the JSON conversion is **vless-only**, because 158 of the 160 proxy outbounds in the measured corpus were vless and one of the two shadowsocks entries carried the literal address `sdfsdf`. Add a protocol when data justifies it.
 - Filtering logic only cares about hostname/IP and final geofeed country.
 - Output rewriting is still **scheme-aware/safe**: it only rewrites parsed URI nodes.
 - The on-demand `/` path does no liveness probing; it only geo/ASN-filters. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
@@ -129,7 +130,7 @@ Important keys:
 - `internal/resolver` — DNS resolution with an in-memory TTL cache
 - `internal/asn` — ASN lookup (Team Cymru) for the ASN name/country filter
 - `internal/filter` — country allow/deny bitset
-- `internal/subscription` — subscription fetch/normalize/parse (incl. `vmess://` decode)
+- `internal/subscription` — subscription fetch/normalize/parse (incl. `vmess://` decode and Xray-JSON→share-link conversion in `xray.go`)
 - `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
