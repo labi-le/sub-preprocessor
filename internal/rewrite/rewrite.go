@@ -34,7 +34,7 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	// base64-decodes everything after "ssr://", the "#name" included, so an
 	// appended fragment turns the node into "format invalid". An undecodable
 	// payload is published verbatim — unannotated beats mangled.
-	switch node.Scheme {
+	switch node.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
 	case subscription.SchemeVmess:
 		if out, ok := subscription.RewriteVmessName(node.Raw, name); ok {
 			b.WriteString(out)

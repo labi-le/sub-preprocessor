@@ -87,7 +87,13 @@ const schemeSep = "://"
 
 // parseNode extracts node fields from a URI string using a lightweight parser.
 // It replaces url.Parse to avoid per-node heap allocations.
-// One string alloc per call (for Node.Raw, reused by all string fields via substrings).
+//
+// The generic path allocates nothing: Node.Raw is the caller's line and
+// Server, Port and Name are substrings of it. The three dedicated decoders
+// (vmess, ss legacy, ssr) each allocate one base64 buffer per node, and their
+// Server/Port/Name are views into THAT buffer rather than into Raw — so what a
+// retained node string keeps alive is scheme-dependent, which is why
+// stable.tagCountry (merge.go) clones instead of slicing.
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {
@@ -119,36 +125,24 @@ func parseNode(line string) (Node, bool) {
 	authority := rest[:authEnd]
 	server, port := splitHostPort(authority)
 
-	switch scheme {
-	case SchemeSS:
-		// A SIP002 link keeps its host in the authority ("<b64userinfo>@host");
-		// without an '@' this is the legacy all-base64 form.
-		if strings.IndexByte(authority, '@') < 0 {
-			host, decodedPort, ok := decodeSSLegacy(authority)
-			if !ok {
-				return Node{}, false
-			}
-			server, port = host, decodedPort
-		}
+	// Each case is one call so the schemes with nothing to correct — the
+	// vless/trojan/hysteria bulk — pay only the jump and the shared ok test.
+	ok := true
+	switch scheme { //nolint:exhaustive // vmess returned above; every scheme without a case keeps the generic authority result
 	case SchemeSSR:
 		return parseSSR(line, rest)
+	case SchemeSS:
+		server, port, ok = ssFields(authority, server, port)
 	case SchemeMieru:
-		queryPort, ok := mieruPort(rest[authEnd:])
-		if !ok {
-			return Node{}, false
-		}
-		port = queryPort
+		port, ok = mieruPort(rest[authEnd:])
 	case "http", "https", "socks", "socks5", "socks5h":
 		// An HTTP/SOCKS proxy node is host:port by definition, and mihomo
 		// refuses a portless one (convert/converter.go:543-546). Accepting it
 		// publishes any bare web URL in a source body — a Telegram channel
 		// link, a panel notice — as a node.
-		if port == "" {
-			return Node{}, false
-		}
+		ok = port != ""
 	}
-
-	if server == "" {
+	if !ok || server == "" {
 		return Node{}, false
 	}
 	if port == "" {
@@ -169,6 +163,17 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	return Node{Raw: line, Scheme: scheme, Name: name, Server: server, Port: port, FragmentIdx: hashIdx}, true
+}
+
+// ssFields resolves the server and port of an ss:// link, given what the
+// generic authority split already produced. A SIP002 link keeps its host in
+// the authority ("<b64userinfo>@host") and needs nothing further; without an
+// '@' this is the legacy form whose whole authority is base64.
+func ssFields(authority, server, port string) (string, string, bool) {
+	if strings.IndexByte(authority, '@') >= 0 {
+		return server, port, true
+	}
+	return decodeSSLegacy(authority)
 }
 
 // validScheme reports whether s has the RFC 3986 scheme shape

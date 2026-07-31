@@ -78,6 +78,33 @@ func ssrLine(remarks string) string {
 	return "ssr://" + base64.RawURLEncoding.EncodeToString([]byte(payload))
 }
 
+// ssrQueryOf asserts that out is a fragment-free, unpadded url-safe ssr link —
+// the only shape mihomo can decode — and returns its parsed query.
+func ssrQueryOf(t *testing.T, out string) url.Values {
+	t.Helper()
+
+	if strings.ContainsRune(out, '#') {
+		t.Fatalf("output carries a fragment: %q", out)
+	}
+	payload, ok := strings.CutPrefix(out, "ssr://")
+	if !ok {
+		t.Fatalf("expected an ssr:// link, got %q", out)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("payload is not unpadded url-safe base64: %v", err)
+	}
+	_, query, found := strings.Cut(string(decoded), "/?")
+	if !found {
+		t.Fatalf("payload lost its /? separator: %q", decoded)
+	}
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		t.Fatalf("parse rewritten query %q: %v", query, err)
+	}
+	return values
+}
+
 // TestNodeNameSSRRewritesRemarks pins the reason ssr needs its own branch:
 // mihomo base64-decodes everything after "ssr://", so appending "#name" — what
 // every other scheme gets — turns the node into "convert: format invalid".
@@ -101,25 +128,7 @@ func TestNodeNameSSRRewritesRemarks(t *testing.T) {
 			rewrite.NodeName(&buf, node, "[GEO:JP][IP:1.2.3.4]")
 			out := buf.String()
 
-			if strings.ContainsRune(out, '#') {
-				t.Fatalf("output carries a fragment: %q", out)
-			}
-			payload, ok := strings.CutPrefix(out, "ssr://")
-			if !ok {
-				t.Fatalf("expected an ssr:// link, got %q", out)
-			}
-			decoded, err := base64.RawURLEncoding.DecodeString(payload)
-			if err != nil {
-				t.Fatalf("payload is not unpadded url-safe base64: %v", err)
-			}
-			_, query, found := strings.Cut(string(decoded), "/?")
-			if !found {
-				t.Fatalf("payload lost its /? separator: %q", decoded)
-			}
-			values, err := url.ParseQuery(query)
-			if err != nil {
-				t.Fatalf("parse rewritten query %q: %v", query, err)
-			}
+			values := ssrQueryOf(t, out)
 			for _, want := range []struct{ key, value string }{
 				{"remarks", "[GEO:JP][IP:1.2.3.4] Old"},
 				{"obfsparam", "obfs.example"},

@@ -23,8 +23,9 @@ import (
 const maxSubscriptionSize = 10 << 20
 
 // proxySchemes are the URI schemes a Mihomo-compatible subscription is built
-// from. Restricting to these rejects HTML pages whose http(s):// links the
-// generic node parser would otherwise accept.
+// from. The node parser is deliberately scheme-generic, so a document that is
+// not a subscription at all can still yield nodes: restricting the count to
+// these keeps a "live" verdict tied to proxy links.
 var proxySchemes = map[string]bool{
 	"vless": true, "vmess": true, "ss": true, "ssr": true, "trojan": true,
 	"tuic": true, "hysteria": true, "hysteria2": true, "hy2": true, "anytls": true,
@@ -53,10 +54,12 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 		r.Expired = true
 	}
 	subscription.Parse(subscription.Normalize(body), func(n subscription.Node) bool {
-		// Only real proxy schemes count. parseNode is deliberately generic and
-		// even defaults a missing port to 443, so an HTML page full of
-		// https:// links would otherwise look like a subscription. Schemes are
-		// case-insensitive (RFC 3986), so lowercase before the lookup.
+		// Only real proxy schemes count. The parser rejects a portless
+		// http/https/socks line, but a portful one (`https://example.com:8443/docs`
+		// in a docs page, a panel's own admin URL) is still a valid node to it,
+		// so the whitelist is what keeps such a page from reading as a live
+		// subscription. Schemes are case-insensitive (RFC 3986), so lowercase
+		// before the lookup.
 		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] {
 			r.Nodes++
 		}

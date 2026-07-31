@@ -109,8 +109,10 @@ func decodeSSR(payload string) (head, query string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	// 5 separators is 6 fields, without allocating a Split slice.
-	if strings.Count(head, ":") != 5 {
+	// An ssr head is exactly "host:port:protocol:method:obfs:password", and 5
+	// separators is 6 fields — counted rather than Split to avoid the slice.
+	const ssrHeadSeparators = 5
+	if strings.Count(head, ":") != ssrHeadSeparators {
 		return "", "", false
 	}
 	return head, query, true
