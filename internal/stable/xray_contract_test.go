@@ -134,3 +134,20 @@ func TestXrayXHTTPSurvivesMihomoParse(t *testing.T) {
 		t.Errorf("tls = %v, want true", m["tls"])
 	}
 }
+
+func TestXrayHysteria2SurvivesMihomoParse(t *testing.T) {
+	t.Parallel()
+
+	m := mihomoProxy(t, `{"outbounds":[{"protocol":"hysteria","settings":{"address":"1.2.3.4","port":443,"version":2},
+"streamSettings":{"network":"hysteria","hysteriaSettings":{"version":2,"auth":"68b4b16e-2759-47a4-8a69-33118edf5ce6"},
+"security":"tls","tlsSettings":{"serverName":"a.example","alpn":["h3"]}}}]}`)
+
+	wantString(t, m, "type", "hysteria2")
+	wantString(t, m, "server", "1.2.3.4")
+	wantString(t, m, "password", "68b4b16e-2759-47a4-8a69-33118edf5ce6")
+	wantString(t, m, "sni", "a.example")
+	alpn, ok := m["alpn"].([]string)
+	if !ok || len(alpn) != 1 || alpn[0] != "h3" {
+		t.Errorf("alpn = %v, want [h3]", m["alpn"])
+	}
+}

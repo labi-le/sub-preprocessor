@@ -190,3 +190,59 @@ func TestNormalizeLeavesNonXrayJSONUntouched(t *testing.T) {
 		}
 	}
 }
+
+// hysteriaV2 is the shape 35 of 385 outbounds across one channel's history had:
+// not an Xray-core transport, so the panel puts the endpoint on settings and the
+// credential in hysteriaSettings.
+const hysteriaV2 = `{"outbounds":[{"tag":"proxy","protocol":"hysteria",
+"settings":{"address":"popa.example.ru","port":443,"version":2},
+"streamSettings":{"network":"hysteria","hysteriaSettings":{"version":2,"auth":"68b4b16e-2759-47a4-8a69-33118edf5ce6"},
+"security":"tls","tlsSettings":{"serverName":"popa.example.ru","fingerprint":"chrome","alpn":["h3"],"allowInsecure":true}}}]}`
+
+func TestNormalizeConvertsHysteria2(t *testing.T) {
+	t.Parallel()
+
+	uri := normalizeOne(t, hysteriaV2)
+	if !strings.HasPrefix(uri, "hysteria2://68b4b16e-2759-47a4-8a69-33118edf5ce6@popa.example.ru:443?") {
+		t.Fatalf("unexpected authority: %q", uri)
+	}
+	q := queryOf(t, uri)
+	for key, want := range map[string]string{"sni": "popa.example.ru", "alpn": "h3", "insecure": "1"} {
+		if got := q.Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// "hysteria2"/"hy2" name the version themselves. Demanding an explicit version
+// field for them would drop every outbound that omits it.
+func TestNormalizeConvertsHysteria2WithoutVersionField(t *testing.T) {
+	t.Parallel()
+
+	for _, proto := range []string{"hysteria2", "hy2"} {
+		body := `{"outbounds":[{"protocol":"` + proto + `","settings":{"address":"a.example","port":8443},
+"streamSettings":{"hysteriaSettings":{"auth":"pw-1"},"tlsSettings":{"serverName":"a.example"}}}]}`
+		uri := normalizeOne(t, body)
+		if !strings.HasPrefix(uri, "hysteria2://pw-1@a.example:8443?") {
+			t.Errorf("%s: %q", proto, uri)
+		}
+	}
+}
+
+// A bare "hysteria" that is not version 2 must NOT be rendered as hysteria2:
+// mihomo parses v1 under its own scheme with a different parameter set, so the
+// proxy would parse and then fail the probe as if the node were dead.
+func TestNormalizeRefusesHysteriaV1(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"explicit v1": `{"outbounds":[{"protocol":"hysteria","settings":{"address":"a.example","port":443,"version":1},
+"streamSettings":{"hysteriaSettings":{"version":1,"auth":"pw"}}}]}`,
+		"no version": `{"outbounds":[{"protocol":"hysteria","settings":{"address":"a.example","port":443},
+"streamSettings":{"hysteriaSettings":{"auth":"pw"}}}]}`,
+	} {
+		if got := string(subscription.Normalize([]byte(body))); got != strings.TrimSpace(body) {
+			t.Errorf("%s: must pass through unconverted, got %q", name, got)
+		}
+	}
+}

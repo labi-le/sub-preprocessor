@@ -17,9 +17,8 @@ import (
 // JSON. Measured on one t.me/hiddifycode post: 6 of its 7 links served JSON
 // holding 160 proxy outbounds, against 8 nodes in the single URI-list link.
 //
-// Only vless is converted. Those 160 outbounds were 158 vless and 2
-// shadowsocks, one of the two carrying the literal address "sdfsdf" — a second
-// protocol would be untested surface for ~1% of the payload.
+// vless and hysteria2 are converted; see outboundShareLink for the measured
+// protocol split that decides what is worth mapping.
 
 // maxJSONOutbounds bounds the expansion. Normalize's output feeds
 // preprocess.processBody, whose node ceiling is enforced on the EXPANDED body:
@@ -32,6 +31,9 @@ const (
 	// (reality over ws) sets encryption, flow, type, security, sni, pbk, sid,
 	// fp, path and host.
 	queryHint = 10
+
+	// hysteriaQueryHint sizes the hysteria2 query map: sni, alpn, insecure.
+	hysteriaQueryHint = 3
 )
 
 // maybeXrayJSON converts body when it is an Xray config document. Normalize
@@ -68,9 +70,10 @@ type xrayStream struct {
 		Fingerprint string `json:"fingerprint"`
 	} `json:"realitySettings"`
 	TLS struct {
-		ServerName  string   `json:"serverName"`
-		Fingerprint string   `json:"fingerprint"`
-		ALPN        []string `json:"alpn"`
+		ServerName    string   `json:"serverName"`
+		Fingerprint   string   `json:"fingerprint"`
+		ALPN          []string `json:"alpn"`
+		AllowInsecure bool     `json:"allowInsecure"`
 	} `json:"tlsSettings"`
 	WS struct {
 		Path    string            `json:"path"`
@@ -84,6 +87,12 @@ type xrayStream struct {
 		Host string `json:"host"`
 		Path string `json:"path"`
 	} `json:"xhttpSettings"`
+	// Hysteria is not an Xray-core transport; panel builds carry it here, with
+	// the credential where a vless config keeps users[].id.
+	Hysteria struct {
+		Version int    `json:"version"`
+		Auth    string `json:"auth"`
+	} `json:"hysteriaSettings"`
 }
 
 type xrayOutbound struct {
@@ -91,6 +100,11 @@ type xrayOutbound struct {
 	Protocol string `json:"protocol"`
 	Settings struct {
 		VNext []xrayVNext `json:"vnext"`
+		// Hysteria outbounds put the endpoint directly on settings instead of
+		// wrapping it in vnext/servers.
+		Address string `json:"address"`
+		Port    int    `json:"port"`
+		Version int    `json:"version"`
 	} `json:"settings"`
 	StreamSettings xrayStream `json:"streamSettings"`
 }
@@ -118,7 +132,7 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 			if written >= maxJSONOutbounds {
 				break
 			}
-			uri, uriOK := vlessShareLink(&configs[i].Outbounds[j], configs[i].Remarks)
+			uri, uriOK := outboundShareLink(&configs[i].Outbounds[j], configs[i].Remarks)
 			if !uriOK {
 				continue
 			}
@@ -134,6 +148,79 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 	}
 
 	return out.Bytes(), true
+}
+
+// outboundShareLink dispatches on the outbound protocol. Measured across 25
+// JSON links from one channel's history: 344 vless, 35 hysteria, 6 shadowsocks.
+// Shadowsocks stays out at 1.6% -- and the sampled entry carried the literal
+// address "sdfsdf".
+func outboundShareLink(ob *xrayOutbound, remarks string) (string, bool) {
+	switch strings.ToLower(ob.Protocol) {
+	case "vless":
+		return vlessShareLink(ob, remarks)
+	case "hysteria", "hysteria2", "hy2":
+		return hysteria2ShareLink(ob, remarks)
+	}
+
+	return "", false
+}
+
+// hysteria2ShareLink renders a hysteria2 outbound as the share link
+// mihomo's converter reads: the credential is userinfo, everything else query.
+//
+// Version 2 ONLY. mihomo parses hysteria v1 under its own `hysteria://` scheme
+// with a different parameter set, so rendering a v1 outbound as hysteria2 would
+// produce a proxy adapter.ParseProxy accepts and the probe then reports as a
+// dead node — a mapping bug wearing the costume of a bad source.
+func hysteria2ShareLink(ob *xrayOutbound, remarks string) (string, bool) {
+	st := &ob.StreamSettings
+	if !isHysteria2(ob) {
+		return "", false
+	}
+	if ob.Settings.Address == "" || ob.Settings.Port <= 0 || st.Hysteria.Auth == "" {
+		return "", false
+	}
+
+	q := make(url.Values, hysteriaQueryHint)
+	setNonEmpty(q, "sni", st.TLS.ServerName)
+	if len(st.TLS.ALPN) > 0 {
+		q.Set("alpn", strings.Join(st.TLS.ALPN, ","))
+	}
+	if st.TLS.AllowInsecure {
+		q.Set("insecure", "1")
+	}
+
+	var b strings.Builder
+	b.WriteString("hysteria2://")
+	b.WriteString(url.User(st.Hysteria.Auth).String())
+	b.WriteByte('@')
+	b.WriteString(hostForAuthority(ob.Settings.Address))
+	b.WriteByte(':')
+	b.WriteString(strconv.Itoa(ob.Settings.Port))
+	if len(q) > 0 {
+		b.WriteByte('?')
+		b.WriteString(q.Encode())
+	}
+	b.WriteByte('#')
+	b.WriteString(url.PathEscape(outboundName(ob, remarks, ob.Settings.Address)))
+
+	return b.String(), true
+}
+
+// isHysteria2 decides the protocol version. "hysteria2"/"hy2" name the version
+// themselves, so demanding an explicit version field there would silently drop
+// outbounds that simply omit it. Only the bare "hysteria" name is ambiguous,
+// and that one has to say 2 — the version lives in either settings or
+// hysteriaSettings depending on which panel wrote the config.
+func isHysteria2(ob *xrayOutbound) bool {
+	switch strings.ToLower(ob.Protocol) {
+	case "hysteria2", "hy2":
+		return true
+	case "hysteria":
+		return ob.StreamSettings.Hysteria.Version == 2 || ob.Settings.Version == 2
+	}
+
+	return false
 }
 
 // decodeXrayConfigs accepts both shapes seen in the wild: a single config
