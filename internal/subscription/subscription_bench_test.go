@@ -147,6 +147,10 @@ func BenchmarkRewriteVmessName(b *testing.B) {
 // mierus decoders, so there is no earlier measurement to compare them with;
 // they exist to fix a floor for the next change to this code.
 
+// benchNodes is the payload size every Parse benchmark below measures, matching
+// the 50-line inputs of the older ones above.
+const benchNodes = 50
+
 // ssLegacyBenchLine mirrors the pre-SIP002 form: the whole authority is
 // unpadded std base64 of "method:password@host:port".
 func ssLegacyBenchLine() string {
@@ -163,13 +167,36 @@ func ssrBenchLine(name string) string {
 	return "ssr://" + b64(payload)
 }
 
-func BenchmarkParse_SSLegacy(b *testing.B) {
+// benchParseInput repeats line into a benchNodes-line payload and pins that
+// every line of it parses. Parse's sink accepts a zero count, so without the
+// check a fixture that stops parsing — a base64 encoding that lands a '/' in
+// an ss authority and truncates it, a decoder narrowed by a later change —
+// silently turns the benchmark into a measurement of benchNodes REJECTIONS and
+// reports the faster number as an improvement.
+func benchParseInput(b *testing.B, line string) []byte {
+	b.Helper()
+
 	var sb strings.Builder
-	for range 50 {
-		sb.WriteString(ssLegacyBenchLine())
+	for range benchNodes {
+		sb.WriteString(line)
 		sb.WriteString("\n")
 	}
 	input := []byte(sb.String())
+
+	nodes := 0
+	rejected := subscription.Parse(input, func(subscription.Node) bool {
+		nodes++
+		return true
+	})
+	if nodes != benchNodes || rejected != 0 {
+		b.Fatalf("fixture %q: %d nodes, %d rejected; want %d, 0", line, nodes, rejected, benchNodes)
+	}
+
+	return input
+}
+
+func BenchmarkParse_SSLegacy(b *testing.B) {
+	input := benchParseInput(b, ssLegacyBenchLine())
 	b.ReportAllocs()
 	for b.Loop() {
 		count := 0
@@ -182,12 +209,7 @@ func BenchmarkParse_SSLegacy(b *testing.B) {
 }
 
 func BenchmarkParse_SSR(b *testing.B) {
-	var sb strings.Builder
-	for range 50 {
-		sb.WriteString(ssrBenchLine("Tokyo Node"))
-		sb.WriteString("\n")
-	}
-	input := []byte(sb.String())
+	input := benchParseInput(b, ssrBenchLine("Tokyo Node"))
 	b.ReportAllocs()
 	for b.Loop() {
 		count := 0
@@ -200,11 +222,7 @@ func BenchmarkParse_SSR(b *testing.B) {
 }
 
 func BenchmarkParse_Mieru(b *testing.B) {
-	var sb strings.Builder
-	for range 50 {
-		sb.WriteString("mierus://user:pass@1.2.3.4?port=2999&port=3000&protocol=TCP&protocol=UDP#Mieru\n")
-	}
-	input := []byte(sb.String())
+	input := benchParseInput(b, "mierus://user:pass@1.2.3.4?port=2999&port=3000&protocol=TCP&protocol=UDP#Mieru")
 	b.ReportAllocs()
 	for b.Loop() {
 		count := 0

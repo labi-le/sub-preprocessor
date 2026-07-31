@@ -9,9 +9,11 @@ import (
 	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
-// SchemeVmess identifies vmess:// nodes. Unlike vless/trojan/ss the server,
-// port and display name live inside a base64-encoded JSON payload rather than
-// a URI authority, so vmess needs a dedicated parser and relabeler.
+// SchemeVmess identifies vmess:// nodes. Unlike vless/trojan the server, port
+// and display name live inside a base64-encoded JSON payload rather than a URI
+// authority, so vmess needs a dedicated parser and relabeler. Legacy ss and ssr
+// hide the same fields the same way and have their own decoders (ss.go/ssr.go);
+// vmess is only the oldest of the three.
 const SchemeVmess Scheme = "vmess"
 
 // parseVmess decodes a vmess:// share link whose payload after the scheme is

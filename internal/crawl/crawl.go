@@ -670,9 +670,10 @@ func extractURLs(page string) []string {
 }
 
 // extractInlineNodes returns every raw proxy URI (vless://, vmess://, ss://,
-// ssr://, trojan://, tuic://, hysteria://, hysteria2://, hy2://, anytls://)
-// pasted directly in a channel page, HTML-unescaped and stripped of trailing
-// punctuation. Unlike extractURLs these are node URIs, not subscription links.
+// ssr://, trojan://, tuic://, hysteria://, hysteria2://, hy2://, anytls://,
+// mierus://) pasted directly in a channel page, HTML-unescaped and stripped of
+// trailing punctuation. Unlike extractURLs these are node URIs, not
+// subscription links.
 func extractInlineNodes(page string) []string {
 	page = html.UnescapeString(page)
 	matches := inlineRe.FindAllString(page, -1)

@@ -150,10 +150,10 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps (minMbps==0 disables the floor and keeps all
 // reachable nodes). It records Mbps on each kept survivor and, when annotate is
-// set, prepends a [SPD:<n>M] tag to the published name via the vmess-aware
-// relabel path. No store: a speed measurement is far too volatile for the
-// host-keyed, month-long geoblock store, so a sub-floor node is dropped for
-// this cycle and re-measured next.
+// set, prepends a [SPD:<n>M] tag to the published name through annotateSpeed.
+// No store: a speed measurement is far too volatile for the host-keyed,
+// month-long geoblock store, so a sub-floor node is dropped for this cycle and
+// re-measured next.
 type bandwidthFilter struct {
 	minMbps  int
 	annotate bool

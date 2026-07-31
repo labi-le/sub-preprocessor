@@ -39,6 +39,18 @@ const (
 	// the whole point of the relabel is that this string is what comes back out
 	// of entryLabel at the far end.
 	contractLabel = contractSource + "-001"
+	// contractTags is the [GEO][IP] prefix the filter pass leaves on an
+	// upstream name, and contractOriginName is the upstream name every fixture
+	// carries. The tags are load-bearing: rewrite.LeadingTags returns "" for a
+	// bare name, taggedName then short-circuits Entry.Tagged to Entry.Raw, and
+	// the tagged line — the one BuildPayload actually publishes — would never
+	// be converted here. It is a strictly harder line than Raw: a SECOND
+	// RewriteSSRName round trip for ssr, and for everything else a fragment
+	// carrying '[', ']', a space and a ':' that mihomo's own url.Parse and
+	// mieru's "<name>:<port>/<protocol>" naming both have to survive.
+	contractTags        = "[GEO:NL][IP:1.2.3.4]"
+	contractOriginName  = contractTags + " Origin"
+	contractTaggedLabel = contractTags + " " + contractLabel
 )
 
 // These credentials are structurally valid on purpose: adapter.ParseProxy
@@ -69,7 +81,7 @@ type schemeContract struct {
 // contractSSSIP002Line renders a SIP002 ss:// link: "<b64(method:password)>@host:port".
 func contractSSSIP002Line(server, port string) string {
 	userinfo := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:secret"))
-	return "ss://" + userinfo + "@" + server + ":" + port + "#Origin"
+	return "ss://" + userinfo + "@" + server + ":" + port + "#" + contractOriginName
 }
 
 // contractSSLegacyLine renders a pre-SIP002 ss:// link, whose WHOLE authority
@@ -88,7 +100,7 @@ func contractSSLegacyLine(t *testing.T, server, port string) string {
 		t.Fatalf("legacy ss fixture encodes to %q, which is not URI-safe; pick another password", authority)
 	}
 
-	return "ss://" + authority + "#Origin"
+	return "ss://" + authority + "#" + contractOriginName
 }
 
 // contractSSRLine renders an ssr:// link. Its base64 payload is
@@ -122,7 +134,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 
 	return []schemeContract{{
 		name:   "vless_tls",
-		line:   "vless://" + contractUUID + "@1.2.3.1:443?encryption=none&security=tls&sni=a.example&type=tcp#Origin",
+		line:   "vless://" + contractUUID + "@1.2.3.1:443?encryption=none&security=tls&sni=a.example&type=tcp#" + contractOriginName,
 		scheme: "vless",
 		server: "1.2.3.1",
 		port:   "443",
@@ -131,7 +143,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 	}, {
 		name: "vless_reality_grpc",
 		line: "vless://" + contractUUID + "@1.2.3.2:8443?encryption=none&security=reality&type=grpc" +
-			"&serviceName=grpc&sni=tesla.com&fp=chrome&pbk=" + contractRealityKey + "&sid=" + contractShortID + "#Origin",
+			"&serviceName=grpc&sni=tesla.com&fp=chrome&pbk=" + contractRealityKey + "&sid=" + contractShortID + "#" + contractOriginName,
 		scheme: "vless",
 		server: "1.2.3.2",
 		port:   "8443",
@@ -139,7 +151,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.2:8443"},
 	}, {
 		name:   "vmess_base64_json",
-		line:   contractVmessLine("1.2.3.3", "443", "Origin"),
+		line:   contractVmessLine("1.2.3.3", "443", contractOriginName),
 		scheme: subscription.SchemeVmess,
 		server: "1.2.3.3",
 		port:   "443",
@@ -147,7 +159,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.3:443"},
 	}, {
 		name:   "trojan",
-		line:   "trojan://secret@1.2.3.4:443?sni=a.example&type=tcp#Origin",
+		line:   "trojan://secret@1.2.3.4:443?sni=a.example&type=tcp#" + contractOriginName,
 		scheme: "trojan",
 		server: "1.2.3.4",
 		port:   "443",
@@ -171,7 +183,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.6:8389"},
 	}, {
 		name:   "ssr",
-		line:   contractSSRLine("1.2.3.7", "8390", "Origin", ""),
+		line:   contractSSRLine("1.2.3.7", "8390", contractOriginName, ""),
 		scheme: subscription.SchemeSSR,
 		server: "1.2.3.7",
 		port:   "8390",
@@ -179,7 +191,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.7:8390"},
 	}, {
 		name:   "hysteria_v1",
-		line:   "hysteria://1.2.3.8:443?auth=secret&peer=a.example&protocol=udp&upmbps=100&downmbps=100&alpn=hysteria#Origin",
+		line:   "hysteria://1.2.3.8:443?auth=secret&peer=a.example&protocol=udp&upmbps=100&downmbps=100&alpn=hysteria#" + contractOriginName,
 		scheme: "hysteria",
 		server: "1.2.3.8",
 		port:   "443",
@@ -187,7 +199,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.8:443"},
 	}, {
 		name:   "hysteria2",
-		line:   "hysteria2://secret@1.2.3.9:8443?sni=a.example&alpn=h3#Origin",
+		line:   "hysteria2://secret@1.2.3.9:8443?sni=a.example&alpn=h3#" + contractOriginName,
 		scheme: "hysteria2",
 		server: "1.2.3.9",
 		port:   "8443",
@@ -197,7 +209,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		// hy2:// is an alias mihomo maps onto type "hysteria2", so the parsed
 		// Scheme and the adapter type deliberately disagree here.
 		name:   "hy2_alias",
-		line:   "hy2://secret@1.2.3.10:8444?sni=a.example&alpn=h3#Origin",
+		line:   "hy2://secret@1.2.3.10:8444?sni=a.example&alpn=h3#" + contractOriginName,
 		scheme: "hy2",
 		server: "1.2.3.10",
 		port:   "8444",
@@ -205,7 +217,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.10:8444"},
 	}, {
 		name:   "tuic",
-		line:   "tuic://" + contractUUID + ":secret@1.2.3.11:443?congestion_control=bbr&alpn=h3&sni=a.example&udp_relay_mode=native#Origin",
+		line:   "tuic://" + contractUUID + ":secret@1.2.3.11:443?congestion_control=bbr&alpn=h3&sni=a.example&udp_relay_mode=native#" + contractOriginName,
 		scheme: "tuic",
 		server: "1.2.3.11",
 		port:   "443",
@@ -213,7 +225,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.11:443"},
 	}, {
 		name:   "anytls",
-		line:   "anytls://user:secret@1.2.3.12:8443?sni=a.example&insecure=1#Origin",
+		line:   "anytls://user:secret@1.2.3.12:8443?sni=a.example&insecure=1#" + contractOriginName,
 		scheme: "anytls",
 		server: "1.2.3.12",
 		port:   "8443",
@@ -221,7 +233,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.12:8443"},
 	}, {
 		name:   "socks5_with_port",
-		line:   "socks5://user:secret@1.2.3.13:1080#Origin",
+		line:   "socks5://user:secret@1.2.3.13:1080#" + contractOriginName,
 		scheme: "socks5",
 		server: "1.2.3.13",
 		port:   "1080",
@@ -229,7 +241,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.13:1080"},
 	}, {
 		name:   "http_with_port",
-		line:   "http://user:secret@1.2.3.14:8080#Origin",
+		line:   "http://user:secret@1.2.3.14:8080#" + contractOriginName,
 		scheme: "http",
 		server: "1.2.3.14",
 		port:   "8080",
@@ -240,7 +252,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		// exists because the portless https:// line is the negative boundary
 		// below, and a gate that rejected BOTH forms would look just as green.
 		name:   "https_with_port",
-		line:   "https://user:secret@1.2.3.15:8443#Origin",
+		line:   "https://user:secret@1.2.3.15:8443#" + contractOriginName,
 		scheme: "https",
 		server: "1.2.3.15",
 		port:   "8443",
@@ -248,7 +260,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		addrs:  []string{"1.2.3.15:8443"},
 	}, {
 		name:   "mierus_single_port",
-		line:   "mierus://user:secret@1.2.3.16?port=2999&protocol=TCP#Origin",
+		line:   "mierus://user:secret@1.2.3.16?port=2999&protocol=TCP#" + contractOriginName,
 		scheme: subscription.SchemeMieru,
 		server: "1.2.3.16",
 		port:   "2999",
@@ -264,7 +276,7 @@ func schemeContracts(t *testing.T) []schemeContract {
 		// resolves to its first port at the adapter (mihomo
 		// adapter/outbound/mieru.go:151-157).
 		name:   "mierus_multi_port",
-		line:   "mierus://user:secret@1.2.3.17?port=2999&protocol=TCP&port=9998-9999&protocol=UDP#Origin",
+		line:   "mierus://user:secret@1.2.3.17?port=2999&protocol=TCP&port=9998-9999&protocol=UDP#" + contractOriginName,
 		scheme: subscription.SchemeMieru,
 		server: "1.2.3.17",
 		port:   "2999",
@@ -282,7 +294,12 @@ func TestSchemeContractEndToEnd(t *testing.T) {
 
 			payload := subscription.Normalize([]byte(c.line + "\n"))
 			c.assertParsed(t, payload)
-			c.assertProxies(t, c.assertMerged(t, payload))
+			e := c.assertMerged(t, payload)
+			// Both published forms, because they are different lines: Raw is
+			// what the prober converts, Tagged is what a consumer's mihomo
+			// parses out of /stable.txt.
+			c.assertProxies(t, "Raw", e.Raw, e.Label)
+			c.assertProxies(t, "Tagged", e.Tagged, contractTaggedLabel)
 		})
 	}
 }
@@ -332,30 +349,43 @@ func (c schemeContract) assertMerged(t *testing.T, payload []byte) Entry {
 	if wantAddr := c.server + ":" + c.port; e.Addr != wantAddr {
 		t.Errorf("Entry.Addr = %q, want %q", e.Addr, wantAddr)
 	}
+	// A fixture whose name lost its leading tags would send taggedName down its
+	// raw short-circuit, leaving the Tagged half of every assertion below a
+	// second copy of the Raw half.
+	if e.Tagged == e.Raw {
+		t.Fatalf("Entry.Tagged == Entry.Raw (%q); the fixture name carries no [GEO][IP] tag to fold", e.Raw)
+	}
 
 	return e
 }
 
-// assertProxies pins the last three hops: how many mihomo proxies the relabeled
-// Entry.Raw becomes, what each one is, and that every one of them folds back
-// onto the entry's label.
-func (c schemeContract) assertProxies(t *testing.T, e Entry) {
+// assertProxies pins the last three hops for one published line: how many
+// mihomo proxies it becomes, what each one is, and that every one of them
+// carries wantName.
+//
+// entryLabel is the inverse of mihomo's naming, so one assertion covers both
+// the single-proxy schemes and mierus://, which mihomo expands into one proxy
+// per port named "<name>:<port>/<protocol>". Only the Raw call reproduces
+// production — nothing folds a Tagged proxy name back — but running it over a
+// name containing '[', ']', a space and a ':' is what proves the fold cuts at
+// the port suffix rather than at the first colon it finds.
+func (c schemeContract) assertProxies(t *testing.T, which, line, wantName string) {
 	t.Helper()
 
-	for i, px := range contractProxies(t, e.Raw, len(c.addrs)) {
+	for i, px := range contractProxies(t, line, len(c.addrs)) {
 		if got := px.Type(); got != c.typ {
-			t.Errorf("proxy[%d] %q: Type = %v, want %v", i, px.Name(), got, c.typ)
+			t.Errorf("%s proxy[%d] %q: Type = %v, want %v", which, i, px.Name(), got, c.typ)
 		}
 		if got := px.Addr(); got != c.addrs[i] {
-			t.Errorf("proxy[%d] %q: Addr = %q, want %q", i, px.Name(), got, c.addrs[i])
+			t.Errorf("%s proxy[%d] %q: Addr = %q, want %q", which, i, px.Name(), got, c.addrs[i])
 		}
-		if got := entryLabel(px); got != e.Label {
-			t.Errorf("entryLabel(%q) = %q, want %q", px.Name(), got, e.Label)
+		if got := entryLabel(px); got != wantName {
+			t.Errorf("%s entryLabel(%q) = %q, want %q", which, px.Name(), got, wantName)
 		}
 	}
 }
 
-// contractProxies runs one relabeled Entry.Raw through the prober's own front
+// contractProxies runs one published node line through the prober's own front
 // end and returns the wantCount proxies it must yield, in emission order.
 //
 // adapter.ParseProxy hands back an outbound holding a dialer (and, for mieru, a
@@ -436,8 +466,8 @@ func TestSchemeContractRejectsPortlessProxyLine(t *testing.T) {
 func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 	t.Parallel()
 
-	const wgLine = "wireguard://ZGVhZGJlZWZkZWFkYmVlZg@1.2.3.20:51820?reserved=0,0,0#Origin"
-	vlessLine := "vless://" + contractUUID + "@1.2.3.21:443?encryption=none&security=tls&type=tcp#Origin"
+	const wgLine = "wireguard://ZGVhZGJlZWZkZWFkYmVlZg@1.2.3.20:51820?reserved=0,0,0#" + contractOriginName
+	vlessLine := "vless://" + contractUUID + "@1.2.3.21:443?encryption=none&security=tls&type=tcp#" + contractOriginName
 
 	entries := Merge([]SourceBody{{Name: contractSource, Body: []byte(wgLine + "\n" + vlessLine + "\n")}})
 	if len(entries) != 2 {
@@ -477,7 +507,10 @@ func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 func TestSchemeContractSSRSurvivesRelabelFragmentFree(t *testing.T) {
 	t.Parallel()
 
-	line := contractSSRLine("1.2.3.22", "8388", "Original", "Original")
+	// The remarks carry the [GEO][IP] tags so Entry.Tagged is a second
+	// RewriteSSRName product rather than a copy of Entry.Raw; the Tagged
+	// fragment assertion below is vacuous otherwise.
+	line := contractSSRLine("1.2.3.22", "8388", contractOriginName, "Original")
 	if !strings.Contains(line, "#") {
 		t.Fatalf("fixture %q carries no fragment, so it proves nothing", line)
 	}
