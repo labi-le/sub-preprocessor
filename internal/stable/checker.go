@@ -304,9 +304,17 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 		}
 	}()
 
-	byLabel := make(map[string]mihomo.Proxy, len(proxies))
+	// entryLabel, not px.Name(): a mierus:// survivor parses into one proxy per
+	// configured port, and the filters below look this map up by Entry.Label.
+	// Every port is kept, in mihomo's emission order, because collapsing them
+	// here would hand the filters an arbitrary port: a node whose last port is
+	// filtered on our egress would be measured unreachable and dropped even
+	// though the probe selected it on a live one. The checks fold the
+	// OUTCOMES instead (see betterAPIOutcome, betterBandwidthOutcome).
+	byLabel := make(map[string][]mihomo.Proxy, len(proxies))
 	for _, px := range proxies {
-		byLabel[px.Name()] = px
+		label := entryLabel(px)
+		byLabel[label] = append(byLabel[label], px)
 	}
 	reports := make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {

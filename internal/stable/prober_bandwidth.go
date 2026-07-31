@@ -31,6 +31,19 @@ type BandwidthOutcome struct {
 	Mbps      int
 }
 
+// betterBandwidthOutcome reports whether a is the outcome to keep when two
+// proxies of one entry fold onto the same label (a mierus:// link's ports).
+// Best-of-ports for the same reason as betterAPIOutcome: the published link is
+// re-expanded by the consuming mihomo into one proxy per port, so a port that
+// our egress cannot reach must not veto the ones it can. Speed then decides,
+// matching the floor the filter applies.
+func betterBandwidthOutcome(a, b BandwidthOutcome) bool {
+	if a.Reachable != b.Reachable {
+		return a.Reachable
+	}
+	return a.Mbps > b.Mbps
+}
+
 // computeMbps converts a byte count and transfer duration to integer Mbps.
 // Guards elapsed<=0 and bytesRead<=0 so a sub-second or empty transfer never
 // divides by zero or yields NaN.
@@ -133,8 +146,10 @@ func bandwidthProbeOne(ctx context.Context, px mihomo.Proxy, target string, time
 // BandwidthCheck downloads the configured test_url through each of the supplied
 // proxies (bounded by check.bandwidth.concurrency) and returns each node's
 // measured speed. Mirrors apiCheck's fan-out: one shared semaphore, per-node
-// debug log, progress reporter. The caller owns the proxies' lifecycle (parse
-// once, close once).
+// debug log, progress reporter, and the same label fold — several proxies of
+// one mieru entry land on one key, and betterBandwidthOutcome resolves them at
+// write time so the result does not depend on which worker finished last. The
+// caller owns the proxies' lifecycle (parse once, close once).
 func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome {
 	target := m.bandwidth.TestURL
 	timeout := m.bandwidth.Timeout
@@ -165,7 +180,10 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 				Bool("reachable", o.Reachable).Int("mbps", o.Mbps).
 				Int64("n", n).Int64("of", prog.total).Msg("bandwidth check")
 			mu.Lock()
-			out[px.Name()] = o
+			label := entryLabel(px)
+			if prev, ok := out[label]; !ok || betterBandwidthOutcome(o, prev) {
+				out[label] = o
+			}
 			mu.Unlock()
 		}()
 	}
