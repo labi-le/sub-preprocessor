@@ -1,0 +1,307 @@
+package stable //nolint:testpackage // exercises unexported stable internals
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	mihomo "github.com/metacubex/mihomo/constant"
+	"github.com/rs/zerolog"
+
+	"domains.lst/sub-preprocessor/internal/config"
+)
+
+// mieruLine renders a mierus:// share link whose fragment is name. Each
+// port/protocol pair mihomo finds here becomes one proxy named
+// "<name>:<port>/<protocol>".
+func mieruLine(server, name string, portProto ...[2]string) string {
+	line := "mierus://user:pass@" + server + "?"
+	for i, pp := range portProto {
+		if i > 0 {
+			line += "&"
+		}
+		line += "port=" + pp[0] + "&protocol=" + pp[1]
+	}
+
+	return line + "#" + name
+}
+
+// labelProxy is a mihomo.Proxy stub exposing only Name and Type, the two
+// methods entryLabel reads. The embedded nil interface panics on anything
+// else, which is the point: it pins the read set. It exists because the
+// degenerate names entryLabel guards against (no colon, leading colon) are
+// shapes mihomo's converter cannot be made to emit, so they are unreachable
+// through a real payload.
+type labelProxy struct {
+	mihomo.Proxy
+	name string
+	typ  mihomo.AdapterType
+}
+
+func (p labelProxy) Name() string             { return p.name }
+func (p labelProxy) Type() mihomo.AdapterType { return p.typ }
+
+func TestEntryLabel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		desc string
+		name string
+		typ  mihomo.AdapterType
+		want string
+	}{
+		{"non-mieru names are the label verbatim", "src-001", mihomo.Vless, "src-001"},
+		{
+			"a colon in a non-mieru name is part of the label, not a suffix",
+			"weird:src-001", mihomo.Vless, "weird:src-001",
+		},
+		{"mieru sheds its :<port>/<protocol> suffix", "src-001:2999/TCP", mihomo.Mieru, "src-001"},
+		{"a port range is still one suffix", "src-001:9998-9999/UDP", mihomo.Mieru, "src-001"},
+		{
+			"only the LAST colon starts the suffix",
+			"weird:src-001:9998-9999/UDP", mihomo.Mieru, "weird:src-001",
+		},
+		// Guards: folding these would produce "", a label that collides with
+		// every entry whose own label is missing.
+		{"a colonless mieru name is not folded", "src-001", mihomo.Mieru, "src-001"},
+		{"a leading colon is not folded to empty", ":2999/TCP", mihomo.Mieru, ":2999/TCP"},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			px := labelProxy{name: c.name, typ: c.typ}
+			if got := entryLabel(px); got != c.want {
+				t.Errorf("entryLabel(%q, %v) = %q, want %q", c.name, c.typ, got, c.want)
+			}
+		})
+	}
+}
+
+// TestEntryLabelFoldsRealMieruProxies pins the upstream shape entryLabel is
+// built on: mihomo expands ONE mierus:// link into one Mieru-typed proxy per
+// configured port, named "<fragment>:<port>/<protocol>". If a mihomo bump
+// changes that naming, this fails here instead of silently un-selecting every
+// mieru node in production.
+func TestEntryLabelFoldsRealMieruProxies(t *testing.T) {
+	t.Parallel()
+
+	pxs := parseTestProxies(t,
+		mieruLine("1.2.3.4", "src-001", [2]string{"2999", "TCP"}, [2]string{"9998-9999", "UDP"})+"\n"+
+			mieruLine("5.6.7.8", "weird:src-002", [2]string{"3000", "TCP"})+"\n"+
+			benchVlessLine("9.9.9.9", "443", "weird:src-003"))
+
+	want := map[string]string{
+		"src-001:2999/TCP":       "src-001",
+		"src-001:9998-9999/UDP":  "src-001",
+		"weird:src-002:3000/TCP": "weird:src-002",
+		"weird:src-003":          "weird:src-003",
+	}
+	if len(pxs) != len(want) {
+		t.Fatalf("parsed %d proxies, want %d: %v", len(pxs), len(want), proxyNames(pxs))
+	}
+	for _, px := range pxs {
+		label, known := want[px.Name()]
+		if !known {
+			t.Fatalf("unexpected proxy name %q; mihomo's mieru naming changed", px.Name())
+		}
+		if got := entryLabel(px); got != label {
+			t.Errorf("entryLabel(%q) = %q, want %q", px.Name(), got, label)
+		}
+	}
+}
+
+func TestFoldProbeResults(t *testing.T) {
+	t.Parallel()
+
+	const rounds = 3
+	pxs := parseTestProxies(t,
+		mieruLine("1.2.3.4", "src-001", [2]string{"2999", "TCP"}, [2]string{"3000", "UDP"},
+			[2]string{"3001", "TCP"})+"\n"+
+			benchVlessLine("9.9.9.9", "443", "src-002")+"\n"+
+			benchVlessLine("8.8.8.8", "443", "src-003"))
+
+	accs := map[string]*delayAcc{
+		// The middle port is the best node: it answered every round.
+		"src-001:2999/TCP": {succ: 1, sum: 100},
+		"src-001:3000/UDP": {succ: rounds, sum: 900},
+		"src-001:3001/TCP": {succ: 2, sum: 200},
+		"src-002":          {succ: 2, sum: 500},
+		// src-003 never answered: dropped, not folded as a zero.
+		"src-003": {succ: 0, sum: 0},
+	}
+	res := foldProbeResults(pxs, accs)
+
+	if len(res) != 2 {
+		t.Fatalf("folded to %d results, want src-001 and src-002 only: %+v", len(res), res)
+	}
+	got, ok := res["src-001"]
+	if !ok {
+		t.Fatalf("mieru node absent under its bare label; keys = %+v", res)
+	}
+	if got.Successes != rounds || got.MeanMs != 300 {
+		t.Errorf("src-001 = %+v, want the best port {Successes:%d MeanMs:300}", got, rounds)
+	}
+	// The failure this guards: summing the three ports gives 6 successes over
+	// 3 rounds, so SelectSurvivors computes rounds-Successes = -3 and every
+	// mieru node walks through maxFail however badly it probed.
+	if got.Successes > rounds {
+		t.Errorf("Successes %d exceeds the %d rounds run; the fold summed instead of picking", got.Successes, rounds)
+	}
+	if res["src-002"] != (ProbeResult{Successes: 2, MeanMs: 250}) {
+		t.Errorf("non-mieru result changed: %+v", res["src-002"])
+	}
+}
+
+// TestFoldProbeResultsTieBreaksOnLatency locks the tiebreak, and locks it
+// order-independently: with equal successes the faster port must win whether
+// it is first or last in the payload.
+func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		desc      string
+		fastFirst bool
+	}{
+		{"fast port first", true},
+		{"fast port last", false},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			pxs := parseTestProxies(t, mieruLine("1.2.3.4", "src-001",
+				[2]string{"2999", "TCP"}, [2]string{"3000", "UDP"}))
+			fast, slow := "src-001:2999/TCP", "src-001:3000/UDP"
+			if !c.fastFirst {
+				fast, slow = slow, fast
+			}
+			accs := map[string]*delayAcc{
+				fast: {succ: 2, sum: 100},
+				slow: {succ: 2, sum: 800},
+			}
+			if got := foldProbeResults(pxs, accs); got["src-001"].MeanMs != 50 {
+				t.Errorf("src-001 = %+v, want the 50ms port", got["src-001"])
+			}
+		})
+	}
+}
+
+// TestThroughNodeChecksKeyOutcomesByEntryLabel covers the two fan-outs that
+// hand their map straight to a filter's outcomes[s.Label] lookup. Both dials
+// fail (nothing listens), which is irrelevant: only the KEY is under test —
+// under the proxy name the lookup misses and the node is dropped as
+// unreachable, i.e. mis-reported rather than merely lost.
+func TestThroughNodeChecksKeyOutcomesByEntryLabel(t *testing.T) {
+	t.Parallel()
+
+	pxs := parseTestProxies(t, mieruLine("127.0.0.1", "src-001", [2]string{"1", "TCP"}))
+	m := &MihomoProber{
+		logger: zerolog.Nop(),
+		bandwidth: config.BandwidthConfig{
+			TestURL: "http://127.0.0.1:1/", Timeout: 500 * time.Millisecond, Concurrency: 1,
+		},
+	}
+	ctx := context.Background()
+
+	api := m.apiCheck(ctx, "test.api", "api", pxs, "http://127.0.0.1:1/", nil,
+		500*time.Millisecond, 1, func(int, string) bool { return false })
+	if _, ok := api["src-001"]; !ok {
+		t.Errorf("apiCheck outcomes keyed %v, want src-001", mapKeys(api))
+	}
+
+	bw := m.BandwidthCheck(ctx, pxs)
+	if _, ok := bw["src-001"]; !ok {
+		t.Errorf("BandwidthCheck outcomes keyed %v, want src-001", mapKeys(bw))
+	}
+}
+
+// TestApplyFiltersMieruSurvivorEntersSubset is the end-to-end regression: with
+// the shared proxy map keyed by proxy name, applyFilters' subset selection
+// (proxies[s.Label]) never finds a mieru survivor, so it is never checked and
+// the zero-value outcome drops it as unreachable. The vless survivor beside it
+// pins that the exact-match path is untouched.
+func TestApplyFiltersMieruSurvivorEntersSubset(t *testing.T) {
+	t.Parallel()
+
+	prober := testProber(t)
+	mieru := mieruLine("1.2.3.4", "src-001", [2]string{"2999", "TCP"})
+	vless := benchVlessLine("9.9.9.9", "443", "src-002")
+	survivors := []Survivor{
+		{Entry: Entry{Label: "src-001", Raw: mieru, Tagged: mieru}},
+		{Entry: Entry{Label: "src-002", Raw: vless, Tagged: vless}},
+	}
+
+	var checked []string
+	check := func(_ context.Context, given []mihomo.Proxy) map[string]APIOutcome {
+		out := make(map[string]APIOutcome, len(given))
+		for _, px := range given {
+			checked = append(checked, px.Name())
+			out[entryLabel(px)] = APIOutcome{Server: px.Addr(), Reachable: true}
+		}
+
+		return out
+	}
+	c := NewChecker(CheckerSpec{
+		Prober:  prober,
+		Filters: []NodeFilter{&apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}},
+	}, nil, nil, nil, nil, zerolog.Nop(), nil)
+
+	kept, reports := c.applyFilters(context.Background(), c.spec.Load(), survivors)
+
+	if len(checked) != 2 {
+		t.Fatalf("check saw %v, want one proxy per survivor (the mieru node must reach the subset)", checked)
+	}
+	if checked[0] != "src-001:2999/TCP" {
+		t.Errorf("mieru proxy entered the subset as %q, want its mihomo name", checked[0])
+	}
+	if len(kept) != 2 {
+		t.Fatalf("kept %d survivors, want both: %+v", len(kept), kept)
+	}
+	if reports[0].Dropped["unreachable"] != 0 {
+		t.Errorf("a checked, reachable node was reported unreachable: %+v", reports[0].Dropped)
+	}
+}
+
+func testProber(t *testing.T) *MihomoProber {
+	t.Helper()
+
+	p, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return p
+}
+
+// parseTestProxies parses payload through the real mihomo converter+adapter so
+// the tests assert against genuine proxy names and adapter types. The proxies
+// are never dialled, so they need no Close.
+func parseTestProxies(t *testing.T, payload string) []mihomo.Proxy {
+	t.Helper()
+
+	pxs, err := testProber(t).ParseProxies([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return pxs
+}
+
+func proxyNames(pxs []mihomo.Proxy) []string {
+	names := make([]string, len(pxs))
+	for i, px := range pxs {
+		names[i] = px.Name()
+	}
+
+	return names
+}
+
+func mapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	return keys
+}

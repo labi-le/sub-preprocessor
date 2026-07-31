@@ -134,7 +134,8 @@ func bandwidthProbeOne(ctx context.Context, px mihomo.Proxy, target string, time
 // proxies (bounded by check.bandwidth.concurrency) and returns each node's
 // measured speed. Mirrors apiCheck's fan-out: one shared semaphore, per-node
 // debug log, progress reporter. The caller owns the proxies' lifecycle (parse
-// once, close once).
+// once, close once) and, as in apiCheck, passes at most one proxy per entry
+// label — the key this map is read back by.
 func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome {
 	target := m.bandwidth.TestURL
 	timeout := m.bandwidth.Timeout
@@ -165,7 +166,7 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 				Bool("reachable", o.Reachable).Int("mbps", o.Mbps).
 				Int64("n", n).Int64("of", prog.total).Msg("bandwidth check")
 			mu.Lock()
-			out[px.Name()] = o
+			out[entryLabel(px)] = o
 			mu.Unlock()
 		}()
 	}

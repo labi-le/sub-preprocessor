@@ -46,6 +46,11 @@ func fanoutSem(concurrency int) chan struct{} {
 // status and the body: a service can refuse an egress with either (a marker in
 // the body, or a bare CDN 403). Every node logs a debug outcome and the
 // progress logger reports each completed 10% decade.
+//
+// Outcomes are keyed by entry label, which is what a filter looks them up by.
+// Pass at most one proxy per label: applyFilters' shared map has already
+// collapsed a mieru node's per-port proxies, and a second one here would
+// overwrite the first's outcome instead of folding with it.
 func (m *MihomoProber) apiCheck(
 	ctx context.Context,
 	op, msg string,
@@ -81,7 +86,7 @@ func (m *MihomoProber) apiCheck(
 				Bool("reachable", o.Reachable).Int("status", status).Bool("blocked", o.Blocked).
 				Int64("n", n).Int64("of", prog.total).Msg(msg)
 			mu.Lock()
-			out[px.Name()] = o
+			out[entryLabel(px)] = o
 			mu.Unlock()
 		}()
 	}

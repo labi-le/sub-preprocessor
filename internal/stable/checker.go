@@ -304,9 +304,13 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 		}
 	}()
 
+	// entryLabel, not px.Name(): a mierus:// survivor parses into one proxy per
+	// configured port, and the filters below look this map up by Entry.Label.
+	// Collapsing them here (last port wins — they are the same node) also means
+	// the filter subsets stay one proxy per survivor.
 	byLabel := make(map[string]mihomo.Proxy, len(proxies))
 	for _, px := range proxies {
-		byLabel[px.Name()] = px
+		byLabel[entryLabel(px)] = px
 	}
 	reports := make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {

@@ -64,9 +64,19 @@ type delayAcc struct {
 	sum  int
 }
 
+// betterProbe reports whether a is the result to keep when two proxies fold
+// onto one label: more successful rounds first, lower mean latency as the
+// tiebreak.
+func betterProbe(a, b ProbeResult) bool {
+	if a.Successes != b.Successes {
+		return a.Successes > b.Successes
+	}
+	return a.MeanMs < b.MeanMs
+}
+
 // Probe parses the payload once and URL-tests every node for the configured
 // number of rounds. The result map contains only nodes that succeeded at
-// least once, keyed by node name.
+// least once, keyed by entry label (see entryLabel).
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
 	proxies, err := m.parseProxies(payload)
 	if err != nil {
@@ -102,15 +112,35 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 		return nil, fmt.Errorf("probe interrupted: %w", ctxErr)
 	}
 
+	return foldProbeResults(proxies, accs), nil
+}
+
+// foldProbeResults collapses the per-proxy accumulators onto entry labels.
+//
+// A mierus:// entry arrives here as one proxy per configured port, all folding
+// onto the same label. Best-of, never a sum: mieru dials one of its ports, so
+// a single working port makes the node usable, whereas adding N ports' rounds
+// together would let Successes exceed check.rounds and walk straight through
+// SelectSurvivors' maxFail gate.
+//
+// Iterating proxies rather than accs is what makes a tie resolve in payload
+// order instead of by map-iteration chance.
+func foldProbeResults(proxies []mihomo.Proxy, accs map[string]*delayAcc) map[string]ProbeResult {
 	res := make(map[string]ProbeResult, len(accs))
-	for name, a := range accs {
-		if a.succ == 0 {
+	for _, px := range proxies {
+		a := accs[px.Name()]
+		if a == nil || a.succ == 0 {
 			continue
 		}
-		res[name] = ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
+		r := ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
+		label := entryLabel(px)
+		if prev, ok := res[label]; ok && !betterProbe(r, prev) {
+			continue
+		}
+		res[label] = r
 	}
 
-	return res, nil
+	return res
 }
 
 // ParseProxies is the exported wrapper over parseProxies so the checker can
