@@ -3,14 +3,14 @@ package stable //nolint:testpackage // exercises unexported stable internals
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	mihomonet "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/adapter/outbound"
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
@@ -198,76 +198,24 @@ func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
 	}
 }
 
-// TestThroughNodeChecksKeyOutcomesByEntryLabel covers the two fan-outs that
-// hand their map straight to a filter's outcomes[s.Label] lookup. Both dials
-// fail (nothing listens), which is irrelevant: only the KEY is under test —
-// under the proxy name the lookup misses and the node is dropped as
-// unreachable, i.e. mis-reported rather than merely lost. The two ports pin
-// the collapse half of the fold and nothing more: two proxies of one entry
-// must leave ONE key, not race each other into two. Which of two DIFFERING
-// outcomes wins is unobservable here (both dials fail identically) and is
-// pinned by TestThroughNodeChecksFoldToTheLivePort.
-func TestThroughNodeChecksKeyOutcomesByEntryLabel(t *testing.T) {
-	t.Parallel()
-
-	const dead = "http://127.0.0.1:1/"
-	pxs := parseTestProxies(t, mieruLine("127.0.0.1", "src-001",
-		[2]string{"1", "TCP"}, [2]string{"2", "UDP"}))
-	if len(pxs) != 2 {
-		t.Fatalf("setup: parsed %v, want one proxy per port", proxyNames(pxs))
-	}
-	m := testProberWith(t, config.BandwidthConfig{
-		TestURL: dead, Timeout: 500 * time.Millisecond, Concurrency: 2,
-	})
-	ctx := context.Background()
-
-	api := m.apiCheck(ctx, "test.api", "api", pxs, dead, nil,
-		500*time.Millisecond, 2, func(int, string) bool { return false })
-	if len(api) != 1 {
-		t.Errorf("apiCheck outcomes keyed %v, want the single label src-001", mapKeys(api))
-	}
-	if _, ok := api["src-001"]; !ok {
-		t.Errorf("apiCheck outcomes keyed %v, want src-001", mapKeys(api))
-	}
-
-	bw := m.BandwidthCheck(ctx, pxs)
-	if len(bw) != 1 {
-		t.Errorf("BandwidthCheck outcomes keyed %v, want the single label src-001", mapKeys(bw))
-	}
-	if _, ok := bw["src-001"]; !ok {
-		t.Errorf("BandwidthCheck outcomes keyed %v, want src-001", mapKeys(bw))
-	}
-}
-
-// mieruPortConn adapts a plain net.Conn to the mihomo.Conn a Proxy must hand
-// back. Both probes pass it straight to an http.Transport, so only the
-// net.Conn half is ever touched; the embedded nil Connection panics on
-// anything else, which pins that read set the way dialRecorder's nil Proxy
-// does.
-type mieruPortConn struct {
-	mihomonet.ExtendedConn
-	mihomo.Connection
-}
-
 // mieruPort is one port of a mierus:// link as mihomo expands it: a
 // Mieru-typed proxy named "<label>:<port>/<protocol>", so entryLabel folds
-// several of them onto one key. serve is the address a live port dials;
-// empty means the port refuses. delay holds the dial open long enough to make
-// this port the LAST of the fan-out to reach the fold, so a test can pin
-// either completion order instead of hoping for one.
+// several of them onto one key. A live port delegates to an embedded DIRECT
+// outbound, which dials the address the probe already put in the metadata; a
+// dead one refuses. delay holds the dial open long enough to make this port
+// the LAST of the fan-out to reach the fold, so a test can pin either
+// completion order instead of hoping for one.
 type mieruPort struct {
-	mihomo.Proxy
-	name  string
-	addr  string
-	serve string
-	delay time.Duration
+	mihomo.Proxy // adapter.NewProxy(outbound.NewDirect()) for a live port, nil for a dead one
+	name, addr   string
+	delay        time.Duration
 }
 
 func (p *mieruPort) Name() string             { return p.name }
 func (p *mieruPort) Type() mihomo.AdapterType { return mihomo.Mieru }
 func (p *mieruPort) Addr() string             { return p.addr }
 
-func (p *mieruPort) DialContext(ctx context.Context, _ *mihomo.Metadata) (mihomo.Conn, error) { //nolint:ireturn // implements mihomo.Proxy; the signature is not ours to choose
+func (p *mieruPort) DialContext(ctx context.Context, meta *mihomo.Metadata) (mihomo.Conn, error) { //nolint:ireturn // implements mihomo.Proxy; the signature is not ours to choose
 	if p.delay > 0 {
 		select {
 		case <-time.After(p.delay):
@@ -275,15 +223,11 @@ func (p *mieruPort) DialContext(ctx context.Context, _ *mihomo.Metadata) (mihomo
 			return nil, ctx.Err()
 		}
 	}
-	if p.serve == "" {
+	if p.Proxy == nil {
 		return nil, errors.New("port refused by test")
 	}
-	conn, err := new(net.Dialer).DialContext(ctx, "tcp", p.serve)
-	if err != nil {
-		return nil, err
-	}
 
-	return &mieruPortConn{ExtendedConn: mihomonet.NewExtendedConn(conn)}, nil
+	return p.Proxy.DialContext(ctx, meta)
 }
 
 // TestThroughNodeChecksFoldToTheLivePort enters the real write-time folds in
@@ -332,8 +276,8 @@ func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
 
 			pxs := []mihomo.Proxy{
 				&mieruPort{
-					name: label + ":2999/TCP", addr: "1.2.3.4:2999",
-					serve: srv.Listener.Addr().String(), delay: c.liveDelay,
+					Proxy: adapter.NewProxy(outbound.NewDirect()),
+					name:  label + ":2999/TCP", addr: "1.2.3.4:2999", delay: c.liveDelay,
 				},
 				&mieruPort{name: label + ":9998-9999/UDP", addr: "1.2.3.4:9998", delay: c.deadDelay},
 			}
