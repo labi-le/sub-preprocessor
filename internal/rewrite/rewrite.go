@@ -28,10 +28,22 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 		name = tags + " " + cleanName
 	}
 
-	// vmess carries its name in the base64 JSON "ps" field, not a URI
-	// fragment, so the tag prefix is folded into the payload and re-encoded.
-	if node.Scheme == subscription.SchemeVmess {
+	// vmess and ssr carry their display name inside the base64 payload rather
+	// than in a URI fragment, so the tag prefix is folded into the payload and
+	// re-encoded. For ssr a fragment would be actively harmful: mihomo
+	// base64-decodes everything after "ssr://", the "#name" included, so an
+	// appended fragment turns the node into "format invalid". An undecodable
+	// payload is published verbatim — unannotated beats mangled.
+	switch node.Scheme {
+	case subscription.SchemeVmess:
 		if out, ok := subscription.RewriteVmessName(node.Raw, name); ok {
+			b.WriteString(out)
+			return
+		}
+		b.WriteString(node.Raw)
+		return
+	case subscription.SchemeSSR:
+		if out, ok := subscription.RewriteSSRName(node.Raw, name); ok {
 			b.WriteString(out)
 			return
 		}
