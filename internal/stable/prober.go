@@ -134,10 +134,9 @@ func foldProbeResults(proxies []mihomo.Proxy, accs map[string]*delayAcc) map[str
 		}
 		r := ProbeResult{Successes: a.succ, MeanMs: a.sum / a.succ}
 		label := entryLabel(px)
-		if prev, ok := res[label]; ok && !betterProbe(r, prev) {
-			continue
+		if prev, ok := res[label]; !ok || betterProbe(r, prev) {
+			res[label] = r
 		}
-		res[label] = r
 	}
 
 	return res
