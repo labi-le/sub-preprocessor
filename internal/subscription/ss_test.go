@@ -33,12 +33,14 @@ func TestParseSSLegacyDecodesAuthority(t *testing.T) {
 		wantPort   string
 		wantName   string
 	}{
-		{"std alphabet", base64.StdEncoding, "aes-256-gcm:pass@1.2.3.4:8388", "#Legacy", "1.2.3.4", "8388", "Legacy"},
-		{"raw url alphabet", base64.RawURLEncoding, "aes-256-gcm:pass@1.2.3.4:8388", "#Legacy", "1.2.3.4", "8388", "Legacy"},
-		{"no fragment names the node after the decoded host", base64.StdEncoding, "aes-256-gcm:pass@example.net:8388", "", "example.net", "8388", "example.net"},
-		{"decoded without a port keeps the 443 default", base64.StdEncoding, "aes-256-gcm:pass@example.net", "#N", "example.net", "443", "N"},
-		{"password containing @ splits at the last one", base64.StdEncoding, "aes-256-gcm:p@ss@1.2.3.4:8388", "#N", "1.2.3.4", "8388", "N"},
-		{"ipv6 host", base64.StdEncoding, "aes-256-gcm:pass@[2001:db8::1]:8388", "#N", "2001:db8::1", "8388", "N"},
+		{"unpadded std alphabet", base64.RawStdEncoding, "aes-256-gcm:pass@1.2.3.4:8388", "#Legacy", "1.2.3.4", "8388", "Legacy"},
+		// A payload carrying '+' proves the decoder is std and not url-safe:
+		// URLEncoding would refuse the character outright.
+		{"payload using the std-only '+'", base64.RawStdEncoding, "aes-256-gcm:pa~@1.2.3.4:8388", "#Legacy", "1.2.3.4", "8388", "Legacy"},
+		{"no fragment names the node after the decoded host", base64.RawStdEncoding, "aes-256-gcm:pass@example.net:8388", "", "example.net", "8388", "example.net"},
+		{"decoded without a port keeps the 443 default", base64.RawStdEncoding, "aes-256-gcm:pass@example.net", "#N", "example.net", "443", "N"},
+		{"password containing @ splits at the last one", base64.RawStdEncoding, "aes-256-gcm:p@ss@1.2.3.4:8388", "#N", "1.2.3.4", "8388", "N"},
+		{"ipv6 host", base64.RawStdEncoding, "aes-256-gcm:pass@[2001:db8::1]:8388", "#N", "2001:db8::1", "8388", "N"},
 	}
 
 	for _, tc := range cases {
@@ -69,6 +71,12 @@ func TestParseSSLegacyDecodesAuthority(t *testing.T) {
 // TestParseSSLegacyRejects: an ss link whose authority is neither a host nor a
 // decodable "…@host" is rejected instead of handing a base64 blob to the
 // resolver, which used to book it as an NXDOMAIN drop and lose the node.
+//
+// The alphabet cases are the narrowing: the spec writes the legacy authority
+// unpadded (https://shadowsocks.org/doc/configs.html) and mihomo decodes it
+// with RawStdEncoding alone, so accepting a padded or url-safe payload would
+// only publish a node no client we serve can convert — one guaranteed probe
+// failure plus 2h of dead-cache pollution under its server:port.
 func TestParseSSLegacyRejects(t *testing.T) {
 	t.Parallel()
 
@@ -77,8 +85,10 @@ func TestParseSSLegacyRejects(t *testing.T) {
 		line string
 	}{
 		{"undecodable payload", "ss://!!!not-base64!!!#N"},
-		{"decoded payload carries no @", ssLegacyLine(t, base64.StdEncoding, "aes-256-gcm:pass", "#N")},
-		{"decoded payload carries no host", ssLegacyLine(t, base64.StdEncoding, "aes-256-gcm:pass@:8388", "#N")},
+		{"std alphabet with padding", ssLegacyLine(t, base64.StdEncoding, "aes-256-gcm:pass@1.2.3.4:8388", "#N")},
+		{"url-safe alphabet", ssLegacyLine(t, base64.RawURLEncoding, "aes-256-gcm:pa~@1.2.3.4:8388", "#N")},
+		{"decoded payload carries no @", ssLegacyLine(t, base64.RawStdEncoding, "aes-256-gcm:pass", "#N")},
+		{"decoded payload carries no host", ssLegacyLine(t, base64.RawStdEncoding, "aes-256-gcm:pass@:8388", "#N")},
 	}
 
 	for _, tc := range cases {

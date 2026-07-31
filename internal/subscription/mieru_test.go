@@ -43,9 +43,10 @@ func TestParseMieruTakesPortFromQuery(t *testing.T) {
 }
 
 // TestParseMieruRejects: mihomo expands a mierus:// link into one proxy per
-// "port" paired with the "protocol" at the same index and drops the link when
-// the lists do not line up, so keeping these would only spend probe budget on
-// nodes that can never be selected.
+// "port" paired with the "protocol" at the same index, drops the link when the
+// lists do not line up, and strconv.Atoi's each port — so keeping any of these
+// would only spend probe budget on nodes that can never be selected, under a
+// fabricated dead-cache and dedupe key.
 func TestParseMieruRejects(t *testing.T) {
 	t.Parallel()
 
@@ -59,6 +60,11 @@ func TestParseMieruRejects(t *testing.T) {
 		{"more ports than protocols", "mierus://u@1.2.3.4?port=2999&port=3000&protocol=TCP"},
 		{"more protocols than ports", "mierus://u@1.2.3.4?port=2999&protocol=TCP&protocol=UDP"},
 		{"port only in the fragment", "mierus://u@1.2.3.4#?port=2999&protocol=TCP"},
+		// The pair counts line up here, so only the VALUE check rejects it;
+		// without one the node is published on the generic 443 default, a port
+		// it does not have.
+		{"empty port value", "mierus://u@1.2.3.4?port=&protocol=TCP"},
+		{"empty first port of several", "mierus://u@1.2.3.4?port=&port=3000&protocol=TCP&protocol=UDP"},
 	}
 
 	for _, tc := range cases {

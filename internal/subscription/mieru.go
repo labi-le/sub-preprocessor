@@ -9,12 +9,14 @@ import "strings"
 // tail is everything after the authority, so it still carries the '/' or '?'
 // that ended it, plus any fragment.
 //
-// It reports false when there is no "port", or when the number of "port" values
-// differs from the number of "protocol" values: mihomo expands one mierus://
-// link into one proxy per port paired with the protocol at the same index and
-// drops the link outright when the lists do not line up
-// (convert/converter.go:656-660), so keeping it only burns probe budget on a
-// node that can never be selected.
+// It reports false when there is no "port", when the first "port" carries no
+// value, or when the number of "port" values differs from the number of
+// "protocol" values. mihomo expands one mierus:// link into one proxy per port
+// paired with the protocol at the same index, drops the link outright when the
+// lists do not line up (convert/converter.go:656-660) and strconv.Atoi's an
+// empty port into an error (:679-684), so any of the three yields zero proxies
+// there. Keeping such a node only burns probe budget and books a fabricated
+// server:port into the dead cache and the dedupe map.
 func mieruPort(tail string) (string, bool) {
 	// The fragment is stripped first: "#?port=…" is a label, not a query.
 	if i := strings.IndexByte(tail, '#'); i >= 0 {
@@ -40,7 +42,7 @@ func mieruPort(tail string) (string, bool) {
 			protocols++
 		}
 	}
-	if ports == 0 || ports != protocols {
+	if ports == 0 || ports != protocols || first == "" {
 		return "", false
 	}
 	return first, true
