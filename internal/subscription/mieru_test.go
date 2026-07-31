@@ -20,6 +20,14 @@ func TestParseMieruTakesPortFromQuery(t *testing.T) {
 		// dead-cache key here, so it is kept verbatim rather than parsed.
 		{"port range", "mierus://user:pass@1.2.3.4?port=9998-9999&protocol=UDP#R", "1.2.3.4", "9998-9999"},
 		{"first of several ports", "mierus://u@h.example?port=2999&port=3000&protocol=TCP&protocol=UDP", "h.example", "2999"},
+		// mihomo's per-port loop skips only the pair whose port fails
+		// strconv.Atoi, so a valueless FIRST port still leaves one working
+		// proxy on 3000 — verified against v1.19.27, which converts this link
+		// to a single mieru proxy named "1.2.3.4:3000/UDP".
+		{"empty first port of several", "mierus://u@1.2.3.4?port=&port=3000&protocol=TCP&protocol=UDP", "1.2.3.4", "3000"},
+		// A range is not Atoi'd at all (it becomes "port-range"), so it
+		// survives the same skip.
+		{"empty first port before a range", "mierus://u@1.2.3.4?port=&port=9998-9999&protocol=TCP&protocol=UDP", "1.2.3.4", "9998-9999"},
 		{"query after a path", "mierus://u@1.2.3.4/x?port=2999&protocol=TCP#P", "1.2.3.4", "2999"},
 		{"query port wins over an authority port", "mierus://u@1.2.3.4:8080?port=2999&protocol=TCP", "1.2.3.4", "2999"},
 	}
@@ -62,9 +70,11 @@ func TestParseMieruRejects(t *testing.T) {
 		{"port only in the fragment", "mierus://u@1.2.3.4#?port=2999&protocol=TCP"},
 		// The pair counts line up here, so only the VALUE check rejects it;
 		// without one the node is published on the generic 443 default, a port
-		// it does not have.
+		// it does not have. mihomo agrees: this single-pair form is the one
+		// valueless-port link that converts to zero proxies, hence "format
+		// invalid".
 		{"empty port value", "mierus://u@1.2.3.4?port=&protocol=TCP"},
-		{"empty first port of several", "mierus://u@1.2.3.4?port=&port=3000&protocol=TCP&protocol=UDP"},
+		{"every port value empty", "mierus://u@1.2.3.4?port=&port=&protocol=TCP&protocol=UDP"},
 	}
 
 	for _, tc := range cases {
