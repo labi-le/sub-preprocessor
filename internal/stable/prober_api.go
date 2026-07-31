@@ -29,6 +29,40 @@ type APIOutcome struct {
 	Blocked   bool   // the check read the response as a refusal of this egress
 }
 
+// API fold ranks, weakest first.
+const (
+	apiRankUnreachable = iota
+	apiRankBlocked
+	apiRankPassed
+)
+
+// betterAPIOutcome reports whether a is the outcome to keep when two proxies
+// of one entry fold onto the same label — a mierus:// link, whose ports are
+// checked independently. Best-of-ports, mirroring betterProbe: what we publish
+// is the link, and its consumer is mihomo, which expands it back into one
+// health-checked proxy per port. A dead port therefore costs the consumer one
+// member of a proxy group, whereas worst-of-N here would discard a whole
+// multi-port node because one obscure UDP port is filtered on OUR egress, not
+// the consumer's.
+//
+// Blocked outranks unreachable because every port of a link shares one host:
+// a service that refused the egress gave a verdict about that host, worth
+// persisting to the geoblock store, while an unreachable port says nothing.
+func betterAPIOutcome(a, b APIOutcome) bool {
+	return apiOutcomeRank(a) > apiOutcomeRank(b)
+}
+
+func apiOutcomeRank(o APIOutcome) int {
+	switch {
+	case o.Reachable && !o.Blocked:
+		return apiRankPassed
+	case o.Blocked:
+		return apiRankBlocked
+	default:
+		return apiRankUnreachable
+	}
+}
+
 // fanoutSem returns the semaphore bounding a through-node fan-out. The acquire
 // runs on the caller's goroutine before the worker that releases it exists, so
 // a zero or negative bound would deadlock on the first node rather than degrade
@@ -48,9 +82,10 @@ func fanoutSem(concurrency int) chan struct{} {
 // progress logger reports each completed 10% decade.
 //
 // Outcomes are keyed by entry label, which is what a filter looks them up by.
-// Pass at most one proxy per label: applyFilters' shared map has already
-// collapsed a mieru node's per-port proxies, and a second one here would
-// overwrite the first's outcome instead of folding with it.
+// Several proxies may share one label (a mieru node's ports), and they finish
+// in arbitrary order, so the fold happens under the same mutex that guards the
+// map: betterAPIOutcome decides at write time, making the result independent
+// of goroutine scheduling.
 func (m *MihomoProber) apiCheck(
 	ctx context.Context,
 	op, msg string,
@@ -86,7 +121,10 @@ func (m *MihomoProber) apiCheck(
 				Bool("reachable", o.Reachable).Int("status", status).Bool("blocked", o.Blocked).
 				Int64("n", n).Int64("of", prog.total).Msg(msg)
 			mu.Lock()
-			out[entryLabel(px)] = o
+			label := entryLabel(px)
+			if prev, ok := out[label]; !ok || betterAPIOutcome(o, prev) {
+				out[label] = o
+			}
 			mu.Unlock()
 		}()
 	}

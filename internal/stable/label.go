@@ -18,10 +18,11 @@ import (
 //
 // The suffix starts at the LAST ':' because neither a port ("2999",
 // "9998-9999") nor a transport ("TCP"/"UDP") can contain one, while a source
-// name can — "weird:src-001:2999/TCP" must fold to "weird:src-001". A name
-// with no colon, or one starting with it, is returned unchanged rather than
-// folded to "": mihomo's uniqueName can hand us shapes this pattern does not
-// describe, and an empty label matches every entry that failed to parse.
+// name can — "weird:src-001:2999/TCP" must fold to "weird:src-001". The
+// colonless / leading-colon guard describes no shape mihomo emits (it builds
+// every mieru name from that exact format, and uniqueName only appends
+// "-%02d" to the tail); it is there so that a future naming change degrades
+// into an unfolded name rather than collapsing every mieru proxy onto "".
 func entryLabel(px mihomo.Proxy) string {
 	name := px.Name()
 	if px.Type() != mihomo.Mieru {

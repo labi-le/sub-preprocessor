@@ -208,9 +208,10 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxies := make(map[string]mihomo.Proxy, len(pxs))
+	proxies := make(map[string][]mihomo.Proxy, len(pxs))
 	for _, p := range pxs {
-		proxies[p.Name()] = p
+		label := entryLabel(p)
+		proxies[label] = append(proxies[label], p)
 	}
 	if _, ok := proxies["s-001"]; !ok {
 		t.Fatal("setup: s-001 did not parse into the proxy map")

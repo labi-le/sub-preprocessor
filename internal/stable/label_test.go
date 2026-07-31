@@ -2,6 +2,7 @@ package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,15 +16,23 @@ import (
 // port/protocol pair mihomo finds here becomes one proxy named
 // "<name>:<port>/<protocol>".
 func mieruLine(server, name string, portProto ...[2]string) string {
-	line := "mierus://user:pass@" + server + "?"
+	var b strings.Builder
+	b.WriteString("mierus://user:pass@")
+	b.WriteString(server)
+	b.WriteByte('?')
 	for i, pp := range portProto {
 		if i > 0 {
-			line += "&"
+			b.WriteByte('&')
 		}
-		line += "port=" + pp[0] + "&protocol=" + pp[1]
+		b.WriteString("port=")
+		b.WriteString(pp[0])
+		b.WriteString("&protocol=")
+		b.WriteString(pp[1])
 	}
+	b.WriteByte('#')
+	b.WriteString(name)
 
-	return line + "#" + name
+	return b.String()
 }
 
 // labelProxy is a mihomo.Proxy stub exposing only Name and Type, the two
@@ -140,13 +149,11 @@ func TestFoldProbeResults(t *testing.T) {
 		t.Fatalf("mieru node absent under its bare label; keys = %+v", res)
 	}
 	if got.Successes != rounds || got.MeanMs != 300 {
+		// Summing instead of picking is the failure mode: three ports would
+		// give 6 successes over 3 rounds, so SelectSurvivors computes
+		// rounds-Successes = -3 and every mieru node walks through maxFail
+		// however badly it probed.
 		t.Errorf("src-001 = %+v, want the best port {Successes:%d MeanMs:300}", got, rounds)
-	}
-	// The failure this guards: summing the three ports gives 6 successes over
-	// 3 rounds, so SelectSurvivors computes rounds-Successes = -3 and every
-	// mieru node walks through maxFail however badly it probed.
-	if got.Successes > rounds {
-		t.Errorf("Successes %d exceeds the %d rounds run; the fold summed instead of picking", got.Successes, rounds)
 	}
 	if res["src-002"] != (ProbeResult{Successes: 2, MeanMs: 250}) {
 		t.Errorf("non-mieru result changed: %+v", res["src-002"])
@@ -190,26 +197,36 @@ func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
 // hand their map straight to a filter's outcomes[s.Label] lookup. Both dials
 // fail (nothing listens), which is irrelevant: only the KEY is under test —
 // under the proxy name the lookup misses and the node is dropped as
-// unreachable, i.e. mis-reported rather than merely lost.
+// unreachable, i.e. mis-reported rather than merely lost. The two ports also
+// pin the fold: two proxies of one entry must leave ONE outcome, not race
+// each other into two keys.
 func TestThroughNodeChecksKeyOutcomesByEntryLabel(t *testing.T) {
 	t.Parallel()
 
-	pxs := parseTestProxies(t, mieruLine("127.0.0.1", "src-001", [2]string{"1", "TCP"}))
-	m := &MihomoProber{
-		logger: zerolog.Nop(),
-		bandwidth: config.BandwidthConfig{
-			TestURL: "http://127.0.0.1:1/", Timeout: 500 * time.Millisecond, Concurrency: 1,
-		},
+	const dead = "http://127.0.0.1:1/"
+	pxs := parseTestProxies(t, mieruLine("127.0.0.1", "src-001",
+		[2]string{"1", "TCP"}, [2]string{"2", "UDP"}))
+	if len(pxs) != 2 {
+		t.Fatalf("setup: parsed %v, want one proxy per port", proxyNames(pxs))
 	}
+	m := testProberWith(t, config.BandwidthConfig{
+		TestURL: dead, Timeout: 500 * time.Millisecond, Concurrency: 2,
+	})
 	ctx := context.Background()
 
-	api := m.apiCheck(ctx, "test.api", "api", pxs, "http://127.0.0.1:1/", nil,
-		500*time.Millisecond, 1, func(int, string) bool { return false })
+	api := m.apiCheck(ctx, "test.api", "api", pxs, dead, nil,
+		500*time.Millisecond, 2, func(int, string) bool { return false })
+	if len(api) != 1 {
+		t.Errorf("apiCheck outcomes keyed %v, want the single label src-001", mapKeys(api))
+	}
 	if _, ok := api["src-001"]; !ok {
 		t.Errorf("apiCheck outcomes keyed %v, want src-001", mapKeys(api))
 	}
 
 	bw := m.BandwidthCheck(ctx, pxs)
+	if len(bw) != 1 {
+		t.Errorf("BandwidthCheck outcomes keyed %v, want the single label src-001", mapKeys(bw))
+	}
 	if _, ok := bw["src-001"]; !ok {
 		t.Errorf("BandwidthCheck outcomes keyed %v, want src-001", mapKeys(bw))
 	}
@@ -262,11 +279,135 @@ func TestApplyFiltersMieruSurvivorEntersSubset(t *testing.T) {
 	}
 }
 
+// TestApplyFiltersMieruDeadPortDoesNotVetoLivePort is the fold regression.
+// Collapsing the shared proxy map on the PROXY side hands the filter chain
+// whichever port mihomo emitted last, so a node the latency probe selected on
+// a live port gets measured on a dead one, dropped, and mis-booked as
+// unreachable. Every port must reach the subset; the outcome fold then keeps
+// the verdict that keeps the node.
+func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
+	t.Parallel()
+
+	// deadPort is configured LAST, i.e. it is exactly the proxy a proxy-side
+	// collapse would have kept.
+	const deadPort = "9998-9999"
+	mieru := mieruLine("1.2.3.4", "src-001",
+		[2]string{"2999", "TCP"}, [2]string{deadPort, "UDP"})
+	survivors := []Survivor{{Entry: Entry{Label: "src-001", Raw: mieru, Tagged: mieru}}}
+
+	var subset []string
+	api := func(_ context.Context, given []mihomo.Proxy) map[string]APIOutcome {
+		subset = proxyNames(given)
+		out := make(map[string]APIOutcome, len(given))
+		for _, px := range given {
+			o := APIOutcome{Server: px.Addr(), Reachable: !strings.Contains(px.Name(), deadPort)}
+			label := entryLabel(px)
+			if prev, ok := out[label]; ok && !betterAPIOutcome(o, prev) {
+				continue
+			}
+			out[label] = o
+		}
+
+		return out
+	}
+	bw := func(_ context.Context, given []mihomo.Proxy) map[string]BandwidthOutcome {
+		out := make(map[string]BandwidthOutcome, len(given))
+		for _, px := range given {
+			o := BandwidthOutcome{Server: px.Addr()}
+			if !strings.Contains(px.Name(), deadPort) {
+				o.Reachable, o.Mbps = true, 50
+			}
+			label := entryLabel(px)
+			if prev, ok := out[label]; ok && !betterBandwidthOutcome(o, prev) {
+				continue
+			}
+			out[label] = o
+		}
+
+		return out
+	}
+	c := NewChecker(CheckerSpec{
+		Prober: testProber(t),
+		Filters: []NodeFilter{
+			&apiFilter{filterName: "test", check: api, logger: zerolog.Nop()},
+			&bandwidthFilter{minMbps: 10, check: bw, logger: zerolog.Nop()},
+		},
+	}, nil, nil, nil, nil, zerolog.Nop(), nil)
+
+	kept, reports := c.applyFilters(context.Background(), c.spec.Load(), survivors)
+
+	if len(subset) != 2 || !strings.Contains(subset[len(subset)-1], deadPort) {
+		t.Fatalf("filter subset was %v, want both ports with the dead one last", subset)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("kept %d survivors, want the node its live port serves: %+v", len(kept), reports)
+	}
+	if kept[0].Mbps != 50 {
+		t.Errorf("kept Mbps %d, want the live port's 50", kept[0].Mbps)
+	}
+}
+
+// TestBetterAPIOutcomePriority pins the order the ports of one mierus:// link
+// are folded in. It compares every ordered pair, so no result can come from
+// two cases happening to meet in a convenient order.
+func TestBetterAPIOutcomePriority(t *testing.T) {
+	t.Parallel()
+
+	// Weakest first: an unreachable port says nothing, a block is a real
+	// verdict about the shared host, and a clean response keeps the node.
+	ranked := []struct {
+		desc string
+		o    APIOutcome
+	}{
+		{"no response", APIOutcome{Server: "h"}},
+		{"geo-blocked", APIOutcome{Server: "h", Reachable: true, Blocked: true}},
+		{"clean response", APIOutcome{Server: "h", Reachable: true}},
+	}
+	for i, a := range ranked {
+		for j, b := range ranked {
+			if got := betterAPIOutcome(a.o, b.o); got != (i > j) {
+				t.Errorf("betterAPIOutcome(%s, %s) = %v, want %v", a.desc, b.desc, got, i > j)
+			}
+		}
+	}
+}
+
+// TestBetterBandwidthOutcomePriority is TestBetterAPIOutcomePriority for the
+// speed fold: reachability first, then throughput.
+func TestBetterBandwidthOutcomePriority(t *testing.T) {
+	t.Parallel()
+
+	ranked := []struct {
+		desc string
+		o    BandwidthOutcome
+	}{
+		// A fabricated rate on an unreachable port must not outrank a real one.
+		{"no transfer", BandwidthOutcome{Server: "h", Mbps: 999}},
+		{"reachable, slow", BandwidthOutcome{Server: "h", Reachable: true, Mbps: 1}},
+		{"reachable, fast", BandwidthOutcome{Server: "h", Reachable: true, Mbps: 50}},
+	}
+	for i, a := range ranked {
+		for j, b := range ranked {
+			if got := betterBandwidthOutcome(a.o, b.o); got != (i > j) {
+				t.Errorf("betterBandwidthOutcome(%s, %s) = %v, want %v", a.desc, b.desc, got, i > j)
+			}
+		}
+	}
+}
+
 func testProber(t *testing.T) *MihomoProber {
 	t.Helper()
 
+	return testProberWith(t, config.BandwidthConfig{})
+}
+
+// testProberWith builds the prober through its real constructor, so a check
+// under test reads the same validated fields production does.
+func testProberWith(t *testing.T, bandwidth config.BandwidthConfig) *MihomoProber {
+	t.Helper()
+
 	p, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+		bandwidth, config.GeoBlockConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
