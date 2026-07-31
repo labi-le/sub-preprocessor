@@ -37,9 +37,27 @@ func benchVmessLine(host, port, name string) string {
 	return "vmess://" + base64.StdEncoding.EncodeToString([]byte(node))
 }
 
+// benchSSRLine renders a parseable ssr URI: six colon-separated head fields
+// and a query, the whole thing base64, with the name in the "remarks" value.
+func benchSSRLine(host, port, name string) string {
+	b64 := base64.RawURLEncoding.EncodeToString
+	payload := host + ":" + port + ":origin:aes-256-cfb:plain:" + b64([]byte("secret")) +
+		"/?obfsparam=" + b64([]byte("obfs.example.com")) + "&remarks=" + b64([]byte(name))
+	return "ssr://" + b64([]byte(payload))
+}
+
 // benchSourceBodies builds 4 sources of ~150 mixed vless/vmess lines each, with
 // ~20% of lines reusing a shared server:port pool so ~20% collapse cross-source.
 func benchSourceBodies() []SourceBody {
+	return benchMixedSourceBodies(benchVmessLine)
+}
+
+// benchMixedSourceBodies is benchSourceBodies with the scheme of every 7th line
+// left open: that slot decides which relabel path Merge takes for it (a payload
+// rewrite for vmess and ssr, a #fragment for the vless rest). Node count,
+// addresses and duplicate rate are held fixed so two Merge benchmarks over it
+// differ in that one variable.
+func benchMixedSourceBodies(everySeventh func(host, port, name string) string) []SourceBody {
 	const perSource = 150
 	names := []string{"alpha", "beta", "gamma", "delta"}
 	bodies := make([]SourceBody, len(names))
@@ -57,7 +75,7 @@ func benchSourceBodies() []SourceBody {
 			}
 			nodeName := fmt.Sprintf("%s node %d", name, i)
 			if i%7 == 0 {
-				sb.WriteString(benchVmessLine(host, port, nodeName))
+				sb.WriteString(everySeventh(host, port, nodeName))
 			} else {
 				sb.WriteString(benchVlessLine(host, port, nodeName))
 			}
@@ -120,6 +138,19 @@ func benchParsePayload() []byte {
 
 func BenchmarkMerge(b *testing.B) {
 	bodies := benchSourceBodies() // built once
+	b.ReportAllocs()
+	for b.Loop() {
+		benchEntriesSink = Merge(bodies)
+	}
+}
+
+// BenchmarkMergeSSR is BenchmarkMerge with ssr where the vmess lines sit, so
+// the difference between the two is what relabelling an ssr node costs against
+// its vmess twin in the one place both actually run. Nothing measured it
+// before: BenchmarkRewriteSSRName prices the rewriter alone, off the merge
+// path. This is a floor, not a comparison.
+func BenchmarkMergeSSR(b *testing.B) {
+	bodies := benchMixedSourceBodies(benchSSRLine) // built once
 	b.ReportAllocs()
 	for b.Loop() {
 		benchEntriesSink = Merge(bodies)

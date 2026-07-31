@@ -225,9 +225,13 @@ func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mih
 }
 
 // annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses
-// the line and relabels through relabelNode so vmess (base64 ps) and URI
-// (#fragment) nodes are both handled; on any parse failure the line is returned
-// unchanged (annotation is best-effort, never fatal).
+// the line and relabels through relabelNode, which reaches the name where each
+// scheme keeps it: the vmess "ps" field, the ssr "remarks" query value, or the
+// URI #fragment. ssr is why this path cannot shortcut to the fragment -- an ssr
+// line arriving here is already a RewriteSSRName product, and appending
+// "#<name>" to one destroys it rather than renaming it (see relabelNode). On
+// any parse failure the line is returned unchanged (annotation is best-effort,
+// never fatal).
 func annotateSpeed(line string, mbps int) string {
 	var out string
 	found := false
