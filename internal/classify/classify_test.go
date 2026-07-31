@@ -102,6 +102,39 @@ func TestBodyRejectsHTMLLinks(t *testing.T) {
 	}
 }
 
+// TestBodyCountsMierusNodes: a mierus:// body is a real subscription — the node
+// parser reads the server and the "port" query value out of it — so leaving
+// mierus out of proxySchemes made such a source classify as nodeless and the
+// crawler never adopt it.
+func TestBodyCountsMierusNodes(t *testing.T) {
+	t.Parallel()
+
+	raw := "mierus://user:pass@1.2.3.4?port=2999&protocol=TCP#m1\n" +
+		"mierus://user:pass@5.6.7.8?port=9998-9999&protocol=UDP#m2\n"
+	body := []byte(base64.StdEncoding.EncodeToString([]byte(raw)))
+
+	got := classify.Body(body, "", 1000)
+	if got.Nodes != 2 {
+		t.Fatalf("Nodes = %d, want 2", got.Nodes)
+	}
+	if !got.Live() {
+		t.Fatalf("a mierus-only body must classify as live, got %+v", got)
+	}
+}
+
+// TestBodyRejectsPortfulProxyURLs: parseNode accepts a portful http/socks link,
+// so only proxySchemes keeps a docs page or a client-setup snippet from reading
+// as a subscription. Adding those schemes to the gate would break exactly that.
+func TestBodyRejectsPortfulProxyURLs(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("Set your client to socks5://127.0.0.1:1080\n" +
+		"Docs: https://example.com:8443/docs\n")
+	if got := classify.Body(body, "", 1000); got.Nodes != 0 || got.Live() {
+		t.Fatalf("portful http/socks URLs must not classify as a subscription, got %+v", got)
+	}
+}
+
 // TestStatusErrorGone pins which statuses prove a subscription is gone. Callers
 // delete a source on a Gone verdict, so a status that merely means "not now"
 // (WAF challenge, back-pressure, origin failure) must never report true.

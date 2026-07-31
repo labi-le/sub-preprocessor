@@ -26,9 +26,16 @@ const maxSubscriptionSize = 10 << 20
 // from. The node parser is deliberately scheme-generic, so a document that is
 // not a subscription at all can still yield nodes: restricting the count to
 // these keeps a "live" verdict tied to proxy links.
+//
+// mihomo also converts http/https/socks/socks5/socks5h links, and the node
+// parser accepts the portful form of each — but those are exactly the links a
+// documentation page, a panel's client-setup snippet or a plain HTML nav bar is
+// full of, so counting them would make the pages this gate exists to reject
+// read as live subscriptions. They stay out on purpose.
 var proxySchemes = map[string]bool{
 	"vless": true, "vmess": true, "ss": true, "ssr": true, "trojan": true,
 	"tuic": true, "hysteria": true, "hysteria2": true, "hy2": true, "anytls": true,
+	"mierus": true,
 }
 
 // Result reports what a fetched body looks like.
