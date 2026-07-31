@@ -20,6 +20,23 @@ var doubleSlash = []byte("://")
 // Scheme is a strict URI scheme type.
 type Scheme string
 
+// Schemes whose server, port or display name does NOT live where the generic
+// URI parser looks for it. Everything else is handled by the scheme-agnostic
+// authority/fragment path; these three each need a dedicated decoder:
+//
+//	ss      - the legacy form base64-encodes "method:pass@host:port" as the
+//	          whole authority, so there is no host to read
+//	ssr     - base64-encodes host, port AND the display name (a "remarks"
+//	          query param) in one payload, and carries no URI fragment
+//	mierus  - the port list lives in the query, never in the authority
+//
+// SchemeVmess is declared in vmess.go beside its own decoder.
+const (
+	SchemeSS    Scheme = "ss"
+	SchemeSSR   Scheme = "ssr"
+	SchemeMieru Scheme = "mierus"
+)
+
 type Node struct {
 	Raw         string
 	Scheme      Scheme
