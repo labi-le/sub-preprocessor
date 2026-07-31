@@ -108,12 +108,13 @@ const countryUnknown = "??"
 // leading-tags string ("" when absent — annotation off, no GEO tag, or a code
 // that is not two ASCII letters).
 //
-// The result is CLONED rather than sliced. tags is the tail of a five-hop
-// zero-copy chain into this cycle's source body (subscription.Parse hands
-// parseNode an ioutil.UnsafeString view, Node.Name and rewrite.LeadingTags
-// both re-slice it), while Entry.Country outlives the cycle inside the metrics
-// snapshot — so a 2-byte sub-slice would pin the whole filtered body until the
-// next publication replaces it.
+// The result is CLONED rather than sliced. tags is the tail of a zero-copy
+// chain out of the parser (subscription.Parse hands parseNode an
+// ioutil.UnsafeString view, Node.Name and rewrite.LeadingTags both re-slice
+// it) whose root is scheme-dependent: this cycle's whole source body for the
+// generic path, a per-node base64 buffer for vmess/ss-legacy/ssr. Either way
+// Entry.Country outlives the cycle inside the metrics snapshot, so a 2-byte
+// sub-slice would pin its root until the next publication replaces it.
 //
 // The code is also validated, because node names are source-authored and
 // Entry.Country becomes a Prometheus label value in the kept-country gauge:
@@ -176,11 +177,24 @@ func appendPad3(b []byte, v int) []byte {
 }
 
 // relabelNode rewrites a node's display name to label so probe results map
-// back to entries. vmess names live in the base64 JSON ps field; every other
-// scheme uses a URI #fragment.
+// back to entries. vmess and ssr both keep their name inside the base64
+// payload; every other scheme uses a URI #fragment.
+//
+// For ssr the fragment path is not merely unused but corrupting: mihomo
+// base64-decodes EVERYTHING after "ssr://", an appended "#label" included
+// (convert/converter.go:476-479), so the relabeled link yields no proxy at
+// all. The label then misses in the probe-result map, SelectSurvivors drops
+// the entry, and the checker books server:port into the 2h dead cache, where
+// Merge's first-wins dedupe lets it shadow a working node of another scheme.
+//
+// A payload neither rewriter can decode returns false, which drops the node:
+// a node that cannot carry the label cannot be mapped back from a probe.
 func relabelNode(n subscription.Node, label string) (string, bool) {
-	if n.Scheme == subscription.SchemeVmess {
+	switch n.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
+	case subscription.SchemeVmess:
 		return subscription.RewriteVmessName(n.Raw, label)
+	case subscription.SchemeSSR:
+		return subscription.RewriteSSRName(n.Raw, label)
 	}
 	raw := n.Raw
 	if n.FragmentIdx >= 0 {

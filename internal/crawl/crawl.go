@@ -50,7 +50,14 @@ var (
 	cursorRe = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
 	trimSet  = ".,;:!?)]}'\""
 	// inlineRe matches raw proxy URIs pasted directly in channel messages.
-	inlineRe = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls)://[^\s"'<>]+`)
+	// Alternation order is not load-bearing: Go's leftmost-first alternation
+	// still backtracks, so "ss" cannot shadow "ssr://" — the whole pattern,
+	// "://" included, has to match. http/https/socks* are absent on purpose:
+	// parseNode rejects only the PORTLESS form, so a
+	// "https://example.com:8443/docs" pasted in a message IS a valid node, and
+	// harvesting those would turn every documentation link a channel posts into
+	// a proxy.
+	inlineRe = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls|mierus)://[^\s"'<>]+`)
 )
 
 // legacyNameRe matches the pre-attribution managed name form tg-<sha10>. Such
