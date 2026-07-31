@@ -68,12 +68,8 @@ func RewriteSSRName(raw, newName string) (string, bool) {
 		return "", false
 	}
 
-	values, err := url.ParseQuery(ssrURLSafeQuery(query))
-	if err != nil {
-		return "", false
-	}
-	values.Set("remarks", base64.RawURLEncoding.EncodeToString([]byte(newName)))
-	encoded := values.Encode()
+	query.Set("remarks", base64.RawURLEncoding.EncodeToString([]byte(newName)))
+	encoded := query.Encode()
 
 	const sep = "/?"
 	plain := make([]byte, 0, len(head)+len(sep)+len(encoded))
@@ -89,55 +85,58 @@ func RewriteSSRName(raw, newName string) (string, bool) {
 }
 
 // decodeSSR splits a decoded ssr payload into its colon-separated head and the
-// query following "/?". The "/?" and the exactly-6-fields requirements are
-// mihomo's (convert/converter.go:483-492) and are mirrored deliberately: a node
-// we keep but the prober cannot convert burns probe budget and can never be
-// published, which is worse than an honest reject.
+// PARSED query following "/?". The "/?", the exactly-6-fields and the
+// url.ParseQuery requirements are all mihomo's
+// (convert/converter.go:483-504) and are mirrored deliberately: a node we keep
+// but the prober cannot convert burns probe budget and can never be published,
+// which is worse than an honest reject.
+//
+// Parsing here rather than in each caller is what makes accepting a node and
+// relabelling it ONE decision: RewriteSSRName reuses these values, so it can no
+// longer refuse a payload parseSSR let through. The query is mapped onto the
+// url-safe alphabet first, exactly as mihomo does, so a '+' inside a base64
+// value survives instead of decoding to a space.
 //
 // The optional trailing "#name" is stripped before decoding. mihomo does not do
 // that and fails on such a link, but both of our output paths re-emit ssr nodes
 // through RewriteSSRName, which drops the fragment.
-func decodeSSR(payload string) (head, query string, ok bool) {
+func decodeSSR(payload string) (head string, query url.Values, ok bool) {
 	if i := strings.IndexByte(payload, '#'); i >= 0 {
 		payload = payload[:i]
 	}
 	decoded, ok := decodeBase64Tolerant(stripWhitespace(payload))
 	if !ok {
-		return "", "", false
+		return "", nil, false
 	}
-	head, query, ok = strings.Cut(ioutil.UnsafeString(decoded), "/?")
+	head, rawQuery, ok := strings.Cut(ioutil.UnsafeString(decoded), "/?")
 	if !ok {
-		return "", "", false
+		return "", nil, false
 	}
 	// An ssr head is exactly "host:port:protocol:method:obfs:password", and 5
 	// separators is 6 fields — counted rather than Split to avoid the slice.
 	const ssrHeadSeparators = 5
 	if strings.Count(head, ":") != ssrHeadSeparators {
-		return "", "", false
+		return "", nil, false
+	}
+	query, err := url.ParseQuery(ssrURLSafeQuery(rawQuery))
+	if err != nil {
+		return "", nil, false
 	}
 	return head, query, true
 }
 
 // ssrRemarks returns the decoded "remarks" value, the display name an ssr link
 // carries instead of a fragment. mihomo decodes it with RawURLEncoding after
-// mapping the std alphabet onto the url-safe one, so both alphabets are
-// accepted; an undecodable value yields "" and the caller falls back to the
-// host, as a name is never worth rejecting a reachable node over.
-func ssrRemarks(query string) string {
-	for query != "" {
-		var pair string
-		pair, query, _ = strings.Cut(query, "&")
-		key, value, _ := strings.Cut(pair, "=")
-		if key != "remarks" {
-			continue
-		}
-		decoded, ok := decodeBase64Tolerant(value)
-		if !ok {
-			return ""
-		}
-		return strings.TrimSpace(ioutil.UnsafeString(decoded))
+// mapping the std alphabet onto the url-safe one — a mapping decodeSSR has
+// already applied — so both alphabets are accepted; an undecodable value yields
+// "" and the caller falls back to the host, as a name is never worth rejecting
+// a reachable node over.
+func ssrRemarks(query url.Values) string {
+	decoded, ok := decodeBase64Tolerant(query.Get("remarks"))
+	if !ok {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(ioutil.UnsafeString(decoded))
 }
 
 func ssrURLSafeQuery(query string) string {

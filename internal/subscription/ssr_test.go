@@ -122,6 +122,14 @@ func TestParseSSRRejects(t *testing.T) {
 		{"seven fields", ssrLine("1.2.3.4:8388:origin:aes-256-cfb:plain:extra:c2VjcmV0/?" + ssrQuery())},
 		{"empty host", ssrLine(":8388:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"empty port", ssrLine("1.2.3.4::origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		// url.ParseQuery is the last of mihomo's three payload requirements
+		// (converter.go:501-504) and the one our own RewriteSSRName shares:
+		// without it we publish, through rewrite.NodeName's raw fallback, a
+		// link convert.ConvertsV2Ray answers "format invalid" to — while
+		// /stable.txt drops it with nothing counted, hiding the loss from
+		// Stats.Unsupported.
+		{"unparseable query escape", ssrLine(ssrHead + "/?remarks=%zz")},
+		{"semicolon separator", ssrLine(ssrHead + "/?remarks=" + b64u("x") + ";group=" + b64u("g"))},
 	}
 
 	for _, tc := range cases {
