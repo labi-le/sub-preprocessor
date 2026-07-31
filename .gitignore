@@ -42,3 +42,7 @@ config/.crawler-state.json
 config/.geoblock.db*
 
 benchmarks
+
+# Worktrees (agent scratch workspaces)
+.worktrees/
+.superpowers/
