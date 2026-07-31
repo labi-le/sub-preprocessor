@@ -119,3 +119,27 @@ func TestParseSSSIP002UsesAuthority(t *testing.T) {
 		t.Errorf("fragmentIdx: got %d, want %d", node.FragmentIdx, want)
 	}
 }
+
+// TestParseSSSIP002WithoutPortRejected: a SIP002-shaped link with no port is
+// the one ss form the '@' told us nothing about. mihomo branches on the port
+// (convert/converter.go:396-407), so for this link it takes the LEGACY branch
+// and RawStd-decodes the bare host — "1.2.3.5" is not base64, the decode
+// fails, and the line is dropped (measured: 0 mappings + "format invalid";
+// the same link with ":8388" yields 1). Keeping it meant defaulting the port
+// to 443 and publishing, probing and dead-caching a node under a port it does
+// not have.
+func TestParseSSSIP002WithoutPortRejected(t *testing.T) {
+	t.Parallel()
+
+	userinfo := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:pass"))
+	for _, line := range []string{
+		"ss://" + userinfo + "@1.2.3.5#N",
+		"ss://" + userinfo + "@example.net?uot=1#N",
+		"ss://" + userinfo + "@[2001:db8::1]#N",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			rejectOne(t, line)
+		})
+	}
+}

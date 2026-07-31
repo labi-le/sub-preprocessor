@@ -166,11 +166,20 @@ func parseNode(line string) (Node, bool) {
 }
 
 // ssFields resolves the server and port of an ss:// link, given what the
-// generic authority split already produced. A SIP002 link keeps its host in
-// the authority ("<b64userinfo>@host") and needs nothing further; without an
-// '@' this is the legacy form whose whole authority is base64.
+// generic authority split already produced. The port is the discriminator, and
+// it is mihomo's too (convert/converter.go:396-407): with a port the link is
+// SIP002 and keeps its host in the authority, without one the whole authority
+// is base64 of "method:pass@host:port" and only decodeSSLegacy can find a host.
+//
+// The '@' cannot stand in for the port even though every SIP002 link carries
+// one. "ss://<b64userinfo>@host" is SIP002-shaped but portless, and mihomo
+// drops it — it RawStd-decodes the bare host, which is not base64 — whereas the
+// generic path defaults the port to 443 and publishes a node under a port it
+// does not have, then probes it and parks it in the 2h dead cache. The reverse
+// misread cannot happen: a legacy authority is base64, an alphabet holding no
+// ':', so it can never look portful.
 func ssFields(authority, server, port string) (string, string, bool) {
-	if strings.IndexByte(authority, '@') >= 0 {
+	if port != "" {
 		return server, port, true
 	}
 	return decodeSSLegacy(authority)
@@ -233,6 +242,34 @@ func splitHostPort(authority string) (host, port string) {
 	}
 
 	return authority, ""
+}
+
+// portNumber parses a bare decimal in 1..65535, the range a TCP port can name.
+// It is hand-rolled rather than strconv.Atoi'd because a rejected value must
+// stay allocation-free: Atoi's failure builds a *NumError holding a copy of the
+// input, and this runs once per candidate port of every mierus:// and ssr://
+// line of every source.
+func portNumber(s string) (int, bool) {
+	const (
+		base10   = 10
+		maxPort  = 65535
+		maxWidth = 5 // digits in maxPort; bounding the length is what lets n accumulate unchecked
+	)
+	if s == "" || len(s) > maxWidth {
+		return 0, false
+	}
+	n := 0
+	for i := range len(s) {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*base10 + int(c-'0')
+	}
+	if n < 1 || n > maxPort {
+		return 0, false
+	}
+	return n, true
 }
 
 func Normalize(body []byte) []byte {

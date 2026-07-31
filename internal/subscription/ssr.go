@@ -26,7 +26,19 @@ func parseSSR(line, payload string) (Node, bool) {
 
 	server, rest, _ := strings.Cut(head, ":")
 	port, _, _ := strings.Cut(rest, ":")
-	if server == "" || port == "" {
+	// The port is the one head field adapter.ParseProxy decodes itself
+	// (strconv.ParseInt through the structure decoder), so a non-numeric one
+	// converts to a mapping the prober cannot build: the node merges, is
+	// published, is skipped behind a single "skipped unparsable proxies" log
+	// line, and still books "host:<garbage>" into the 2h dead cache.
+	//
+	// The 1..65535 window is deliberately stricter than that decode, which
+	// takes 0, -1 and 70000 too — NewShadowSocksR only JoinHostPorts the int
+	// and has no range check of its own, unlike mieru's validateMieruOption.
+	// Nothing can dial those, so the honest reject costs no reachable node and
+	// keeps Entry.Addr a real server:port.
+	_, portOK := portNumber(port)
+	if server == "" || !portOK {
 		return Node{}, false
 	}
 

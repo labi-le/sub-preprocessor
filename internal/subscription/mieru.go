@@ -70,37 +70,10 @@ func mieruPort(tail string) (string, bool) {
 // and "%203000" decode to " 3000", which Atoi refuses just as this does.
 func mieruUsablePort(value string) bool {
 	if begin, end, isRange := strings.Cut(value, "-"); isRange {
-		b, bok := mieruPortNumber(begin)
-		e, eok := mieruPortNumber(end)
+		b, bok := portNumber(begin)
+		e, eok := portNumber(end)
 		return bok && eok && b <= e
 	}
-	_, ok := mieruPortNumber(value)
+	_, ok := portNumber(value)
 	return ok
-}
-
-// mieruPortNumber parses a bare decimal in 1..65535. It is hand-rolled rather
-// than strconv.Atoi'd because a rejected value must stay allocation-free:
-// Atoi's failure builds a *NumError holding a copy of the input, and this runs
-// once per port of every mierus:// line of every source.
-func mieruPortNumber(s string) (int, bool) {
-	const (
-		base10   = 10
-		maxPort  = 65535
-		maxWidth = 5 // digits in maxPort; bounding the length is what lets n accumulate unchecked
-	)
-	if s == "" || len(s) > maxWidth {
-		return 0, false
-	}
-	n := 0
-	for i := range len(s) {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		n = n*base10 + int(c-'0')
-	}
-	if n < 1 || n > maxPort {
-		return 0, false
-	}
-	return n, true
 }

@@ -122,6 +122,19 @@ func TestParseSSRRejects(t *testing.T) {
 		{"seven fields", ssrLine("1.2.3.4:8388:origin:aes-256-cfb:plain:extra:c2VjcmV0/?" + ssrQuery())},
 		{"empty host", ssrLine(":8388:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"empty port", ssrLine("1.2.3.4::origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		// The port is the one head field adapter.ParseProxy itself decodes
+		// (strconv.ParseInt via the structure decoder), so a non-numeric one
+		// converts to a mapping the prober cannot build: the node is merged,
+		// published, skipped with only a "skipped unparsable proxies" log line
+		// and still booked into the 2h dead cache under "host:<garbage>".
+		// 0/-1/70000 are the deliberate over-reach: ParseProxy takes them
+		// (adapter/outbound/shadowsocksr.go:113 JoinHostPorts the int with no
+		// range check of its own), but nothing can dial them.
+		{"non-numeric port", ssrLine("1.2.3.4:http:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		{"port with a trailing byte", ssrLine("1.2.3.4:8388x:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		{"port zero", ssrLine("1.2.3.4:0:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		{"negative port", ssrLine("1.2.3.4:-1:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		{"port above 65535", ssrLine("1.2.3.4:70000:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		// url.ParseQuery is the last of mihomo's three payload requirements
 		// (converter.go:501-504) and the one our own RewriteSSRName shares:
 		// without it we publish, through rewrite.NodeName's raw fallback, a
