@@ -59,11 +59,17 @@ until the first cycle completes).
 
 ## Important current design decisions
 
-- Parsing is **generic URI parsing**, not hardcoded to `vless://` only.
+- Parsing is **generic URI parsing**, not hardcoded to `vless://` only, and that stays the policy: there is deliberately **no whitelist** of mihomo-known schemes, so a scheme with no concrete reason to be rejected keeps the generic `scheme://[userinfo@]host[:port][?query][#fragment]` walk. Four schemes need more than that walk, because the fields the pipeline needs are not where it looks, and each decoder mirrors mihomo's so that a node we keep is a node the prober can convert:
+  - `vmess://` — base64 JSON (`add`/`port`/`ps`).
+  - `ss://` — SIP002 takes the untouched generic path; the legacy form base64-encodes the whole authority (`method:pass@host:port`) and is decoded with `base64.RawStdEncoding` ONLY. Narrower than our tolerant vmess decoder on purpose: the shadowsocks spec writes that form WITHOUT padding and mihomo decodes it with that alphabet alone, so a padded or url-safe payload is a node that merges, spends a probe, converts to nothing and parks in the dead cache.
+  - `ssr://` — host, port AND display name all live inside one base64 payload, so nothing is readable from the URI. Accepted only on mihomo's own terms: a `/?` split, exactly 6 colon-separated head fields, and a query `url.ParseQuery` accepts. Its name is relabeled through `subscription.RewriteSSRName` (the ssr twin of `RewriteVmessName`), which emits a **fragment-free** link — mihomo base64-decodes everything after `ssr://`, a `#fragment` included, and refuses the link if one is there.
+  - `mierus://` — the port list lives in the query. We key the node on the first `port` value mihomo's adapter would actually serve (1..65535, or a range of two such), not merely the first one written down.
+- Portless `http`/`https`/`socks`/`socks5`/`socks5h` lines are **rejected** by the parser: mihomo refuses such a proxy, and accepting them published any bare web URL in a source body as a node. The PORTFUL form is still a valid node — which is why `internal/classify`'s proxy-scheme whitelist and the crawler's inline-node regex still leave those schemes out: a `https://example.com:8443/docs` in a README must not make the page read as a live subscription.
 - A subscription URL may also answer with an **Xray JSON config** instead of a URI list — panel software (Hiddify) does. `subscription.Normalize` converts such a document's outbounds into share links, so nothing downstream (`Parse`, `classify`, the geo pipeline, `Merge`, `rewrite`) knows about JSON. The asymmetry with the line above is deliberate, not an oversight: URI parsing is scheme-generic, the JSON conversion is **vless-only**, because 158 of the 160 proxy outbounds in the measured corpus were vless and one of the two shadowsocks entries carried the literal address `sdfsdf`. Add a protocol when data justifies it.
 - Filtering logic only cares about hostname/IP and final geofeed country.
 - Output rewriting is still **scheme-aware/safe**: it only rewrites parsed URI nodes.
 - The on-demand `/` path does no liveness probing; it only geo/ASN-filters. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
+- In the `/stable.txt` worker a node is identified by its `Entry.Label` (`<source>-NNN`), never by the mihomo proxy name — because the two differ for `mierus://`, which mihomo expands into ONE proxy PER configured port, named `<label>:<port>/<protocol>`. `entryLabel` (`internal/stable/label.go`) folds that back; without it a healthy mieru node matched nothing, was never selected, went into the dead cache and counted `unreachable` in every through-node filter. The latency probe and both through-node outcome maps then fold a label's duplicates **best-of-ports** (the entry survives if any of its ports passed — best-of, never a sum, or `Successes` could exceed `check.rounds`), while the filters' proxy subset keeps EVERY port, so a port dead on our egress cannot mask a live sibling.
 - The resolver keeps an in-memory DNS TTL cache (`resolver.cache_ttl` / `resolver.cache_negative_ttl`) so repeated stable cycles don't hammer the upstream DNS.
 - Geofeed sources are explicit in YAML via `geofeed.sources[].url` + `geofeed.sources[].type`.
 - File type is explicit only: `raw` or `gzip`. There is no auto-detection/legacy mode.
@@ -130,7 +136,7 @@ Important keys:
 - `internal/resolver` — DNS resolution with an in-memory TTL cache
 - `internal/asn` — ASN lookup (Team Cymru) for the ASN name/country filter
 - `internal/filter` — country allow/deny bitset
-- `internal/subscription` — subscription fetch/normalize/parse (incl. `vmess://` decode and Xray-JSON→share-link conversion in `xray.go`)
+- `internal/subscription` — subscription fetch/normalize/parse (scheme-generic, plus dedicated decoders for `vmess://`, legacy `ss://`, `ssr://` and `mierus://` in `vmess.go`/`ss.go`/`ssr.go`/`mieru.go`, and Xray-JSON→share-link conversion in `xray.go`)
 - `internal/rewrite` — node name/fragment rewrite (`[GEO][IP]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
@@ -146,6 +152,7 @@ Important keys:
   - `subscription_url`
   - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`)
   - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. (Folding exclusions into `All()` used to drop every unplaceable IP the moment one country was excluded.) Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
+- `GET /` no longer publishes a portless `http`/`https`/`socks`/`socks5`/`socks5h` line as a node: a bare `https://t.me/somechannel` in a source body used to be emitted as a node and now counts in `Stats.Unsupported` (`unsupported=` in `X-Preprocessor-Stats`) instead. A portful one (`https://example.com:8443`) is still a node
 - `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 33.4k-node aggregator source outright
 - `GET /stable.txt` serves the worker's current list; `503` until the first cycle completes. Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
