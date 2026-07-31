@@ -2,10 +2,15 @@ package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	mihomonet "github.com/metacubex/mihomo/common/net"
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
@@ -197,9 +202,11 @@ func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
 // hand their map straight to a filter's outcomes[s.Label] lookup. Both dials
 // fail (nothing listens), which is irrelevant: only the KEY is under test —
 // under the proxy name the lookup misses and the node is dropped as
-// unreachable, i.e. mis-reported rather than merely lost. The two ports also
-// pin the fold: two proxies of one entry must leave ONE outcome, not race
-// each other into two keys.
+// unreachable, i.e. mis-reported rather than merely lost. The two ports pin
+// the collapse half of the fold and nothing more: two proxies of one entry
+// must leave ONE key, not race each other into two. Which of two DIFFERING
+// outcomes wins is unobservable here (both dials fail identically) and is
+// pinned by TestThroughNodeChecksFoldToTheLivePort.
 func TestThroughNodeChecksKeyOutcomesByEntryLabel(t *testing.T) {
 	t.Parallel()
 
@@ -229,6 +236,130 @@ func TestThroughNodeChecksKeyOutcomesByEntryLabel(t *testing.T) {
 	}
 	if _, ok := bw["src-001"]; !ok {
 		t.Errorf("BandwidthCheck outcomes keyed %v, want src-001", mapKeys(bw))
+	}
+}
+
+// mieruPortConn adapts a plain net.Conn to the mihomo.Conn a Proxy must hand
+// back. Both probes pass it straight to an http.Transport, so only the
+// net.Conn half is ever touched; the embedded nil Connection panics on
+// anything else, which pins that read set the way dialRecorder's nil Proxy
+// does.
+type mieruPortConn struct {
+	mihomonet.ExtendedConn
+	mihomo.Connection
+}
+
+// mieruPort is one port of a mierus:// link as mihomo expands it: a
+// Mieru-typed proxy named "<label>:<port>/<protocol>", so entryLabel folds
+// several of them onto one key. serve is the address a live port dials;
+// empty means the port refuses. delay holds the dial open long enough to make
+// this port the LAST of the fan-out to reach the fold, so a test can pin
+// either completion order instead of hoping for one.
+type mieruPort struct {
+	mihomo.Proxy
+	name  string
+	addr  string
+	serve string
+	delay time.Duration
+}
+
+func (p *mieruPort) Name() string             { return p.name }
+func (p *mieruPort) Type() mihomo.AdapterType { return mihomo.Mieru }
+func (p *mieruPort) Addr() string             { return p.addr }
+
+func (p *mieruPort) DialContext(ctx context.Context, _ *mihomo.Metadata) (mihomo.Conn, error) { //nolint:ireturn // implements mihomo.Proxy; the signature is not ours to choose
+	if p.delay > 0 {
+		select {
+		case <-time.After(p.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if p.serve == "" {
+		return nil, errors.New("port refused by test")
+	}
+	conn, err := new(net.Dialer).DialContext(ctx, "tcp", p.serve)
+	if err != nil {
+		return nil, err
+	}
+
+	return &mieruPortConn{ExtendedConn: mihomonet.NewExtendedConn(conn)}, nil
+}
+
+// TestThroughNodeChecksFoldToTheLivePort enters the real write-time folds in
+// apiCheck and BandwidthCheck with two ports of one label whose outcomes
+// DIFFER, which is the only way to observe a fold at all: strip both
+// conditions back to last-write-wins and every other test in this package
+// still passes, because their ports all fail identically.
+//
+// Each case pins one completion order outright — the delayed port is the one
+// last-write-wins would keep — and both must fold to the LIVE port: reachable
+// for the API check, a measured rate for the bandwidth check.
+func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
+	t.Parallel()
+
+	const (
+		label = "src-001"
+		// Far beyond a loopback request, so "which port finished last" is a
+		// decision this test makes rather than one the scheduler makes.
+		lateBy = 150 * time.Millisecond
+		// Enough bytes that the transfer is timed as payload, not as noise.
+		bodyLen = 64 << 10
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			// measure() starts its clock once the headers land, so flushing
+			// them before the body keeps the measured interval above zero and
+			// the computed Mbps off the floor.
+			flusher.Flush()
+			time.Sleep(2 * time.Millisecond)
+		}
+		_, _ = w.Write(make([]byte, bodyLen))
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, c := range []struct {
+		desc      string
+		liveDelay time.Duration
+		deadDelay time.Duration
+	}{
+		{"dead port folds in last", 0, lateBy},
+		{"live port folds in last", lateBy, 0},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			pxs := []mihomo.Proxy{
+				&mieruPort{
+					name: label + ":2999/TCP", addr: "1.2.3.4:2999",
+					serve: srv.Listener.Addr().String(), delay: c.liveDelay,
+				},
+				&mieruPort{name: label + ":9998-9999/UDP", addr: "1.2.3.4:9998", delay: c.deadDelay},
+			}
+			const timeout = 5 * time.Second
+			m := testProberWith(t, config.BandwidthConfig{
+				TestURL: srv.URL, Timeout: timeout, Concurrency: 2,
+			})
+			ctx := context.Background()
+
+			api := m.apiCheck(ctx, "test.api", "api", pxs, srv.URL, nil,
+				timeout, 2, func(int, string) bool { return false })
+			if len(api) != 1 {
+				t.Fatalf("apiCheck outcomes keyed %v, want the single label %s", mapKeys(api), label)
+			}
+			if got := api[label]; !got.Reachable || got.Blocked {
+				t.Errorf("apiCheck folded %s to %+v, want the live port's reachable outcome", label, got)
+			}
+
+			bw := m.BandwidthCheck(ctx, pxs)
+			if len(bw) != 1 {
+				t.Fatalf("BandwidthCheck outcomes keyed %v, want the single label %s", mapKeys(bw), label)
+			}
+			if got := bw[label]; !got.Reachable || got.Mbps <= 0 {
+				t.Errorf("BandwidthCheck folded %s to %+v, want the live port's measurement", label, got)
+			}
+		})
 	}
 }
 
@@ -302,10 +433,9 @@ func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 		for _, px := range given {
 			o := APIOutcome{Server: px.Addr(), Reachable: !strings.Contains(px.Name(), deadPort)}
 			label := entryLabel(px)
-			if prev, ok := out[label]; ok && !betterAPIOutcome(o, prev) {
-				continue
+			if prev, ok := out[label]; !ok || betterAPIOutcome(o, prev) {
+				out[label] = o
 			}
-			out[label] = o
 		}
 
 		return out
@@ -318,10 +448,9 @@ func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 				o.Reachable, o.Mbps = true, 50
 			}
 			label := entryLabel(px)
-			if prev, ok := out[label]; ok && !betterBandwidthOutcome(o, prev) {
-				continue
+			if prev, ok := out[label]; !ok || betterBandwidthOutcome(o, prev) {
+				out[label] = o
 			}
-			out[label] = o
 		}
 
 		return out
