@@ -117,11 +117,37 @@ func parseNode(line string) (Node, bool) {
 	}
 
 	authority := rest[:authEnd]
-	if authority == "" {
-		return Node{}, false
+	server, port := splitHostPort(authority)
+
+	switch scheme {
+	case SchemeSS:
+		// A SIP002 link keeps its host in the authority ("<b64userinfo>@host");
+		// without an '@' this is the legacy all-base64 form.
+		if strings.IndexByte(authority, '@') < 0 {
+			host, decodedPort, ok := decodeSSLegacy(authority)
+			if !ok {
+				return Node{}, false
+			}
+			server, port = host, decodedPort
+		}
+	case SchemeSSR:
+		return parseSSR(line, rest)
+	case SchemeMieru:
+		queryPort, ok := mieruPort(rest[authEnd:])
+		if !ok {
+			return Node{}, false
+		}
+		port = queryPort
+	case "http", "https", "socks", "socks5", "socks5h":
+		// An HTTP/SOCKS proxy node is host:port by definition, and mihomo
+		// refuses a portless one (convert/converter.go:543-546). Accepting it
+		// publishes any bare web URL in a source body — a Telegram channel
+		// link, a panel notice — as a node.
+		if port == "" {
+			return Node{}, false
+		}
 	}
 
-	server, port := splitHostPort(authority)
 	if server == "" {
 		return Node{}, false
 	}
