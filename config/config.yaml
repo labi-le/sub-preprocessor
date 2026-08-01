@@ -38,11 +38,12 @@ filters:
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: tidal # keyless reachability, status only: keep a node if api.tidal.com/v1/country answered 2xx. A refused egress (e.g. RU) dies at CloudFront with a 403, so there is no refusal marker to match. The body is not read at all -- the country it reports gates where a subscription can be bought, not where an existing one plays
-  - type: bandwidth # drop nodes slower than min_mbps (last: runs on the fewest nodes)
+  - type: bandwidth # drop nodes slower than min_mbps (last GATE: runs on the fewest nodes)
     test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
     min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
     timeout: 20s # per-node download deadline
     concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
+  - type: geotrace # NOT a gate: drops nothing, only corrects [GEO:]/[IP:] with the egress the node reports (cdn-cgi/trace). Last on purpose -- it runs on the fewest nodes, and every node here is one that will actually be published. Fixes the tag being wrong for ~46% of the list: the annotate chain places the address the RESOLVER returned, and 41% of named hosts sit in Cloudflare anycast ranges that terminate in many countries at once, so a node tagged CA was exiting in Germany
 # Ordered annotation tags added to node names (both / and /stable.txt).
 annotate:
   - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
