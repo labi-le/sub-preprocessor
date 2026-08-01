@@ -52,6 +52,12 @@ type tidalChecker interface {
 	TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
+// traceChecker is the geotrace filter's half of the prober: unlike the gates
+// above it returns a measurement, not a verdict.
+type traceChecker interface {
+	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
+}
+
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
 	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -313,21 +319,44 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 				check:      td.TidalCheck,
 				logger:     logger,
 			})
+		case geotraceFilterName:
+			filters = appendGeotraceFilter(filters, prober, annotate, logger)
 		case bandwidthFilterName:
-			bc, ok := prober.(bandwidthChecker)
-			if !ok {
-				logger.Warn().Msg("bandwidth filter requested but prober lacks bandwidth support; skipping")
-				continue
-			}
-			filters = append(filters, &bandwidthFilter{
-				minMbps:  bc.BandwidthMinMbps(),
-				annotate: annotate,
-				check:    bc.BandwidthCheck,
-				logger:   logger,
-			})
+			filters = appendBandwidthFilter(filters, prober, annotate, logger)
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")
 		}
 	}
 	return filters
+}
+
+// appendGeotraceFilter adds the egress-annotating filter when the prober can
+// trace. It takes and returns the slice so the capability check lives here
+// rather than as another branch inside buildNodeFilters' switch.
+func appendGeotraceFilter(dst []NodeFilter, prober Prober, annotate bool, logger zerolog.Logger) []NodeFilter {
+	tr, ok := prober.(traceChecker)
+	if !ok {
+		logger.Warn().Msg("geotrace filter requested but prober lacks trace support; skipping")
+
+		return dst
+	}
+
+	return append(dst, &geotraceFilter{check: tr.TraceCheck, annotate: annotate, logger: logger})
+}
+
+// appendBandwidthFilter mirrors appendGeotraceFilter.
+func appendBandwidthFilter(dst []NodeFilter, prober Prober, annotate bool, logger zerolog.Logger) []NodeFilter {
+	bc, ok := prober.(bandwidthChecker)
+	if !ok {
+		logger.Warn().Msg("bandwidth filter requested but prober lacks bandwidth support; skipping")
+
+		return dst
+	}
+
+	return append(dst, &bandwidthFilter{
+		minMbps:  bc.BandwidthMinMbps(),
+		annotate: annotate,
+		check:    bc.BandwidthCheck,
+		logger:   logger,
+	})
 }

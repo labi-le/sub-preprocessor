@@ -68,6 +68,12 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
+	// Cloudflare's trace endpoint answers 211 bytes of key=value from the edge
+	// the request actually reached, so it reports the egress rather than a
+	// registration. Concurrency matches the other through-node checks.
+	defaultGeoTraceEndpoint    = "https://cloudflare.com/cdn-cgi/trace"
+	defaultGeoTraceTimeout     = 15 * time.Second
+	defaultGeoTraceConcurrency = 8
 
 	// Free downloadable IP->country databases for the annotate provider chain.
 	// {yyyy-mm} in the dbip URL expands to the current UTC month at fetch time.
@@ -87,6 +93,7 @@ const (
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
 	FilterTidal     = "tidal"
+	FilterGeoTrace  = "geotrace"
 	FilterBandwidth = "bandwidth"
 
 	ProviderGeofeed  = "geofeed"
@@ -228,6 +235,7 @@ type NodeFilterSpec struct {
 	Claude    ClaudeConfig
 	ChatGPT   ChatGPTConfig
 	Tidal     TidalConfig
+	GeoTrace  GeoTraceConfig
 }
 
 // IPFilterSpecs returns the IP-stage filters (country/asn) in config order.
@@ -291,6 +299,8 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 			specs = append(specs, NodeFilterSpec{Type: FilterChatGPT, ChatGPT: f.mergedChatGPT(cfg.GeoBlock.ChatGPT)})
 		case FilterTidal:
 			specs = append(specs, NodeFilterSpec{Type: FilterTidal, Tidal: f.mergedTidal(cfg.GeoBlock.Tidal)})
+		case FilterGeoTrace:
+			specs = append(specs, NodeFilterSpec{Type: FilterGeoTrace, GeoTrace: f.mergedGeoTrace(cfg.GeoBlock.GeoTrace)})
 		case FilterBandwidth:
 			specs = append(specs, NodeFilterSpec{Type: FilterBandwidth, Bandwidth: f.bandwidthConfig()})
 		}
@@ -371,6 +381,20 @@ func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
 	if f.Concurrency != 0 {
 		base.Concurrency = f.Concurrency
 	}
+	return base
+}
+
+func (f FilterConfig) mergedGeoTrace(base GeoTraceConfig) GeoTraceConfig {
+	if f.Endpoint != "" {
+		base.Endpoint = f.Endpoint
+	}
+	if f.Timeout != 0 {
+		base.Timeout = f.Timeout
+	}
+	if f.Concurrency != 0 {
+		base.Concurrency = f.Concurrency
+	}
+
 	return base
 }
 
@@ -544,12 +568,13 @@ type ASNConfig struct {
 // transient CDN error or rate-limit would otherwise evict the host from every
 // endpoint for the store's whole TTL.
 type GeoBlockConfig struct {
-	DBPath  string        `yaml:"db_path"`
-	TTL     time.Duration `yaml:"ttl"`
-	Gemini  GeminiConfig  `yaml:"gemini"`
-	Claude  ClaudeConfig  `yaml:"claude"`
-	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
-	Tidal   TidalConfig   `yaml:"tidal"`
+	DBPath   string         `yaml:"db_path"`
+	TTL      time.Duration  `yaml:"ttl"`
+	Gemini   GeminiConfig   `yaml:"gemini"`
+	Claude   ClaudeConfig   `yaml:"claude"`
+	ChatGPT  ChatGPTConfig  `yaml:"chatgpt"`
+	Tidal    TidalConfig    `yaml:"tidal"`
+	GeoTrace GeoTraceConfig `yaml:"geotrace"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -638,6 +663,21 @@ type TidalConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
+// GeoTraceConfig configures the through-node egress lookup. Unlike the other
+// through-node checks it is not a gate: it drops nothing and only corrects the
+// GEO and IP tags with what the node reports about itself.
+//
+// The offline annotate chain cannot do this. It places the address our resolver
+// returned for the node's hostname, and 41% of the named hosts measured in the
+// pool sit in Cloudflare's shared anycast ranges, which terminate in many
+// countries at once -- so the tag described Cloudflare's registration while the
+// traffic left from the origin (a node tagged CA exiting in Germany).
+type GeoTraceConfig struct {
+	Endpoint    string        `yaml:"endpoint"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
@@ -699,6 +739,19 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if td.Concurrency == 0 {
 		td.Concurrency = defaultTidalConcurrency
+	}
+	applyGeoTraceDefaults(&g.GeoTrace)
+}
+
+func applyGeoTraceDefaults(gt *GeoTraceConfig) {
+	if gt.Endpoint == "" {
+		gt.Endpoint = defaultGeoTraceEndpoint
+	}
+	if gt.Timeout == 0 {
+		gt.Timeout = defaultGeoTraceTimeout
+	}
+	if gt.Concurrency == 0 {
+		gt.Concurrency = defaultGeoTraceConcurrency
 	}
 }
 
@@ -1015,7 +1068,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return cfg.validateCountryFilter(i, f)
 	case FilterASN:
 		return validateASNFilter(i, f)
-	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal:
+	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterGeoTrace:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
@@ -1023,7 +1076,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
 			strings.Join([]string{
 				FilterCountry, FilterASN, FilterGemini, FilterClaude,
-				FilterChatGPT, FilterTidal, FilterBandwidth,
+				FilterChatGPT, FilterTidal, FilterGeoTrace, FilterBandwidth,
 			}, ", "))
 	}
 }
@@ -1296,6 +1349,7 @@ func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
 		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
+		!reflect.DeepEqual(old.GeoBlock.GeoTrace, newCfg.GeoBlock.GeoTrace) ||
 		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal)
 }
 

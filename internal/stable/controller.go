@@ -79,6 +79,8 @@ func (c *Controller) Apply(cfg config.Config) error {
 			geo.ChatGPT = spec.ChatGPT
 		case config.FilterTidal:
 			geo.Tidal = spec.Tidal
+		case config.FilterGeoTrace:
+			geo.GeoTrace = spec.GeoTrace
 		case config.FilterBandwidth:
 			bandwidth = spec.Bandwidth
 		}
