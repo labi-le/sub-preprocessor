@@ -68,8 +68,8 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
-	// Cloudflare's trace endpoint answers 211 bytes of key=value from the edge
-	// the request actually reached, so it reports the egress rather than a
+	// Cloudflare's trace endpoint answers key=value lines from the edge the
+	// request actually reached, so it reports the egress rather than a
 	// registration. Concurrency matches the other through-node checks.
 	defaultGeoTraceEndpoint    = "https://cloudflare.com/cdn-cgi/trace"
 	defaultGeoTraceTimeout     = 15 * time.Second
@@ -83,9 +83,9 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn, run per-node in preprocess) and
-// through-node filters (gemini/claude/chatgpt/tidal/bandwidth, run post-probe in
-// stable); which physical stage a type lands in is an implementation detail,
-// not config.
+// through-node filters (gemini/claude/chatgpt/tidal/geotrace/bandwidth, run
+// post-probe in stable); which physical stage a type lands in is an
+// implementation detail, not config.
 const (
 	FilterCountry   = "country"
 	FilterASN       = "asn"
@@ -168,12 +168,16 @@ type GeoConfig struct {
 //     are worker-only (see below)
 //   - asn:     DenyPatterns
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/claude/chatgpt/tidal: selectors; prober params come from
-//     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden per-entry
-//     (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
+//   - gemini/claude/chatgpt/tidal/geotrace: selectors; prober params come from
+//     geoblock.{gemini,claude,chatgpt,tidal,geotrace} and may be overridden
+//     per-entry (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
-//     Endpoint/Timeout/Concurrency for tidal).
+//     Endpoint/Timeout/Concurrency for tidal and for geotrace).
+//
+// A field a type's merge does not read is silently ignored for that type: a
+// geotrace entry honours only Endpoint/Timeout/Concurrency, so a Marker or
+// Model written beside it changes nothing.
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
@@ -194,7 +198,8 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude/chatgpt/tidal overrides (fall back to the geoblock sub-block).
+	// gemini/claude/chatgpt/tidal/geotrace overrides (fall back to the geoblock
+	// sub-block; geotrace reads only Endpoint here).
 	Marker   string `yaml:"marker"`
 	Model    string `yaml:"model"`
 	Endpoint string `yaml:"endpoint"`
@@ -286,7 +291,7 @@ func (cfg *Config) DeniedCountries() filter.CountrySet {
 }
 
 // NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
-// tidal/bandwidth) in config order.
+// tidal/geotrace/bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
 	for _, f := range cfg.Filters {
@@ -414,8 +419,8 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the URL-test (latency) prober params only. The through-node
-// filters (gemini/claude/chatgpt/tidal/bandwidth) and their params live in the
-// top-level filters list, not here.
+// filters (gemini/claude/chatgpt/tidal/geotrace/bandwidth) and their params
+// live in the top-level filters list, not here.
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
 	Timeout        time.Duration `yaml:"timeout"`
@@ -561,12 +566,13 @@ type ASNConfig struct {
 
 // GeoBlockConfig configures the per-node geo-block list -- a SQLite TTL store of
 // node hosts that failed a through-node API reachability check (Gemini, Claude,
-// ChatGPT) -- plus the base params of every through-node API check. Tidal's
+// ChatGPT) -- plus the base params of every through-node check. Tidal's
 // params live here for uniformity even though the tidal filter deliberately
 // never writes to the store: its verdict is a bare status code, a far weaker
 // signal than the explicit refusal markers the other checks match, so a
 // transient CDN error or rate-limit would otherwise evict the host from every
-// endpoint for the store's whole TTL.
+// endpoint for the store's whole TTL. Geotrace's live here for the same
+// uniformity and never reach the store either -- it is not a gate at all.
 type GeoBlockConfig struct {
 	DBPath   string         `yaml:"db_path"`
 	TTL      time.Duration  `yaml:"ttl"`
@@ -1216,6 +1222,12 @@ func (g *GeoBlockConfig) validate() error {
 	if g.Tidal.Concurrency < 0 {
 		return errors.New("geoblock.tidal.concurrency must not be negative")
 	}
+	if g.GeoTrace.Timeout < 0 {
+		return errors.New("geoblock.geotrace.timeout must not be negative")
+	}
+	if g.GeoTrace.Concurrency < 0 {
+		return errors.New("geoblock.geotrace.concurrency must not be negative")
+	}
 	return nil
 }
 
@@ -1342,15 +1354,15 @@ func FiltersChanged(old, newCfg Config) bool {
 }
 
 // ProberChanged reports whether the through-node prober settings
-// (gemini/claude/chatgpt/tidal) differ; the stable worker must be re-applied
-// when they do. The store-only geoblock fields (db_path, ttl) are covered by
-// StoresChanged instead.
+// (gemini/claude/chatgpt/tidal/geotrace) differ; the stable worker must be
+// re-applied when they do. The store-only geoblock fields (db_path, ttl) are
+// covered by StoresChanged instead.
 func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
 		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
-		!reflect.DeepEqual(old.GeoBlock.GeoTrace, newCfg.GeoBlock.GeoTrace) ||
-		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal)
+		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal) ||
+		!reflect.DeepEqual(old.GeoBlock.GeoTrace, newCfg.GeoBlock.GeoTrace)
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at

@@ -28,8 +28,9 @@ resolver:
   cache_ttl: 1h
   cache_negative_ttl: 10m
 # Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
-# preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
-# post-probe in the stable worker. Order is honoured within each stage.
+# preprocess; through-node filters (gemini/claude/chatgpt/tidal/geotrace/
+# bandwidth) run post-probe in the stable worker. Order is honoured within each
+# stage.
 filters:
   - type: country
     provider: geofeed

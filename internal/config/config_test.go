@@ -481,6 +481,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative chatgpt timeout":      {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
 		"negative tidal concurrency":    {base + "geoblock:\n  tidal:\n    concurrency: -1\n", "geoblock.tidal.concurrency"},
 		"negative tidal timeout":        {base + "geoblock:\n  tidal:\n    timeout: -1s\n", "geoblock.tidal.timeout"},
+		"negative geotrace concurrency": {base + "geoblock:\n  geotrace:\n    concurrency: -1\n", "geoblock.geotrace.concurrency"},
+		"negative geotrace timeout":     {base + "geoblock:\n  geotrace:\n    timeout: -1s\n", "geoblock.geotrace.timeout"},
 		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
 		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
 		"negative asn timeout":          {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
