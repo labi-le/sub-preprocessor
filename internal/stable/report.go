@@ -43,11 +43,17 @@ type SourceReport struct {
 // FilterReport is one through-node filter's effect on the survivor set: how
 // many entered, how many it kept, and how many it dropped keyed by reason
 // (blocked/slow/unreachable).
+//
+// Notes is the other channel: per-filter counters that are not drops, keyed by
+// note name (geotrace's corrected/unanswered). A filter that drops nothing
+// reports through Notes alone and leaves Dropped empty, so a reader of the
+// drop counts never has to know which keys are really drops.
 type FilterReport struct {
 	Name    string
 	In      int
 	Kept    int
 	Dropped map[string]int
+	Notes   map[string]int
 }
 
 // Reporter receives the outcome of each cycle. A nil Reporter disables
