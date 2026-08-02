@@ -110,10 +110,17 @@ func TestBetterTraceOutcomePriority(t *testing.T) {
 		// above sorts the same way under either key, which is why dropping the
 		// address branch entirely leaves them all green.
 		//
-		// The pair is synthetic. mihomo cannot emit one: within a single label
-		// the host and the label text are constant, so both the address and the
-		// name vary only by the port and the two keys always agree. It pins the
-		// comparator's primary key, not a shape seen in production.
+		// The shape is rare, not impossible, so the pair is worth pinning.
+		// mihomo builds a mieru proxy's NAME from the raw port token but its
+		// ADDRESS from the parsed int (converter.go "%s:%s/%s" vs NewMieru's
+		// strconv.Itoa), so a leading zero desynchronizes the two keys — and
+		// portNumber accepts "0999", mieruPort republishes it verbatim. For
+		// "?port=0999&protocol=TCP&port=1000&protocol=UDP#src-001" mihomo
+		// emits addr h:999 / name "src-001:0999/TCP" and addr h:1000 / name
+		// "src-001:1000/UDP": byte-wise the first address is the GREATER one
+		// while its name is the smaller. A range begin port carries the zero
+		// the same way ("0999-9999" Sscanf'd to 999). The fixture values below
+		// are stand-ins for that shape, chosen to read clearly.
 		{"higher address, lower name", traceOutcome{addr: "1.2.3.4:1500", name: "src-001:1000/TCP"}},
 		{"lower address, higher name", traceOutcome{addr: "1.2.3.4:1000", name: "src-001:9000/UDP"}},
 	}
