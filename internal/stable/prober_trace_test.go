@@ -38,9 +38,9 @@ func traceAnswer(ip, loc string) string {
 //
 // The lowercase cases are why the letters test is case-EXACT. A case-folding
 // one lets xx slip past the != XX guard that exists to reject it, and lets any
-// lowercase loc through — the one country source in the pipeline that is not
-// upper-folded, splitting stable_kept_country_nodes between two spellings of
-// one country.
+// lowercase loc through, splitting stable_kept_country_nodes between two
+// spellings of one country — the split both geo databases avoid by
+// upper-folding, and that merge.go's tagCountry does not.
 func TestParseTraceRejectsWhatTheTagCannotCarry(t *testing.T) {
 	t.Parallel()
 
@@ -105,6 +105,17 @@ func TestBetterTraceOutcomePriority(t *testing.T) {
 		{"higher address", traceOutcome{addr: "1.2.3.4:9998", name: "src-001:9998-9999/UDP"}},
 		{"same address, higher name", traceOutcome{addr: "1.2.3.4:2999", name: "src-001:2999/UDP"}},
 		{"same address, lower name", traceOutcome{addr: "1.2.3.4:2999", name: "src-001:2999/TCP"}},
+		// The last two make the ADDRESS key load-bearing: their keys disagree,
+		// so ranking by name alone would order this pair backwards. Every case
+		// above sorts the same way under either key, which is why dropping the
+		// address branch entirely leaves them all green.
+		//
+		// The pair is synthetic. mihomo cannot emit one: within a single label
+		// the host and the label text are constant, so both the address and the
+		// name vary only by the port and the two keys always agree. It pins the
+		// comparator's primary key, not a shape seen in production.
+		{"higher address, lower name", traceOutcome{addr: "1.2.3.4:1500", name: "src-001:1000/TCP"}},
+		{"lower address, higher name", traceOutcome{addr: "1.2.3.4:1000", name: "src-001:9000/UDP"}},
 	}
 	for i, a := range ranked {
 		for j, b := range ranked {

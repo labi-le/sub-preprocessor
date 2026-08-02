@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -77,7 +78,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 				Bool("reachable", reachable).Int("status", status).
 				Str("loc", res.Country).Str("egress", res.IP).
 				Int64("n", n).Int64("of", prog.total).Msg("geotrace")
-			if !reachable || status < 200 || status >= 300 || !ok {
+			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok {
 				return
 			}
 			mu.Lock()
@@ -181,9 +182,12 @@ func parseTrace(body string) (TraceResult, bool) {
 // The letters test is case-EXACT, not merge.go's case-folding asciiLetter, and
 // the reserved-code guard leans on that: a folding test would admit "xx", the
 // very code the guard exists to reject. It would also admit any lowercase loc,
-// leaving this the one country source in the pipeline that is not upper-folded
-// (geofeed.parseLine and its dbip twin parseCountry both are), so a single
-// country would reach stable_kept_country_nodes under two label values.
+// and both geo databases upper-fold theirs (geofeed.parseLine and its dbip twin
+// parseCountry), so one country would reach stable_kept_country_nodes under two
+// label values. merge.go's tagCountry is NOT upper-folded — it tests with the
+// folding asciiLetter and returns the tag's two bytes verbatim, so an upstream
+// "[GEO:de]" already splits that gauge — which makes this a spelling declined,
+// not the only source in the pipeline that avoids one.
 // Cloudflare documents loc uppercase, and a rejection here reads as no answer,
 // so being wrong about that costs the node its correction, never a wrong tag.
 func validCountry(c string) bool {
