@@ -102,9 +102,10 @@ Every `subscriptions.interval` it:
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `bandwidth`) on the survivors; a `gemini`/`claude`/
-   `chatgpt` geo-block writes the node's host to the geoblock store, so step 2
-   drops it on every later cycle. Every other drop lasts this cycle only,
+   `chatgpt` / `tidal` / `geotrace` / `bandwidth`) on the survivors; a
+   `gemini`/`claude`/`chatgpt` geo-block writes the node's host to the geoblock
+   store, so step 2 drops it on every later cycle. Every other drop lasts this
+   cycle only, and `geotrace` drops nothing at all — it only retags,
 9. atomically publishes the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
@@ -138,7 +139,8 @@ Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
 
 **Through-node filters** — run only in the stable worker, after the latency
-probe, routing real requests *through* each surviving node:
+probe, routing real requests *through* each surviving node. All but the last
+are gates that drop:
 
 - `gemini` — GET the Gemini API through the node and inspect the response
   body for the location-block marker (a check a HEAD-only URL test cannot
@@ -178,9 +180,21 @@ probe, routing real requests *through* each surviving node:
   below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
   dropped; kept nodes get a `[SPD:<n>M]` tag when annotation is enabled.
   Results are never cached — measured fresh each cycle.
+- `geotrace` — the one entry that is **not** a gate: it keeps every node it is
+  handed and only corrects the `[GEO:]` / `[IP:]` values with the egress the
+  node reports about itself, via Cloudflare's `/cdn-cgi/trace`
+  (`geoblock.geotrace.endpoint`). The offline chain cannot do this: it tags the
+  address the *resolver* returned for the node's hostname, and 41% of the named
+  hosts measured in the pool sit in Cloudflare's shared anycast ranges, which
+  terminate in many countries at once — so a node tagged `CA` was in fact
+  exiting in Germany. Only the address the endpoint saw is a fact; the country
+  beside it is still a geo-IP lookup, just one made about the right address. It
+  substitutes tags that are already present and never adds any, so an empty
+  `annotate:` list disables it, other tags (`[SPD:<n>M]`) keep their place, and a
+  node whose trace fails keeps the offline guess.
 
-Filter order within each stage is honoured; putting `bandwidth` last means it
-runs on the fewest nodes.
+Filter order within each stage is honoured; putting the expensive ones
+(`bandwidth`, `geotrace`) last means they run on the fewest nodes.
 
 ### Annotation
 
@@ -333,9 +347,11 @@ Key sections:
 - `annotate` — the ordered tag list described above; GEO/ASN entries take a
   `providers:` chain. The retired singular `provider:` key is rejected as an
   unknown key by the strict decode instead of being silently dropped.
-- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
-  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
-  for the through-node filters.
+- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*`,
+  `tidal.*` and `geotrace.*` base params (endpoint, model, marker, key,
+  timeout, concurrency) for the through-node filters. `geotrace.*` takes only
+  `endpoint`/`timeout`/`concurrency`, and defaults to
+  `https://cloudflare.com/cdn-cgi/trace`, 15s, 8.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline

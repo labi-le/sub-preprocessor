@@ -104,9 +104,9 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
-	if len(fs) != 5 {
-		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "geotrace", "bandwidth", "bogus"}, prober, nil, true, zerolog.Nop())
+	if len(fs) != 6 {
+		t.Fatalf("gemini + claude + chatgpt + tidal + geotrace + bandwidth + unknown -> 6 filters, got %d", len(fs))
 	}
 	if got := builtFilterName(fs[2]); got != "chatgpt" {
 		t.Fatalf("expected chatgpt filter third, got %q", got)
@@ -114,8 +114,11 @@ func TestBuildNodeFilters(t *testing.T) {
 	if got := builtFilterName(fs[3]); got != "tidal" {
 		t.Fatalf("expected tidal filter fourth, got %q", got)
 	}
-	if got := builtFilterName(fs[4]); got != "bandwidth" {
-		t.Fatalf("expected bandwidth filter fifth, got %q", got)
+	if got := builtFilterName(fs[4]); got != "geotrace" {
+		t.Fatalf("expected geotrace filter fifth, got %q", got)
+	}
+	if got := builtFilterName(fs[5]); got != "bandwidth" {
+		t.Fatalf("expected bandwidth filter sixth, got %q", got)
 	}
 }
 
@@ -127,6 +130,8 @@ func builtFilterName(f NodeFilter) string {
 	switch v := f.(type) {
 	case *apiFilter:
 		return v.filterName
+	case *geotraceFilter:
+		return geotraceFilterName
 	case *bandwidthFilter:
 		return bandwidthFilterName
 	default:
