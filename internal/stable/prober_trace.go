@@ -11,10 +11,24 @@ import (
 	"domains.lst/sub-preprocessor/internal/log"
 )
 
+const (
+	countryCodeLen = 2
+	// locNoCountry is Cloudflare's reserved loc for a client it has no country
+	// data for; see validCountry.
+	locNoCountry = "XX"
+)
+
 // TraceResult is one node's measured egress. IP is a fact: the address the
 // endpoint saw the request arrive from. Country is Cloudflare's geo-IP lookup
 // OF that address — still a database opinion, but formed about the right
 // address, which is the whole difference from the offline chain.
+//
+// Both fields go into a published node name verbatim and Country becomes a
+// Prometheus label value through Entry.Country, so parseTrace guarantees them
+// rather than leaving it to each consumer: a TraceResult that exists at all
+// has a Country of exactly two ASCII letters that is none of Cloudflare's
+// reserved non-country codes, and an IP that net.ParseIP accepts. Anything
+// else is reported as no answer.
 type TraceResult struct {
 	Country string
 	IP      string
@@ -38,11 +52,10 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 	opLog := log.Op(m.logger, "stable.TraceCheck")
 	prog := newProgress(opLog, "geotrace progress", len(proxies))
 
-	out := make(map[string]TraceResult, len(proxies))
-	// winner records which proxy address produced the stored result, so a label
-	// covering several proxies folds by a total order instead of by whoever
-	// finished first.
-	winner := make(map[string]string, len(proxies))
+	// winner folds a label's proxies down to ONE outcome by a total order over
+	// them, so the stored result does not depend on which goroutine finished
+	// first.
+	winner := make(map[string]traceOutcome, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := fanoutSem(c.Concurrency)
@@ -68,26 +81,67 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 				return
 			}
 			mu.Lock()
-			// A mieru label holds one proxy per port and they can exit
-			// differently. Completion order is scheduler-dependent, so the
-			// lowest address wins rather than the fastest goroutine.
+			cand := traceOutcome{addr: px.Addr(), name: px.Name(), res: res}
 			label := entryLabel(px)
-			if best, seen := winner[label]; !seen || px.Addr() < best {
-				out[label] = res
-				winner[label] = px.Addr()
+			if best, seen := winner[label]; !seen || betterTraceOutcome(cand, best) {
+				winner[label] = cand
 			}
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 
+	out := make(map[string]TraceResult, len(winner))
+	for label, w := range winner {
+		out[label] = w.res
+	}
+
 	return out
 }
 
-// parseTrace reads Cloudflare's /cdn-cgi/trace body: 211 bytes of "key=value"
-// lines. Only a result carrying BOTH fields counts — a tag is only worth
-// replacing when the replacement is complete, and a partial answer means the
-// response came from something that is not the trace endpoint.
+// traceOutcome is one proxy's trace answer plus the identity the fold orders
+// by. A mieru label holds one proxy per port and they can exit differently, so
+// exactly one of them has to win the label.
+type traceOutcome struct {
+	addr string
+	name string
+	res  TraceResult
+}
+
+// betterTraceOutcome reports whether a should replace b as their label's
+// stored result. The order has to be TOTAL: on a tie the map is not
+// overwritten and the survivor is whichever goroutine reached the mutex first,
+// which is exactly what folding by an order is meant to rule out.
+//
+// Address alone is not total. mihomo builds a mieru proxy's address from
+// server and port only (adapter/outbound/mieru.go NewMieru: net.JoinHostPort,
+// and a port RANGE contributes its begin port), while the NAME also carries
+// the transport (common/convert/converter.go: "<label>:<port>/<protocol>").
+// Two proxies of one mierus:// link therefore share an address whenever the
+// link repeats a port under two protocols, or writes a plain port equal to a
+// range's begin port. The name cannot collide: uniqueName suffixes "-%02d".
+func betterTraceOutcome(a, b traceOutcome) bool {
+	if a.addr != b.addr {
+		return a.addr < b.addr
+	}
+
+	return a.name < b.name
+}
+
+// parseTrace reads Cloudflare's /cdn-cgi/trace body: "key=value" lines, of no
+// fixed length — the endpoint echoes the request User-Agent back in uag=, so
+// the only bound is apiProbeOne's maxAPIBody. Only a result carrying BOTH
+// fields counts — a tag is only worth replacing when the replacement is
+// complete, and a partial answer means the response came from something that
+// is not the trace endpoint.
+//
+// Both fields are validated here because that is what the rest of the package
+// is promised: Country is two ASCII letters and never one of Cloudflare's
+// reserved non-country codes, IP parses as an address. Country reaches a
+// Prometheus label value through Entry.Country, and both are embedded verbatim
+// in the published node name. A rejected body is reported as NO answer, so the
+// caller keeps the offline chain's tag — this never invents a second spelling
+// of merge.go's countryUnknown.
 func parseTrace(body string) (TraceResult, bool) {
 	var res TraceResult
 	for len(body) > 0 {
@@ -108,11 +162,21 @@ func parseTrace(body string) (TraceResult, bool) {
 			res.Country = value
 		}
 	}
-	if res.IP == "" || len(res.Country) != countryCodeLen {
+	if !validCountry(res.Country) || net.ParseIP(res.IP) == nil {
 		return TraceResult{}, false
 	}
 
 	return res, true
 }
 
-const countryCodeLen = 2
+// validCountry accepts only what a [GEO:] tag may carry. Besides ISO-3166-1
+// alpha-2, Cloudflare documents two reserved loc values that are NOT
+// countries: XX for a client it has no country data for, and T1 for the Tor
+// network (loc is the CF-IPCountry value —
+// https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-ipcountry).
+// T1 is already caught by the letters test; XX is not, and XX is the one that
+// costs information: overwriting an offline [GEO:DE] with [GEO:XX] replaces a
+// possibly-correct guess with none at all.
+func validCountry(c string) bool {
+	return len(c) == countryCodeLen && asciiLetter(c[0]) && asciiLetter(c[1]) && c != locNoCountry
+}
