@@ -482,6 +482,58 @@
       ]
     },
     {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Through-node filter notes (not drops)",
+      "description": "Counters a filter reports that are NOT drops, so they stay out of the drops chart above. geotrace/corrected = published nodes whose [GEO:] tag the node's own egress contradicted (the offline chain resolved the hostname, not the exit); geotrace/unanswered = survivors whose trace did not complete, which keep the offline chain's tag. geotrace drops nothing, so its in and kept are always equal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_notes",
+          "legendFormat": "{{filter}}/{{note}}"
+        }
+      ]
+    },
+    {
       "id": 9,
       "type": "timeseries",
       "title": "Kept-node speed (Mbps): min / p50 / avg / p90 / max",
@@ -494,7 +546,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -575,7 +627,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 20
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -671,7 +723,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -742,7 +794,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -792,7 +844,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -844,7 +896,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {

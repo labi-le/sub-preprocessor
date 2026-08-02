@@ -84,6 +84,16 @@ const (
 	dropSlow        = "slow"
 )
 
+// Note counters a through-node filter reports in FilterReport.Notes: per-filter
+// numbers that are NOT drops, so they must not land in the drops chart. Same
+// wire-format rule as the drop reasons above — internal/metrics publishes each
+// one verbatim as stable_filter_notes{note=...} and the Grafana dashboard
+// documents them by name, so rename the identifiers freely, never the strings.
+const (
+	noteCorrected  = "corrected"
+	noteUnanswered = "unanswered"
+)
+
 // apiFilter keeps only survivors that pass a through-node API check, and records
 // geo-blocked node hosts in the store (TTL) so later cycles drop them in
 // preprocess, before they are ever merged. A nil store (see the tidal filter)

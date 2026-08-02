@@ -29,6 +29,7 @@ const (
 	labelFilter = "filter"
 	labelSource = "source"
 	labelReason = "reason"
+	labelNote   = "note"
 )
 
 // Metrics holds the latest cycle report plus lifetime counters and renders them
@@ -122,6 +123,12 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 	for _, f := range filters {
 		for _, reason := range sortedKeys(f.Dropped) {
 			sample(w, "stable_filter_dropped_nodes", map[string]string{labelFilter: f.Name, labelReason: reason}, float64(f.Dropped[reason]))
+		}
+	}
+	help(w, "stable_filter_notes", "gauge", "Per-filter counters that are not drops (geotrace: corrected tags, unanswered traces).")
+	for _, f := range filters {
+		for _, note := range sortedKeys(f.Notes) {
+			sample(w, "stable_filter_notes", map[string]string{labelFilter: f.Name, labelNote: note}, float64(f.Notes[note]))
 		}
 	}
 }
