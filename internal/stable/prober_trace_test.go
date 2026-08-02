@@ -27,22 +27,31 @@ func traceAnswer(ip, loc string) string {
 }
 
 // TestParseTraceRejectsWhatTheTagCannotCarry pins the validation the rest of
-// the package is promised: Country is two ASCII letters and never one of
-// Cloudflare's reserved non-country codes, IP parses as an address.
+// the package is promised: Country is two UPPERCASE ASCII letters and never
+// one of Cloudflare's reserved non-country codes, IP parses as an address.
 //
 // XX is the case this exists for. It is two bytes, so a length check passes
 // it, and a node Cloudflare cannot place then overwrites a possibly-correct
 // offline [GEO:DE] with a code that names no country. Every rejection has to
 // read as NO answer — same as an unreachable node — so the caller keeps the
 // offline tag instead of publishing a second spelling of countryUnknown.
+//
+// The lowercase cases are why the letters test is case-EXACT. A case-folding
+// one lets xx slip past the != XX guard that exists to reject it, and lets any
+// lowercase loc through — the one country source in the pipeline that is not
+// upper-folded, splitting stable_kept_country_nodes between two spellings of
+// one country.
 func TestParseTraceRejectsWhatTheTagCannotCarry(t *testing.T) {
 	t.Parallel()
 
 	for name, body := range map[string]string{
 		"loc XX, Cloudflare's no-country-data code": "ip=1.2.3.4\nloc=XX\n",
+		"loc xx, the same reserved code lowercased": "ip=1.2.3.4\nloc=xx\n",
 		"loc T1, Cloudflare's Tor code":             "ip=1.2.3.4\nloc=T1\n",
 		"loc digits":                                "ip=1.2.3.4\nloc=12\n",
 		"loc is the annotator's unknown marker":     "ip=1.2.3.4\nloc=??\n",
+		"loc lowercase country":                     "ip=1.2.3.4\nloc=de\n",
+		"loc mixed case country":                    "ip=1.2.3.4\nloc=De\n",
 		// Two runes, four bytes: the code is counted in bytes because that is
 		// what an alpha-2 code is.
 		"loc non-ascii":     "ip=1.2.3.4\nloc=ДЕ\n",

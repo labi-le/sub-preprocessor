@@ -26,9 +26,9 @@ const (
 // Both fields go into a published node name verbatim and Country becomes a
 // Prometheus label value through Entry.Country, so parseTrace guarantees them
 // rather than leaving it to each consumer: a TraceResult that exists at all
-// has a Country of exactly two ASCII letters that is none of Cloudflare's
-// reserved non-country codes, and an IP that net.ParseIP accepts. Anything
-// else is reported as no answer.
+// has a Country of exactly two UPPERCASE ASCII letters that is none of
+// Cloudflare's reserved non-country codes, and an IP that net.ParseIP accepts.
+// Anything else is reported as no answer.
 type TraceResult struct {
 	Country string
 	IP      string
@@ -136,12 +136,12 @@ func betterTraceOutcome(a, b traceOutcome) bool {
 // is not the trace endpoint.
 //
 // Both fields are validated here because that is what the rest of the package
-// is promised: Country is two ASCII letters and never one of Cloudflare's
-// reserved non-country codes, IP parses as an address. Country reaches a
-// Prometheus label value through Entry.Country, and both are embedded verbatim
-// in the published node name. A rejected body is reported as NO answer, so the
-// caller keeps the offline chain's tag — this never invents a second spelling
-// of merge.go's countryUnknown.
+// is promised: Country is two UPPERCASE ASCII letters and never one of
+// Cloudflare's reserved non-country codes, IP parses as an address. Country
+// reaches a Prometheus label value through Entry.Country, and both are
+// embedded verbatim in the published node name. A rejected body is reported as
+// NO answer, so the caller keeps the offline chain's tag — this never invents
+// a second spelling of merge.go's countryUnknown.
 func parseTrace(body string) (TraceResult, bool) {
 	var res TraceResult
 	for len(body) > 0 {
@@ -177,6 +177,17 @@ func parseTrace(body string) (TraceResult, bool) {
 // T1 is already caught by the letters test; XX is not, and XX is the one that
 // costs information: overwriting an offline [GEO:DE] with [GEO:XX] replaces a
 // possibly-correct guess with none at all.
+//
+// The letters test is case-EXACT, not merge.go's case-folding asciiLetter, and
+// the reserved-code guard leans on that: a folding test would admit "xx", the
+// very code the guard exists to reject. It would also admit any lowercase loc,
+// leaving this the one country source in the pipeline that is not upper-folded
+// (geofeed.parseLine and its dbip twin parseCountry both are), so a single
+// country would reach stable_kept_country_nodes under two label values.
+// Cloudflare documents loc uppercase, and a rejection here reads as no answer,
+// so being wrong about that costs the node its correction, never a wrong tag.
 func validCountry(c string) bool {
-	return len(c) == countryCodeLen && asciiLetter(c[0]) && asciiLetter(c[1]) && c != locNoCountry
+	return len(c) == countryCodeLen && upperLetter(c[0]) && upperLetter(c[1]) && c != locNoCountry
 }
+
+func upperLetter(b byte) bool { return b >= 'A' && b <= 'Z' }
