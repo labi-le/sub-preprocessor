@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -29,9 +30,9 @@ const (
 // Survivor.Egress, and its country ends up as a Prometheus label inside the
 // metrics snapshot, so a sub-slice would pin a whole 64 KiB body well past the
 // cycle. parseTrace guarantees them rather than leaving it to each consumer —
-// a TraceResult that exists at all carries a parsed address and a country of
-// exactly two ASCII letters that is none of Cloudflare's reserved non-country
-// codes. Anything else is reported as no answer.
+// a TraceResult that exists at all carries an address netip accepts and a
+// country of exactly two UPPERCASE ASCII letters that is none of Cloudflare's
+// reserved non-country codes. Anything else is reported as no answer.
 type TraceResult struct {
 	IP      netip.Addr
 	Country geofeed.CountryCode
@@ -80,7 +81,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 				Bool("reachable", reachable).Int("status", status).
 				Stringer("loc", res.Country).Stringer("egress", res.IP).
 				Int64("n", n).Int64("of", prog.total).Msg("geotrace")
-			if !reachable || status < 200 || status >= 300 || !ok {
+			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok {
 				return
 			}
 			mu.Lock()
@@ -139,11 +140,11 @@ func betterTraceOutcome(a, b traceOutcome) bool {
 // is not the trace endpoint.
 //
 // Both fields are validated and CONVERTED here because that is what the rest
-// of the package is promised: a country of two ASCII letters, never one of
-// Cloudflare's reserved non-country codes, and an address netip accepts. The
-// conversion is also what keeps the body out of the result — see TraceResult.
-// A rejected body is reported as NO answer, so the caller keeps whatever the
-// offline chain resolves; this never invents a second spelling of
+// of the package is promised: a country of two UPPERCASE ASCII letters, never
+// one of Cloudflare's reserved non-country codes, and an address netip
+// accepts. The conversion is also what keeps the body out of the result — see
+// TraceResult. A rejected body is reported as NO answer, so the caller keeps
+// whatever the offline chain resolves; this never invents a second spelling of
 // countryUnknown.
 func parseTrace(body string) (TraceResult, bool) {
 	var ip, loc string
@@ -181,12 +182,16 @@ func parseTrace(body string) (TraceResult, bool) {
 // T1 is already caught by the letters test; XX is not, and XX is the one that
 // costs information: overwriting an offline [GEO:DE] with [GEO:XX] replaces a
 // possibly-correct guess with none at all.
+//
+// The letters test is case-EXACT, and the reserved-code guard leans on that: a
+// case-folding test would admit "xx", the very code the guard exists to reject.
+// It would also admit any lowercase loc, while both geo databases upper-fold
+// theirs (geofeed.parseLine and its dbip twin parseCountry), so one country
+// would reach stable_kept_country_nodes under two label values. Cloudflare
+// documents loc uppercase, and a rejection here reads as no answer, so being
+// wrong about that costs the node its correction, never a wrong tag.
 func validCountry(c string) bool {
-	return len(c) == countryCodeLen && asciiLetter(c[0]) && asciiLetter(c[1]) && c != locNoCountry
+	return len(c) == countryCodeLen && upperLetter(c[0]) && upperLetter(c[1]) && c != locNoCountry
 }
 
-func asciiLetter(b byte) bool {
-	const asciiCaseBit = 0x20 // the single bit by which ASCII letter cases differ
-	lower := b | asciiCaseBit
-	return lower >= 'a' && lower <= 'z'
-}
+func upperLetter(b byte) bool { return b >= 'A' && b <= 'Z' }

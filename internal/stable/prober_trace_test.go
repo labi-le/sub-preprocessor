@@ -32,22 +32,31 @@ func traceAnswer(ip, loc string) string {
 }
 
 // TestParseTraceRejectsWhatTheTagCannotCarry pins the validation the rest of
-// the package is promised: Country is two ASCII letters and never one of
-// Cloudflare's reserved non-country codes, IP parses as an address.
+// the package is promised: Country is two UPPERCASE ASCII letters and never
+// one of Cloudflare's reserved non-country codes, IP parses as an address.
 //
 // XX is the case this exists for. It is two bytes, so a length check passes
 // it, and a node Cloudflare cannot place then overwrites a possibly-correct
 // offline [GEO:DE] with a code that names no country. Every rejection has to
 // read as NO answer — same as an unreachable node — so the caller keeps the
 // offline tag instead of publishing a second spelling of countryUnknown.
+//
+// The lowercase cases are why the letters test is case-EXACT. A case-folding
+// one lets xx slip past the != XX guard that exists to reject it, and lets any
+// lowercase loc through, splitting stable_kept_country_nodes between two
+// spellings of one country — the split both geo databases avoid by
+// upper-folding.
 func TestParseTraceRejectsWhatTheTagCannotCarry(t *testing.T) {
 	t.Parallel()
 
 	for name, body := range map[string]string{
 		"loc XX, Cloudflare's no-country-data code": "ip=1.2.3.4\nloc=XX\n",
+		"loc xx, the same reserved code lowercased": "ip=1.2.3.4\nloc=xx\n",
 		"loc T1, Cloudflare's Tor code":             "ip=1.2.3.4\nloc=T1\n",
 		"loc digits":                                "ip=1.2.3.4\nloc=12\n",
 		"loc is the annotator's unknown marker":     "ip=1.2.3.4\nloc=??\n",
+		"loc lowercase country":                     "ip=1.2.3.4\nloc=de\n",
+		"loc mixed case country":                    "ip=1.2.3.4\nloc=De\n",
 		// Two runes, four bytes: the code is counted in bytes because that is
 		// what an alpha-2 code is.
 		"loc non-ascii":     "ip=1.2.3.4\nloc=ДЕ\n",
@@ -101,6 +110,24 @@ func TestBetterTraceOutcomePriority(t *testing.T) {
 		{"higher address", traceOutcome{addr: "1.2.3.4:9998", name: "src-001:9998-9999/UDP"}},
 		{"same address, higher name", traceOutcome{addr: "1.2.3.4:2999", name: "src-001:2999/UDP"}},
 		{"same address, lower name", traceOutcome{addr: "1.2.3.4:2999", name: "src-001:2999/TCP"}},
+		// The last two make the ADDRESS key load-bearing: their keys disagree,
+		// so ranking by name alone would order this pair backwards. Every case
+		// above sorts the same way under either key, which is why dropping the
+		// address branch entirely leaves them all green.
+		//
+		// The shape is rare, not impossible, so the pair is worth pinning.
+		// mihomo builds a mieru proxy's NAME from the raw port token but its
+		// ADDRESS from the parsed int (converter.go "%s:%s/%s" vs NewMieru's
+		// strconv.Itoa), so a leading zero desynchronizes the two keys — and
+		// portNumber accepts "0999", mieruPort republishes it verbatim. For
+		// "?port=0999&protocol=TCP&port=1000&protocol=UDP#src-001" mihomo
+		// emits addr h:999 / name "src-001:0999/TCP" and addr h:1000 / name
+		// "src-001:1000/UDP": byte-wise the first address is the GREATER one
+		// while its name is the smaller. A range begin port carries the zero
+		// the same way ("0999-9999" Sscanf'd to 999). The fixture values below
+		// are stand-ins for that shape, chosen to read clearly.
+		{"higher address, lower name", traceOutcome{addr: "1.2.3.4:1500", name: "src-001:1000/TCP"}},
+		{"lower address, higher name", traceOutcome{addr: "1.2.3.4:1000", name: "src-001:9000/UDP"}},
 	}
 	for i, a := range ranked {
 		for j, b := range ranked {
