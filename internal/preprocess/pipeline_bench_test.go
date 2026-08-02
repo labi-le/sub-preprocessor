@@ -81,8 +81,9 @@ func BenchmarkProcessBodyPipeline(b *testing.B) {
 	resolved := p.resolver.GetResolvedMap()
 	defer p.resolver.PutResolvedMap(resolved)
 	stats := Stats{}
+	sink := &bufferSink{buf: buf, annotator: p.annotator}
 	pctx := &PipelineContext{
-		Buffer:   buf,
+		sink:     sink,
 		Lookup:   lookup,
 		Allowed:  allowed,
 		Resolved: resolved,
@@ -95,7 +96,7 @@ func BenchmarkProcessBodyPipeline(b *testing.B) {
 		buf.Reset()
 		clear(resolved)
 		stats = Stats{}
-		pctx.IsFirstNode = true
+		sink.wrote = false
 		if err := p.processBody(ctx, body, pctx); err != nil {
 			b.Fatalf("processBody: %v", err)
 		}

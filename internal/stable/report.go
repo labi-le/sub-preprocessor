@@ -24,6 +24,20 @@ type CycleReport struct {
 	Sources       []SourceReport
 	Filters       []FilterReport
 	KeptSpeeds    []int
+	Trace         TraceReport
+}
+
+// TraceReport accounts the geotrace annotation stage: how many survivors told
+// us where their traffic actually leaves from, and how much that changed.
+//
+// Moved is the number the trace exists to justify — a published country that
+// differs from the one the offline chain gives for the RESOLVED address — and
+// Answered/Unanswered bound how far it can be trusted, since an unanswered
+// node simply keeps the offline guess.
+type TraceReport struct {
+	Answered   int
+	Unanswered int
+	Moved      int
 }
 
 // SourceReport is one source's contribution to a cycle: how many nodes it
@@ -43,17 +57,11 @@ type SourceReport struct {
 // FilterReport is one through-node filter's effect on the survivor set: how
 // many entered, how many it kept, and how many it dropped keyed by reason
 // (blocked/slow/unreachable).
-//
-// Notes is the other channel: per-filter counters that are not drops, keyed by
-// note name (geotrace's corrected/unanswered). A filter that drops nothing
-// reports through Notes alone and leaves Dropped empty, so a reader of the
-// drop counts never has to know which keys are really drops.
 type FilterReport struct {
 	Name    string
 	In      int
 	Kept    int
 	Dropped map[string]int
-	Notes   map[string]int
 }
 
 // Reporter receives the outcome of each cycle. A nil Reporter disables

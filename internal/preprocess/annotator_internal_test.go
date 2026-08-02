@@ -23,17 +23,21 @@ type fakeProvider struct {
 func (f fakeProvider) Name() string                                { return f.name }
 func (f fakeProvider) Lookup(context.Context, netip.Addr) geo.Info { return f.info }
 
-func parseOneNode(t *testing.T, line string) subscription.Node {
+// sampleNodeLine is the one node every annotator test relabels; the tests are
+// about the tag prefix, not about parsing.
+const sampleNodeLine = "vless://u@example.com:443#Old"
+
+func parseOneNode(t *testing.T) subscription.Node {
 	t.Helper()
 	var node subscription.Node
 	ok := false
-	subscription.Parse([]byte(line), func(n subscription.Node) bool {
+	subscription.Parse([]byte(sampleNodeLine), func(n subscription.Node) bool {
 		node = n
 		ok = true
 		return false
 	})
 	if !ok {
-		t.Fatalf("no node parsed from %q", line)
+		t.Fatalf("no node parsed from %q", sampleNodeLine)
 	}
 	return node
 }
@@ -52,9 +56,9 @@ func TestAnnotatorTagListOrder(t *testing.T) {
 		t.Fatal("expected a non-nil annotator")
 	}
 
-	node := parseOneNode(t, "vless://u@example.com:443#Old")
+	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
-	a.annotate(context.Background(), &buf, &tagBuf, node, netip.MustParseAddr("1.2.3.4"))
+	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("1.2.3.4")})
 
 	want := "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4][ASN:AS64500 EXAMPLE] Old"
 	if buf.String() != want {
@@ -74,9 +78,9 @@ func TestAnnotatorUnknownGeoAndASN(t *testing.T) {
 		{Tag: config.TagIP},
 	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
 
-	node := parseOneNode(t, "vless://u@example.com:443#Old")
+	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
-	a.annotate(context.Background(), &buf, &tagBuf, node, netip.MustParseAddr("9.9.9.9"))
+	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("9.9.9.9")})
 
 	want := "vless://u@example.com:443#[GEO:??][ASN:??][IP:9.9.9.9] Old"
 	if buf.String() != want {
@@ -95,9 +99,17 @@ func TestNewAnnotatorEmptyIsNil(t *testing.T) {
 // annotateOne runs a single node through the annotator and returns the output.
 func annotateOne(t *testing.T, a *annotator, ip string) string {
 	t.Helper()
-	node := parseOneNode(t, "vless://u@example.com:443#Old")
+	return annotateReq(t, a, AnnotateRequest{IP: netip.MustParseAddr(ip)})
+}
+
+// annotateReq fills in the node req leaves unset and returns the output.
+func annotateReq(t *testing.T, a *annotator, req AnnotateRequest) string {
+	t.Helper()
+	if req.Node.Raw == "" {
+		req.Node = parseOneNode(t)
+	}
 	var buf, tagBuf bytes.Buffer
-	a.annotate(context.Background(), &buf, &tagBuf, node, netip.MustParseAddr(ip))
+	a.Annotate(context.Background(), &buf, &tagBuf, req)
 	return buf.String()
 }
 
@@ -188,6 +200,131 @@ func TestAnnotatorSkipsUnbuiltProvider(t *testing.T) {
 	want := "vless://u@example.com:443#[GEO:NL] Old"
 	if got := annotateOne(t, a, "1.2.3.4"); got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// geotraceAnnotator builds a GEO chain over the given provider names, wiring
+// only geofeed into the provider map — geotrace deliberately has no entry
+// there, so this also pins that newAnnotator resolves it without the
+// "referenced but not built" fallback.
+func geotraceAnnotator(t *testing.T, order ...string) *annotator {
+	t.Helper()
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: order},
+		{Tag: config.TagIP},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+	})
+	if a == nil {
+		t.Fatal("expected a non-nil annotator")
+	}
+	return a
+}
+
+// TestAnnotatorGeoTraceChain: the geotrace step is a chain member like any
+// other — it wins when it leads and answered, misses through to the offline
+// database when the trace never ran, and loses to a provider ahead of it.
+func TestAnnotatorGeoTraceChain(t *testing.T) {
+	t.Parallel()
+
+	egress := Egress{IP: netip.MustParseAddr("203.0.113.7"), Country: geofeed.CountryCode{'D', 'E'}}
+
+	tests := []struct {
+		name   string
+		order  []string
+		egress Egress
+		want   string
+	}{
+		{
+			name:   "trace first wins",
+			order:  []string{config.ProviderGeoTrace, config.ProviderGeofeed},
+			egress: egress,
+			want:   "vless://u@example.com:443#[GEO:DE][IP:1.2.3.4] Old",
+		},
+		{
+			name:  "unmeasured trace falls through",
+			order: []string{config.ProviderGeoTrace, config.ProviderGeofeed},
+			want:  "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4] Old",
+		},
+		{
+			name:   "trace behind a hit never runs",
+			order:  []string{config.ProviderGeofeed, config.ProviderGeoTrace},
+			egress: egress,
+			want:   "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4] Old",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := geotraceAnnotator(t, tc.order...)
+			req := AnnotateRequest{IP: netip.MustParseAddr("1.2.3.4"), Egress: tc.egress}
+			if got := annotateReq(t, a, req); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAnnotateReturnsResolvedCountry: the returned code is what the publisher
+// records as the node's country, so it must be the one the GEO chain resolved
+// — and zero, not a rendered "??", when nothing did.
+func TestAnnotateReturnsResolvedCountry(t *testing.T) {
+	t.Parallel()
+
+	a := geotraceAnnotator(t, config.ProviderGeoTrace, config.ProviderGeofeed)
+	node := parseOneNode(t)
+	var buf, tagBuf bytes.Buffer
+
+	got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
+		Node:   node,
+		IP:     netip.MustParseAddr("1.2.3.4"),
+		Egress: Egress{IP: netip.MustParseAddr("203.0.113.7"), Country: geofeed.CountryCode{'D', 'E'}},
+	})
+	if got != (geofeed.CountryCode{'D', 'E'}) {
+		t.Fatalf("got country %q, want DE", got)
+	}
+
+	noGeo := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{{Tag: config.TagIP}}, nil)
+	buf.Reset()
+	if got = noGeo.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
+		Node: node, IP: netip.MustParseAddr("1.2.3.4"),
+	}); got != (geofeed.CountryCode{}) {
+		t.Fatalf("a tag list without GEO must resolve no country, got %q", got)
+	}
+}
+
+// TestAnnotatePrefixLeadsConfiguredTags: the caller-rendered prefix is the
+// leftmost thing in the name — the worker's [SPD:] tag has no config entry to
+// be ordered by, so its position is this contract alone.
+func TestAnnotatePrefixLeadsConfiguredTags(t *testing.T) {
+	t.Parallel()
+
+	a := geotraceAnnotator(t, config.ProviderGeofeed)
+	req := AnnotateRequest{IP: netip.MustParseAddr("1.2.3.4"), Prefix: "[SPD:60M] "}
+
+	want := "vless://u@example.com:443#[SPD:60M] [GEO:NL][IP:1.2.3.4] Old"
+	if got := annotateReq(t, a, req); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestAnnotateIPv6Address: netip.Addr.As4 PANICS on a v6 address. The resolver
+// never produces one, but a traced egress can be v6, and the panic would land
+// in the middle of a publication cycle.
+func TestAnnotateIPv6Address(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{{Tag: config.TagIP}}, nil)
+
+	for _, tc := range []struct{ ip, want string }{
+		{"2606:4700::6810:85e5", "2606:4700::6810:85e5"},
+		{"::ffff:1.2.3.4", "1.2.3.4"},
+	} {
+		want := "vless://u@example.com:443#[IP:" + tc.want + "] Old"
+		if got := annotateOne(t, a, tc.ip); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
 	}
 }
 

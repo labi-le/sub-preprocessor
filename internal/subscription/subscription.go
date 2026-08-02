@@ -92,8 +92,8 @@ const schemeSep = "://"
 // Server, Port and Name are substrings of it. The three dedicated decoders
 // (vmess, ss legacy, ssr) each allocate one base64 buffer per node, and their
 // Server/Port/Name are views into THAT buffer rather than into Raw — so what a
-// retained node string keeps alive is scheme-dependent, which is why
-// stable.tagCountry (merge.go) clones instead of slicing.
+// retained node string keeps alive is scheme-dependent, and a caller holding
+// one past the body it came from has to copy rather than slice.
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {

@@ -29,7 +29,6 @@ const (
 	labelFilter = "filter"
 	labelSource = "source"
 	labelReason = "reason"
-	labelNote   = "note"
 )
 
 // Metrics holds the latest cycle report plus lifetime counters and renders them
@@ -92,6 +91,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
+	writeTrace(w, r.Trace)
 	if len(r.KeptCountries) > 0 {
 		help(w, "stable_kept_country_nodes", "gauge", "Published nodes per resolved country (last cycle).")
 		for _, c := range sortedKeys(r.KeptCountries) {
@@ -125,12 +125,15 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 			sample(w, "stable_filter_dropped_nodes", map[string]string{labelFilter: f.Name, labelReason: reason}, float64(f.Dropped[reason]))
 		}
 	}
-	help(w, "stable_filter_notes", "gauge", "Per-filter counters that are not drops (geotrace: corrected tags, unanswered traces).")
-	for _, f := range filters {
-		for _, note := range sortedKeys(f.Notes) {
-			sample(w, "stable_filter_notes", map[string]string{labelFilter: f.Name, labelNote: note}, float64(f.Notes[note]))
-		}
-	}
+}
+
+// writeTrace renders the geotrace annotation stage. It is not a filter and has
+// no FilterReport: the trace drops nothing, so answered+unanswered is simply
+// the published list split by whether the node told us where it exits.
+func writeTrace(w io.Writer, t stable.TraceReport) {
+	gauge(w, "stable_trace_answered_nodes", "Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.", float64(t.Answered))
+	gauge(w, "stable_trace_unanswered_nodes", "Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.", float64(t.Unanswered))
+	gauge(w, "stable_trace_moved_nodes", "Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.", float64(t.Moved))
 }
 
 func writeSources(w io.Writer, sources []stable.SourceReport) {

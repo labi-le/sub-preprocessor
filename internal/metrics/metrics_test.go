@@ -37,8 +37,8 @@ func TestMetricsObserveRender(t *testing.T) {
 		Filters: []stable.FilterReport{
 			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}},
 			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}},
-			{Name: "geotrace", In: 165, Kept: 165, Dropped: map[string]int{}, Notes: map[string]int{"corrected": 47, "unanswered": 8}},
 		},
+		Trace:         stable.TraceReport{Answered: 157, Unanswered: 8, Moved: 47},
 		KeptSpeeds:    []int{3, 7, 30, 120},
 		GeoUnknown:    3,
 		KeptCountries: map[string]int{"NL": 40, "FI": 12},
@@ -56,9 +56,13 @@ func TestMetricsObserveRender(t *testing.T) {
 		`stable_filter_kept_nodes{filter="bandwidth"} 165`,
 		`stable_filter_dropped_nodes{filter="bandwidth",reason="slow"} 49`,
 		`stable_filter_dropped_nodes{filter="claude",reason="blocked"} 7`,
-		"# TYPE stable_filter_notes gauge",
-		`stable_filter_notes{filter="geotrace",note="corrected"} 47`,
-		`stable_filter_notes{filter="geotrace",note="unanswered"} 8`,
+		"# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.",
+		"# TYPE stable_trace_answered_nodes gauge",
+		"stable_trace_answered_nodes 157",
+		"# TYPE stable_trace_unanswered_nodes gauge",
+		"stable_trace_unanswered_nodes 8",
+		"# TYPE stable_trace_moved_nodes gauge",
+		"stable_trace_moved_nodes 47",
 		`stable_source_kept_nodes{source="mifa"} 20`,
 		`stable_source_dropped_nodes{reason="geo",source="mifa"} 71`,
 		`stable_kept_speed_mbps_bucket{le="5"} 1`,
@@ -77,13 +81,11 @@ func TestMetricsObserveRender(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", w, out)
 		}
 	}
-	// The notes are a separate series precisely so the drops chart stays a
-	// drops chart: a geotrace counter leaking into stable_filter_dropped_nodes
-	// would read as 47 published nodes thrown away.
-	for _, note := range []string{"corrected", "unanswered"} {
-		if strings.Contains(out, `stable_filter_dropped_nodes{filter="geotrace",reason="`+note+`"}`) {
-			t.Errorf("note %q must not render as a drop reason:\n%s", note, out)
-		}
+	// The trace is an annotation stage, not a gate. Its counters must never
+	// reach the filter series, where a reader would read 47 nodes moved as 47
+	// nodes thrown away.
+	if strings.Contains(out, `filter="geotrace"`) {
+		t.Errorf("geotrace is no longer a filter:\n%s", out)
 	}
 }
 

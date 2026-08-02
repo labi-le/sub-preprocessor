@@ -18,12 +18,58 @@ const (
 	hundred     = 100
 )
 
+// Egress is what a node reported about itself through the geotrace probe. The
+// zero value means the probe never ran — on `GET /` it never does, and in the
+// worker only nodes that survived the latency probe are traced.
+type Egress struct {
+	IP      netip.Addr
+	Country geofeed.CountryCode
+}
+
+// Valid reports whether the trace answered. A trace that answered pins the
+// address the node actually leaves from; without one the caller has nothing
+// but the address the resolver returned.
+func (e Egress) Valid() bool { return e.IP.IsValid() }
+
+// AnnotateRequest is one node to annotate. IP is the address the tags describe
+// — the caller picks it (the traced egress when there is one, the resolved
+// address otherwise), because only the caller knows which of the two it wants
+// published. Prefix is written ahead of the configured tags verbatim, for tags
+// the caller renders itself (`[SPD:60M] `).
+type AnnotateRequest struct {
+	Node   subscription.Node
+	IP     netip.Addr
+	Egress Egress
+	Prefix string
+}
+
+// Annotator renders the tag prefix into a node's name.
+type Annotator interface {
+	// Annotate writes the annotated node line to dst and returns the country
+	// the GEO chain resolved (the zero code when nothing resolved it, or when
+	// no GEO tag is configured). scratch is caller-owned and reused across
+	// nodes to keep prefix assembly allocation-light.
+	Annotate(ctx context.Context, dst, scratch *bytes.Buffer, req AnnotateRequest) geofeed.CountryCode
+}
+
+// annotStep is one link of a tag's resolution chain. A nil prov marks the
+// geotrace step: it resolves nothing, it repeats what the node said about
+// itself, so there is no geo.Provider behind it — a Provider looks an address
+// up, and no address lookup can tell where a proxy's traffic leaves from.
+//
+// That is also why geotrace is absent from the provider map newAnnotator
+// resolves names against: a name missing from that map is a wiring bug worth
+// an Error log, and geotrace would trip it on every processor build.
+type annotStep struct {
+	prov geo.Provider
+}
+
 // annotTag is one resolved annotation tag: a key (GEO/IP/ASN) and, for
-// provider-backed tags (GEO/ASN), the ordered provider chain that resolves it
-// (first provider that answers wins).
+// provider-backed tags (GEO/ASN), the ordered chain that resolves it (first
+// step that answers wins).
 type annotTag struct {
-	key       string
-	providers []geo.Provider
+	key   string
+	chain []annotStep
 }
 
 // annotator builds the ordered [KEY:VAL] tag prefix for a node's chosen IP and
@@ -47,77 +93,110 @@ func newAnnotator(logger zerolog.Logger, specs []config.AnnotateSpec, providers 
 	for _, s := range specs {
 		t := annotTag{key: s.Tag}
 		for _, name := range s.Providers {
+			if name == config.ProviderGeoTrace {
+				t.chain = append(t.chain, annotStep{})
+				continue
+			}
 			prov, ok := providers[name]
 			if !ok || prov == nil {
 				logger.Error().Str("tag", s.Tag).Str("provider", name).
 					Msg("annotate provider referenced but not built; skipping")
 				continue
 			}
-			t.providers = append(t.providers, prov)
+			t.chain = append(t.chain, annotStep{prov: prov})
 		}
 		tags = append(tags, t)
 	}
 	return &annotator{tags: tags}
 }
 
-// annotate writes node to buf with the configured tag prefix folded into its
-// name. tagBuf is a caller-owned scratch buffer reused across nodes to keep the
-// prefix assembly allocation-light.
-func (a *annotator) annotate(ctx context.Context, buf, tagBuf *bytes.Buffer, node subscription.Node, ip netip.Addr) {
-	tagBuf.Reset()
+func (a *annotator) Annotate(
+	ctx context.Context,
+	dst, scratch *bytes.Buffer,
+	req AnnotateRequest,
+) geofeed.CountryCode {
+	scratch.Reset()
+	scratch.WriteString(req.Prefix)
+	var country geofeed.CountryCode
 	for _, t := range a.tags {
 		switch t.key {
 		case config.TagGEO:
-			c := t.lookupCountry(ctx, ip)
-			tagBuf.WriteString("[GEO:")
+			c := t.lookupCountry(ctx, req)
+			// Nothing forbids a second GEO entry with a different chain; the
+			// caller gets the leftmost tag that resolved, which is the one a
+			// reader of the name takes for the node's country.
+			if country == (geofeed.CountryCode{}) {
+				country = c
+			}
+			scratch.WriteString("[GEO:")
 			if c == (geofeed.CountryCode{}) {
-				tagBuf.WriteString("??")
+				scratch.WriteString("??")
 			} else {
-				tagBuf.WriteByte(c[0])
-				tagBuf.WriteByte(c[1])
+				scratch.WriteByte(c[0])
+				scratch.WriteByte(c[1])
 			}
-			tagBuf.WriteByte(']')
+			scratch.WriteByte(']')
 		case config.TagIP:
-			tagBuf.WriteString("[IP:")
-			writeIPv4(tagBuf, ip)
-			tagBuf.WriteByte(']')
+			scratch.WriteString("[IP:")
+			writeIP(scratch, req.IP)
+			scratch.WriteByte(']')
 		case config.TagASN:
-			name := t.lookupASN(ctx, ip)
-			tagBuf.WriteString("[ASN:")
+			name := t.lookupASN(ctx, req.IP)
+			scratch.WriteString("[ASN:")
 			if name == "" {
-				tagBuf.WriteString("??")
+				scratch.WriteString("??")
 			} else {
-				tagBuf.WriteString(name)
+				scratch.WriteString(name)
 			}
-			tagBuf.WriteByte(']')
+			scratch.WriteByte(']')
 		}
 	}
-	rewrite.NodeName(buf, node, tagBuf.String())
+	rewrite.NodeName(dst, req.Node, scratch.String())
+	return country
 }
 
-// lookupCountry walks the tag's provider chain and returns the first non-zero
-// country; all-miss returns the zero code (rendered as ??).
-func (t *annotTag) lookupCountry(ctx context.Context, ip netip.Addr) geofeed.CountryCode {
-	for _, prov := range t.providers {
-		if c := prov.Lookup(ctx, ip).Country; c != (geofeed.CountryCode{}) {
+// lookupCountry walks the tag's chain and returns the first non-zero country;
+// all-miss returns the zero code (rendered as ??). The geotrace step answers
+// only when the trace ran: an unmeasured egress is a miss, so a chain that
+// names geotrace first still annotates every node the probe skipped.
+func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofeed.CountryCode {
+	for _, step := range t.chain {
+		if step.prov == nil {
+			if req.Egress.Valid() {
+				return req.Egress.Country
+			}
+			continue
+		}
+		if c := step.prov.Lookup(ctx, req.IP).Country; c != (geofeed.CountryCode{}) {
 			return c
 		}
 	}
 	return geofeed.CountryCode{}
 }
 
-// lookupASN walks the tag's provider chain and returns the first non-empty AS
-// name; all-miss returns "" (rendered as ??).
+// lookupASN walks the tag's chain and returns the first non-empty AS name;
+// all-miss returns "" (rendered as ??). The geotrace step is always a miss
+// here: cdn-cgi/trace reports an address and a location, never an AS.
 func (t *annotTag) lookupASN(ctx context.Context, ip netip.Addr) string {
-	for _, prov := range t.providers {
-		if name := prov.Lookup(ctx, ip).ASN; name != "" {
+	for _, step := range t.chain {
+		if step.prov == nil {
+			continue
+		}
+		if name := step.prov.Lookup(ctx, ip).ASN; name != "" {
 			return name
 		}
 	}
 	return ""
 }
 
-func writeIPv4(b *bytes.Buffer, ip netip.Addr) {
+// writeIP renders ip digit by digit for the v4 family, which is every address
+// the IPv4-only resolver produces. The branch is not cosmetic: As4 PANICS on a
+// real IPv6 address, and a traced egress can be one.
+func writeIP(b *bytes.Buffer, ip netip.Addr) {
+	if !ip.Is4() && !ip.Is4In6() {
+		b.WriteString(ip.String())
+		return
+	}
 	ip4 := ip.As4()
 	writeOctet(b, ip4[0])
 	b.WriteByte('.')

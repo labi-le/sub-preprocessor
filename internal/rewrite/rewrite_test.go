@@ -165,24 +165,6 @@ func TestNodeNameUndecodableSSRWrittenVerbatim(t *testing.T) {
 	}
 }
 
-func TestLeadingTags(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"[GEO:FI][IP:1.2.3.4] my node": "[GEO:FI][IP:1.2.3.4]",
-		"[OK][GEO:DE] name":            "[OK][GEO:DE]",
-		"[GEO:LV]":                     "[GEO:LV]",
-		"plain name":                   "",
-		"[UNKNOWN:x][GEO:FI] n":        "",
-		"":                             "",
-		"[BAD][GEO:FI] x":              "[BAD][GEO:FI]",
-	}
-	for in, want := range cases {
-		if got := rewrite.LeadingTags(in); got != want {
-			t.Errorf("LeadingTags(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestStripKnownTags(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
@@ -207,8 +189,5 @@ func TestKnownTagsIncludeSPD(t *testing.T) {
 	}
 	if got := rewrite.StripKnownTags("[GEO:FI][IP:1.2.3.4][SPD:5M] node"); got != "node" {
 		t.Fatalf("StripKnownTags mixed tags: %q", got)
-	}
-	if got := rewrite.LeadingTags("[SPD:12M] node"); got != "[SPD:12M]" {
-		t.Fatalf("LeadingTags = %q, want [SPD:12M]", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,7 +194,11 @@ type Stats struct {
 
 // PipelineContext holds request-scoped state shared across the processing pipeline.
 type PipelineContext struct {
-	Buffer *bytes.Buffer
+	// sink receives every node that survived the IP stage. Emission is behind
+	// an interface because the two callers want different things out of the
+	// same pipeline: `GET /` wants the published text, the stable worker wants
+	// the nodes themselves so it can annotate after probing them.
+	sink nodeSink
 	// Lookup is the country-resolution chain the geofeed country filter judges
 	// nodes with: every in-memory country database this process loaded, tried
 	// in order. It is the same set of databases the GEO annotation resolves
@@ -211,8 +216,53 @@ type PipelineContext struct {
 	// avoiding a per-node heap allocation. It is overwritten each node and must
 	// be consumed (copied into Scratch) before the next node runs.
 	addrScratch [1]netip.Addr
-	IsFirstNode bool
-	tagBuf      bytes.Buffer
+}
+
+// NodeResult is one node that survived the IP stage, unannotated. IP is the
+// address the pipeline judged it by; whatever tags are rendered later must
+// describe that same address, or the published node contradicts the filter
+// that kept it.
+type NodeResult struct {
+	Raw string
+	IP  netip.Addr
+}
+
+type nodeSink interface {
+	emit(ctx context.Context, node subscription.Node, ip netip.Addr)
+}
+
+// bufferSink renders nodes into the response buffer as they survive. The
+// separator and the tag prefix are both part of the published text, so they
+// belong here rather than in the pipeline.
+type bufferSink struct {
+	buf       *bytes.Buffer
+	annotator *annotator
+	tagBuf    bytes.Buffer
+	wrote     bool
+}
+
+func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.Addr) {
+	if s.wrote {
+		s.buf.WriteByte('\n')
+	}
+	s.wrote = true
+	if s.annotator == nil {
+		s.buf.WriteString(node.Raw)
+		return
+	}
+	s.annotator.Annotate(ctx, s.buf, &s.tagBuf, AnnotateRequest{Node: node, IP: ip})
+}
+
+// sliceSink collects survivors for a caller that annotates later.
+type sliceSink struct {
+	nodes []NodeResult
+}
+
+// emit clones the node line. subscription.Parse hands out views into the
+// source body, and that body is released when the call returns — a retained
+// view would pin the whole subscription for as long as the node lives.
+func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Addr) {
+	s.nodes = append(s.nodes, NodeResult{Raw: strings.Clone(node.Raw), IP: ip})
 }
 
 // providerNeeds reports which lazily-built geo backends the configured IP
@@ -348,7 +398,24 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	return p, nil
 }
 
+// Filter renders the surviving nodes as the published subscription text,
+// annotated inline: `GET /` has no post-probe stage to annotate in.
 func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
+	return p.filterInto(ctx, &bufferSink{buf: b, annotator: p.annotator}, req)
+}
+
+// FilterNodes runs the same pipeline but hands the survivors back unannotated,
+// each paired with the address the filters judged it by. The stable worker
+// annotates only after probing, so the tags can carry what the probes learned
+// — and must carry them for THIS address, never a second resolution of the
+// same hostname.
+func (p *Processor) FilterNodes(ctx context.Context, req FilterRequest) ([]NodeResult, Stats, error) {
+	sink := &sliceSink{}
+	stats, err := p.filterInto(ctx, sink, req)
+	return sink.nodes, stats, err
+}
+
+func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterRequest) (Stats, error) {
 	label := string(req.SubscriptionURL)
 	if len(req.Body) > 0 {
 		label = "inline"
@@ -389,13 +456,12 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 	defer p.resolver.PutResolvedMap(resolved)
 
 	pctx := &PipelineContext{
-		Buffer:      b,
-		Lookup:      lookup,
-		Allowed:     allowed,
-		Denied:      req.DeniedCountries,
-		Resolved:    resolved,
-		Stats:       &stats,
-		IsFirstNode: true,
+		sink:     sink,
+		Lookup:   lookup,
+		Allowed:  allowed,
+		Denied:   req.DeniedCountries,
+		Resolved: resolved,
+		Stats:    &stats,
 	}
 
 	if err := p.processBody(ctx, body, pctx); err != nil {
@@ -563,16 +629,20 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		}
 	}
 
-	if !pctx.IsFirstNode {
-		pctx.Buffer.WriteByte('\n')
-	}
-	pctx.IsFirstNode = false
-	if p.annotator != nil {
-		p.annotator.annotate(ctx, pctx.Buffer, &pctx.tagBuf, node, ips[0])
-	} else {
-		pctx.Buffer.WriteString(node.Raw)
-	}
+	pctx.sink.emit(ctx, node, ips[0])
 	pctx.Stats.Kept++
+}
+
+// Annotator returns the renderer for the configured tag list, or nil when
+// annotation is disabled. The nil is explicit: a *annotator in an interface
+// would be non-nil to a caller branching on it.
+//
+//nolint:ireturn // the point of the getter is to hand out the interface
+func (p *Processor) Annotator() Annotator {
+	if p.annotator == nil {
+		return nil
+	}
+	return p.annotator
 }
 
 // snapshotLookup returns the processor's current geofeed lookup under the read
@@ -656,6 +726,12 @@ func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 // rule in NewProcessor makes the latter unreachable for a GEO chain, but a nil
 // geoDB in the chain would panic and that is too sharp an edge to leave resting
 // on an argument made elsewhere.
+//
+// geotrace is dropped for a harder reason than asn: it is not a lookup at all.
+// It answers with what a node reported through ITS OWN proxy, and the IP stage
+// runs before any proxy exists — there is nothing to ask. A `{type: country}`
+// filter therefore stays offline, and a GEO chain led by geotrace still
+// filters on the local databases behind it.
 //
 // A geofeed-only chain collapses to an empty order, as does a chain naming
 // nothing local (GEO through asn alone) and a config with no GEO entry at all:

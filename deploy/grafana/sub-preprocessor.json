@@ -484,8 +484,8 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Through-node filter notes (not drops)",
-      "description": "Counters a filter reports that are NOT drops, so they stay out of the drops chart above. geotrace/corrected = published nodes whose [GEO:] tag the node's own egress contradicted (the offline chain resolved the hostname, not the exit); geotrace/unanswered = survivors whose trace did not complete, which keep the offline chain's tag. geotrace drops nothing, so its in and kept are always equal.",
+      "title": "geotrace egress (annotation, not a gate)",
+      "description": "What the published nodes reported about themselves through cloudflare cdn-cgi/trace. Nothing here is a drop: a trace that fails, or contradicts the offline chain, still publishes the node. answered/unanswered split the survivors by whether the trace completed — a large unanswered share makes the moved ratio below it that much less representative. moved = answered nodes whose final country differs from what the offline chain placed the resolved address in, i.e. how often the tag would have been wrong without the trace (measured: 47 of 102). It is a property of the pool, not a fault: an anycast front-end registers in one country and exits in another.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -528,8 +528,26 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_notes",
-          "legendFormat": "{{filter}}/{{note}}"
+          "expr": "stable_trace_answered_nodes",
+          "legendFormat": "answered"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_trace_unanswered_nodes",
+          "legendFormat": "unanswered"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_trace_moved_nodes",
+          "legendFormat": "moved (offline chain was wrong)"
         }
       ]
     },

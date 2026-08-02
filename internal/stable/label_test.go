@@ -307,20 +307,20 @@ func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
 	}
 }
 
-// TestApplyFiltersMieruSurvivorEntersSubset is the end-to-end regression: with
-// the shared proxy map keyed by proxy name, applyFilters' subset selection
+// TestFilterMieruSurvivorEntersSubset is the end-to-end regression: with
+// the shared proxy map keyed by proxy name, the filter stage's subset selection
 // (proxies[s.Label]) never finds a mieru survivor, so it is never checked and
 // the zero-value outcome drops it as unreachable. The vless survivor beside it
 // pins that the exact-match path is untouched.
-func TestApplyFiltersMieruSurvivorEntersSubset(t *testing.T) {
+func TestFilterMieruSurvivorEntersSubset(t *testing.T) {
 	t.Parallel()
 
 	prober := testProber(t)
 	mieru := mieruLine("1.2.3.4", "src-001", [2]string{"2999", "TCP"})
 	vless := benchVlessLine("9.9.9.9", "443", "src-002")
 	survivors := []Survivor{
-		{Entry: Entry{Label: "src-001", Raw: mieru, Tagged: mieru}},
-		{Entry: Entry{Label: "src-002", Raw: vless, Tagged: vless}},
+		{Entry: Entry{Label: "src-001", Raw: mieru}},
+		{Entry: Entry{Label: "src-002", Raw: vless}},
 	}
 
 	var checked []string
@@ -338,7 +338,7 @@ func TestApplyFiltersMieruSurvivorEntersSubset(t *testing.T) {
 		Filters: []NodeFilter{&apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}},
 	}, nil, nil, nil, nil, zerolog.Nop(), nil)
 
-	kept, reports := c.applyFilters(context.Background(), c.spec.Load(), survivors)
+	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
 	if len(checked) != 2 {
 		t.Fatalf("check saw %v, want one proxy per survivor (the mieru node must reach the subset)", checked)
@@ -354,13 +354,13 @@ func TestApplyFiltersMieruSurvivorEntersSubset(t *testing.T) {
 	}
 }
 
-// TestApplyFiltersMieruDeadPortDoesNotVetoLivePort is the fold regression.
+// TestFilterMieruDeadPortDoesNotVetoLivePort is the fold regression.
 // Collapsing the shared proxy map on the PROXY side hands the filter chain
 // whichever port mihomo emitted last, so a node the latency probe selected on
 // a live port gets measured on a dead one, dropped, and mis-booked as
 // unreachable. Every port must reach the subset; the outcome fold then keeps
 // the verdict that keeps the node.
-func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
+func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 	t.Parallel()
 
 	// deadPort is configured LAST, i.e. it is exactly the proxy a proxy-side
@@ -368,7 +368,7 @@ func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 	const deadPort = "9998-9999"
 	mieru := mieruLine("1.2.3.4", "src-001",
 		[2]string{"2999", "TCP"}, [2]string{deadPort, "UDP"})
-	survivors := []Survivor{{Entry: Entry{Label: "src-001", Raw: mieru, Tagged: mieru}}}
+	survivors := []Survivor{{Entry: Entry{Label: "src-001", Raw: mieru}}}
 
 	var subset []string
 	api := func(_ context.Context, given []mihomo.Proxy) map[string]APIOutcome {
@@ -407,7 +407,7 @@ func TestApplyFiltersMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 		},
 	}, nil, nil, nil, nil, zerolog.Nop(), nil)
 
-	kept, reports := c.applyFilters(context.Background(), c.spec.Load(), survivors)
+	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
 	if len(subset) != 2 || !strings.Contains(subset[len(subset)-1], deadPort) {
 		t.Fatalf("filter subset was %v, want both ports with the dead one last", subset)

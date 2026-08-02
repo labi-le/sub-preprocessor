@@ -81,10 +81,9 @@ func TestProcessNodeKeepsCachedResolvedSlicePristine(t *testing.T) {
 	p := &Processor{filters: []Filter{f}}
 
 	pctx := &PipelineContext{
-		Buffer:      &bytes.Buffer{},
-		Resolved:    map[string][]netip.Addr{"example.com": {ipA, ipB}},
-		Stats:       &Stats{},
-		IsFirstNode: true,
+		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		Resolved: map[string][]netip.Addr{"example.com": {ipA, ipB}},
+		Stats:    &Stats{},
 	}
 	node := subscription.Node{Raw: "vless://u@example.com:443#X", Server: "example.com", Port: "443"}
 
@@ -113,10 +112,9 @@ func TestProcessBodyCancelledContextReturnsError(t *testing.T) {
 
 	p := &Processor{}
 	pctx := &PipelineContext{
-		Buffer:      &bytes.Buffer{},
-		Resolved:    map[string][]netip.Addr{},
-		Stats:       &Stats{},
-		IsFirstNode: true,
+		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		Resolved: map[string][]netip.Addr{},
+		Stats:    &Stats{},
 	}
 	body := []byte("vless://u@example.com:443#A\nvless://u@example.org:443#B")
 
@@ -165,6 +163,112 @@ func TestFilterInlineBodyNoFetch(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing node %q; got:\n%s", want, out)
 		}
+	}
+}
+
+func newInlineProcessor() *Processor {
+	return &Processor{logger: zerolog.Nop(), resolver: resolver.New(time.Second, "", 0, 0)}
+}
+
+// TestFilterNodesMatchesFilter pins both entry points to one pipeline: the
+// structural sink must yield exactly the nodes Filter prints, in the same
+// order and with the same stats, each carrying the address the filters judged
+// it by — the worker's later tags describe THAT address, and a mismatch would
+// publish a node under a country nothing checked.
+func TestFilterNodesMatchesFilter(t *testing.T) {
+	t.Parallel()
+
+	const plain = "vless://a@1.1.1.1:443#n1\nvless://b@2.2.2.2:443#n2\nvless://c@3.3.3.3:443#n3"
+	req := func() FilterRequest {
+		return FilterRequest{Body: []byte(plain), AllowedCountries: filter.All()}
+	}
+
+	var buf bytes.Buffer
+	wantStats, err := newInlineProcessor().Filter(context.Background(), &buf, req())
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+
+	nodes, stats, err := newInlineProcessor().FilterNodes(context.Background(), req())
+	if err != nil {
+		t.Fatalf("FilterNodes failed: %v", err)
+	}
+	if stats != wantStats {
+		t.Fatalf("FilterNodes stats = %+v, want %+v", stats, wantStats)
+	}
+
+	// Bare-IP servers keep the expected addresses readable and the test
+	// resolver-free.
+	wantIPs := []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}
+	lines := strings.Split(buf.String(), "\n")
+	if len(nodes) != len(lines) || len(nodes) != len(wantIPs) {
+		t.Fatalf("FilterNodes returned %d nodes, Filter printed %d lines", len(nodes), len(lines))
+	}
+	for i, line := range lines {
+		if nodes[i].Raw != line {
+			t.Errorf("node %d = %q, Filter printed %q", i, nodes[i].Raw, line)
+		}
+		if want := netip.MustParseAddr(wantIPs[i]); nodes[i].IP != want {
+			t.Errorf("node %d carries IP %v, want %v", i, nodes[i].IP, want)
+		}
+	}
+}
+
+// TestFilterNodesClonesRaw: subscription.Parse hands out views into the source
+// body, which the caller is free to reuse or release the moment FilterNodes
+// returns. Comparing against a compile-time constant is the point — comparing
+// against a string read out beforehand would alias the same bytes and pass.
+func TestFilterNodesClonesRaw(t *testing.T) {
+	t.Parallel()
+
+	const want = "vless://a@1.1.1.1:443#n1"
+	body := []byte(want)
+
+	nodes, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("FilterNodes failed: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("got %d nodes, want 1", len(nodes))
+	}
+	for i := range body {
+		body[i] = 'x'
+	}
+	if nodes[0].Raw != want {
+		t.Fatalf("NodeResult.Raw aliases the source body: %q", nodes[0].Raw)
+	}
+}
+
+// TestFilterNodesSharesFilterRejections: the two entry points must fail alike,
+// or the worker would publish a junk body Filter refuses.
+func TestFilterNodesSharesFilterRejections(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+		Body:             []byte("not a node\nstill://"),
+		AllowedCountries: filter.All(),
+	}); err == nil || err.Error() != "no supported URI nodes found" {
+		t.Fatalf("a bodyful of junk must be refused, got err=%v", err)
+	}
+
+	if _, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+		Body: []byte("vless://a@1.1.1.1:443#n1"),
+	}); err == nil {
+		t.Fatal("an empty allow set must be refused")
+	}
+
+	var big strings.Builder
+	for range maxSubscriptionNodes + 1 {
+		big.WriteString("vless://u@192.0.2.1:443#n\n")
+	}
+	if _, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+		Body:             []byte(big.String()),
+		AllowedCountries: filter.All(),
+	}); !errors.Is(err, ErrTooManyNodes) {
+		t.Fatalf("the node ceiling must bite on FilterNodes too, got err=%v", err)
 	}
 }
 
@@ -380,10 +484,9 @@ func TestProcessBodyEnforcesNodeCeiling(t *testing.T) {
 	}
 	newPctx := func() *PipelineContext {
 		return &PipelineContext{
-			Buffer:      &bytes.Buffer{},
-			Resolved:    map[string][]netip.Addr{},
-			Stats:       &Stats{},
-			IsFirstNode: true,
+			sink:     &bufferSink{buf: &bytes.Buffer{}},
+			Resolved: map[string][]netip.Addr{},
+			Stats:    &Stats{},
 		}
 	}
 

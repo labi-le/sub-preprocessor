@@ -45,13 +45,15 @@ func (stubLookup) LookupCountry(_ netip.Addr) geofeed.CountryCode {
 // stable worker never performs network fetches from reload tests.
 type failingFilterer struct{}
 
-func (failingFilterer) Filter(
+func (failingFilterer) FilterNodes(
 	_ context.Context,
-	_ *bytes.Buffer,
 	_ preprocess.FilterRequest,
-) (preprocess.Stats, error) {
-	return preprocess.Stats{}, errors.New("stub filterer: no network in tests")
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return nil, preprocess.Stats{}, errors.New("stub filterer: no network in tests")
 }
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (failingFilterer) Annotator() preprocess.Annotator { return nil }
 
 func writeConfig(t *testing.T, path, content string) {
 	t.Helper()

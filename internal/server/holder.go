@@ -1,10 +1,28 @@
 package server
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"domains.lst/sub-preprocessor/internal/stable"
+)
 
 type Snapshot struct {
+	// Svc serves GET /, which only filters. Worker is the same processor under
+	// the wider interface the /stable.txt cycle needs — the per-node IP stage
+	// and the annotator it publishes with. Both are filled from one concrete
+	// processor, so the worker can never read a snapshot the request path is
+	// not already serving.
 	Svc    Filterer
+	Worker stable.Filterer
 	Groups map[string][]string
+}
+
+// NewSnapshot is how production wires a snapshot: both halves are positional,
+// so the /stable.txt worker cannot be left nil by a literal that simply forgot
+// the field it does not care about. Tests that exercise only GET / still build
+// the literal directly and pass no worker — deliberately, not by omission.
+func NewSnapshot(svc Filterer, worker stable.Filterer, groups map[string][]string) *Snapshot {
+	return &Snapshot{Svc: svc, Worker: worker, Groups: groups}
 }
 
 type Holder struct {

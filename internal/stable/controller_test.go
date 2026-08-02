@@ -38,9 +38,14 @@ func (s *syncBuf) String() string {
 // branch: instant, no network, no probing.
 type emptyFilterer struct{}
 
-func (emptyFilterer) Filter(context.Context, *bytes.Buffer, preprocess.FilterRequest) (preprocess.Stats, error) {
-	return preprocess.Stats{}, nil
+func (emptyFilterer) FilterNodes(
+	context.Context, preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return nil, preprocess.Stats{}, nil
 }
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (emptyFilterer) Annotator() preprocess.Annotator { return nil }
 
 // The interval is fixed: every caller wants a cycle that never fires a second
 // time on its own, so the test drives Apply/Reconfigure rather than the clock.

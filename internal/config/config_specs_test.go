@@ -360,17 +360,86 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 }
 
 // TestLoadAnnotateProviderChain proves an explicit ordered chain is preserved
-// verbatim across all four provider names.
+// verbatim across all five provider names.
 func TestLoadAnnotateProviderChain(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, registry, asn]\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed, dbip, registry, asn]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN}
+	want := []string{
+		config.ProviderGeoTrace, config.ProviderGeofeed,
+		config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN,
+	}
 	if !reflect.DeepEqual(cfg.Annotate[0].Providers, want) {
 		t.Fatalf("providers = %v, want %v", cfg.Annotate[0].Providers, want)
+	}
+}
+
+// TestAnnotateUsesProvider proves the flag the stable worker gates its trace
+// probe on: a chain that cannot render the answer must not cost one request
+// through every survivor.
+func TestAnnotateUsesProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed]\n  - tag: IP\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AnnotateUsesProvider(config.ProviderGeoTrace) {
+		t.Fatalf("geotrace is in the GEO chain %v", cfg.Annotate[0].Providers)
+	}
+	if cfg.AnnotateUsesProvider(config.ProviderDBIP) {
+		t.Fatal("dbip is in no chain, yet reported as used")
+	}
+
+	offline, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geofeed]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offline.AnnotateUsesProvider(config.ProviderGeoTrace) {
+		t.Fatal("an offline-only chain must not arm the trace probe")
+	}
+}
+
+// TestLoadRejectsGeoTraceFilterType pins the retirement: geotrace is an
+// annotate provider now, and a config still listing it as a filter must fail
+// loudly rather than silently drop a stage the operator asked for.
+func TestLoadRejectsGeoTraceFilterType(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadYAML(t, geoBase+"filters:\n  - type: geotrace\n")
+	if err == nil {
+		t.Fatal("expected error for the retired geotrace filter type")
+	}
+	if !strings.Contains(err.Error(), `unknown type "geotrace"`) {
+		t.Fatalf("error %q does not name the unknown filter type", err)
+	}
+}
+
+// TestShippedConfigLoads decodes the repository's own config/config.yaml with
+// the strict decoder, so a key the schema stopped accepting cannot ship. It is
+// copied into a temp dir on purpose: Load merges sibling overlays, and this
+// test is about config.yaml alone.
+func TestShippedConfigLoads(t *testing.T) {
+	t.Parallel()
+
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadYAML(t, string(shipped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range cfg.Filters {
+		if f.Type == "geotrace" {
+			t.Fatalf("filters[%d] still lists the retired geotrace filter", i)
+		}
+	}
+	if !cfg.AnnotateUsesProvider(config.ProviderGeoTrace) {
+		t.Fatal("shipped annotate chain no longer asks the node for its egress")
 	}
 }
 

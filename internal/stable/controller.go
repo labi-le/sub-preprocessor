@@ -79,8 +79,6 @@ func (c *Controller) Apply(cfg config.Config) error {
 			geo.ChatGPT = spec.ChatGPT
 		case config.FilterTidal:
 			geo.Tidal = spec.Tidal
-		case config.FilterGeoTrace:
-			geo.GeoTrace = spec.GeoTrace
 		case config.FilterBandwidth:
 			bandwidth = spec.Bandwidth
 		}
@@ -94,8 +92,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}
-	annotate := len(cfg.Annotate) > 0
-	filters := buildNodeFilters(names, prober, c.store, annotate, c.logger)
+	filters := buildNodeFilters(names, prober, c.store, c.logger)
 
 	spec := CheckerSpec{
 		Sources:       subs.Sources,
@@ -107,6 +104,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		SourceTimeout: subs.Check.SourceTimeout,
 		Prober:        prober,
 		Filters:       filters,
+		Trace:         cfg.AnnotateUsesProvider(config.ProviderGeoTrace),
 	}
 
 	if c.checker != nil {

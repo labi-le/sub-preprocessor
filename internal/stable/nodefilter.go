@@ -2,12 +2,9 @@ package stable
 
 import (
 	"context"
-	"strconv"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
-
-	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
 // NodeFilter is a through-node check the worker runs on latency-probe
@@ -52,12 +49,6 @@ type tidalChecker interface {
 	TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
-// traceChecker is the geotrace filter's half of the prober: unlike the gates
-// above it returns a measurement, not a verdict.
-type traceChecker interface {
-	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
-}
-
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
 	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -82,16 +73,6 @@ const (
 	dropBlocked     = "blocked"
 	dropUnreachable = "unreachable"
 	dropSlow        = "slow"
-)
-
-// Note counters a through-node filter reports in FilterReport.Notes: per-filter
-// numbers that are NOT drops, so they must not land in the drops chart. Same
-// wire-format rule as the drop reasons above — internal/metrics publishes each
-// one verbatim as stable_filter_notes{note=...} and the Grafana dashboard
-// documents them by name, so rename the identifiers freely, never the strings.
-const (
-	noteCorrected  = "corrected"
-	noteUnanswered = "unanswered"
 )
 
 // apiFilter keeps only survivors that pass a through-node API check, and records
@@ -165,16 +146,14 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps (minMbps==0 disables the floor and keeps all
-// reachable nodes). It records Mbps on each kept survivor and, when annotate is
-// set, prepends a [SPD:<n>M] tag to the published name through annotateSpeed.
-// No store: a speed measurement is far too volatile for the host-keyed,
-// month-long geoblock store, so a sub-floor node is dropped for this cycle and
-// re-measured next.
+// reachable nodes) and records Mbps on each kept survivor, which the
+// publication turns into the [SPD:] tag. No store: a speed measurement is far
+// too volatile for the host-keyed, month-long geoblock store, so a sub-floor
+// node is dropped for this cycle and re-measured next.
 type bandwidthFilter struct {
-	minMbps  int
-	annotate bool
-	check    func(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
-	logger   zerolog.Logger
+	minMbps int
+	check   func(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
+	logger  zerolog.Logger
 }
 
 func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
@@ -209,9 +188,6 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 			slow++
 		default:
 			s.Mbps = o.Mbps
-			if f.annotate {
-				s.Tagged = annotateSpeed(s.Tagged, o.Mbps)
-			}
 			kept = append(kept, s)
 		}
 	}
@@ -240,37 +216,13 @@ func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mih
 	return subset
 }
 
-// annotateSpeed prepends [SPD:<mbps>M] to a node's published name. It re-parses
-// the line and relabels through relabelNode, which reaches the name where each
-// scheme keeps it: the vmess "ps" field, the ssr "remarks" query value, or the
-// URI #fragment. ssr is why this path cannot shortcut to the fragment -- an ssr
-// line arriving here is already a RewriteSSRName product, and appending
-// "#<name>" to one destroys it rather than renaming it (see relabelNode). On
-// any parse failure the line is returned unchanged (annotation is best-effort,
-// never fatal).
-func annotateSpeed(line string, mbps int) string {
-	var out string
-	found := false
-	subscription.Parse([]byte(line), func(n subscription.Node) bool {
-		if relabeled, ok := relabelNode(n, "[SPD:"+strconv.Itoa(mbps)+"M] "+n.Name); ok {
-			out = relabeled
-			found = true
-		}
-		return false
-	})
-	if !found {
-		return line
-	}
-	return out
-}
-
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
 // support (a resolved API key); the claude, chatgpt and tidal filters are
 // keyless (the first two geo-block before authentication, tidal's /v1/country
 // needs no credential); the bandwidth filter needs a prober with bandwidth
 // support.
-func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate bool, logger zerolog.Logger) []NodeFilter {
+func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
 		switch n {
@@ -329,10 +281,8 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 				check:      td.TidalCheck,
 				logger:     logger,
 			})
-		case geotraceFilterName:
-			filters = appendGeotraceFilter(filters, prober, annotate, logger)
 		case bandwidthFilterName:
-			filters = appendBandwidthFilter(filters, prober, annotate, logger)
+			filters = appendBandwidthFilter(filters, prober, logger)
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")
 		}
@@ -340,22 +290,10 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, annotate b
 	return filters
 }
 
-// appendGeotraceFilter adds the egress-annotating filter when the prober can
-// trace. It takes and returns the slice so the capability check lives here
-// rather than as another branch inside buildNodeFilters' switch.
-func appendGeotraceFilter(dst []NodeFilter, prober Prober, annotate bool, logger zerolog.Logger) []NodeFilter {
-	tr, ok := prober.(traceChecker)
-	if !ok {
-		logger.Warn().Msg("geotrace filter requested but prober lacks trace support; skipping")
-
-		return dst
-	}
-
-	return append(dst, &geotraceFilter{check: tr.TraceCheck, annotate: annotate, logger: logger})
-}
-
-// appendBandwidthFilter mirrors appendGeotraceFilter.
-func appendBandwidthFilter(dst []NodeFilter, prober Prober, annotate bool, logger zerolog.Logger) []NodeFilter {
+// appendBandwidthFilter adds the speed filter when the prober can measure. It
+// takes and returns the slice so the capability check lives here rather than as
+// another branch inside buildNodeFilters' switch.
+func appendBandwidthFilter(dst []NodeFilter, prober Prober, logger zerolog.Logger) []NodeFilter {
 	bc, ok := prober.(bandwidthChecker)
 	if !ok {
 		logger.Warn().Msg("bandwidth filter requested but prober lacks bandwidth support; skipping")
@@ -364,9 +302,8 @@ func appendBandwidthFilter(dst []NodeFilter, prober Prober, annotate bool, logge
 	}
 
 	return append(dst, &bandwidthFilter{
-		minMbps:  bc.BandwidthMinMbps(),
-		annotate: annotate,
-		check:    bc.BandwidthCheck,
-		logger:   logger,
+		minMbps: bc.BandwidthMinMbps(),
+		check:   bc.BandwidthCheck,
+		logger:  logger,
 	})
 }

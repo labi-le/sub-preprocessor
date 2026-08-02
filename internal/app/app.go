@@ -183,11 +183,11 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	holder := serverpkg.NewHolder(&serverpkg.Snapshot{Svc: svc, Groups: cfg.Groups})
+	holder := serverpkg.NewHolder(serverpkg.NewSnapshot(svc, svc, cfg.Groups))
 	stableHolder := stable.NewHolder()
 	m := metrics.New()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
-		return holder.Load().Svc
+		return holder.Load().Worker
 	}, sblock, dcache, logger, m)
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)

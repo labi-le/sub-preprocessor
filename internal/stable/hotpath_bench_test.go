@@ -1,9 +1,11 @@
 package stable //nolint:testpackage // benchmarks unexported stable internals (parseProxies)
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
-	"strings"
+	"net/netip"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -11,6 +13,9 @@ import (
 	mihomo "github.com/metacubex/mihomo/constant"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geofeed"
+	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/rewrite"
 )
 
 // Package-level sinks keep the compiler from eliding benchmarked work.
@@ -62,7 +67,7 @@ func benchMixedSourceBodies(everySeventh func(host, port, name string) string) [
 	names := []string{"alpha", "beta", "gamma", "delta"}
 	bodies := make([]SourceBody, len(names))
 	for si, name := range names {
-		var sb strings.Builder
+		nodes := make([]preprocess.NodeResult, 0, perSource)
 		for i := range perSource {
 			var host, port string
 			if i%5 == 0 {
@@ -74,14 +79,16 @@ func benchMixedSourceBodies(everySeventh func(host, port, name string) string) [
 				port = "443"
 			}
 			nodeName := fmt.Sprintf("%s node %d", name, i)
+			line := benchVlessLine(host, port, nodeName)
 			if i%7 == 0 {
-				sb.WriteString(everySeventh(host, port, nodeName))
-			} else {
-				sb.WriteString(benchVlessLine(host, port, nodeName))
+				line = everySeventh(host, port, nodeName)
 			}
-			sb.WriteByte('\n')
+			nodes = append(nodes, preprocess.NodeResult{
+				Raw: line,
+				IP:  netip.AddrFrom4([4]byte{10, 1, byte(si), byte(i)}),
+			})
 		}
-		bodies[si] = SourceBody{Name: name, Body: []byte(sb.String())}
+		bodies[si] = SourceBody{Name: name, Nodes: nodes}
 	}
 	return bodies
 }
@@ -95,10 +102,10 @@ func benchSelectData() ([]Entry, map[string]ProbeResult) {
 	for i := range n {
 		label := fmt.Sprintf("alpha-%03d", i)
 		entries[i] = Entry{
-			Label:  label,
-			Raw:    benchVlessLine(fmt.Sprintf("10.1.%d.%d", i/256, i%256), "443", label),
-			Tagged: benchVlessLine(fmt.Sprintf("10.1.%d.%d", i/256, i%256), "443", label),
-			Addr:   fmt.Sprintf("10.1.%d.%d:443", i/256, i%256),
+			Label: label,
+			Raw:   benchVlessLine(fmt.Sprintf("10.1.%d.%d", i/256, i%256), "443", label),
+			Addr:  fmt.Sprintf("10.1.%d.%d:443", i/256, i%256),
+			IP:    netip.AddrFrom4([4]byte{10, 1, byte(i / 256), byte(i % 256)}),
 		}
 		if i%5 != 0 { // ~80% coverage
 			res[label] = ProbeResult{Successes: 3, MeanMs: 40 + (i % 200)}
@@ -107,14 +114,31 @@ func benchSelectData() ([]Entry, map[string]ProbeResult) {
 	return entries, res
 }
 
-// benchSurvivors builds ~300 survivors with ~80-byte Tagged URIs.
+// benchAnnotator prices the publication as production runs it: through
+// rewrite.NodeName, over a tag run of the shape the configured chain emits.
+type benchAnnotator struct{}
+
+func (benchAnnotator) Annotate(
+	_ context.Context, dst, _ *bytes.Buffer, req preprocess.AnnotateRequest,
+) geofeed.CountryCode {
+	code := geofeed.CountryCode{'D', 'E'}
+	rewrite.NodeName(dst, req.Node, req.Prefix+"[GEO:"+code.String()+"][IP:"+req.IP.String()+"]")
+
+	return code
+}
+
+// benchSurvivors builds ~300 survivors with ~80-byte URIs.
 func benchSurvivors() []Survivor {
 	const n = 300
 	surv := make([]Survivor, n)
 	for i := range n {
-		tagged := benchVlessLine(fmt.Sprintf("203.0.%d.%d", i/256, i%256), "443",
+		raw := benchVlessLine(fmt.Sprintf("203.0.%d.%d", i/256, i%256), "443",
 			fmt.Sprintf("alpha-%03d-published", i))
-		surv[i] = Survivor{Entry: Entry{Tagged: tagged}, MeanMs: i, Mbps: i}
+		surv[i] = Survivor{
+			Entry:  Entry{Raw: raw, IP: netip.AddrFrom4([4]byte{203, 0, byte(i / 256), byte(i % 256)})},
+			MeanMs: i,
+			Mbps:   i,
+		}
 	}
 	return surv
 }
@@ -167,9 +191,11 @@ func BenchmarkSelectSurvivors(b *testing.B) {
 
 func BenchmarkBuildPayload(b *testing.B) {
 	survivors := benchSurvivors()
+	ctx := context.Background()
+	ann := benchAnnotator{}
 	b.ReportAllocs()
 	for b.Loop() {
-		benchBytesSink = BuildPayload(survivors)
+		benchBytesSink = BuildPayload(ctx, ann, survivors)
 	}
 }
 

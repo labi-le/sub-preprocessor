@@ -83,9 +83,9 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn, run per-node in preprocess) and
-// through-node filters (gemini/claude/chatgpt/tidal/geotrace/bandwidth, run
-// post-probe in stable); which physical stage a type lands in is an
-// implementation detail, not config.
+// through-node filters (gemini/claude/chatgpt/tidal/bandwidth, run post-probe
+// in stable); which physical stage a type lands in is an implementation
+// detail, not config.
 const (
 	FilterCountry   = "country"
 	FilterASN       = "asn"
@@ -93,9 +93,13 @@ const (
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
 	FilterTidal     = "tidal"
-	FilterGeoTrace  = "geotrace"
 	FilterBandwidth = "bandwidth"
 
+	// ProviderGeoTrace answers from what the node reported about its own egress
+	// (Cloudflare's cdn-cgi/trace, run by the stable worker after the probes).
+	// The on-demand GET / path has no post-probe stage, so there it always
+	// misses and the chain falls through to the offline providers below.
+	ProviderGeoTrace = "geotrace"
 	ProviderGeofeed  = "geofeed"
 	ProviderDBIP     = "dbip"
 	ProviderRegistry = "registry"
@@ -168,16 +172,16 @@ type GeoConfig struct {
 //     are worker-only (see below)
 //   - asn:     DenyPatterns
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/claude/chatgpt/tidal/geotrace: selectors; prober params come from
-//     geoblock.{gemini,claude,chatgpt,tidal,geotrace} and may be overridden
+//   - gemini/claude/chatgpt/tidal: selectors; prober params come from
+//     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden
 //     per-entry (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
-//     Endpoint/Timeout/Concurrency for tidal and for geotrace).
+//     Endpoint/Timeout/Concurrency for tidal).
 //
 // A field a type's merge does not read is silently ignored for that type: a
-// geotrace entry honours only Endpoint/Timeout/Concurrency, so a Marker or
-// Model written beside it changes nothing.
+// tidal entry honours only Endpoint/Timeout/Concurrency, so a Marker or Model
+// written beside it changes nothing.
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
@@ -198,8 +202,8 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude/chatgpt/tidal/geotrace overrides (fall back to the geoblock
-	// sub-block; geotrace reads only Endpoint here).
+	// gemini/claude/chatgpt/tidal overrides (fall back to the geoblock
+	// sub-block).
 	Marker   string `yaml:"marker"`
 	Model    string `yaml:"model"`
 	Endpoint string `yaml:"endpoint"`
@@ -240,7 +244,6 @@ type NodeFilterSpec struct {
 	Claude    ClaudeConfig
 	ChatGPT   ChatGPTConfig
 	Tidal     TidalConfig
-	GeoTrace  GeoTraceConfig
 }
 
 // IPFilterSpecs returns the IP-stage filters (country/asn) in config order.
@@ -290,8 +293,21 @@ func (cfg *Config) DeniedCountries() filter.CountrySet {
 	return denied
 }
 
+// AnnotateUsesProvider reports whether any annotate tag's chain names the given
+// provider. The stable worker asks for ProviderGeoTrace: the trace probe costs
+// one request through every survivor, so it is only worth running when a tag
+// can actually render its answer.
+func (cfg *Config) AnnotateUsesProvider(name string) bool {
+	for _, a := range cfg.Annotate {
+		if slices.Contains(a.Providers, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
-// tidal/geotrace/bandwidth) in config order.
+// tidal/bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
 	for _, f := range cfg.Filters {
@@ -304,8 +320,6 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 			specs = append(specs, NodeFilterSpec{Type: FilterChatGPT, ChatGPT: f.mergedChatGPT(cfg.GeoBlock.ChatGPT)})
 		case FilterTidal:
 			specs = append(specs, NodeFilterSpec{Type: FilterTidal, Tidal: f.mergedTidal(cfg.GeoBlock.Tidal)})
-		case FilterGeoTrace:
-			specs = append(specs, NodeFilterSpec{Type: FilterGeoTrace, GeoTrace: f.mergedGeoTrace(cfg.GeoBlock.GeoTrace)})
 		case FilterBandwidth:
 			specs = append(specs, NodeFilterSpec{Type: FilterBandwidth, Bandwidth: f.bandwidthConfig()})
 		}
@@ -389,20 +403,6 @@ func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
 	return base
 }
 
-func (f FilterConfig) mergedGeoTrace(base GeoTraceConfig) GeoTraceConfig {
-	if f.Endpoint != "" {
-		base.Endpoint = f.Endpoint
-	}
-	if f.Timeout != 0 {
-		base.Timeout = f.Timeout
-	}
-	if f.Concurrency != 0 {
-		base.Concurrency = f.Concurrency
-	}
-
-	return base
-}
-
 func (f FilterConfig) bandwidthConfig() BandwidthConfig {
 	return BandwidthConfig{
 		TestURL:     f.TestURL,
@@ -419,7 +419,7 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the URL-test (latency) prober params only. The through-node
-// filters (gemini/claude/chatgpt/tidal/geotrace/bandwidth) and their params
+// filters (gemini/claude/chatgpt/tidal/bandwidth) and their params
 // live in the top-level filters list, not here.
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
@@ -572,7 +572,8 @@ type ASNConfig struct {
 // signal than the explicit refusal markers the other checks match, so a
 // transient CDN error or rate-limit would otherwise evict the host from every
 // endpoint for the store's whole TTL. Geotrace's live here for the same
-// uniformity and never reach the store either -- it is not a gate at all.
+// uniformity and never reach the store either -- it gates nothing, it only
+// answers the annotate chain.
 type GeoBlockConfig struct {
 	DBPath   string         `yaml:"db_path"`
 	TTL      time.Duration  `yaml:"ttl"`
@@ -669,11 +670,11 @@ type TidalConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
-// GeoTraceConfig configures the through-node egress lookup. Unlike the other
-// through-node checks it is not a gate: it drops nothing and only corrects the
-// GEO and IP tags with what the node reports about itself.
+// GeoTraceConfig configures the through-node egress lookup behind the
+// "geotrace" annotate provider. It is no gate: it drops nothing and only tells
+// the annotate chain where the node's traffic actually leaves from.
 //
-// The offline annotate chain cannot do this. It places the address our resolver
+// The offline providers cannot know that. They place the address our resolver
 // returned for the node's hostname, and 41% of the named hosts measured in the
 // pool sit in Cloudflare's shared anycast ranges, which terminate in many
 // countries at once -- so the tag described Cloudflare's registration while the
@@ -1074,7 +1075,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return cfg.validateCountryFilter(i, f)
 	case FilterASN:
 		return validateASNFilter(i, f)
-	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterGeoTrace:
+	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
@@ -1082,7 +1083,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
 			strings.Join([]string{
 				FilterCountry, FilterASN, FilterGemini, FilterClaude,
-				FilterChatGPT, FilterTidal, FilterGeoTrace, FilterBandwidth,
+				FilterChatGPT, FilterTidal, FilterBandwidth,
 			}, ", "))
 	}
 }
@@ -1179,10 +1180,10 @@ func (cfg *Config) validateAnnotate() error {
 func validateProviderChain(i int, providers []string) error {
 	for j, p := range providers {
 		switch p {
-		case ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN:
+		case ProviderGeoTrace, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN:
 		default:
-			return fmt.Errorf("annotate[%d]: unknown provider %q (must be %q, %q, %q or %q)",
-				i, p, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN)
+			return fmt.Errorf("annotate[%d]: unknown provider %q (must be %q, %q, %q, %q or %q)",
+				i, p, ProviderGeoTrace, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN)
 		}
 		if slices.Contains(providers[:j], p) {
 			return fmt.Errorf("annotate[%d]: duplicate provider %q", i, p)

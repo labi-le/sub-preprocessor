@@ -3,11 +3,13 @@ package stable
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 
+	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/log"
 )
 
@@ -23,15 +25,16 @@ const (
 // OF that address — still a database opinion, but formed about the right
 // address, which is the whole difference from the offline chain.
 //
-// Both fields go into a published node name verbatim and Country becomes a
-// Prometheus label value through Entry.Country, so parseTrace guarantees them
-// rather than leaving it to each consumer: a TraceResult that exists at all
-// has a Country of exactly two ASCII letters that is none of Cloudflare's
-// reserved non-country codes, and an IP that net.ParseIP accepts. Anything
-// else is reported as no answer.
+// Both are VALUES, never views into the response body: a result travels on to
+// Survivor.Egress, and its country ends up as a Prometheus label inside the
+// metrics snapshot, so a sub-slice would pin a whole 64 KiB body well past the
+// cycle. parseTrace guarantees them rather than leaving it to each consumer —
+// a TraceResult that exists at all carries a parsed address and a country of
+// exactly two ASCII letters that is none of Cloudflare's reserved non-country
+// codes. Anything else is reported as no answer.
 type TraceResult struct {
-	Country string
-	IP      string
+	IP      netip.Addr
+	Country geofeed.CountryCode
 }
 
 // TraceCheck asks each node where its traffic actually comes out.
@@ -75,7 +78,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 			n := prog.step()
 			opLog.Debug().Str("node", px.Name()).Str("server", host).
 				Bool("reachable", reachable).Int("status", status).
-				Str("loc", res.Country).Str("egress", res.IP).
+				Stringer("loc", res.Country).Stringer("egress", res.IP).
 				Int64("n", n).Int64("of", prog.total).Msg("geotrace")
 			if !reachable || status < 200 || status >= 300 || !ok {
 				return
@@ -135,15 +138,15 @@ func betterTraceOutcome(a, b traceOutcome) bool {
 // complete, and a partial answer means the response came from something that
 // is not the trace endpoint.
 //
-// Both fields are validated here because that is what the rest of the package
-// is promised: Country is two ASCII letters and never one of Cloudflare's
-// reserved non-country codes, IP parses as an address. Country reaches a
-// Prometheus label value through Entry.Country, and both are embedded verbatim
-// in the published node name. A rejected body is reported as NO answer, so the
-// caller keeps the offline chain's tag — this never invents a second spelling
-// of merge.go's countryUnknown.
+// Both fields are validated and CONVERTED here because that is what the rest
+// of the package is promised: a country of two ASCII letters, never one of
+// Cloudflare's reserved non-country codes, and an address netip accepts. The
+// conversion is also what keeps the body out of the result — see TraceResult.
+// A rejected body is reported as NO answer, so the caller keeps whatever the
+// offline chain resolves; this never invents a second spelling of
+// countryUnknown.
 func parseTrace(body string) (TraceResult, bool) {
-	var res TraceResult
+	var ip, loc string
 	for len(body) > 0 {
 		line := body
 		if i := strings.IndexByte(body, '\n'); i >= 0 {
@@ -157,16 +160,17 @@ func parseTrace(body string) (TraceResult, bool) {
 		}
 		switch key {
 		case "ip":
-			res.IP = value
+			ip = value
 		case "loc":
-			res.Country = value
+			loc = value
 		}
 	}
-	if !validCountry(res.Country) || net.ParseIP(res.IP) == nil {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || !validCountry(loc) {
 		return TraceResult{}, false
 	}
 
-	return res, true
+	return TraceResult{IP: addr, Country: geofeed.CountryCode{loc[0], loc[1]}}, true
 }
 
 // validCountry accepts only what a [GEO:] tag may carry. Besides ISO-3166-1
@@ -179,4 +183,10 @@ func parseTrace(body string) (TraceResult, bool) {
 // possibly-correct guess with none at all.
 func validCountry(c string) bool {
 	return len(c) == countryCodeLen && asciiLetter(c[0]) && asciiLetter(c[1]) && c != locNoCountry
+}
+
+func asciiLetter(b byte) bool {
+	const asciiCaseBit = 0x20 // the single bit by which ASCII letter cases differ
+	lower := b | asciiCaseBit
+	return lower >= 'a' && lower <= 'z'
 }

@@ -102,11 +102,16 @@ Every `subscriptions.interval` it:
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `geotrace` / `bandwidth`) on the survivors; a
+   `chatgpt` / `tidal` / `bandwidth`) on the survivors, all of them gates; a
    `gemini`/`claude`/`chatgpt` geo-block writes the node's host to the geoblock
    store, so step 2 drops it on every later cycle. Every other drop lasts this
-   cycle only, and `geotrace` drops nothing at all — it only retags,
-9. atomically publishes the result.
+   cycle only,
+9. asks the final survivor set where its traffic actually leaves from
+   (Cloudflare's `/cdn-cgi/trace`), but only when the `annotate` chain names
+   the `geotrace` provider — nothing is dropped here,
+10. builds each node's tags **once**, from the address that survived the
+    pipeline (the traced egress when there is one), and atomically publishes
+    the result.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
 `503 stable list not ready` until the first cycle completes) with an
@@ -178,30 +183,20 @@ are gates that drop:
   every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
-  dropped; kept nodes get a `[SPD:<n>M]` tag when annotation is enabled.
+  dropped; a kept node's Mbps is recorded, and the `[SPD:<n>M]` tag it earns is
+  rendered later, with every other tag, at publication.
   Results are never cached — measured fresh each cycle.
-- `geotrace` — the one entry that is **not** a gate: it keeps every node it is
-  handed and only corrects the `[GEO:]` / `[IP:]` values with the egress the
-  node reports about itself, via Cloudflare's `/cdn-cgi/trace`
-  (`geoblock.geotrace.endpoint`). The offline chain cannot do this: it tags the
-  address the *resolver* returned for the node's hostname, and 41% of the named
-  hosts measured in the pool sit in Cloudflare's shared anycast ranges, which
-  terminate in many countries at once — so a node tagged `CA` was in fact
-  exiting in Germany. Only the address the endpoint saw is a fact; the country
-  beside it is still a geo-IP lookup, just one made about the right address. It
-  substitutes tags that are already present and never adds any, so an empty
-  `annotate:` list disables it, other tags (`[SPD:<n>M]`) keep their place, and a
-  node whose trace fails keeps the offline guess.
 
-Filter order within each stage is honoured; putting the expensive ones
-(`bandwidth`, `geotrace`) last means they run on the fewest nodes.
+Filter order is honoured; putting the expensive one (`bandwidth`) last means it
+runs on the fewest nodes. `geotrace` is not in this list — it is an annotate
+provider, not a gate: see [Annotation](#annotation).
 
 ### Annotation
 
 The ordered `annotate:` list controls the tags prepended to node names on both
 endpoints: `GEO` (`[GEO:XX]`), `IP` (`[IP:1.2.3.4]`), `ASN` (`[ASN:...]`).
 GEO and ASN entries take `providers:` — an **ordered lookup chain** (e.g.
-`providers: [geofeed, dbip, registry, asn]`): the first provider that
+`providers: [geotrace, geofeed, dbip, registry, asn]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
 `[GEO:??]` / `[ASN:??]`. An empty `annotate` list disables annotation
 (original names pass through). Rewriting is scheme-aware: vmess folds tags into
@@ -216,6 +211,7 @@ Available providers:
 
 | Provider | Source | Character |
 |---|---|---|
+| `geotrace` | the node itself, via Cloudflare's `/cdn-cgi/trace` (`geoblock.geotrace.*`) | the only provider that reports the EXIT; worker-only |
 | `geofeed` | RFC 8805 CSV feeds (`geo.geofeed.sources`) | precise, low coverage |
 | `dbip` | DB-IP Country Lite — monthly gzip CSV; the `{yyyy-mm}` URL placeholder expands to the current UTC month, with one previous-month retry on a 404 right after rollover | broad coverage, in-memory |
 | `registry` | the five RIR delegated-extended files | *registration* country of the allocated block, not necessarily where it routes |
@@ -224,13 +220,27 @@ Available providers:
 The `dbip`/`registry` databases are downloaded and indexed in memory only when
 an annotate chain actually references them.
 
+`geotrace` is the odd one out. Every other provider looks the node's *resolved*
+address up in a table, and 41% of the named hosts measured in the pool sit in
+Cloudflare's shared anycast ranges, which terminate in many countries at once —
+so a node tagged `CA` was in fact exiting in Germany. Asking the node where its
+traffic leaves from costs one request through it, which only the `/stable.txt`
+worker's post-probe stage can spend: on `GET /` there is nothing to ask, so
+`geotrace` always misses there and the chain falls through to the offline
+providers. Naming it in a chain is what arms that probe; leaving it out means
+no cycle pays for it. Only the address the endpoint saw is a fact — the country
+beside it is still a geo-IP lookup, just one made about the right address.
+
 The country **filter** (`provider: geofeed`) judges nodes with that same chain,
 in the order the `GEO` entry's `providers:` list gives it: it consults every
 local database that list names. A node only DB-IP can place is therefore
 dropped by an `exclude_countries` naming that country and kept by a `countries`
 allow-list naming it — the filter's verdict and the `[GEO:...]` tag can no
-longer disagree. Two asymmetries remain:
+longer disagree. Three asymmetries remain:
 
+- `geotrace` is skipped by the filter, and cannot be otherwise: the filter runs
+  in preprocess, before any probe exists to ask. The tag can name the egress
+  the filter never saw.
 - `asn` is skipped by the filter: it is a per-IP Cymru round trip, not a local
   table. A node only Cymru can place counts as unplaceable for the filter while
   its tag names the country. Operators who want that lookup in the filter too
@@ -347,11 +357,13 @@ Key sections:
 - `annotate` — the ordered tag list described above; GEO/ASN entries take a
   `providers:` chain. The retired singular `provider:` key is rejected as an
   unknown key by the strict decode instead of being silently dropped.
-- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*`,
-  `tidal.*` and `geotrace.*` base params (endpoint, model, marker, key,
-  timeout, concurrency) for the through-node filters. `geotrace.*` takes only
-  `endpoint`/`timeout`/`concurrency`, and defaults to
-  `https://cloudflare.com/cdn-cgi/trace`, 15s, 8.
+- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
+  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
+  for the through-node filters, plus `geotrace.*` — `endpoint`/`timeout`/
+  `concurrency` only, defaulting to `https://cloudflare.com/cdn-cgi/trace`,
+  15s, 8 — which configures the `geotrace` ANNOTATE provider's probe, not a
+  filter. There is no `{type: geotrace}` filter entry; naming `geotrace` in an
+  `annotate` chain is what turns the probe on.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline

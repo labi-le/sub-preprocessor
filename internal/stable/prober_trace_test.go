@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,11 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geofeed"
 )
+
+// traceDE is the answer the fixtures below render.
+var traceDE = TraceResult{IP: netip.MustParseAddr("5.6.7.8"), Country: geofeed.CountryCode{'D', 'E'}}
 
 // traceAnswer renders a /cdn-cgi/trace body around the two lines parseTrace
 // reads, keeping the neighbours the live endpoint writes between them.
@@ -73,7 +78,7 @@ func TestParseTraceAcceptsARealAnswer(t *testing.T) {
 
 			continue
 		}
-		if res.IP != tc.ip || res.Country != tc.country {
+		if res.IP.String() != tc.ip || res.Country.String() != tc.country {
 			t.Errorf("%s: got %+v, want ip %s loc %s", name, res, tc.ip, tc.country)
 		}
 	}
@@ -202,7 +207,7 @@ func TestTraceCheckKeepsOnlyAnsweredNodes(t *testing.T) {
 			if ok != c.answered {
 				t.Fatalf("answered = %v (%+v), want %v", ok, res, c.answered)
 			}
-			if c.answered && res != (TraceResult{Country: "DE", IP: "5.6.7.8"}) {
+			if c.answered && res != traceDE {
 				t.Fatalf("got %+v", res)
 			}
 		})
@@ -260,8 +265,8 @@ func TestTraceCheckFoldsOnePortPerLabelDeterministically(t *testing.T) {
 			}
 			// TCP sorts below UDP, and the name is the only thing that
 			// separates these two.
-			if want := (TraceResult{Country: "DE", IP: "5.6.7.8"}); got[label] != want {
-				t.Errorf("folded %s to %+v, want the lower-named port's trace %+v", label, got[label], want)
+			if got[label] != traceDE {
+				t.Errorf("folded %s to %+v, want the lower-named port's trace %+v", label, got[label], traceDE)
 			}
 		})
 	}

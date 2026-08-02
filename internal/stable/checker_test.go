@@ -1,9 +1,9 @@
 package stable_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -19,17 +19,30 @@ import (
 
 type fakeFilterer struct {
 	bodies map[fetch.SubscriptionURL]string
+	// ip is the address the IP stage judged, carried onto every node it yields
+	// — the worker never resolves one itself.
+	ip  netip.Addr
+	ann preprocess.Annotator
 }
 
-func (f fakeFilterer) Filter(_ context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error) {
+func (f fakeFilterer) FilterNodes(
+	_ context.Context, req preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
 	body, ok := f.bodies[req.SubscriptionURL]
 	if !ok {
-		return preprocess.Stats{}, errors.New("source unavailable")
+		return nil, preprocess.Stats{}, errors.New("source unavailable")
 	}
-	b.WriteString(body)
 
-	return preprocess.Stats{}, nil
+	nodes := sourceBody("", body).Nodes
+	for i := range nodes {
+		nodes[i].IP = f.ip
+	}
+
+	return nodes, preprocess.Stats{}, nil
 }
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (f fakeFilterer) Annotator() preprocess.Annotator { return f.ann }
 
 type fakeProber struct {
 	res        map[string]stable.ProbeResult
@@ -476,9 +489,12 @@ type slowFilterer struct {
 	delays map[fetch.SubscriptionURL]time.Duration
 }
 
-func (f slowFilterer) Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error) {
+func (f slowFilterer) FilterNodes(
+	ctx context.Context, req preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
 	time.Sleep(f.delays[req.SubscriptionURL])
-	return f.fakeFilterer.Filter(ctx, b, req)
+
+	return f.fakeFilterer.FilterNodes(ctx, req)
 }
 
 func TestCheckerMergeOrderIgnoresFetchCompletion(t *testing.T) {
@@ -672,5 +688,144 @@ func TestReconfigureAppliesIntervalWhileIdle(t *testing.T) {
 	case <-prober.calls:
 	case <-time.After(5 * time.Second):
 		t.Fatal("shortened interval was not applied while the worker sat idle")
+	}
+}
+
+// tracingProber is fakeProber that also answers the egress trace, which is
+// what turns the trace stage on: the flag alone is not enough, the prober has
+// to be able to run it.
+type tracingProber struct {
+	fakeProber
+	trace map[string]stable.TraceResult
+}
+
+func (p *tracingProber) TraceCheck(context.Context, []mihomo.Proxy) map[string]stable.TraceResult {
+	return p.trace
+}
+
+// TestCheckerAnnotatesBeforeCountingCountries locks the ordering the cycle
+// depends on: Survivor.Country exists only once the publication has run the
+// GEO chain, and the kept-country and geo-unknown gauges read that field. Build
+// the payload after observing and every cycle reports zero countries while
+// publishing tagged nodes.
+//
+// It also pins the address split end to end: the traced node is described by
+// the egress it reported, its untraced neighbour by the address the IP stage
+// judged, and the trace report counts the one country that actually moved.
+func TestCheckerAnnotatesBeforeCountingCountries(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{
+		bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+			"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		},
+		ip:  addr(t, "9.9.9.9"),
+		ann: tagAnnotator{offline: country(t, "NL")},
+	}
+	prober := &tracingProber{
+		fakeProber: fakeProber{res: map[string]stable.ProbeResult{
+			"alpha-001": {Successes: 5, MeanMs: 100},
+			"beta-001":  {Successes: 5, MeanMs: 200},
+		}},
+		trace: map[string]stable.TraceResult{
+			"alpha-001": {IP: addr(t, "5.6.7.8"), Country: country(t, "DE")},
+		},
+	}
+	spec := testCheckerSpec(prober)
+	spec.Trace = true
+	holder := stable.NewHolder()
+	rep := &fakeReporter{}
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, holder, zerolog.Nop(), rep)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	snap := holder.Load()
+	if snap == nil {
+		t.Fatal("expected snapshot, got nil")
+	}
+	want := "vless://u@1.1.1.1:443#[GEO:DE][IP:5.6.7.8] alpha-001\n" +
+		"vless://u@2.2.2.2:443#[GEO:NL][IP:9.9.9.9] beta-001\n"
+	if got := string(snap.Payload); got != want {
+		t.Errorf("payload:\ngot  %q\nwant %q", got, want)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	if got := rep.last.KeptCountries; got["DE"] != 1 || got["NL"] != 1 || len(got) != 2 {
+		t.Errorf("KeptCountries = %v, want one DE and one NL", got)
+	}
+	if rep.last.GeoUnknown != 0 {
+		t.Errorf("GeoUnknown = %d, want 0", rep.last.GeoUnknown)
+	}
+	wantTrace := stable.TraceReport{Answered: 1, Unanswered: 1, Moved: 1}
+	if rep.last.Trace != wantTrace {
+		t.Errorf("Trace = %+v, want %+v", rep.last.Trace, wantTrace)
+	}
+}
+
+// A trace that agrees with the offline chain is answered but not MOVED: the
+// number the trace exists to justify counts corrections, not round trips.
+func TestCheckerTraceAgreeingWithOfflineChainIsNotMoved(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{
+		bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		},
+		ip:  addr(t, "9.9.9.9"),
+		ann: tagAnnotator{offline: country(t, "DE")},
+	}
+	prober := &tracingProber{
+		fakeProber: fakeProber{res: map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}}},
+		trace: map[string]stable.TraceResult{
+			"alpha-001": {IP: addr(t, "5.6.7.8"), Country: country(t, "DE")},
+		},
+	}
+	spec := testCheckerSpec(prober)
+	spec.Trace = true
+	rep := &fakeReporter{}
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), zerolog.Nop(), rep)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	wantTrace := stable.TraceReport{Answered: 1, Unanswered: 0, Moved: 0}
+	if rep.last.Trace != wantTrace {
+		t.Errorf("Trace = %+v, want %+v", rep.last.Trace, wantTrace)
+	}
+}
+
+// A prober that cannot trace leaves the stage off entirely rather than
+// reporting every survivor unanswered — the config asked for an annotation the
+// build could not provide, and the cycle says so with a warning, not a metric.
+func TestCheckerTraceSkippedWithoutProberSupport(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{
+		bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		},
+		ip:  addr(t, "9.9.9.9"),
+		ann: tagAnnotator{offline: country(t, "NL")},
+	}
+	spec := testCheckerSpec(&fakeProber{res: map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}}})
+	spec.Trace = true
+	rep := &fakeReporter{}
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), zerolog.Nop(), rep)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	if rep.last.Trace != (stable.TraceReport{}) {
+		t.Errorf("Trace = %+v, want the zero report", rep.last.Trace)
 	}
 }

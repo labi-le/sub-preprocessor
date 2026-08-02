@@ -145,13 +145,14 @@ func (r *Reloader) Reload(ctx context.Context) {
 			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl change requires restart; stores are built once at startup")
 	}
 
-	r.holder.Store(&server.Snapshot{Svc: newProc, Groups: newCfg.Groups})
+	r.holder.Store(server.NewSnapshot(newProc, newProc, newCfg.Groups))
 
 	// The stable worker derives its allow set and through-node filters from the
 	// unified filters list, plus subscriptions, groups, the geoblock prober
-	// settings (gemini/claude/chatgpt/tidal), and the annotate list (baked into the
-	// bandwidth [SPD:] tag), so a change to any of them re-applies it; unrelated
-	// config edits must leave it running.
+	// settings (gemini/claude/chatgpt/tidal/geotrace), and the annotate list
+	// (which decides the published tags and whether the egress trace runs at
+	// all), so a change to any of them re-applies it; unrelated config edits
+	// must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
 		config.FiltersChanged(r.currentCfg, newCfg) ||

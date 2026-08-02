@@ -1,81 +1,102 @@
 package stable
 
 import (
-	"bytes"
+	"net/netip"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"domains.lst/sub-preprocessor/internal/ioutil"
-	"domains.lst/sub-preprocessor/internal/rewrite"
+	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
-// SourceBody is a fetched (and geo-filtered) subscription payload.
+// SourceBody is one source's contribution to a cycle: the nodes its preprocess
+// pass kept, still unannotated.
 type SourceBody struct {
-	Name string
-	Body []byte
+	Name  string
+	Nodes []preprocess.NodeResult
 }
 
-// Entry is a merged node. Raw carries the clean <source>-NNN name used for
-// probing; Tagged carries the published name (the [GEO][IP] annotation from the
-// filter pass, when present, plus the same unique label). Country mirrors the
-// carried [GEO:xx] tag: two ASCII letters, "??" when the annotation chain
-// resolved nothing, "" when annotation is off (no tag to judge) or the tag
-// carried something that is not a country code — see tagCountry.
+// Entry is a merged node, still unannotated: the tags are built once at
+// publication, after every probe and through-node filter has had its say. Raw
+// carries the clean <source>-NNN name the prober converts and the publication
+// annotates. IP is the address the preprocess IP-filters judged, carried
+// forward so the tag can never describe a different address than the filter
+// did — the worker never resolves a hostname twice. Country is filled at
+// publication only, from the annotation's own verdict.
 type Entry struct {
 	Label   string
 	Raw     string
-	Tagged  string
-	Addr    string // server:port, the dead-cache key
+	Addr    string // lowercased server:port, the dead-cache key
+	IP      netip.Addr
 	Country string
 }
 
-// Merge parses all source bodies in order, dedupes nodes by lowercased
-// Server:Port (hostnames are case-insensitive; first source wins) and relabels
-// each kept node to <source>-NNN so probe results map back to entries
-// unambiguously. NNN counts kept nodes per source. Entry.Addr carries the
-// lowercased key so mixed-case duplicates share one dead-cache entry; Raw and
-// Tagged keep the original casing.
+// Merge walks all sources in order, dedupes nodes by lowercased Server:Port
+// (hostnames are case-insensitive; first source wins) and relabels each kept
+// node to <source>-NNN so probe results map back to entries unambiguously. NNN
+// counts kept nodes per source. Entry.Addr carries the lowercased key so
+// mixed-case duplicates share one dead-cache entry; Raw keeps the original
+// casing.
 func Merge(bodies []SourceBody) []Entry {
-	// Estimate total nodes cheaply (one line per node) to pre-size collections.
 	total := 0
 	for _, src := range bodies {
-		total += bytes.Count(src.Body, []byte{'\n'}) + 1
+		total += len(src.Nodes)
 	}
 	seen := make(map[string]struct{}, total)
 	entries := make([]Entry, 0, total)
 	var scratch []byte  // reused lowercased server:port key builder
 	var labelBuf []byte // reused <source>-NNN label builder
+	// Reused parse input. Safe because relabelNode always returns a freshly
+	// built string, never a view into the line it was handed.
+	var lineBuf []byte
 	for _, src := range bodies {
 		kept := 0
-		subscription.Parse(src.Body, func(n subscription.Node) bool {
+		for _, node := range src.Nodes {
+			lineBuf = append(lineBuf[:0], node.Raw...)
+			n, ok := parseOne(lineBuf)
+			if !ok {
+				continue
+			}
 			// Dedupe key: lowercased server:port in the reused scratch buffer.
 			scratch = lowerServerPort(scratch, n.Server, n.Port)
 			// Membership test on the scratch bytes allocates nothing; the real
 			// string key is interned only when the node is actually kept.
 			if _, dup := seen[string(scratch)]; dup {
-				return true
+				continue
 			}
 			labelBuf = labelBuf[:0]
 			labelBuf = append(labelBuf, src.Name...)
 			labelBuf = append(labelBuf, '-')
 			labelBuf = appendPad3(labelBuf, kept+1)
 			label := string(labelBuf)
-			raw, ok := relabelNode(n, label)
-			if !ok {
-				return true
+			raw, relabeled := relabelNode(n, label)
+			if !relabeled {
+				continue
 			}
-			tags := rewrite.LeadingTags(n.Name)
-			tagged := taggedName(n, raw, label, tags)
 			key := string(scratch)
 			seen[key] = struct{}{}
 			kept++
-			entries = append(entries, Entry{Label: label, Raw: raw, Tagged: tagged, Addr: key, Country: tagCountry(tags)})
-			return true
-		})
+			entries = append(entries, Entry{Label: label, Raw: raw, Addr: key, IP: node.IP})
+		}
 	}
 	return entries
+}
+
+// parseOne parses the one node line a NodeResult carries. preprocess yields
+// exactly the lines it kept, one node each, so the first result is this node's
+// and the walk stops there.
+func parseOne(line []byte) (subscription.Node, bool) {
+	var node subscription.Node
+	ok := false
+	subscription.Parse(line, func(n subscription.Node) bool {
+		node, ok = n, true
+
+		return false
+	})
+
+	return node, ok
 }
 
 // lowerServerPort appends the lowercased "server:port" dedupe key into dst[:0]
@@ -97,65 +118,6 @@ func lowerServerPort(dst []byte, server, port string) []byte {
 	}
 	dst = append(dst, ':')
 	return append(dst, port...)
-}
-
-// countryUnknown is the annotator's marker for "no provider resolved a
-// country" ([GEO:??]). Returning the constant keeps the common miss alloc-free
-// and body-free.
-const countryUnknown = "??"
-
-// tagCountry extracts the 2-char code from a "[GEO:xx]" tag anywhere in the
-// leading-tags string ("" when absent — annotation off, no GEO tag, or a code
-// that is not two ASCII letters).
-//
-// The result is CLONED rather than sliced. tags is the tail of a zero-copy
-// chain out of the parser (subscription.Parse hands parseNode an
-// ioutil.UnsafeString view, Node.Name and rewrite.LeadingTags both re-slice
-// it) whose root is scheme-dependent: this cycle's whole source body for the
-// generic path, a per-node base64 buffer for vmess/ss-legacy/ssr. Either way
-// Entry.Country outlives the cycle inside the metrics snapshot, so a 2-byte
-// sub-slice would pin its root until the next publication replaces it.
-//
-// The code is also validated, because node names are source-authored and
-// Entry.Country becomes a Prometheus label value in the kept-country gauge:
-// without annotation the upstream's own "[GEO:...]" survives verbatim into the
-// merge, and one byte a label cannot carry would break the entire scrape.
-func tagCountry(tags string) string {
-	const marker = "[GEO:"
-	i := strings.Index(tags, marker)
-	if i < 0 {
-		return ""
-	}
-	code := i + len(marker)
-	if len(tags) < code+3 || tags[code+2] != ']' {
-		return ""
-	}
-	c := tags[code : code+2]
-	if c == countryUnknown {
-		return countryUnknown
-	}
-	if !asciiLetter(c[0]) || !asciiLetter(c[1]) {
-		return ""
-	}
-	return strings.Clone(c)
-}
-
-func asciiLetter(b byte) bool {
-	const asciiCaseBit = 0x20 // the single bit by which ASCII letter cases differ
-	lower := b | asciiCaseBit
-	return lower >= 'a' && lower <= 'z'
-}
-
-// taggedName carries the leading [GEO][IP] tags from the source name onto the
-// relabeled node, falling back to raw when there are none.
-func taggedName(n subscription.Node, raw, label, tags string) string {
-	if tags == "" {
-		return raw
-	}
-	if t, ok := relabelNode(n, tags+" "+label); ok {
-		return t
-	}
-	return raw
 }
 
 const (

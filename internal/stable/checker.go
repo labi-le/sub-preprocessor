@@ -17,11 +17,21 @@ import (
 	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
-const sourceBufSize = 4096
-
-// Filterer matches server.Filterer; declared locally to avoid an import cycle.
+// Filterer is the worker's half of the preprocess processor: the per-node IP
+// stage plus the annotator the publication runs. Declared locally to avoid an
+// import cycle.
 type Filterer interface {
-	Filter(ctx context.Context, b *bytes.Buffer, req preprocess.FilterRequest) (preprocess.Stats, error)
+	FilterNodes(ctx context.Context, req preprocess.FilterRequest) ([]preprocess.NodeResult, preprocess.Stats, error)
+	// Annotator is nil when annotation is configured off; the cycle then
+	// publishes merged lines verbatim.
+	Annotator() preprocess.Annotator
+}
+
+// traceChecker is the prober's egress-measuring half. Unlike the through-node
+// gates it answers with a measurement rather than a verdict, which is why it
+// runs after the filter chain instead of inside it.
+type traceChecker interface {
+	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
 }
 
 // Blocklist records nodes that failed a through-node API check; declared
@@ -54,6 +64,10 @@ type CheckerSpec struct {
 	SourceTimeout time.Duration
 	Prober        Prober
 	Filters       []NodeFilter
+	// Trace turns on the per-node egress probe, from the annotate chain naming
+	// the geotrace provider. The probe still depends on the prober being able
+	// to run it.
+	Trace bool
 }
 
 // Checker periodically fetches sources through the preprocess pipeline, merges
@@ -142,7 +156,11 @@ func (c *Checker) Run(ctx context.Context) {
 func (c *Checker) RunOnce(ctx context.Context) error {
 	start := time.Now()
 	spec := c.spec.Load()
-	bodies, sourceReports := c.fetchSources(ctx, spec)
+	// One processor for the whole cycle: the IP stage that judged an address
+	// and the annotator that describes it must be the same one, even if a
+	// reload swaps the snapshot mid-cycle.
+	svc := c.filterer()
+	bodies, sourceReports := c.fetchSources(ctx, spec, svc)
 
 	entries := Merge(bodies)
 	if len(entries) == 0 {
@@ -174,7 +192,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
-	survivors, filterReports := c.applyFilters(ctx, spec, survivors)
+	survivors, filterReports, trace := c.filterAndMeasureEgress(ctx, spec, survivors)
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
@@ -187,8 +205,14 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
+	// Before observe, not merely before Store: this is what fills
+	// Survivor.Country, which the gauges below then count.
+	ann := svc.Annotator()
+	payload := BuildPayload(ctx, ann, survivors)
+	trace.Moved = movedCount(ctx, ann, survivors)
+
 	c.holder.Store(&Snapshot{
-		Payload:   BuildPayload(survivors),
+		Payload:   payload,
 		UpdatedAt: time.Now(),
 		Stats: Stats{
 			SourcesOK:    len(bodies),
@@ -219,6 +243,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Sources:       sourceReports,
 		Filters:       filterReports,
 		KeptSpeeds:    keptSpeeds(survivors),
+		Trace:         trace,
 	})
 
 	return nil
@@ -275,18 +300,56 @@ func keptCountries(survivors []Survivor) map[string]int {
 	return m
 }
 
-// applyFilters runs the through-node NodeFilter chain over the survivors. It
-// parses the survivor set into proxies ONCE (regardless of filter count) and
-// shares them across every filter, which selects the subset for its current
-// (narrowed) survivors by node label. The checker owns the proxies' lifecycle:
-// they are closed exactly once after the chain (deferred), and no filter closes
-// them. Probe parses and closes its own full set independently. Parsing is
-// skipped entirely when there is no filter or no survivor; a parse failure logs
-// and passes survivors through unchanged (matching the previous per-filter
-// skip-on-no-proxies behavior).
-func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors []Survivor) ([]Survivor, []FilterReport) {
-	if len(spec.Filters) == 0 || len(survivors) == 0 {
-		return survivors, nil
+// movedCount counts published nodes the trace actually MOVED: those whose
+// final country differs from the one the offline chain gives for the RESOLVED
+// address — the tag the node would have carried had it never answered. That
+// offline verdict is never published and nothing remembers it, so the chain is
+// re-run with an empty Egress, for the traced nodes alone; an untraced node's
+// published tag already IS the offline answer.
+func movedCount(ctx context.Context, ann preprocess.Annotator, survivors []Survivor) int {
+	if ann == nil {
+		return 0
+	}
+	r := renderer{ann: ann}
+	moved := 0
+	for i := range survivors {
+		s := &survivors[i]
+		if !s.Egress.Valid() {
+			continue
+		}
+		if _, offline, ok := r.render(ctx, s.Raw, preprocess.AnnotateRequest{IP: s.Entry.IP}); ok &&
+			countryString(offline) != s.Country {
+			moved++
+		}
+	}
+
+	return moved
+}
+
+// filterAndMeasureEgress runs the through-node NodeFilter chain over the
+// survivors and then asks the ones still standing where their traffic actually
+// leaves from. It parses the survivor set into proxies ONCE (regardless of
+// filter count) and shares them across every filter and the trace, which select
+// the subset for their current (narrowed) survivors by node label. The checker
+// owns the proxies' lifecycle: they are closed exactly once at the end
+// (deferred), and nothing else closes them. Probe parses and closes its own
+// full set independently. Parsing is skipped entirely when there is nothing to
+// run or no survivor; a parse failure logs and passes survivors through
+// unchanged (matching the previous per-filter skip-on-no-proxies behavior).
+//
+// The trace runs LAST, on the final survivor set, because its answer only
+// annotates: measuring a node a later gate drops would spend a request on a
+// tag nobody sees.
+func (c *Checker) filterAndMeasureEgress(
+	ctx context.Context, spec *CheckerSpec, survivors []Survivor,
+) ([]Survivor, []FilterReport, TraceReport) {
+	tracer, canTrace := spec.Prober.(traceChecker)
+	if spec.Trace && !canTrace {
+		c.logger.Warn().Msg("geotrace annotation requested but prober lacks trace support; skipping")
+	}
+	trace := spec.Trace && canTrace
+	if (len(spec.Filters) == 0 && !trace) || len(survivors) == 0 {
+		return survivors, nil, TraceReport{}
 	}
 
 	entries := make([]Entry, len(survivors))
@@ -296,7 +359,7 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-		return survivors, nil
+		return survivors, nil, TraceReport{}
 	}
 	defer func() {
 		for _, px := range proxies {
@@ -322,16 +385,41 @@ func (c *Checker) applyFilters(ctx context.Context, spec *CheckerSpec, survivors
 		survivors, rep = f.apply(ctx, survivors, byLabel)
 		reports = append(reports, rep)
 	}
+	if !trace {
+		return survivors, reports, TraceReport{}
+	}
 
-	return survivors, reports
+	return survivors, reports, applyTrace(ctx, tracer, survivors, byLabel)
+}
+
+// applyTrace records what each survivor reported about its own egress. It
+// drops nothing: a node whose trace fails keeps its place and is annotated
+// from the offline chain instead.
+func applyTrace(
+	ctx context.Context, tracer traceChecker, survivors []Survivor, byLabel map[string][]mihomo.Proxy,
+) TraceReport {
+	traced := tracer.TraceCheck(ctx, filterSubset(survivors, byLabel))
+	var rep TraceReport
+	for i := range survivors {
+		res, ok := traced[survivors[i].Label]
+		if !ok {
+			rep.Unanswered++
+
+			continue
+		}
+		rep.Answered++
+		survivors[i].Egress = preprocess.Egress{IP: res.IP, Country: res.Country}
+	}
+
+	return rep
 }
 
 // fetchSources fetches every configured source concurrently through the
-// preprocess pipeline and returns the successfully-filtered bodies in
+// preprocess pipeline and returns the successfully-filtered node sets in
 // configuration order, so Merge's first-source-wins dedupe is deterministic.
-func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]SourceBody, []SourceReport) {
-	svc := c.filterer()
-
+func (c *Checker) fetchSources(
+	ctx context.Context, spec *CheckerSpec, svc Filterer,
+) ([]SourceBody, []SourceReport) {
 	type result struct {
 		body  SourceBody
 		stats preprocess.Stats
@@ -354,8 +442,6 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 			sourceCtx, cancel := context.WithTimeout(ctx, spec.SourceTimeout)
 			defer cancel()
 
-			var buf bytes.Buffer
-			buf.Grow(sourceBufSize)
 			// The worker imposes no allow-list: the configured country filters
 			// only ever exclude, and an exclusion must not drop a node whose IP
 			// no geo source covers.
@@ -369,13 +455,13 @@ func (c *Checker) fetchSources(ctx context.Context, spec *CheckerSpec) ([]Source
 				req.SubscriptionURL = ""
 				req.Body = []byte(src.Body)
 			}
-			stats, err := svc.Filter(sourceCtx, &buf, req)
+			nodes, stats, err := svc.FilterNodes(sourceCtx, req)
 			if err != nil {
 				results[i] = result{err: err}
 				return
 			}
 			results[i] = result{
-				body:  SourceBody{Name: src.Name, Body: append([]byte(nil), buf.Bytes()...)},
+				body:  SourceBody{Name: src.Name, Nodes: nodes},
 				stats: stats,
 			}
 		}(i, src)

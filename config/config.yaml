@@ -28,9 +28,8 @@ resolver:
   cache_ttl: 1h
   cache_negative_ttl: 10m
 # Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
-# preprocess; through-node filters (gemini/claude/chatgpt/tidal/geotrace/
-# bandwidth) run post-probe in the stable worker. Order is honoured within each
-# stage.
+# preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
+# post-probe in the stable worker. Order is honoured within each stage.
 filters:
   - type: country
     provider: geofeed
@@ -44,14 +43,20 @@ filters:
     min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
     timeout: 20s # per-node download deadline
     concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
-  - type: geotrace # NOT a gate: drops nothing, only corrects [GEO:]/[IP:] with the egress the node reports (cdn-cgi/trace). Last on purpose -- it runs on the fewest nodes, and every node here is one that will actually be published. Fixes the tag being wrong for ~46% of the list: the annotate chain places the address the RESOLVER returned, and 41% of named hosts sit in Cloudflare anycast ranges that terminate in many countries at once, so a node tagged CA was exiting in Germany
 # Ordered annotation tags added to node names (both / and /stable.txt).
 annotate:
   - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
-    # Ordered chain, first hit wins: dbip/registry are downloaded in-memory
-    # databases (built only because they are referenced here), asn is the
-    # cached Cymru DNS last resort.
-    providers: [geofeed, dbip, registry, asn]
+    # Ordered chain, first hit wins. geotrace asks the node itself where its
+    # traffic leaves from (cdn-cgi/trace); it answers only in the stable
+    # worker, which has a post-probe stage to ask from -- on / it always misses
+    # and the chain falls through to geofeed. It is no gate and drops nobody.
+    # First because it is the only provider that reports the EXIT: the offline
+    # ones place the address the RESOLVER returned, and 41% of named hosts sit
+    # in Cloudflare anycast ranges that terminate in many countries at once, so
+    # a node tagged CA was exiting in Germany (~46% of the list was mistagged).
+    # dbip/registry are downloaded in-memory databases (built only because they
+    # are referenced here), asn is the cached Cymru DNS last resort.
+    providers: [geotrace, geofeed, dbip, registry, asn]
   - tag: IP # [IP:1.2.3.4] of the chosen address
 geoblock:
   db_path: /config/.geoblock.db

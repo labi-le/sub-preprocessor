@@ -1,6 +1,8 @@
 package stable //nolint:testpackage // drives the whole chain into entryLabel, an unexported internal
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -9,6 +11,9 @@ import (
 	"github.com/metacubex/mihomo/common/convert"
 	mihomo "github.com/metacubex/mihomo/constant"
 
+	"domains.lst/sub-preprocessor/internal/geofeed"
+	"domains.lst/sub-preprocessor/internal/preprocess"
+	"domains.lst/sub-preprocessor/internal/rewrite"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -39,19 +44,54 @@ const (
 	// the whole point of the relabel is that this string is what comes back out
 	// of entryLabel at the far end.
 	contractLabel = contractSource + "-001"
-	// contractTags is the [GEO][IP] prefix the filter pass leaves on an
-	// upstream name, and contractOriginName is the upstream name every fixture
-	// carries. The tags are load-bearing: rewrite.LeadingTags returns "" for a
-	// bare name, taggedName then short-circuits Entry.Tagged to Entry.Raw, and
-	// the tagged line — the one BuildPayload actually publishes — would never
-	// be converted here. It is a strictly harder line than Raw: a SECOND
-	// RewriteSSRName round trip for ssr, and for everything else a fragment
-	// carrying '[', ']', a space and a ':' that mihomo's own url.Parse and
-	// mieru's "<name>:<port>/<protocol>" naming both have to survive.
+	// contractTags is the [GEO][IP] prefix the publication folds into a node's
+	// name, and contractOriginName is the upstream name every fixture carries.
+	// The tags are load-bearing: the published line is a strictly harder line
+	// than Raw — a SECOND RewriteSSRName round trip for ssr, and for everything
+	// else a fragment carrying '[', ']', a space and a ':' that mihomo's own
+	// url.Parse and mieru's "<name>:<port>/<protocol>" naming both have to
+	// survive.
 	contractTags        = "[GEO:NL][IP:1.2.3.4]"
 	contractOriginName  = contractTags + " Origin"
 	contractTaggedLabel = contractTags + " " + contractLabel
 )
+
+// contractAnnotator renders exactly contractTags through the same
+// rewrite.NodeName the production chain uses, so the published half of the
+// table below is the line a consumer's mihomo really parses out of
+// /stable.txt.
+type contractAnnotator struct{}
+
+func (contractAnnotator) Annotate(
+	_ context.Context, dst, _ *bytes.Buffer, req preprocess.AnnotateRequest,
+) geofeed.CountryCode {
+	rewrite.NodeName(dst, req.Node, contractTags)
+
+	return geofeed.CountryCode{'N', 'L'}
+}
+
+// sourceNodes turns a normalized subscription body into the per-node results
+// the preprocess IP stage hands the worker, so these fixtures stay written as
+// the source text they model.
+func sourceNodes(payload []byte) SourceBody {
+	var nodes []preprocess.NodeResult
+	for line := range strings.SplitSeq(string(payload), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			nodes = append(nodes, preprocess.NodeResult{Raw: line})
+		}
+	}
+
+	return SourceBody{Name: contractSource, Nodes: nodes}
+}
+
+// publishedLine is the single line BuildPayload puts on /stable.txt for e.
+func publishedLine(t *testing.T, e Entry) string {
+	t.Helper()
+
+	payload := BuildPayload(context.Background(), contractAnnotator{}, []Survivor{{Entry: e}})
+
+	return strings.TrimSuffix(string(payload), "\n")
+}
 
 // These credentials are structurally valid on purpose: adapter.ParseProxy
 // validates a vless UUID, an x25519 public key and a hex short ID, so
@@ -296,10 +336,14 @@ func TestSchemeContractEndToEnd(t *testing.T) {
 			c.assertParsed(t, payload)
 			e := c.assertMerged(t, payload)
 			// Both published forms, because they are different lines: Raw is
-			// what the prober converts, Tagged is what a consumer's mihomo
-			// parses out of /stable.txt.
+			// what the prober converts, the annotated line is what a consumer's
+			// mihomo parses out of /stable.txt.
 			c.assertProxies(t, "Raw", e.Raw, e.Label)
-			c.assertProxies(t, "Tagged", e.Tagged, contractTaggedLabel)
+			published := publishedLine(t, e)
+			if published == e.Raw {
+				t.Fatalf("BuildPayload published %q unannotated; the tagged half below would be a copy of Raw", published)
+			}
+			c.assertProxies(t, "published", published, contractTaggedLabel)
 		})
 	}
 }
@@ -334,7 +378,7 @@ func (c schemeContract) assertParsed(t *testing.T, payload []byte) {
 func (c schemeContract) assertMerged(t *testing.T, payload []byte) Entry {
 	t.Helper()
 
-	entries := Merge([]SourceBody{{Name: contractSource, Body: payload}})
+	entries := Merge([]SourceBody{sourceNodes(payload)})
 	if len(entries) != 1 {
 		t.Fatalf("Merge(%q) = %d entries, want 1", c.line, len(entries))
 	}
@@ -349,12 +393,6 @@ func (c schemeContract) assertMerged(t *testing.T, payload []byte) Entry {
 	if wantAddr := c.server + ":" + c.port; e.Addr != wantAddr {
 		t.Errorf("Entry.Addr = %q, want %q", e.Addr, wantAddr)
 	}
-	// A fixture whose name lost its leading tags would send taggedName down its
-	// raw short-circuit, leaving the Tagged half of every assertion below a
-	// second copy of the Raw half.
-	if e.Tagged == e.Raw {
-		t.Fatalf("Entry.Tagged == Entry.Raw (%q); the fixture name carries no [GEO][IP] tag to fold", e.Raw)
-	}
 
 	return e
 }
@@ -366,8 +404,8 @@ func (c schemeContract) assertMerged(t *testing.T, payload []byte) Entry {
 // entryLabel is the inverse of mihomo's naming, so one assertion covers both
 // the single-proxy schemes and mierus://, which mihomo expands into one proxy
 // per port named "<name>:<port>/<protocol>". Only the Raw call reproduces
-// production — nothing folds a Tagged proxy name back — but running it over a
-// name containing '[', ']', a space and a ':' is what proves the fold cuts at
+// production — nothing folds an annotated proxy name back — but running it over
+// a name containing '[', ']', a space and a ':' is what proves the fold cuts at
 // the port suffix rather than at the first colon it finds.
 func (c schemeContract) assertProxies(t *testing.T, which, line, wantName string) {
 	t.Helper()
@@ -443,7 +481,7 @@ func TestSchemeContractRejectsPortlessProxyLine(t *testing.T) {
 			if nodes != 0 || rejected != 1 {
 				t.Fatalf("Parse(%q) = %d nodes, %d rejected; want 0, 1", line, nodes, rejected)
 			}
-			if entries := Merge([]SourceBody{{Name: contractSource, Body: payload}}); len(entries) != 0 {
+			if entries := Merge([]SourceBody{sourceNodes(payload)}); len(entries) != 0 {
 				t.Fatalf("Merge(%q) = %d entries, want 0: %+v", line, len(entries), entries)
 			}
 		})
@@ -469,7 +507,7 @@ func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 	const wgLine = "wireguard://ZGVhZGJlZWZkZWFkYmVlZg@1.2.3.20:51820?reserved=0,0,0#" + contractOriginName
 	vlessLine := "vless://" + contractUUID + "@1.2.3.21:443?encryption=none&security=tls&type=tcp#" + contractOriginName
 
-	entries := Merge([]SourceBody{{Name: contractSource, Body: []byte(wgLine + "\n" + vlessLine + "\n")}})
+	entries := Merge([]SourceBody{sourceNodes([]byte(wgLine + "\n" + vlessLine + "\n"))})
 	if len(entries) != 2 {
 		t.Fatalf("Merge = %d entries, want 2 (wireguard is parsed, not rejected): %+v", len(entries), entries)
 	}
@@ -507,15 +545,15 @@ func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 func TestSchemeContractSSRSurvivesRelabelFragmentFree(t *testing.T) {
 	t.Parallel()
 
-	// The remarks carry the [GEO][IP] tags so Entry.Tagged is a second
-	// RewriteSSRName product rather than a copy of Entry.Raw; the Tagged
+	// The remarks carry the [GEO][IP] tags so the published line is a second
+	// RewriteSSRName product rather than a copy of Entry.Raw; the published
 	// fragment assertion below is vacuous otherwise.
 	line := contractSSRLine("1.2.3.22", "8388", contractOriginName, "Original")
 	if !strings.Contains(line, "#") {
 		t.Fatalf("fixture %q carries no fragment, so it proves nothing", line)
 	}
 
-	entries := Merge([]SourceBody{{Name: contractSource, Body: []byte(line + "\n")}})
+	entries := Merge([]SourceBody{sourceNodes([]byte(line + "\n"))})
 	if len(entries) != 1 {
 		t.Fatalf("Merge = %d entries, want 1", len(entries))
 	}
@@ -523,8 +561,8 @@ func TestSchemeContractSSRSurvivesRelabelFragmentFree(t *testing.T) {
 	if strings.Contains(e.Raw, "#") {
 		t.Errorf("relabeled ssr Raw carries a fragment, which mihomo cannot decode: %q", e.Raw)
 	}
-	if strings.Contains(e.Tagged, "#") {
-		t.Errorf("published ssr Tagged carries a fragment, which mihomo cannot decode: %q", e.Tagged)
+	if published := publishedLine(t, e); strings.Contains(published, "#") {
+		t.Errorf("published ssr line carries a fragment, which mihomo cannot decode: %q", published)
 	}
 
 	pxs := contractProxies(t, e.Raw, 1)
