@@ -15,6 +15,83 @@ nix-shell --run "make race"
 nix-shell --run "make bench"
 ```
 
+## Workflow — mandatory, not advisory
+
+Every change to production code or to a contract (an exported API, a config key, a metric
+name, a published output shape) MUST go through this loop:
+
+> **implement → review (performance + architecture, as SEPARATE passes) → fix → repeat**
+
+It terminates on two conditions, both required: a full round returns **zero** open findings,
+and **every point of what was originally agreed is implemented**. Not "the happy path
+works". Not "tests pass". Reviewers MUST be told what is out of scope, so a round is not
+spent proposing redesigns nobody asked for.
+
+**Proportionality.** The gate is risk, not diff size. A docs-only or config-only change
+takes one review pass, not two. But the termination conditions NEVER relax: a one-line
+change with an open finding is not done either.
+
+**A finding may be REFUTED, not only fixed — and the loop must allow it.** A round is clean
+when every finding is either fixed or disproved with evidence, and a wrong finding
+implemented is a regression the process invited. This is not hypothetical here: a reviewer
+demanded dropping the ssr port-range check because `adapter.ParseProxy` supposedly enforces
+it — measured, `NewShadowSocksR` has no range check at all and accepts `0`, `-1`, `70000`.
+Another demanded rejecting a `mierus://` link whose first `port` is empty — measured,
+mihomo `continue`s its INNER per-port loop and serves a working proxy from a later port, so
+rejecting would have dropped usable nodes. Verify a finding against the code before
+implementing it; say so with evidence when it is wrong.
+
+**A green suite is not evidence, and MUST NEVER be reported as a review result.** A review
+earns its cost only by trying to break the change; mutation is the cheapest way and is
+expected — revert the fix, confirm the new test fails, restore. That has repeatedly found
+tests here that could not fail at all: the mieru outcome fold shipped with three tests that
+looked like coverage while neutering both production fold conditions left the package green.
+
+**Why review at all when CI is green.** The `geotrace` filter once shipped completely inert.
+`go test ./...`, `-race` and `golangci-lint` were all clean. `swapTagValues` stopped scanning
+at the first space between tags while `rewrite.LeadingTags`, its own input source, skipped
+that whitespace — and because `bandwidth` runs before `geotrace` and prepends
+`"[SPD:<n>M] "`, every survivor in production arrived space-separated and came back
+untouched. Nothing dropped, nothing warned, and the `corrected` counter read 0, which an
+operator reads as "the offline chain was right" — the opposite of the truth. No test caught
+it: every fixture used the pre-bandwidth name shape.
+
+**Why performance is its OWN pass.** Read naively, that change's benchmark table showed a
+38.9% regression. It was not one — the benchmark that moved most feeds lines containing no
+`://`, so `parseNode` is never called and it cannot execute one changed instruction.
+Separating binary-layout noise from real cost took a hybrid tree (new production code, old
+test files) plus `go tool objdump` showing the suspect functions instruction-identical.
+Without that pass the branch either ships a regression or gets rewritten to chase a phantom.
+The inverse also happened: a mieru fix that read as obviously correct added a 16-byte field
+to `Entry`, measured at +13% ns and +16.7% B/op on `BenchmarkSelectSurvivors`. **Allocations
+are the binding constraint** — `allocs/op` and `B/op` MUST NOT increase; `ns/op` is noisy and
+means nothing without a control.
+
+**Why architecture is its OWN pass.** That same mieru fix passed its slice-scoped review: it
+was locally correct. It also fixed one of FOUR places where a mihomo proxy name is matched
+against an `Entry.Label`, leaving `recordDead`, `applyFilters`' proxy map and both
+through-node outcome maps broken. A reviewer given one slice structurally cannot see that;
+someone MUST look at the whole seam, especially where parallel work merges.
+
+**Why loop instead of reviewing once.** Every round has found what the previous missed.
+Round 1 found the inert filter; round 2 found its fix's fold had no coverage; round 3 found
+a comment asserting mihomo cannot emit a shape a leading-zero mieru port makes it emit
+routinely. The loop stopped when a round returned zero — never before.
+
+**Why "100% of what was agreed" is its own condition.** "It works" is not "it is done". All
+of these passed a working-feature check and were still defects: `Entry.Country` kept its
+pre-trace value, so the published list and the country gauge disagreed about one node;
+`corrected`/`unanswered` rode `FilterReport.Dropped` and so appeared on a Grafana panel
+titled "drops by reason" for a filter that drops nothing; `mergedGeoTrace` measured 0.0%
+coverage, so deleting two of its three arms kept the suite green.
+
+**Comments are a first-class review target,** not polish. The recurring defect here is a
+true-when-written comment: one referenced `merge.go`'s `tagCountry` after a redesign deleted
+it, one said the trace endpoint answers "211 bytes" (measured 202 and 301 — it echoes the
+request User-Agent), one claimed a proxy shape mihomo cannot produce. Per the conventions
+below, a stale comment is worse than none, so a review that approves the code and ignores
+its comments has not finished.
+
 ## Code conventions
 
 - **Comments earn their place.** Write one only for what the code cannot say itself: the *why* (rationale, tradeoffs), non-obvious invariants, ordering/locking/concurrency rules, units, edge-case semantics, gotchas, or external behavior (mihomo quirks, SSRF, protocol details).
