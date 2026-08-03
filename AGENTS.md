@@ -236,7 +236,7 @@ Important keys:
 - `resolver.address` — upstream DNS server, passed verbatim to the dialer, so it MUST be `host:port` (`1.1.1.1:53`); a portless value is rejected at load, because it dials nothing and would drop every node as a DNS failure. Empty keeps the system resolver
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
 - `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) run post-probe in the stable worker only, and every one of them is a gate that drops. `exclude_groups`/`exclude_countries` on a `country` entry are **worker-only** — their single consumer is `config.Config.DeniedCountries()`, which feeds the `/stable.txt` worker; on `/` the country constraint comes from the query params alone.
-- `annotate` — ordered tag list (`tag: GEO|ASN`; both take `providers:`, an ordered chain of `geotrace|geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. `geotrace` is the only provider that is not an offline database: it answers what the node reported about its own egress, which exists only in the worker's post-probe stage, so on `/` it always misses and the chain falls through. `config.Config.AnnotateUsesProvider("geotrace")` is what arms that probe — an offline-only chain never spends a request on it. The retired singular `provider:` key is rejected as an unknown key by the strict decode. The `IP` tag is retired too — removed outright, since nothing consumed it and no shipped config selected it, so `- tag: IP` now fails the load as an unknown tag; `rewrite.isKnownTag` still recognises `[IP:…]` on the STRIP side, deliberately, so an upstream-authored address is removed instead of riding along.
+- `annotate` — ordered tag list (`tag: GEO` is the only accepted tag; it takes `providers:`, an ordered chain of `geotrace|geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. One accepted tag does not make the LIST redundant: entries render in order and may repeat, so two `GEO` entries with different chains publish two tags (`preprocess.annotator` reports the leftmost that resolved as the node's country), and the empty list is a distinct mode rather than a milder one. **Repetition reaches BOTH stages.** `preprocess.countryChainOrder` builds the country FILTER's provider order by concatenating EVERY `GEO` entry's chain in written order, de-duplicated by first occurrence, so the filter's provider set is the union of what the entries name and repetition changes only what is RENDERED. Measured on an IP the geofeed cannot place and DB-IP puts in DE, one entry chaining `[geofeed, dbip]` and two entries (`[geofeed]` then `[dbip]`) now reach the same verdict — kept under `countries=DE`, dropped under `exclude_countries=DE` — and differ only in the tag, `[GEO:DE]` against `[GEO:??][GEO:DE]`. Reading the first entry alone inverted BOTH verdicts for the split config, the deny-list one silently: it published `[GEO:??][GEO:DE]` for a node the operator excluded DE for, and `select.go` then wrote `DE` into `Entry.Country` and `stable_kept_country_nodes{country="DE"}`. `geotrace` is the only provider that is not an offline database: it answers what the node reported about its own egress, which exists only in the worker's post-probe stage, so on `/` it always misses and the chain falls through. `config.Config.AnnotateUsesProvider("geotrace")` is what arms that probe — an offline-only chain never spends a request on it. The retired singular `provider:` key is rejected as an unknown key by the strict decode. The `IP` and `ASN` tags are retired — both removed outright, since nothing consumed them and no shipped config selected them, so `- tag: IP` and `- tag: ASN` now fail the load as unknown tags; `rewrite.isKnownTag` still recognises `[IP:…]` and `[ASN:…]` on the STRIP side, deliberately, so an upstream-authored address or AS attribution is removed instead of riding along. Note that `asn` the PROVIDER and `{type: asn}` the FILTER are untouched and load-bearing — only the tag went.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` / `geoblock.tidal.*` (`endpoint`, `timeout`, `concurrency`; plus `marker` for gemini/claude/chatgpt, `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt`/`tidal` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` / `{type: tidal}` in `filters` (a filter entry may override these per-field). The `tidal` gate is the odd one out twice over. It has no refusal marker: where Tidal refuses an egress the request dies at the CDN (403 + HTML, measured from a RU egress), so the gate is **fail-closed on the status alone** — kept only on 2xx, and since redirects are not followed a 3xx interstitial is a refusal too. The body is deliberately not read (the country it reports gates where a subscription can be bought, not where an existing subscriber streams), so the gate answers only "did the request get through" and a 2xx from an ISP block page or captive portal counts as passed. It also never writes to the geoblock store (a bare status code is too weak a signal to persist host-wide for the store's TTL).
 - The `gemini` gate CANNOT be made keyless, and a rejected key must never read as "not blocked". Measured against `generativelanguage.googleapis.com` from a geo-blocked egress: no key -> `403` "Method doesn't allow unregistered callers"; junk key (query param or `x-goog-api-key`) -> `400 API_KEY_INVALID`; valid key -> `400 FAILED_PRECONDITION` + the location marker. The API resolves caller identity, then key validity, and only then the location precondition, so the verdict this gate reads is invisible without a working credential — hence `geminiInconclusive` (401/403/404/429, plus a 400 carrying `API_KEY_INVALID`): those answers predate the verdict, are counted and warned, and a rotated key can no longer turn the gate into a silent no-op. Keyless substitutes are country-list guesses, not this check: `gemini.google.com/app` and `aistudio.google.com/welcome` both answered `200` from that same blocked egress, and the supported-country list is documented at `ai.google.dev/gemini-api/docs/available-regions` (RU/BY/CN/HK/MO/IR/KP/CU/SY/AF/MM absent)
@@ -260,7 +260,7 @@ Important keys:
 - `internal/asn` — ASN lookup (Team Cymru) for the ASN name/country filter
 - `internal/filter` — country allow/deny bitset
 - `internal/subscription` — subscription fetch/normalize/parse (scheme-generic, plus dedicated decoders for `vmess://`, legacy `ss://`, `ssr://` and `mierus://` in `vmess.go`/`ss.go`/`ssr.go`/`mieru.go`, and Xray-JSON→share-link conversion in `xray.go`)
-- `internal/rewrite` — node name/fragment rewrite (`[GEO][ASN]`, vmess `ps` rewrite)
+- `internal/rewrite` — node name/fragment rewrite (`[GEO:XX]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
 - `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), the post-filter `cdn-cgi/trace` egress measurement, one-shot name annotation at publication, checker loop, holder
@@ -327,31 +327,49 @@ nix flake update sub-preprocessor && make switch
 - Benchmark results are stored in `./benchmarks/bench-<UTC timestamp>.txt`. That directory
   is gitignored, so a figure quoted out of a snapshot is unreachable from a fresh checkout:
   cite the mechanism, or re-measure with `nix-shell --run "make bench"`
-- **`BenchmarkProcessBodyPipeline` moved at `5d06fb6` and the FIXTURE, not the code, is the
-  whole of the drop and then some.** Its annotate list is a fixture (`newBenchProcessor`,
-  `internal/preprocess/pipeline_bench_test.go`), so the commit that removed the `IP` annotate
-  tag also dropped a `{Tag: IP}` entry from it. Re-measured as four trees run round-robin in
-  ONE session — `go test -bench '^BenchmarkProcessBodyPipeline$' -benchmem -benchtime 5000x
-  -count=1 ./internal/preprocess`, 41 rounds each, first round discarded, medians of the
-  remaining 40, 9800X3D: `23df10f` **18686 ns/op / 4642 B/op**; a hybrid of `23df10f`
-  production code with `5d06fb6`'s fixture **15933 / 1600**; that hybrid with only
-  `5d06fb6`'s `annotator.go` swapped in **16221 / 1600**; this HEAD **16212 / 1600**; 100
-  allocs/op throughout. So the fixture is **100% of the B/op drop and 111% of the ns drop** —
-  it OVERSHOOTS, because the production change put **+280 ns/op (+1.8%)** back on top of it,
-  and swapping `annotator.go` alone reproduces all of that (+288). Two things follow for a
-  reader diffing a fresh `make bench` against a pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
-  not an allocation win the pipeline earned, and the post-`5d06fb6` ns baseline is **~16200,
-  NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. Read
-  the +1.8% as a median shift, not a clean separation: the interquartile ranges are disjoint
-  (hybrid 15856-16027, HEAD 16162-16348) but the full ranges overlap in the tails, and B/op
-  itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
-  objdump` on `(*annotator).Annotate` shows the surviving 2-case switch dispatching on ONE
-  length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the 3-case one needed two
-  (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares against seven. It is block
-  placement. Left alone deliberately: a never-executed switch arm does not buy back three
-  nanoseconds per node. Every `benchmarks/` snapshot older than `5d06fb6` records
-  `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% allocation win that
-  does not exist.
+- **Two benchmarks moved because their FIXTURE moved, and both times the fixture was the
+  whole of it.** `BenchmarkProcessBodyPipeline`'s annotate list lives in `newBenchProcessor`
+  (`internal/preprocess/pipeline_bench_test.go`) and `BenchmarkAnnotate`'s in
+  `annotator_bench_test.go`. Both name the annotate tags, so removing a tag edits them:
+  `5d06fb6` (the `IP` tag) took the pipeline 4640 -> 1600 B/op, and the `ASN` tag removal
+  took `BenchmarkAnnotate` 48 -> 24 B/op. **Neither is an allocation win the code earned.**
+  Controlled both times against a hybrid tree holding the fixture constant, the fixture was
+  100% of each B/op move. Every `benchmarks/` snapshot older than `5d06fb6` records
+  `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% win that does not
+  exist; the post-`5d06fb6` pipeline baseline is **~16200 ns/op**, not the hybrid's ~15900.
+- **A sub-2% ns delta on these benchmarks is not measurable here and MUST NOT be quoted as
+  a result.** The variable is the linked image, not the session: two `git archive` exports
+  of byte-identical source, relinked, disagree by up to ~2% on a must-be-zero null control,
+  while each individual link holds its own offset to a handful of ns across sessions hours
+  apart. So a clean null control proves nothing - it says only that this link sits near its
+  control - and re-running only sharpens a constant you cannot attribute. **Re-export and
+  RELINK the null control; if two links of one source disagree by more than the delta you
+  are chasing, that delta is unmeasured.** This was paid for twice: a +1.8% regression
+  attributed to the `IP` removal and a -0.75% win attributed to the `ASN` one. Neither
+  survived a relinked control. What DOES survive is the static shape - `go tool objdump`
+  shows the annotate dispatch going from a 3-case switch to a 2-case one to a guard clause
+  (`if t.key != config.TagGEO { continue }`) as the two tags were removed, seven immediate
+  compares down to three. That is an argument about work removed, not about nanoseconds.
+- **Allocations are the binding constraint and they are clean across both changes**: no
+  `allocs/op` or `B/op` increase on any benchmark. Five in untouched packages
+  (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
+  differ between trees at `-benchtime 100x` while the SAME tree reproduces the same spread
+  across consecutive runs - `Resolution_Concurrent` even flips 64/65 allocs/op - so that is
+  the instrument. The one deliberate increase is in `countryChainOrder`: a config splitting
+  one `GEO` chain across several entries now pays a per-request `chainLookup` it did not
+  before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
+  already cost. The shipped config is unmoved, and the alternative was the wrong filter
+  verdict - see `Processor.countryChain`.
+- **STRUCK by explicit agreement, after six review rounds:** the per-link median tables,
+  per-session interquartile ranges and A/B/C/D build enumerations that used to fill this
+  section. They were measured in `/tmp` export trees that no longer exist, so no reader
+  could check them from a fresh checkout - which is the rule at the top of this section.
+  They existed to support a NULL result, so the apparatus could never be load-bearing and
+  could only be wrong in new ways; each rewrite minted the next round's findings ("five
+  commits" was seven, "four independent links" was three links and a re-run, a tree that
+  "reproduced exactly" was a different tree). The three bullets above are what four
+  independent reviewers verified and what stands without figures. Re-measure with
+  `nix-shell --run "make bench"` rather than trusting a number here.
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations

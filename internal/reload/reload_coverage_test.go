@@ -260,7 +260,14 @@ var keyMutators = map[string]func(*config.Config){
 	"filters[].key_var":     func(c *config.Config) { c.Filters[3].KeyVar = "OTHER" },
 	"filters[].version":     func(c *config.Config) { c.Filters[4].Version = "2024-01-01" },
 
-	"annotate[].tag": func(c *config.Config) { c.Annotate[0].Tag = config.TagASN },
+	// GEO is the only tag validateAnnotate accepts, so no LOADABLE config
+	// differs in this field alone; the row still has to be exercised, and with
+	// an unloadable value it pins three gates rather than one. config.Equal
+	// must reach AnnotateSpec.Tag (or mutatedReach rejects the mutator as
+	// proving nothing), OptionsFromConfig must carry the field into the
+	// processor's Options (proc), and config.AnnotateChanged must see it so the
+	// worker re-applies (worker) — the liveBoth class fails on either half.
+	"annotate[].tag": func(c *config.Config) { c.Annotate[0].Tag = "NOT-A-TAG" },
 	"annotate[].providers": func(c *config.Config) {
 		c.Annotate[0].Providers = []string{config.ProviderDBIP}
 	},

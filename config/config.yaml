@@ -43,7 +43,13 @@ filters:
     min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
     timeout: 20s # per-node download deadline
     concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
-# Ordered annotation tags added to node names (both / and /stable.txt).
+# Ordered annotation tags added to node names (both / and /stable.txt). GEO is
+# the only tag the loader accepts; entries still render in order and may
+# repeat, so a second `- tag: GEO` with a different chain publishes a second
+# tag. Repetition reaches the country FILTER too: it walks every GEO entry's
+# chain concatenated in written order, de-duplicated by first occurrence
+# (preprocess countryChainOrder), so splitting one chain across entries changes
+# only the rendering, never which nodes survive.
 annotate:
   - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
     # Ordered chain, first hit wins. geotrace asks the node itself where its
@@ -57,14 +63,16 @@ annotate:
     # dbip/registry are downloaded in-memory databases (built only because they
     # are referenced here), asn is the cached Cymru DNS last resort.
     providers: [geotrace, geofeed, dbip, registry, asn]
-  # There is no IP tag any more: it was removed outright, because nothing
-  # consumed it and no config selected it, so `- tag: IP` is now a load error
-  # (unknown tag). It had also stopped being the thing its name promised --
-  # since geotrace it carried the MEASURED egress, for a CDN-fronted node
-  # precisely the origin the fronting hid (108 of 149 traced nodes last cycle
-  # published an address different from the resolved one), and /stable.txt is
-  # shared. An upstream-authored [IP:...] is still STRIPPED off node names
-  # (rewrite.isKnownTag keeps recognising it) on any config that annotates at
+  # GEO is the last tag standing. The IP and ASN tags were both removed
+  # outright, because nothing consumed them and no config selected them, so
+  # `- tag: IP` and `- tag: ASN` are now load errors (unknown tag). IP had also
+  # stopped being the thing its name promised -- since geotrace it carried the
+  # MEASURED egress, for a CDN-fronted node precisely the origin the fronting
+  # hid (108 of 149 traced nodes last cycle published an address different from
+  # the resolved one), and /stable.txt is shared. Note what did NOT go: `asn`
+  # the PROVIDER above and the `{type: asn}` FILTER are both live. An
+  # upstream-authored [IP:...] or [ASN:...] is still STRIPPED off node names
+  # (rewrite.isKnownTag keeps recognising both) on any config that annotates at
   # all. Emptying this list is the exception, not a milder setting: the
   # annotator goes nil, nothing strips anything, and on / the node line is
   # published verbatim (preprocess.bufferSink.emit writes node.Raw), so every
