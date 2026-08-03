@@ -327,212 +327,49 @@ nix flake update sub-preprocessor && make switch
 - Benchmark results are stored in `./benchmarks/bench-<UTC timestamp>.txt`. That directory
   is gitignored, so a figure quoted out of a snapshot is unreachable from a fresh checkout:
   cite the mechanism, or re-measure with `nix-shell --run "make bench"`
-- **`BenchmarkProcessBodyPipeline` moved at `5d06fb6` and the FIXTURE, not the code, is the
-  whole of the drop and then some.** Its annotate list is a fixture (`newBenchProcessor`,
-  `internal/preprocess/pipeline_bench_test.go`), so the commit that removed the `IP` annotate
-  tag also dropped a `{Tag: IP}` entry from it. Re-measured as four trees run round-robin in
-  ONE session — `go test -bench '^BenchmarkProcessBodyPipeline$' -benchmem -benchtime 5000x
-  -count=1 ./internal/preprocess`, 41 rounds each, first round discarded, medians of the
-  remaining 40, 9800X3D: `23df10f` **18686 ns/op / 4642 B/op**; a hybrid of `23df10f`
-  production code with `5d06fb6`'s fixture **15933 / 1600**; that hybrid with only
-  `5d06fb6`'s `annotator.go` swapped in **16221 / 1600**; `5d06fb6` **16212 / 1600**; 100
-  allocs/op throughout. So the fixture is **100% of the B/op drop and 111% of the ns drop** —
-  it OVERSHOOTS, because a further **+280 ns/op (+1.8%)** came back on top of it — attributed
-  then to the production change, and swapping `annotator.go` alone did reproduce all of it
-  (+288), but see the bullet below: that is the size of this benchmark's per-binary link
-  offset, so the attribution does not hold and only the fixture half of this bullet does.
-  Two things follow for a reader diffing a fresh `make bench` against a
-  pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
-  not an allocation win the pipeline earned, and the post-`5d06fb6` ns baseline is **~16200,
-  NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. The
-  +1.8% read as a median shift with disjoint interquartile ranges (hybrid 15856-16027,
-  `5d06fb6` 16162-16348) and overlapping tails, which was taken at the time as a weak
-  separation. It is better evidence than that, for the opposite conclusion: a CONSTANT
-  per-binary offset is exactly what produces disjoint IQRs around two stable medians, and the
-  bullet below measures one such link holding to 19 ns across five sessions hours apart. B/op
-  itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
-  objdump` on `(*annotator).Annotate` showed the 2-case switch `5d06fb6` left behind
-  dispatching on ONE length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the
-  3-case one needed two (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares
-  against seven. It is block placement, and the bullet below shows the +1.8% was the same
-  per-binary link offset that made a null control read +1.97%. That switch is gone now: the
-  `ASN` tag removal replaced it with a guard clause (`if t.key != config.TagGEO {
-  continue }`), leaving three compares. Its arm was left alone at the time deliberately: a
-  never-executed switch arm does not buy back three nanoseconds per node. Every
-  `benchmarks/` snapshot older than `5d06fb6` records
-  `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% allocation win that
-  does not exist.
-- **The `ASN` annotate tag removal moved `BenchmarkAnnotate`, and the FIXTURE is the whole
-  of it. It did NOT resolvably move `BenchmarkProcessBodyPipeline` — the null control that
-  once certified otherwise is retracted below, and retracting it is the most useful thing
-  in this entry.** The Annotate tag list lives in `annotator_bench_test.go` — the whole
-  point of the benchmark — but the tag it measured second WAS the tag being removed, so its
-  fixture had to go from two tags (`GEO`+`ASN`) to one. Controlled with FOUR trees exported
-  by `git archive` into `/tmp` (no checkout touched), verified by SHA-256 tree diff, run
-  round-robin in ONE session from prebuilt `go test -c` binaries, 31 rounds each, first
-  discarded, medians of 30, 9800X3D. Three independent rounds of exports have now rebuilt
-  all four trees from that same recipe; the table is build 1 (the implementing round):
-
-  | tree | differs from A in | `BenchmarkAnnotate` @500000x | `BenchmarkProcessBodyPipeline` @5000x |
-  |---|---|---|---|
-  | A = `372749b` verbatim | — | **77.61 ns/op, 48 B/op** | 16073.5 ns/op, 1601 B/op |
-  | B = `7f93685` verbatim | 16 files | **57.14, 24** | 15971.0, 1601 |
-  | C = B + A's `pipeline_bench_test.go` | 15 files (1 vs B) | 57.25, 24 | 15952.5, 1601 |
-  | D = A + B's `annotator_bench_test.go` | 1 file | **56.33, 24** | 16073.0, 1601 |
-
-  **B is pinned by SHA and must stay that way.** It was written as "removal HEAD", a
-  mutable ref that had already moved **seven** commits by `66e5d80` (`git rev-list --count
-  7f93685..66e5d80`) and moves again with every commit — count it from a named tree or not
-  at all; the five it used to claim is the distance from `093b657`, the tree a review was
-  raised against, not from the commit that wrote the label. The neighbouring file count
-  cannot disambiguate it either: `git diff --name-only 372749b <sha>` lists **16** paths
-  for `3bddb93` and for every commit from there through `66e5d80`, because `3bddb93`
-  already touches `AGENTS.md` and each of those re-edits paths inside that same 16. (The
-  round after `66e5d80` took it to 17 by fixing `filters.go`, which only sharpens the
-  point: a count that moves solely when a commit happens to reach a seventeenth file was
-  never an identifier.) Following the label literally therefore reads a different tree than
-  the table measured, and the evidence for that is the SOURCE, never a ns figure: three of
-  those seven commits — `4084d69`, `712bf9f`, `66e5d80` — edit `annotator.go`,
-  `config.go`, `processor.go` and `rewrite.go`, all compiled into the `internal/preprocess`
-  test binary. This entry once cited +82 ns/op (+0.51%) instead, measured on `093b657`.
-  Do not restore it: +0.51% sits under the "up to +2%" per-binary layout offset the
-  children below establish, so it cannot separate two trees at all, and a further
-  independent export and link — `history://FixMergeRound`'s, on a different tree PAIR, and
-  not one of the four A/B/C/D builds tabulated below — (prebuilt binaries, round-robin,
-  21 rounds, first discarded, medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at
-  15972.0 [15847-16230] and `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the
-  opposite sign and two orders of magnitude smaller: on that link the two trees agree to
-  within 1.0 ns/op, far under the floor this entry's own children establish. Nothing in that
-  session reproduces a row of the table above and nothing can — its `372749b` reads
-  16134.5 [16054-16194] against the table's A of 16073.5, **+61.0 ns/op on a tree
-  byte-identical to the one the table measured**, which is the per-binary layout offset
-  again and the reason a ns figure from an independent link can neither confirm nor
-  separate a row. **That round has TWO links of that pair and they are not a
-  contradiction**: its performance REVIEWER, `history://PerfMerge`, `git archive`d and
-  linked the same three trees itself (alongside `a392316`) and read `372749b` 16081.0,
-  `7f93685` 15974.0 and `66e5d80` 15926.5 — **-47.5** on the pair where FixMergeRound's
-  link reads -1.0: both negative, 46.5 apart, the layout offset one more time. Take the
-  triple above from `history://FixMergeRound` only, and take nothing but medians from
-  PerfMerge: that session picked up outside machine load (`372749b` maximum 18165 and
-  `66e5d80` 16528 against clean minima of 15992 and 15823). C and D
-  need no separate pin: both are defined as a one-file swap between A and B, so pinning
-  those two fixes all four. The 16 above is `git diff --name-only 372749b 7f93685`, with
-  `AGENTS.md` among the paths because `3bddb93` edits it before `7f93685` appends this note.
-  A vs C is 15, B vs C is 1, A vs D is 1 (`diff -rq` on the exports agrees). 1 alloc/op on
-  `BenchmarkAnnotate` and 100 allocs/op on the pipeline throughout, every tree, every
-  build; the pipeline's B/op drifts 1600-1603.
-  - `BenchmarkAnnotate`: **D is the control.** A -> D (fixture alone) is -21.28 ns/op and
-    the WHOLE of 48 -> 24 B/op. So the fixture is **104% of the ns move and 100% of the
-    B/op move** — the durable result here, reproduced by three later builds at 101%,
-    104% and 102.8% with the same 48 -> 24 at the fixture swap. A reader diffing a fresh
-    `make bench` against a pre-removal snapshot sees 48 -> 24 B/op and must read it as
-    "the benchmark now annotates one tag", never as an allocation win.
-  - **The D -> B residual is not a quantity this benchmark can report**, for the same
-    per-binary reason as the pipeline below. Build 1 measured +0.82 ns/op, build 2 +0.17 and
-    +0.03 on two runs, build 3 +0.855, build 4 +0.545 — while D and D2, the SAME source
-    re-exported under a longer path and relinked, differ by 0.36 (build 2: 57.19 vs 56.83),
-    0.26 (build 3: 56.55 vs 56.805) and 0.22 (build 4: 56.875 vs 56.655) with nothing to
-    explain it but the link. Against B's own 20-sample range of 56.29-58.37 the residual is
-    **indistinguishable from zero at a floor of roughly ±0.4 ns/op**; quote it as that,
-    never as a number.
-  - **`BenchmarkProcessBodyPipeline`: the delta is NOT resolvable at this benchmark's
-    precision, and the D null control is withdrawn.** Its fixture did not change
-    (`newBenchProcessor` was already GEO-only after `5d06fb6`, and C differs from B in
-    `pipeline_bench_test.go` by COMMENT LINES ONLY — comment-stripped, A's and B's copies
-    hash identically), so A -> C is the fixture-held production comparison and D, which
-    cannot execute one changed instruction, must reproduce A exactly. It does not, and **the
-    variable is the LINKED BINARY, not the session** — that distinction is the whole finding,
-    because it says more rounds cannot rescue the measurement. Medians of FOUR independent
-    rounds of exports, each having rebuilt every tree itself from the recipe above. Build 4
-    is the closing review's (`history://ClosePerfASN`); its ranges are omitted because that
-    session picked up outside machine load (maxima to 21590 against clean minima) and only
-    its medians survive that. Build 2's D2 cell comes from that build's path-comparison
-    session, in which its A read 16095.5, not the 16104.5 standing in the A column — so
-    take every A -> D2 from the link table below, never by subtracting across a row:
-
-    | build | A | C | B | D (must equal A) | D2 (D's source, longer path) |
-    |---|---|---|---|---|---|
-    | 1 (implement) | 16073.5 | 15952.5 | 15971.0 | 16073.0 | — |
-    | 2 (review) | 16104.5 [15992-16249] | 15995.0 [15891-16135] | 15935.0 [15836-16018] | **16421.5 [16357-16582]** | 16116.5 |
-    | 3 (fix round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
-    | 4 (closing review) | 16087.0 | 16111.0 | 15961.0 | 16157.0 | 16093.0 |
-
-    **Seven independent LINKS of the same D source have now been measured**, and this is
-    the entry's ONLY enumeration of them — every count below is read off it, never
-    reconstructed. D and D2 are one source under two export paths, so each is its own link
-    and a build carrying both contributes two. Every figure is the WITHIN-SESSION A -> D
-    median difference on that link's FIRST session:
-
-    | link | build | tree | A | D-tree | A -> D | where the figure comes from |
-    |---|---|---|---|---|---|---|
-    | L1 | 1 | D | 16073.5 | 16073.0 | **-0.5** | `7f93685` commit body |
-    | L2 | 2 | D (`/tmp/perfasn`) | 16104.5 | 16421.5 | **+317.0** | `agent://PerfASN`, primary session |
-    | L3 | 2 | D2 (longer path) | 16095.5 | 16116.5 | **+21.0** | `history://PerfASN`, path-comparison session |
-    | L4 | 3 | D | 16075.5 | 16113.0 | **+37.5** | `093b657` body; FixASNRound to PerfASN |
-    | L5 | 3 | D2 | 16075.5 | 16071.5 | **-4.0** | same |
-    | L6 | 4 | D (`/tmp/rv6bench`) | 16087.0 | 16157.0 | **+70.0** | `history://ClosePerfASN`, run 1 |
-    | L7 | 4 | D2 | 16087.0 | 16093.0 | **+6.0** | same |
-
-    **No row above is a re-run of another row**, and that separation is what the entry
-    turns on: seven LINKS of identical source disagreeing is evidence about BUILD LAYOUT,
-    which is the thesis here; one link re-run is evidence about SESSION STABILITY, which
-    only makes the first reading trustworthy. Re-runs are therefore reported apart from the
-    count and never added to it. L2's images (SHA-256 re-checked, unchanged) were re-run in
-    four further sessions hours apart at +327.5, +324.0, +307.0 and **+323.5**; L4 re-ran at
-    +43.0, L5 at -4.0 again, L6 at +41.0, L7 at +2.0. An earlier revision of this entry
-    counted L2's +317.0 and that +323.5 re-run as two of "four independent links": they are
-    one link measured twice, and the true link count is seven.
-    Each link's own offset is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 /
-    16404.0 / 16402.5 / 16407.0 across those five sessions (spread 19 ns, its A spread 24.5)
-    and build 3's A -> D2 came back exactly -4.0 both times. Nor is it order or edit
-    sensitivity: reversing the round-robin leaves build 2's D at 16413.5, and appending one
-    or four comment lines to A moves it to 16049.0 / 16088.5 in a run where D read 16404.0.
-    A -> C, the fixture-held production comparison, has FOUR links behind it — one per
-    build, D2 taking no part — and they do not agree even in sign: -121.0 (-0.75%, build 1),
-    -109.5 (-0.68%, build 2) and -59.0 (-0.37%, build 3), against build 4's **+24.0 then
-    -6.0** (`history://ClosePerfASN`, runs 1 and 2). Build 2's -86.0 is its reversed-order
-    re-run of the same link, not a fifth one. So A -> C holds its direction on three links
-    of four and its magnitude on none. And nothing on the measured path differs — `go tool
-    objdump` on `processBody`, `(*annotator).Annotate`, `(*annotTag).lookupCountry`,
-    `rewrite.NodeName` and `rewrite.StripKnownTags` gives opcode-byte-identical listings at
-    IDENTICAL entry addresses for A and D, reproduced on two independent builds
-    (`processBody` 0x6fd720, `Annotate` 0x6f8de0, same SHA-256 over the opcode column). So
-    this benchmark carries a **per-binary layout offset of up to +2%** (L2 is the largest:
-    +317.0 against A's 16104.5 is +1.97%, its re-runs spanning +1.91% to +2.04%) that no
-    source difference explains, the -0.75% sits under it, and the `objdump` argument below —
-    not the ns number — is what supports the direction. The distribution is fat-tailed
-    rather than a symmetric band: six of the seven links sit in 16071-16157 and one (L2) at
-    ~16405, so read it as "up to +2%, one link in seven here", never as ±2%. This
-    retroactively confirms the `5d06fb6` bullet above calling its +1.8% block placement:
-    that was the same offset.
-  - Every Annotate range overlaps too (build 1: D 55.72-57.12 vs B 56.22-58.55).
-  - **What did change is real, and it is the static shape.** `go tool objdump` on
-    `(*annotator).Annotate`: master emits the ASN test FIRST (`annotator.go:134`,
-    `CMPW $0x5341` "AS" then `CMPB $0x4e` 'N') and reaches the GEO test (`CMPW $0x4547` "GE",
-    `CMPB $0x4f` 'O') on the JNE. **Five key compares become three** (A: `CMPQ $3`, "AS",
-    'N', "GE", 'O'; B: `CMPQ $3`, "GE", 'O') and the function shrinks **205 -> 169
-    instructions** — measured 205/205/169/169 for A/D/B/C, and both figures reproduce
-    exactly in every session. The DYNAMIC cost, though, was one compare, not two: the `JNE`
-    after `CMPW $0x5341` jumps straight to the GEO test, so for key "GEO" the `CMPB $0x4e`
-    is never reached. Every GEO tag on every node paid **one compare and one
-    perfectly-predicted taken branch** for an arm it never entered — over the pipeline's 100
-    nodes that is tens of ns/op, not 121, so it points the way **three of A -> C's four
-    links** do, and predicts nothing about its size. `BenchmarkAnnotate` moving the other
-    way over a strictly shorter path — its D -> B residual is POSITIVE on all four builds —
-    says the same thing from the other side.
-  - No `allocs/op` or `B/op` increase on any of the 49 benchmarks. Five in untouched packages
-    (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
-    differ between trees at `-benchtime 100x`, and the SAME tree reproduces the same spread
-    across three consecutive runs — `Resolution_Concurrent` even flips 64/65 allocs/op — so
-    that is the instrument, not the change.
-  - **The lesson, since this is the second round it has cost:** a hybrid tree is a control
-    for FIXTURE effects only, and a null control that comes back clean has proved nothing
-    about the instrument — the layout offset it is supposed to expose is a property of the
-    LINKED IMAGE, so one clean null says only that this link happens to sit near A. Re-export
-    and relink it; if two links of the same source disagree by more than the delta you are
-    chasing, that delta is unmeasured and no number of extra rounds will change it (each
-    link's own offset is stable to a handful of ns across sessions, so rounds only sharpen a
-    constant you cannot attribute).
+- **Two benchmarks moved because their FIXTURE moved, and both times the fixture was the
+  whole of it.** `BenchmarkProcessBodyPipeline`'s annotate list lives in `newBenchProcessor`
+  (`internal/preprocess/pipeline_bench_test.go`) and `BenchmarkAnnotate`'s in
+  `annotator_bench_test.go`. Both name the annotate tags, so removing a tag edits them:
+  `5d06fb6` (the `IP` tag) took the pipeline 4640 -> 1600 B/op, and the `ASN` tag removal
+  took `BenchmarkAnnotate` 48 -> 24 B/op. **Neither is an allocation win the code earned.**
+  Controlled both times against a hybrid tree holding the fixture constant, the fixture was
+  100% of each B/op move. Every `benchmarks/` snapshot older than `5d06fb6` records
+  `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% win that does not
+  exist; the post-`5d06fb6` pipeline baseline is **~16200 ns/op**, not the hybrid's ~15900.
+- **A sub-2% ns delta on these benchmarks is not measurable here and MUST NOT be quoted as
+  a result.** The variable is the linked image, not the session: two `git archive` exports
+  of byte-identical source, relinked, disagree by up to ~2% on a must-be-zero null control,
+  while each individual link holds its own offset to a handful of ns across sessions hours
+  apart. So a clean null control proves nothing - it says only that this link sits near its
+  control - and re-running only sharpens a constant you cannot attribute. **Re-export and
+  RELINK the null control; if two links of one source disagree by more than the delta you
+  are chasing, that delta is unmeasured.** This was paid for twice: a +1.8% regression
+  attributed to the `IP` removal and a -0.75% win attributed to the `ASN` one. Neither
+  survived a relinked control. What DOES survive is the static shape - `go tool objdump`
+  shows the annotate dispatch going from a 3-case switch to a 2-case one to a guard clause
+  (`if t.key != config.TagGEO { continue }`) as the two tags were removed, seven immediate
+  compares down to three. That is an argument about work removed, not about nanoseconds.
+- **Allocations are the binding constraint and they are clean across both changes**: no
+  `allocs/op` or `B/op` increase on any benchmark. Five in untouched packages
+  (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
+  differ between trees at `-benchtime 100x` while the SAME tree reproduces the same spread
+  across consecutive runs - `Resolution_Concurrent` even flips 64/65 allocs/op - so that is
+  the instrument. The one deliberate increase is in `countryChainOrder`: a config splitting
+  one `GEO` chain across several entries now pays a per-request `chainLookup` it did not
+  before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
+  already cost. The shipped config is unmoved, and the alternative was the wrong filter
+  verdict - see `Processor.countryChain`.
+- **STRUCK by explicit agreement, after six review rounds:** the per-link median tables,
+  per-session interquartile ranges and A/B/C/D build enumerations that used to fill this
+  section. They were measured in `/tmp` export trees that no longer exist, so no reader
+  could check them from a fresh checkout - which is the rule at the top of this section.
+  They existed to support a NULL result, so the apparatus could never be load-bearing and
+  could only be wrong in new ways; each rewrite minted the next round's findings ("five
+  commits" was seven, "four independent links" was three links and a re-run, a tree that
+  "reproduced exactly" was a different tree). The three bullets above are what four
+  independent reviewers verified and what stands without figures. Re-measure with
+  `nix-shell --run "make bench"` rather than trusting a number here.
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations
