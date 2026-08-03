@@ -88,12 +88,13 @@ objdump` on the suspect functions. Without that pass the branch either ships a r
 gets rewritten to chase a phantom. The inverse is just as real, and derivable without
 running anything: `SelectSurvivors` does one `make([]Survivor, 0, len(entries))`, so its
 B/op is `len(entries) * unsafe.Sizeof(Survivor{})` rounded up to the allocator's 8 KiB page
-multiple. At the benchmark's `n = 500`, growing `Survivor` from 80 to 88 bytes moves it from
-40960 to 49152 B/op — **+20%, for one added `bool`**. **Allocations are the binding
+multiple — at the benchmark's `n = 500` and today's 136-byte `Survivor`, 73807 B/op. That
+step function has been paid twice. `4ed8009` grew `Survivor` 80 -> 88 bytes for one added
+`bool` and moved it 40960 -> 49152 B/op — **+20%**. **Allocations are the binding
 constraint:** an `allocs/op` or `B/op` increase is a BLOCKING FINDING the change MUST
 justify and the reviewer MUST accept before the round closes. A finding, not a prohibition,
-because that 20% was paid deliberately: the field is now `Entry.Country` (`0f7af54` swapped
-the bool for the code itself, 88 -> 96 bytes, the same 49152 B/op), and it is what feeds
+because that 20% was paid deliberately: `0f7af54` then swapped the bool for the code itself
+(88 -> 96 bytes, the same 49152 B/op) and the field is now `Entry.Country`, which feeds
 `keptCountries` and `stable_kept_country_nodes`. An agent reading the rule as absolute would
 have blocked it. `ns/op` is noisy and means nothing without a control: benchmarks here drift
 several percent run to run over code whose allocation counters do not move at all.
