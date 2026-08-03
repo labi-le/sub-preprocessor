@@ -352,6 +352,50 @@ nix flake update sub-preprocessor && make switch
   nanoseconds per node. Every `benchmarks/` snapshot older than `5d06fb6` records
   `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% allocation win that
   does not exist.
+- **The `ASN` annotate tag removal moved `BenchmarkAnnotate`, and the FIXTURE is 104% of
+  it.** That benchmark's tag list lives in `annotator_bench_test.go` — the whole point of
+  the benchmark — but the tag it measured second WAS the tag being removed, so its fixture
+  had to go from two tags (`GEO`+`ASN`) to one. Controlled with FOUR trees exported by
+  `git archive` into `/tmp` (no checkout touched), verified by SHA-256 tree diff, run
+  round-robin in ONE session from prebuilt `go test -c` binaries, 31 rounds each, first
+  discarded, medians of 30, 9800X3D:
+
+  | tree | differs from A in | `BenchmarkAnnotate` @500000x | `BenchmarkProcessBodyPipeline` @5000x |
+  |---|---|---|---|
+  | A = `372749b` verbatim | — | **77.61 ns/op, 48 B/op** | **16073.5 ns/op, 1601 B/op** |
+  | B = removal HEAD verbatim | 15 files | **57.14, 24** | **15971.0, 1601** |
+  | C = B + A's `pipeline_bench_test.go` | 14 files (1 vs B) | 57.25, 24 | **15952.5, 1601** |
+  | D = A + B's `annotator_bench_test.go` | 1 file | **56.33, 24** | 16073.0, 1601 |
+
+  1 alloc/op on `BenchmarkAnnotate` and 100 allocs/op on the pipeline throughout; the
+  pipeline's B/op drifts 1600-1602 on every tree.
+  - `BenchmarkAnnotate`: **D is the control**, and A -> D (fixture alone) is -21.28 ns/op
+    and the whole of 48 -> 24 B/op, while D -> B (production code alone) is **+0.82 ns/op**.
+    So the fixture is **104% of the ns move and 100% of the B/op move**. A reader diffing a
+    fresh `make bench` against a pre-removal snapshot sees 48 -> 24 B/op and must read it as
+    "the benchmark now annotates one tag", never as an allocation win.
+  - `BenchmarkProcessBodyPipeline`: **its fixture did NOT change.** `newBenchProcessor` was
+    already GEO-only after `5d06fb6`, and C differs from B in `pipeline_bench_test.go` by
+    COMMENT LINES ONLY — comment-stripped, A's and B's copies hash identically. So A -> C is
+    the clean fixture-held production comparison: **-121 ns/op (-0.75%)**, with C -> B
+    (+18.5, +0.12%) sitting in the drift. D is the null control that sizes that drift: at
+    16073.0 against A's 16073.5 it reproduces A to half a nanosecond, since swapping the
+    annotate fixture cannot touch this benchmark.
+  - Both deltas are **median shifts, not separations** — every range overlaps (Annotate
+    D 55.72-57.12 vs B 56.22-58.55; pipeline A 15944-16236 vs C 15873-16071).
+  - Unlike the `IP` round, the executed path really did get shorter, and `go tool objdump`
+    on `(*annotator).Annotate` says why: master emits the ASN test FIRST (`annotator.go:134`,
+    `CMPW $0x5341` "AS" then `CMPB $0x4e` 'N') and only reaches the GEO test
+    (`CMPW $0x4547` "GE", `CMPB $0x4f` 'O') on the JNE, so **every GEO tag on every node paid
+    two compares and a taken branch for an arm it never entered**. The removal leaves three
+    compares where there were five, and the function shrinks 205 -> 169 instructions. That
+    predicts the pipeline's -0.75%; `BenchmarkAnnotate`'s +1.46% points the other way over a
+    strictly shorter path, so at 57 ns/op that one is block placement, not work.
+  - No `allocs/op` or `B/op` increase on any of the 49 benchmarks. Five in untouched packages
+    (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
+    differ between trees at `-benchtime 100x`, and the SAME tree reproduces the same spread
+    across three consecutive runs — `Resolution_Concurrent` even flips 64/65 allocs/op — so
+    that is the instrument, not the change.
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations
