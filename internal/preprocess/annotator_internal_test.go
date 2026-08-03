@@ -54,7 +54,10 @@ func parseNodeLine(t *testing.T, line string) subscription.Node {
 // removes one: StripKnownTags consumes a CONTIGUOUS run, so if that arm goes,
 // the scan stops at `[ASN:` and republishes an AS attribution we never made,
 // with our own [GEO:] tag in front of it. Same argument as the `IP:` arm,
-// which three tests in internal/rewrite already pin.
+// which three tests already pin, though not all in one package: deleting that
+// arm fails TestStripKnownTags and TestKnownTagsIncludeSPD in internal/rewrite
+// and a second, same-named TestStripKnownTags here in internal/preprocess
+// (processor_test.go), and nothing else in the suite.
 func TestAnnotateStripsUpstreamTagsItCannotWrite(t *testing.T) {
 	t.Parallel()
 
@@ -140,6 +143,42 @@ func TestNewAnnotatorEmptyIsNil(t *testing.T) {
 	}
 }
 
+// TestAnnotatorRendersNothingForUnacceptedTag pins the `t.key != config.TagGEO`
+// guard in Annotate, and annotTag.key with it. GEO is the only tag
+// validateAnnotate accepts, so this spec can only be a Config built IN CODE —
+// not a hypothetical shape: reloader_test carried a `{Tag: "ASN"}` entry until
+// this commit's own removal round, and OptionsFromConfig hands the annotator
+// whatever Config it is given. Delete the guard and the loop falls into the one
+// rendering arm regardless of key, publishing the chain's answer under the GEO
+// label — a [GEO:NL] tag for an entry that never asked for a country, and NL
+// returned as the node's country, which is what reaches Entry.Country and
+// stable_kept_country_nodes. Nothing else in the suite fails when it goes.
+func TestAnnotatorRendersNothingForUnacceptedTag(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: "ASN", Providers: []string{config.ProviderGeofeed}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+	})
+	if a == nil {
+		t.Fatal("a spec with an unaccepted tag must still build an annotator")
+	}
+
+	var buf, tagBuf bytes.Buffer
+	got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
+		Node: parseOneNode(t), IP: netip.MustParseAddr("1.2.3.4"),
+	})
+
+	// A clean relabel, no tag of any kind — not "[GEO:NL]", and not "[GEO:]".
+	if want := "vless://u@example.com:443#Old"; buf.String() != want {
+		t.Fatalf("an unaccepted tag must render nothing:\n got %q\nwant %q", buf.String(), want)
+	}
+	if got != (geofeed.CountryCode{}) {
+		t.Fatalf("an unaccepted tag must claim no country, got %q", got)
+	}
+}
+
 // annotateOne runs a single node through the annotator and returns the output.
 func annotateOne(t *testing.T, a *annotator, ip string) string {
 	t.Helper()
@@ -176,18 +215,23 @@ func TestAnnotatorGeoChainOrder(t *testing.T) {
 }
 
 // TestAnnotatorGeoChainFallback: a miss falls through to the next provider in
-// the chain. The dbip step answers with an Info that is NOT empty but carries
+// the chain. The middle step answers with an Info that is NOT empty but carries
 // no country — the shape geo.asnProvider returns when Cymru names the AS and
 // leaves the registry country blank — so this also pins that a chain reads the
-// field its own tag renders, not "the provider answered something".
+// field its own tag renders, not "the provider answered something". It is bound
+// to the `asn` step because that is the only provider that can emit the shape:
+// geofeed, dbip and registry all go through geo.lookupProvider, which returns
+// Info{Country} and never fills ASN. Hence asn sits mid-chain here rather than
+// in its usual last-resort place — a later step has to remain for the miss to
+// fall through to.
 func TestAnnotatorGeoChainFallback(t *testing.T) {
 	t.Parallel()
 
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry}},
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderASN, config.ProviderRegistry}},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed:  fakeProvider{name: "geofeed"},
-		config.ProviderDBIP:     fakeProvider{name: "dbip", info: geo.Info{ASN: "SOME-AS, RU"}},
+		config.ProviderASN:      fakeProvider{name: "asn", info: geo.Info{ASN: "SOME-AS, RU"}},
 		config.ProviderRegistry: fakeProvider{name: "registry", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
 	})
 

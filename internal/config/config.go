@@ -212,18 +212,28 @@ type FilterConfig struct {
 }
 
 // AnnotateSpec is one entry in the ordered annotation tag list. GEO is the only
-// tag the loader accepts — validateAnnotate's default arm rejects everything
-// else, IP and ASN included, both retired once nothing consumed them — and it
-// is provider-backed: Providers is its ordered lookup chain, first provider
-// that answers wins, and it must not be empty. Omitting it in YAML is still
-// fine, because applyAnnotateDefaults runs before Validate and fills GEO with
-// geofeed; the emptiness check only bites a Config built in code.
+// tag the loader accepts — validateAnnotate opens with a guard clause that
+// rejects everything else, IP and ASN included, both retired once nothing
+// consumed them — and it is provider-backed: Providers is its ordered lookup
+// chain, first provider that answers wins, and it must not be empty. Omitting
+// it in YAML is still fine, because applyAnnotateDefaults runs before Validate
+// and fills GEO with geofeed; the emptiness check only bites a Config built in
+// code.
 //
 // One accepted tag does not make the LIST redundant: entries are rendered in
 // order and repeat freely (two GEO entries with different chains publish two
 // tags, and Annotate reports the leftmost that resolved), and an empty list
 // disables annotation outright — a distinct mode, not a milder one, since the
 // annotator then goes nil and nothing strips upstream tags either.
+//
+// Repetition is honoured by the RENDERING stage only. preprocess's country
+// FILTER derives its provider order from the FIRST GEO entry alone
+// (countryChainOrder), so a second entry's chain publishes a tag the filter
+// never consulted — measured: with the geofeed unable to place an IP DB-IP puts
+// in DE, one entry chaining [geofeed, dbip] keeps the node under a `countries=DE`
+// allow-list and publishes [GEO:DE], while two entries [geofeed] then [dbip]
+// render [GEO:??][GEO:DE] and geo-drop it. Deliberately not changed here:
+// merging the chains would alter which nodes survive.
 //
 // The retired single-provider "provider" key needs no field here: the strict
 // decode in decodeStrict rejects it, and every future rename with it.

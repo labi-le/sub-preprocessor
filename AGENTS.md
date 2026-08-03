@@ -236,7 +236,7 @@ Important keys:
 - `resolver.address` — upstream DNS server, passed verbatim to the dialer, so it MUST be `host:port` (`1.1.1.1:53`); a portless value is rejected at load, because it dials nothing and would drop every node as a DNS failure. Empty keeps the system resolver
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
 - `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) run post-probe in the stable worker only, and every one of them is a gate that drops. `exclude_groups`/`exclude_countries` on a `country` entry are **worker-only** — their single consumer is `config.Config.DeniedCountries()`, which feeds the `/stable.txt` worker; on `/` the country constraint comes from the query params alone.
-- `annotate` — ordered tag list (`tag: GEO` is the only accepted tag; it takes `providers:`, an ordered chain of `geotrace|geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. One accepted tag does not make the LIST redundant: entries render in order and may repeat, so two `GEO` entries with different chains publish two tags (`preprocess.annotator` reports the leftmost that resolved as the node's country), and the empty list is a distinct mode rather than a milder one. `geotrace` is the only provider that is not an offline database: it answers what the node reported about its own egress, which exists only in the worker's post-probe stage, so on `/` it always misses and the chain falls through. `config.Config.AnnotateUsesProvider("geotrace")` is what arms that probe — an offline-only chain never spends a request on it. The retired singular `provider:` key is rejected as an unknown key by the strict decode. The `IP` and `ASN` tags are retired — both removed outright, since nothing consumed them and no shipped config selected them, so `- tag: IP` and `- tag: ASN` now fail the load as unknown tags; `rewrite.isKnownTag` still recognises `[IP:…]` and `[ASN:…]` on the STRIP side, deliberately, so an upstream-authored address or AS attribution is removed instead of riding along. Note that `asn` the PROVIDER and `{type: asn}` the FILTER are untouched and load-bearing — only the tag went.
+- `annotate` — ordered tag list (`tag: GEO` is the only accepted tag; it takes `providers:`, an ordered chain of `geotrace|geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. One accepted tag does not make the LIST redundant: entries render in order and may repeat, so two `GEO` entries with different chains publish two tags (`preprocess.annotator` reports the leftmost that resolved as the node's country), and the empty list is a distinct mode rather than a milder one. **Repetition reaches RENDERING only.** `preprocess.countryChainOrder` builds the country FILTER's provider order from the FIRST `GEO` entry and returns, so a second entry's chain publishes a tag the filter never consulted — measured on an IP the geofeed cannot place and DB-IP puts in DE: one entry chaining `[geofeed, dbip]` keeps the node under `countries=DE` and publishes `[GEO:DE]`, while two entries (`[geofeed]` then `[dbip]`) render `[GEO:??][GEO:DE]` and geo-drop it. Pre-existing and deliberately left alone — merging the chains would change which nodes survive — so an operator wanting a provider in the filter must put it in the FIRST entry's chain. `geotrace` is the only provider that is not an offline database: it answers what the node reported about its own egress, which exists only in the worker's post-probe stage, so on `/` it always misses and the chain falls through. `config.Config.AnnotateUsesProvider("geotrace")` is what arms that probe — an offline-only chain never spends a request on it. The retired singular `provider:` key is rejected as an unknown key by the strict decode. The `IP` and `ASN` tags are retired — both removed outright, since nothing consumed them and no shipped config selected them, so `- tag: IP` and `- tag: ASN` now fail the load as unknown tags; `rewrite.isKnownTag` still recognises `[IP:…]` and `[ASN:…]` on the STRIP side, deliberately, so an upstream-authored address or AS attribution is removed instead of riding along. Note that `asn` the PROVIDER and `{type: asn}` the FILTER are untouched and load-bearing — only the tag went.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` / `geoblock.tidal.*` (`endpoint`, `timeout`, `concurrency`; plus `marker` for gemini/claude/chatgpt, `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt`/`tidal` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` / `{type: tidal}` in `filters` (a filter entry may override these per-field). The `tidal` gate is the odd one out twice over. It has no refusal marker: where Tidal refuses an egress the request dies at the CDN (403 + HTML, measured from a RU egress), so the gate is **fail-closed on the status alone** — kept only on 2xx, and since redirects are not followed a 3xx interstitial is a refusal too. The body is deliberately not read (the country it reports gates where a subscription can be bought, not where an existing subscriber streams), so the gate answers only "did the request get through" and a 2xx from an ISP block page or captive portal counts as passed. It also never writes to the geoblock store (a bare status code is too weak a signal to persist host-wide for the store's TTL).
 - The `gemini` gate CANNOT be made keyless, and a rejected key must never read as "not blocked". Measured against `generativelanguage.googleapis.com` from a geo-blocked egress: no key -> `403` "Method doesn't allow unregistered callers"; junk key (query param or `x-goog-api-key`) -> `400 API_KEY_INVALID`; valid key -> `400 FAILED_PRECONDITION` + the location marker. The API resolves caller identity, then key validity, and only then the location precondition, so the verdict this gate reads is invisible without a working credential — hence `geminiInconclusive` (401/403/404/429, plus a 400 carrying `API_KEY_INVALID`): those answers predate the verdict, are counted and warned, and a rotated key can no longer turn the gate into a silent no-op. Keyless substitutes are country-list guesses, not this check: `gemini.google.com/app` and `aistudio.google.com/welcome` both answered `200` from that same blocked egress, and the supported-country list is documented at `ai.google.dev/gemini-api/docs/available-regions` (RU/BY/CN/HK/MO/IR/KP/CU/SY/AF/MM absent)
@@ -345,57 +345,103 @@ nix flake update sub-preprocessor && make switch
   the +1.8% as a median shift, not a clean separation: the interquartile ranges are disjoint
   (hybrid 15856-16027, HEAD 16162-16348) but the full ranges overlap in the tails, and B/op
   itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
-  objdump` on `(*annotator).Annotate` shows the surviving 2-case switch dispatching on ONE
-  length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the 3-case one needed two
-  (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares against seven. It is block
-  placement. Left alone deliberately: a never-executed switch arm does not buy back three
-  nanoseconds per node. Every `benchmarks/` snapshot older than `5d06fb6` records
+  objdump` on `(*annotator).Annotate` showed the 2-case switch `5d06fb6` left behind
+  dispatching on ONE length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the
+  3-case one needed two (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares
+  against seven. It is block placement, and the bullet below shows the +1.8% was the same
+  build-identity floor that made a null control read +1.97%. That switch is gone now: the
+  `ASN` tag removal replaced it with a guard clause (`if t.key != config.TagGEO {
+  continue }`), leaving three compares. Its arm was left alone at the time deliberately: a
+  never-executed switch arm does not buy back three nanoseconds per node. Every
+  `benchmarks/` snapshot older than `5d06fb6` records
   `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% allocation win that
   does not exist.
-- **The `ASN` annotate tag removal moved `BenchmarkAnnotate`, and the FIXTURE is 104% of
-  it.** That benchmark's tag list lives in `annotator_bench_test.go` — the whole point of
-  the benchmark — but the tag it measured second WAS the tag being removed, so its fixture
-  had to go from two tags (`GEO`+`ASN`) to one. Controlled with FOUR trees exported by
-  `git archive` into `/tmp` (no checkout touched), verified by SHA-256 tree diff, run
+- **The `ASN` annotate tag removal moved `BenchmarkAnnotate`, and the FIXTURE is the whole
+  of it. It did NOT resolvably move `BenchmarkProcessBodyPipeline` — the null control that
+  once certified otherwise is retracted below, and retracting it is the most useful thing
+  in this entry.** The Annotate tag list lives in `annotator_bench_test.go` — the whole
+  point of the benchmark — but the tag it measured second WAS the tag being removed, so its
+  fixture had to go from two tags (`GEO`+`ASN`) to one. Controlled with FOUR trees exported
+  by `git archive` into `/tmp` (no checkout touched), verified by SHA-256 tree diff, run
   round-robin in ONE session from prebuilt `go test -c` binaries, 31 rounds each, first
-  discarded, medians of 30, 9800X3D:
+  discarded, medians of 30, 9800X3D. Three sessions have now rebuilt all four trees from
+  that same recipe; the table is session 1 (the implementing round):
 
   | tree | differs from A in | `BenchmarkAnnotate` @500000x | `BenchmarkProcessBodyPipeline` @5000x |
   |---|---|---|---|
-  | A = `372749b` verbatim | — | **77.61 ns/op, 48 B/op** | **16073.5 ns/op, 1601 B/op** |
-  | B = removal HEAD verbatim | 15 files | **57.14, 24** | **15971.0, 1601** |
-  | C = B + A's `pipeline_bench_test.go` | 14 files (1 vs B) | 57.25, 24 | **15952.5, 1601** |
+  | A = `372749b` verbatim | — | **77.61 ns/op, 48 B/op** | 16073.5 ns/op, 1601 B/op |
+  | B = removal HEAD verbatim | 16 files | **57.14, 24** | 15971.0, 1601 |
+  | C = B + A's `pipeline_bench_test.go` | 15 files (1 vs B) | 57.25, 24 | 15952.5, 1601 |
   | D = A + B's `annotator_bench_test.go` | 1 file | **56.33, 24** | 16073.0, 1601 |
 
-  1 alloc/op on `BenchmarkAnnotate` and 100 allocs/op on the pipeline throughout; the
-  pipeline's B/op drifts 1600-1602 on every tree.
-  - `BenchmarkAnnotate`: **D is the control**, and A -> D (fixture alone) is -21.28 ns/op
-    and the whole of 48 -> 24 B/op, while D -> B (production code alone) is **+0.82 ns/op**.
-    So the fixture is **104% of the ns move and 100% of the B/op move**. A reader diffing a
-    fresh `make bench` against a pre-removal snapshot sees 48 -> 24 B/op and must read it as
-    "the benchmark now annotates one tag", never as an allocation win.
-  - `BenchmarkProcessBodyPipeline`: **its fixture did NOT change.** `newBenchProcessor` was
-    already GEO-only after `5d06fb6`, and C differs from B in `pipeline_bench_test.go` by
-    COMMENT LINES ONLY — comment-stripped, A's and B's copies hash identically. So A -> C is
-    the clean fixture-held production comparison: **-121 ns/op (-0.75%)**, with C -> B
-    (+18.5, +0.12%) sitting in the drift. D is the null control that sizes that drift: at
-    16073.0 against A's 16073.5 it reproduces A to half a nanosecond, since swapping the
-    annotate fixture cannot touch this benchmark.
-  - Both deltas are **median shifts, not separations** — every range overlaps (Annotate
-    D 55.72-57.12 vs B 56.22-58.55; pipeline A 15944-16236 vs C 15873-16071).
-  - Unlike the `IP` round, the executed path really did get shorter, and `go tool objdump`
-    on `(*annotator).Annotate` says why: master emits the ASN test FIRST (`annotator.go:134`,
-    `CMPW $0x5341` "AS" then `CMPB $0x4e` 'N') and only reaches the GEO test
-    (`CMPW $0x4547` "GE", `CMPB $0x4f` 'O') on the JNE, so **every GEO tag on every node paid
-    two compares and a taken branch for an arm it never entered**. The removal leaves three
-    compares where there were five, and the function shrinks 205 -> 169 instructions. That
-    predicts the pipeline's -0.75%; `BenchmarkAnnotate`'s +1.46% points the other way over a
-    strictly shorter path, so at 57 ns/op that one is block placement, not work.
+  The file counts are `git diff --name-only 372749b 7f93685`, which lists **16** paths —
+  `AGENTS.md` among them, because `3bddb93` edits it before `7f93685` appends this note.
+  A vs C is 15, B vs C is 1, A vs D is 1 (`diff -rq` on the exports agrees). 1 alloc/op on
+  `BenchmarkAnnotate` and 100 allocs/op on the pipeline throughout, every tree, every
+  session; the pipeline's B/op drifts 1600-1603.
+  - `BenchmarkAnnotate`: **D is the control.** A -> D (fixture alone) is -21.28 ns/op and
+    the WHOLE of 48 -> 24 B/op. So the fixture is **104% of the ns move and 100% of the
+    B/op move** — the durable result here, reproduced by two later sessions at 101% and
+    104% with the same 48 -> 24 at the fixture swap. A reader diffing a fresh `make bench`
+    against a pre-removal snapshot sees 48 -> 24 B/op and must read it as "the benchmark now
+    annotates one tag", never as an allocation win.
+  - **The D -> B residual is not a quantity this benchmark can report.** Session 1 measured
+    +0.82 ns/op, session 2 +0.17 and +0.03 on two runs, session 3 +0.855 — while D and D2,
+    the SAME source re-exported under a longer path and rebuilt, differ by 0.36 (session 2:
+    57.19 vs 56.83) and 0.26 (session 3: 56.55 vs 56.805) with nothing to explain it but the
+    link. Against B's own 20-sample range of 56.29-58.37 the residual is **indistinguishable
+    from zero at a floor of roughly ±0.4 ns/op**; quote it as that, never as a number.
+  - **`BenchmarkProcessBodyPipeline`: the delta is NOT resolvable at this benchmark's
+    precision, and the D null control is withdrawn.** Its fixture did not change
+    (`newBenchProcessor` was already GEO-only after `5d06fb6`, and C differs from B in
+    `pipeline_bench_test.go` by COMMENT LINES ONLY — comment-stripped, A's and B's copies
+    hash identically), so A -> C is the fixture-held production comparison and D, which
+    cannot execute one changed instruction, must reproduce A exactly. It does not. Medians,
+    each session having rebuilt every tree itself:
+
+    | session | A | C | B | D (must equal A) | D2 (D's source, longer path) |
+    |---|---|---|---|---|---|
+    | 1 (implement) | 16073.5 | 15952.5 | 15971.0 | 16073.0 | — |
+    | 2 (review) | 16104.5 [15992-16249] | 15995.0 [15891-16135] | 15935.0 [15836-16018] | **16421.5 [16357-16582]** | 16116.5 |
+    | 3 (this round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
+
+    A -> D reads +0.5, **+317.0 (+1.97%, ranges DISJOINT)** and +37.5 ns/op across the three;
+    A -> C reads -121.0 (-0.75%), -109.5 (-0.68%) and -59.0 (-0.37%). The direction of A -> C
+    is consistent, its magnitude is not, and every value of it is smaller than the spread the
+    null control alone covers. Session 2 pinned that down: D's excursion survives reversing
+    the round-robin order (D 16413.5, n=20), it is not a response to editing source at all
+    (A plus one appended comment line 16049.0, A plus four 16088.5, D 16404.0 in the same
+    run), and `go tool objdump` on `processBody`, `(*annotator).Annotate`,
+    `(*annotTag).lookupCountry`, `rewrite.NodeName` and `rewrite.StripKnownTags` gives
+    opcode-byte-identical listings at IDENTICAL entry addresses for A and D (session 3
+    reproduced this: `processBody` 0x6fd720, `Annotate` 0x6f8de0, same SHA-256 over the
+    opcode column). So there is a **build-identity floor of 0.2-2.0%** on this benchmark that
+    no source difference explains, the -0.75% sits under it, and the `objdump` argument below
+    — not the ns number — is what supports the direction. This retroactively confirms the
+    `5d06fb6` bullet above calling its +1.8% block placement: that was the same floor.
+  - Every Annotate range overlaps too (session 1: D 55.72-57.12 vs B 56.22-58.55).
+  - **What did change is real, and it is the static shape.** `go tool objdump` on
+    `(*annotator).Annotate`: master emits the ASN test FIRST (`annotator.go:134`,
+    `CMPW $0x5341` "AS" then `CMPB $0x4e` 'N') and reaches the GEO test (`CMPW $0x4547` "GE",
+    `CMPB $0x4f` 'O') on the JNE. **Five key compares become three** (A: `CMPQ $3`, "AS",
+    'N', "GE", 'O'; B: `CMPQ $3`, "GE", 'O') and the function shrinks **205 -> 169
+    instructions** — measured 205/205/169/169 for A/D/B/C, and both figures reproduce
+    exactly in every session. The DYNAMIC cost, though, was one compare, not two: the `JNE`
+    after `CMPW $0x5341` jumps straight to the GEO test, so for key "GEO" the `CMPB $0x4e`
+    is never reached. Every GEO tag on every node paid **one compare and one
+    perfectly-predicted taken branch** for an arm it never entered — over the pipeline's 100
+    nodes that is tens of ns/op, not 121, so it is **consistent with the sign of** the
+    pipeline's A -> C, and predicts nothing about its size. `BenchmarkAnnotate` moving the
+    other way over a strictly shorter path says the same thing from the other side.
   - No `allocs/op` or `B/op` increase on any of the 49 benchmarks. Five in untouched packages
     (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
     differ between trees at `-benchtime 100x`, and the SAME tree reproduces the same spread
     across three consecutive runs — `Resolution_Concurrent` even flips 64/65 allocs/op — so
     that is the instrument, not the change.
+  - **The lesson, since this is the second round it has cost:** a hybrid tree is a control
+    for FIXTURE effects only. It is not a session-stability certificate, and a null control
+    that comes back clean has not proved the session is quiet — rebuild it, and treat any
+    delta smaller than the null control's own spread as unmeasured.
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations

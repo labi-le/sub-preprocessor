@@ -46,7 +46,10 @@ filters:
 # Ordered annotation tags added to node names (both / and /stable.txt). GEO is
 # the only tag the loader accepts; entries still render in order and may
 # repeat, so a second `- tag: GEO` with a different chain publishes a second
-# tag.
+# tag. Repetition is a RENDERING feature only: the country filter takes its
+# provider order from the FIRST entry's chain alone (preprocess
+# countryChainOrder), so anything the filter should consult belongs in the
+# chain below, not in a second entry.
 annotate:
   - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
     # Ordered chain, first hit wins. geotrace asks the node itself where its
