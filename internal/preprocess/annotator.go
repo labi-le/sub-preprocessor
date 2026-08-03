@@ -59,9 +59,11 @@ type annotStep struct {
 	prov geo.Provider
 }
 
-// annotTag is one resolved annotation tag: a key (GEO or ASN) and the ordered
-// chain that resolves it (first step that answers wins). Both surviving tags
-// are provider-backed; the chainless kind went with the IP tag.
+// annotTag is one resolved annotation tag: a key and the ordered chain that
+// resolves it (first step that answers wins). GEO is the only key the config
+// loader accepts today, so key is what keeps Annotate rendering nothing for a
+// spec built in code with any other tag — the chainless kind went with the IP
+// tag, and the second provider-backed kind with the ASN one.
 type annotTag struct {
 	key   string
 	chain []annotStep
@@ -114,33 +116,26 @@ func (a *annotator) Annotate(
 	scratch.WriteString(req.Prefix)
 	var country geofeed.CountryCode
 	for _, t := range a.tags {
-		switch t.key {
-		case config.TagGEO:
-			c := t.lookupCountry(ctx, req)
-			// Nothing forbids a second GEO entry with a different chain; the
-			// caller gets the leftmost tag that resolved, which is the one a
-			// reader of the name takes for the node's country.
-			if country == (geofeed.CountryCode{}) {
-				country = c
-			}
-			scratch.WriteString("[GEO:")
-			if c == (geofeed.CountryCode{}) {
-				scratch.WriteString("??")
-			} else {
-				scratch.WriteByte(c[0])
-				scratch.WriteByte(c[1])
-			}
-			scratch.WriteByte(']')
-		case config.TagASN:
-			name := t.lookupASN(ctx, req.IP)
-			scratch.WriteString("[ASN:")
-			if name == "" {
-				scratch.WriteString("??")
-			} else {
-				scratch.WriteString(name)
-			}
-			scratch.WriteByte(']')
+		// GEO is the only tag config.validateAnnotate accepts, so a spec with
+		// any other key renders nothing rather than a "[??]" of unknown kind.
+		if t.key != config.TagGEO {
+			continue
 		}
+		c := t.lookupCountry(ctx, req)
+		// Nothing forbids a second GEO entry with a different chain; the
+		// caller gets the leftmost tag that resolved, which is the one a
+		// reader of the name takes for the node's country.
+		if country == (geofeed.CountryCode{}) {
+			country = c
+		}
+		scratch.WriteString("[GEO:")
+		if c == (geofeed.CountryCode{}) {
+			scratch.WriteString("??")
+		} else {
+			scratch.WriteByte(c[0])
+			scratch.WriteByte(c[1])
+		}
+		scratch.WriteByte(']')
 	}
 	rewrite.NodeName(dst, req.Node, scratch.String())
 	return country
@@ -163,19 +158,4 @@ func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofe
 		}
 	}
 	return geofeed.CountryCode{}
-}
-
-// lookupASN walks the tag's chain and returns the first non-empty AS name;
-// all-miss returns "" (rendered as ??). The geotrace step is always a miss
-// here: cdn-cgi/trace reports an address and a location, never an AS.
-func (t *annotTag) lookupASN(ctx context.Context, ip netip.Addr) string {
-	for _, step := range t.chain {
-		if step.prov == nil {
-			continue
-		}
-		if name := step.prov.Lookup(ctx, ip).ASN; name != "" {
-			return name
-		}
-	}
-	return ""
 }

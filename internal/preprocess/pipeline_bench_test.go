@@ -79,8 +79,11 @@ func newBenchProcessor(b *testing.B) *Processor {
 // 18686 -> 15933 ns/op and 4642 -> 1600 B/op. AGENTS.md's bench notes carry the
 // full four-tree measurement, including the +280 ns/op the production change
 // put back. Nothing here can attribute a move to the annotator, which is
-// what BenchmarkAnnotate (annotator_bench_test.go) is for — its tag list is
-// fixed, so a move there is the code.
+// what BenchmarkAnnotate (annotator_bench_test.go) is for. Its tag list is
+// fixed in ITS OWN file, so a move there is normally the code — the ASN
+// removal is the one round where that fixture changed too (two tags down to
+// one), and AGENTS.md records the control that separates the two. THIS
+// benchmark's fixture was already GEO-only and did not move that round.
 func BenchmarkProcessBodyPipeline(b *testing.B) {
 	p := newBenchProcessor(b)
 	body := benchBody()

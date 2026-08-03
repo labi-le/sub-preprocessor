@@ -14,20 +14,21 @@ import (
 )
 
 // BenchmarkAnnotate measures the annotator alone — tag-list walk, prefix
-// assembly, upstream-tag strip and fragment rewrite — over BOTH configurable
-// tags. The providers are fakes returning a constant, so no geo database
+// assembly, upstream-tag strip and fragment rewrite — over the shipped shape:
+// ONE tag, GEO, which since the ASN tag was retired is the only one the loader
+// accepts. The providers are fakes returning a constant, so no geo database
 // lookup is inside the number, and the tag list is fixed HERE rather than in a
 // processor fixture. That is the whole point of this benchmark:
 // BenchmarkProcessBodyPipeline takes its annotate list from newBenchProcessor,
 // and `5d06fb6` edited that list, which moved the pipeline number 14% with the
-// production code held constant. A move in THIS number is the annotate code.
+// production code held constant. A move in THIS number is the annotate code —
+// except across the ASN removal, which dropped this fixture's second tag too;
+// see the AGENTS.md bench note for the control that separates the two.
 func BenchmarkAnnotate(b *testing.B) {
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
-		config.ProviderASN:     fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
 	})
 	if a == nil {
 		b.Fatal("newAnnotator returned nil")

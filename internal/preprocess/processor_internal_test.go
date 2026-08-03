@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -808,13 +810,24 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 		{
 			name: "shipped chain keeps its order and drops asn",
 			annotate: []config.AnnotateSpec{
-				{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 				{Tag: config.TagGEO, Providers: []string{
 					config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN,
 				}},
 			},
 			haveDBIP: true, haveRegistry: true,
 			want: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry},
+		},
+		{
+			// countryChainOrder reads the FIRST GEO entry; a second one with a
+			// different chain (the only multi-entry shape the loader still
+			// accepts) must not reopen the order it already settled.
+			name: "a later GEO entry does not override the first",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderGeofeed}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderRegistry, config.ProviderGeofeed}},
+			},
+			haveDBIP: true, haveRegistry: true,
+			want: []string{config.ProviderDBIP, config.ProviderGeofeed},
 		},
 		{
 			name: "operator order is preserved verbatim",
@@ -843,8 +856,8 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 			},
 		},
 		{
-			name:     "no GEO entry falls back to the geofeed",
-			annotate: []config.AnnotateSpec{{Tag: config.TagASN, Providers: []string{config.ProviderASN}}},
+			name:     "an empty annotate list falls back to the geofeed",
+			annotate: []config.AnnotateSpec{},
 		},
 	}
 	for _, tc := range cases {
@@ -856,5 +869,126 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 				t.Fatalf("countryChainOrder = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestProviderNeedsASNHasTwoIndependentSources pins the seam the retired ASN
+// annotate TAG must not have moved: whether the Cymru resolver is built is
+// decided by opts.IPFilters and by the PROVIDER chains in opts.Annotate, and
+// never by a tag name. Both sources stand alone — an operator who filters by
+// AS name annotates nothing, and the shipped config annotates through asn with
+// no asn filter configured — so a rule that read the tag would have silently
+// dropped one of them.
+func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		filters  []config.IPFilterSpec
+		annotate []config.AnnotateSpec
+		want     bool
+	}{
+		{
+			name:     "an asn filter alone, nothing annotated",
+			filters:  []config.IPFilterSpec{{Type: config.FilterASN, DenyPatterns: []string{"spammy"}}},
+			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
+			want:     true,
+		},
+		{
+			name:     "a country filter through the asn provider",
+			filters:  []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderASN}},
+			annotate: nil,
+			want:     true,
+		},
+		{
+			name:    "an annotate chain ending in asn, no asn filter",
+			filters: []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{
+				config.ProviderGeoTrace, config.ProviderGeofeed, config.ProviderASN,
+			}}},
+			want: true,
+		},
+		{
+			name:     "neither source names asn",
+			filters:  []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := Options{IPFilters: tc.filters, Annotate: tc.annotate}
+			if needsASN, _, _ := providerNeeds(opts); needsASN != tc.want {
+				t.Fatalf("providerNeeds needsASN = %v, want %v", needsASN, tc.want)
+			}
+
+			// The decision only matters through what NewProcessor builds.
+			opts.PreloadedGeofeed = GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()}
+			p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+			if err != nil {
+				t.Fatalf("NewProcessor: %v", err)
+			}
+			if got := p.ASNState() != nil; got != tc.want {
+				t.Fatalf("processor built an ASN resolver = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShippedConfigStillBuildsTheASNResolver reads the repository's own
+// config/config.yaml rather than a fixture: its GEO chain ends in asn, and
+// that single line is what keeps the Cymru resolver in the running service.
+func TestShippedConfigStillBuildsTheASNResolver(t *testing.T) {
+	t.Parallel()
+
+	// Copied into a temp dir because config.Load merges the sibling overlays,
+	// and this is about config.yaml alone.
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if writeErr := os.WriteFile(path, shipped, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var viaChain bool
+	for _, a := range cfg.Annotate {
+		viaChain = viaChain || slices.Contains(a.Providers, config.ProviderASN)
+	}
+	if !viaChain {
+		t.Fatal("precondition: the shipped annotate chain no longer names the asn provider")
+	}
+
+	// The shipped chain also names dbip and registry, so both geoDBs are built
+	// too; preloading them keeps this test off the network. Nothing here
+	// preloads the ASN resolver — that one is constructed or not, and which is
+	// the whole question.
+	offline := GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()}
+	opts := Options{
+		IPFilters:         cfg.IPFilterSpecs(),
+		Annotate:          cfg.Annotate,
+		DBIP:              cfg.Geo.DBIP,
+		Registry:          cfg.Geo.Registry,
+		PreloadedGeofeed:  offline,
+		PreloadedDBIP:     offline,
+		PreloadedRegistry: offline,
+	}
+	if needsASN, _, _ := providerNeeds(opts); !needsASN {
+		t.Fatal("the shipped config must still need the ASN resolver")
+	}
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+	if p.ASNState() == nil {
+		t.Fatal("the shipped config must still build the ASN resolver")
 	}
 }

@@ -194,12 +194,15 @@ provider, not a gate: see [Annotation](#annotation).
 ### Annotation
 
 The ordered `annotate:` list controls the tags prepended to node names on both
-endpoints: `GEO` (`[GEO:XX]`) and `ASN` (`[ASN:...]`). Each takes
+endpoints. `GEO` (`[GEO:XX]`) is the only tag it accepts — `IP` and `ASN` were
+both retired, and naming either now fails the load. The entry takes
 `providers:` — an **ordered lookup chain** (e.g.
 `providers: [geotrace, geofeed, dbip, registry, asn]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
-`[GEO:??]` / `[ASN:??]`. An empty `annotate` list disables annotation
-(original names pass through). Rewriting is scheme-aware: vmess folds tags into
+`[GEO:??]`. The list still earns its shape: entries render in order and may
+repeat (two `GEO` entries with different chains publish two tags), and an empty
+`annotate` list disables annotation (original names pass through).
+Rewriting is scheme-aware: vmess folds tags into
 the base64 `ps` field, `ssr` into the base64 `remarks` query value, every other
 scheme into the `#fragment`. For `ssr` the fragment is not merely unused but
 corrupting — mihomo base64-decodes everything after `ssr://`, an appended
@@ -354,9 +357,10 @@ Key sections:
   — the upstream DNS server as `host:port` (a portless value is rejected at
   load: it dials nothing, so every node would be dropped as a DNS failure).
 - `filters` — the ordered filter list described above.
-- `annotate` — the ordered tag list described above; GEO/ASN entries take a
-  `providers:` chain. The retired singular `provider:` key is rejected as an
-  unknown key by the strict decode instead of being silently dropped.
+- `annotate` — the ordered tag list described above; every entry is a `GEO`
+  entry and takes a `providers:` chain. The retired singular `provider:` key is
+  rejected as an unknown key by the strict decode instead of being silently
+  dropped.
 - `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
   `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
   for the through-node filters, plus `geotrace.*` — `endpoint`/`timeout`/

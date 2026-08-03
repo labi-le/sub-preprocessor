@@ -323,7 +323,7 @@ func TestLoadRejectsBadGeoDatabases(t *testing.T) {
 func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n  - tag: ASN\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n  - tag: GEO\n    providers: [dbip]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +333,11 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Annotate[0].Providers, []string{config.ProviderGeofeed}) {
 		t.Fatalf("GEO providers default = %v, want [geofeed]", cfg.Annotate[0].Providers)
 	}
-	if !reflect.DeepEqual(cfg.Annotate[1].Providers, []string{config.ProviderASN}) {
-		t.Fatalf("ASN providers default = %v, want [asn]", cfg.Annotate[1].Providers)
+	// GEO is the only accepted tag, so the list's remaining job is ordering
+	// repeated entries: an explicit chain on the second one is not overwritten
+	// by the default the first one got.
+	if !reflect.DeepEqual(cfg.Annotate[1].Providers, []string{config.ProviderDBIP}) {
+		t.Fatalf("explicit providers = %v, want [dbip]", cfg.Annotate[1].Providers)
 	}
 
 	rejects := map[string]struct {
@@ -345,6 +348,7 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", "field provider not found in type config.AnnotateSpec"},
 		"unknown provider":   {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
 		"retired ip tag":     {geoBase + "annotate:\n  - tag: IP\n", `unknown tag "IP"`},
+		"retired asn tag":    {geoBase + "annotate:\n  - tag: ASN\n", `unknown tag "ASN"`},
 		"duplicate provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},
 	}
 	for name, tc := range rejects {

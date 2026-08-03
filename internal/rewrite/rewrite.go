@@ -8,15 +8,14 @@ import (
 )
 
 // NodeName writes node to b with the given already-formatted tag prefix folded
-// into its published name, e.g. tags="[GEO:AE][ASN:VDSINA - SERVERS TECH FZCO, AE]"
-// produces "...#[GEO:AE][ASN:VDSINA - SERVERS TECH FZCO, AE] Old Name". An
-// `[ASN:]` value is a Cymru AS NAME and never carries an "AS<number>" prefix:
-// preprocess.annotTag.lookupASN renders geo.Info.ASN, which geo.asnProvider
-// copies from asn.Result.Name, which is asn.parseASRecord's trailing record
-// field ("216071 | AE | ripencc | 2023-10-30 | VDSINA - SERVERS TECH FZCO, AE").
-// An empty tags string writes the node with its known-tag prefix stripped
-// (annotation reduced to a clean relabel). Nodes that do not support fragment
-// rewrites are written verbatim.
+// into its published name, e.g. tags="[GEO:AE]" produces
+// "...#[GEO:AE] Old Name". `[GEO:]` is the only prefix this service can emit
+// from the annotate list -- preprocess.annotator has one rendering arm left,
+// config.TagGEO, and it writes either an ISO-3166-1 alpha-2 code or "??" --
+// and the stable worker prepends its own "[SPD:<n>M] " ahead of it. An empty
+// tags string writes the node with its known-tag prefix stripped (annotation
+// reduced to a clean relabel). Nodes that do not support fragment rewrites are
+// written verbatim.
 func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
@@ -97,26 +96,28 @@ func StripKnownTags(s string) string {
 }
 
 // isKnownTag reports whether tag is one this service strips off an upstream
-// name. The set is deliberately WIDER than the set we write: only `GEO:`/`ASN:`
-// (the configured annotate tags) and `SPD:` (stable.speedPrefix) are ever
-// authored here; `IP:`, `JUR:`, `OK` and `BAD` are recognised so that an
-// upstream-authored tag is removed on relabel instead of accumulating in front
-// of ours.
+// name. The set is deliberately WIDER than the set we write: only `GEO:` (the
+// one configured annotate tag) and `SPD:` (stable.speedPrefix) are ever
+// authored here; `IP:`, `ASN:`, `JUR:`, `OK` and `BAD` are recognised so that
+// an upstream-authored tag is removed on relabel instead of accumulating in
+// front of ours.
 //
-// `IP:` has no writer left -- the annotate tag was removed -- and still must
-// stay, on the only path that strips anything: an ANNOTATING config. With
-// `annotate: []` the annotator is nil, so nothing calls NodeName and this
-// function never runs at all: preprocess.bufferSink.emit publishes node.Raw
-// verbatim, while stable.BuildPayload's nil-annotator arm publishes
-// Survivor.Raw -- the Entry.Raw that stable.Merge had already relabelled to
-// <source>-NNN, so no upstream name reaches /stable.txt whatever this
-// function recognises. On `/` every upstream tag survives.
+// `IP:` and `ASN:` have no writer left -- both annotate tags were removed --
+// and both must still stay, on the only path that strips anything: an
+// ANNOTATING config. With `annotate: []` the annotator is nil, so nothing
+// calls NodeName and this function never runs at all:
+// preprocess.bufferSink.emit publishes node.Raw verbatim, while
+// stable.BuildPayload's nil-annotator arm publishes Survivor.Raw -- the
+// Entry.Raw that stable.Merge had already relabelled to <source>-NNN, so no
+// upstream name reaches /stable.txt whatever this function recognises. On `/`
+// every upstream tag survives.
 //
 // Where it does run, the scan consumes a CONTIGUOUS run and returns the
-// remainder from the first tag it does not recognise, so without this arm an
-// upstream `[GEO:RU][IP:1.2.3.4] Moscow` loses only its GEO tag and we
-// republish `[GEO:xx] [IP:1.2.3.4] Moscow`, carrying an address we never
-// verified.
+// remainder from the first tag it does not recognise, so dropping either arm
+// costs more than the tag it drops: without `ASN:` an upstream
+// `[GEO:RU][ASN:SOME-AS, RU] Moscow` loses only its GEO tag and we republish
+// `[GEO:xx] [ASN:SOME-AS, RU] Moscow`, and without `IP:` the same shape leaks
+// an address we never verified.
 func isKnownTag(tag string) bool {
 	if tag == "OK" || tag == "BAD" {
 		return true

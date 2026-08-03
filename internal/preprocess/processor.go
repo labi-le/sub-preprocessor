@@ -266,7 +266,11 @@ func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Add
 }
 
 // providerNeeds reports which lazily-built geo backends the configured IP
-// filters and annotate chains reference.
+// filters and annotate chains reference. It reads filter types and PROVIDER
+// names only, never a tag name: the two sources of needsASN are independent
+// (an asn filter with nothing annotated, and a GEO chain naming asn with no
+// asn filter), which is why retiring the ASN annotate TAG left the Cymru
+// resolver exactly as reachable as before.
 func providerNeeds(opts Options) (needsASN, wantDBIP, wantRegistry bool) {
 	for _, spec := range opts.IPFilters {
 		if spec.Type == config.FilterASN || (spec.Type == config.FilterCountry && spec.Provider == config.ProviderASN) {

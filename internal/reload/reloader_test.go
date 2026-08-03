@@ -112,9 +112,12 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.Geo.ASN.Timeout = 4 * time.Second
 	cfg.Geo.ASN.CacheTTL = 24 * time.Hour
 	cfg.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"^AS1234 ", "spammy"}}}
+	// Two entries, both GEO: the only multi-entry annotate list the loader
+	// still accepts, and the arity the DeepEqual below needs to prove the
+	// whole ordered list is copied rather than its first element.
 	cfg.Annotate = []config.AnnotateSpec{
 		{Tag: "GEO", Providers: []string{"geofeed", "dbip"}},
-		{Tag: "ASN", Providers: []string{"asn"}},
+		{Tag: "GEO", Providers: []string{"registry"}},
 	}
 	cfg.Geo.DBIP = config.DBIPConfig{URL: "https://mirror.example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)}
 	cfg.Geo.Registry = config.RegistryConfig{URLs: []string{"https://mirror.example.com/delegated"}, RefreshInterval: new(2 * time.Hour)}

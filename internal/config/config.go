@@ -106,7 +106,6 @@ const (
 	ProviderASN      = "asn"
 
 	TagGEO = "GEO"
-	TagASN = "ASN"
 )
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -212,13 +211,19 @@ type FilterConfig struct {
 	Version  string `yaml:"version"`
 }
 
-// AnnotateSpec is one entry in the ordered annotation tag list. GEO and ASN are
-// the only tags the loader accepts — validateAnnotate's default arm rejects
-// everything else, IP included since `5d06fb6` retired it — and both are
-// provider-backed: Providers is their ordered lookup chain, first provider that
-// answers wins, and it must not be empty. Omitting it in YAML is still fine,
-// because applyAnnotateDefaults runs before Validate and fills GEO with
-// geofeed, ASN with asn; the emptiness check only bites a Config built in code.
+// AnnotateSpec is one entry in the ordered annotation tag list. GEO is the only
+// tag the loader accepts — validateAnnotate's default arm rejects everything
+// else, IP and ASN included, both retired once nothing consumed them — and it
+// is provider-backed: Providers is its ordered lookup chain, first provider
+// that answers wins, and it must not be empty. Omitting it in YAML is still
+// fine, because applyAnnotateDefaults runs before Validate and fills GEO with
+// geofeed; the emptiness check only bites a Config built in code.
+//
+// One accepted tag does not make the LIST redundant: entries are rendered in
+// order and repeat freely (two GEO entries with different chains publish two
+// tags, and Annotate reports the leftmost that resolved), and an empty list
+// disables annotation outright — a distinct mode, not a milder one, since the
+// annotator then goes nil and nothing strips upstream tags either.
 //
 // The retired single-provider "provider" key needs no field here: the strict
 // decode in decodeStrict rejects it, and every future rename with it.
@@ -947,14 +952,8 @@ func applyBandwidthDefaults(f *FilterConfig) {
 }
 
 func applyAnnotateDefaults(a *AnnotateSpec) {
-	if len(a.Providers) > 0 {
-		return
-	}
-	switch a.Tag {
-	case TagGEO:
+	if len(a.Providers) == 0 && a.Tag == TagGEO {
 		a.Providers = []string{ProviderGeofeed}
-	case TagASN:
-		a.Providers = []string{ProviderASN}
 	}
 }
 
@@ -1161,16 +1160,14 @@ func (f FilterConfig) validateBandwidth(i int) error {
 // validateAnnotate rejects unknown tags and invalid provider chains.
 func (cfg *Config) validateAnnotate() error {
 	for i, a := range cfg.Annotate {
-		switch a.Tag {
-		case TagGEO, TagASN:
-			if len(a.Providers) == 0 {
-				return fmt.Errorf("annotate[%d]: tag %s requires at least one provider", i, a.Tag)
-			}
-			if err := validateProviderChain(i, a.Providers); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("annotate[%d]: unknown tag %q (must be %q or %q)", i, a.Tag, TagGEO, TagASN)
+		if a.Tag != TagGEO {
+			return fmt.Errorf("annotate[%d]: unknown tag %q (must be %q)", i, a.Tag, TagGEO)
+		}
+		if len(a.Providers) == 0 {
+			return fmt.Errorf("annotate[%d]: tag %s requires at least one provider", i, a.Tag)
+		}
+		if err := validateProviderChain(i, a.Providers); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1375,7 +1372,7 @@ func StoresChanged(old, newCfg Config) bool {
 }
 
 // AnnotateChanged reports whether the annotate tag list differs. Both consumers
-// bake it in: the processor renders the per-node [GEO]/[ASN] tags from it, and
+// bake it in: the processor renders the per-node [GEO:] tags from it, and
 // the stable worker builds published names once per cycle, prepending its own
 // [SPD:] prefix to those same tags. So the reloader must rebuild/re-apply when
 // the list changes; otherwise the published annotation stays stale.

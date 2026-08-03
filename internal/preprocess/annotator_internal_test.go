@@ -29,60 +29,106 @@ const sampleNodeLine = "vless://u@example.com:443#Old"
 
 func parseOneNode(t *testing.T) subscription.Node {
 	t.Helper()
+	return parseNodeLine(t, sampleNodeLine)
+}
+
+func parseNodeLine(t *testing.T, line string) subscription.Node {
+	t.Helper()
 	var node subscription.Node
 	ok := false
-	subscription.Parse([]byte(sampleNodeLine), func(n subscription.Node) bool {
+	subscription.Parse([]byte(line), func(n subscription.Node) bool {
 		node = n
 		ok = true
 		return false
 	})
 	if !ok {
-		t.Fatalf("no node parsed from %q", sampleNodeLine)
+		t.Fatalf("no node parsed from %q", line)
 	}
 	return node
 }
 
+// TestAnnotateStripsUpstreamTagsItCannotWrite drives an upstream-authored name
+// through the REAL annotate path — annotator plus rewrite.NodeName — with the
+// shipped shape of one GEO tag. Since the ASN tag was retired nothing here
+// writes `[ASN:`, and rewrite.isKnownTag's ASN arm is the only thing left that
+// removes one: StripKnownTags consumes a CONTIGUOUS run, so if that arm goes,
+// the scan stops at `[ASN:` and republishes an AS attribution we never made,
+// with our own [GEO:] tag in front of it. Same argument as the `IP:` arm,
+// which three tests in internal/rewrite already pin.
+func TestAnnotateStripsUpstreamTagsItCannotWrite(t *testing.T) {
+	t.Parallel()
+
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderGeofeed}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+	})
+
+	node := parseNodeLine(t, "vless://u@example.com:443#[GEO:RU][ASN:SOME-AS, RU] Moscow")
+	var buf, tagBuf bytes.Buffer
+	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("1.2.3.4")})
+
+	want := "vless://u@example.com:443#[GEO:NL] Moscow"
+	if buf.String() != want {
+		t.Fatalf("got %q, want %q", buf.String(), want)
+	}
+}
+
+// TestAnnotatorTagListOrder: entries render in list order. GEO is the only tag
+// the loader accepts, but nothing forbids a second entry with a different
+// chain, so that is what a multi-tag name is made of now — and the country
+// Annotate reports is the LEFTMOST one, the tag a reader of the name reads.
 func TestAnnotatorTagListOrder(t *testing.T) {
 	t.Parallel()
 
-	geofeedProv := fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}}
-	asnProv := fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}}
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
-	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
+		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+		config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'D', 'E'}}},
+	})
 	if a == nil {
 		t.Fatal("expected a non-nil annotator")
 	}
 
 	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
-	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("1.2.3.4")})
+	got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("1.2.3.4")})
 
-	want := "vless://u@example.com:443#[GEO:NL][ASN:AS64500 EXAMPLE] Old"
+	want := "vless://u@example.com:443#[GEO:NL][GEO:DE] Old"
 	if buf.String() != want {
 		t.Fatalf("got %q, want %q", buf.String(), want)
 	}
+	if got != (geofeed.CountryCode{'N', 'L'}) {
+		t.Fatalf("got country %q, want the leftmost tag's NL", got)
+	}
 }
 
-func TestAnnotatorUnknownGeoAndASN(t *testing.T) {
+// TestAnnotatorUnknownRendersQuestionMarks: a tag whose whole chain missed
+// renders [GEO:??] in place, and does NOT claim the node's country — the
+// reported code is the leftmost entry that RESOLVED, not the leftmost entry.
+func TestAnnotatorUnknownRendersQuestionMarks(t *testing.T) {
 	t.Parallel()
 
-	// Zero-value Info => unknown country and empty ASN, which must render as ??.
-	geofeedProv := fakeProvider{name: "geofeed"}
-	asnProv := fakeProvider{name: "asn"}
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
+		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed"},
+		config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
+	})
 
 	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
-	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("9.9.9.9")})
+	got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("9.9.9.9")})
 
-	want := "vless://u@example.com:443#[ASN:??][GEO:??] Old"
+	want := "vless://u@example.com:443#[GEO:??][GEO:SE] Old"
 	if buf.String() != want {
 		t.Fatalf("got %q, want %q", buf.String(), want)
+	}
+	if got != (geofeed.CountryCode{'S', 'E'}) {
+		t.Fatalf("got country %q, want SE: a missed tag must not claim the node's country", got)
 	}
 }
 
@@ -129,8 +175,11 @@ func TestAnnotatorGeoChainOrder(t *testing.T) {
 	}
 }
 
-// TestAnnotatorGeoChainFallback: a miss (zero country) falls through to the
-// next provider in the chain.
+// TestAnnotatorGeoChainFallback: a miss falls through to the next provider in
+// the chain. The dbip step answers with an Info that is NOT empty but carries
+// no country — the shape geo.asnProvider returns when Cymru names the AS and
+// leaves the registry country blank — so this also pins that a chain reads the
+// field its own tag renders, not "the provider answered something".
 func TestAnnotatorGeoChainFallback(t *testing.T) {
 	t.Parallel()
 
@@ -138,7 +187,7 @@ func TestAnnotatorGeoChainFallback(t *testing.T) {
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry}},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed:  fakeProvider{name: "geofeed"},
-		config.ProviderDBIP:     fakeProvider{name: "dbip"},
+		config.ProviderDBIP:     fakeProvider{name: "dbip", info: geo.Info{ASN: "SOME-AS, RU"}},
 		config.ProviderRegistry: fakeProvider{name: "registry", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
 	})
 
@@ -161,24 +210,6 @@ func TestAnnotatorGeoChainAllMiss(t *testing.T) {
 
 	want := "vless://u@example.com:443#[GEO:??] Old"
 	if got := annotateOne(t, a, "9.9.9.9"); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// TestAnnotatorASNChainFallback: the ASN tag takes the first NON-EMPTY AS name
-// in the chain; a provider that returns a country but no ASN is a miss.
-func TestAnnotatorASNChainFallback(t *testing.T) {
-	t.Parallel()
-
-	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagASN, Providers: []string{config.ProviderGeofeed, config.ProviderASN}},
-	}, map[string]geo.Provider{
-		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
-		config.ProviderASN:     fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
-	})
-
-	want := "vless://u@example.com:443#[ASN:AS64500 EXAMPLE] Old"
-	if got := annotateOne(t, a, "1.2.3.4"); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -282,16 +313,22 @@ func TestAnnotateReturnsResolvedCountry(t *testing.T) {
 		t.Fatalf("got country %q, want DE", got)
 	}
 
-	noGeo := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
+	// The zero code, not the "??" the name renders: a node whose country
+	// nothing resolved must not be BOOKED under a country.
+	allMiss := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
 	}, map[string]geo.Provider{
-		config.ProviderASN: fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
+		config.ProviderGeofeed: fakeProvider{name: "geofeed"},
 	})
 	buf.Reset()
-	if got = noGeo.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
+	got = allMiss.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
 		Node: node, IP: netip.MustParseAddr("1.2.3.4"),
-	}); got != (geofeed.CountryCode{}) {
-		t.Fatalf("a tag list without GEO must resolve no country, got %q", got)
+	})
+	if got != (geofeed.CountryCode{}) {
+		t.Fatalf("an all-miss GEO chain must resolve no country, got %q", got)
+	}
+	if want := "vless://u@example.com:443#[GEO:??] Old"; buf.String() != want {
+		t.Fatalf("got %q, want %q — the ?? is rendered, never returned", buf.String(), want)
 	}
 }
 
@@ -303,14 +340,14 @@ func TestAnnotatePrefixLeadsConfiguredTags(t *testing.T) {
 
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
+		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
-		config.ProviderASN:     fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
+		config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'D', 'E'}}},
 	})
 	req := AnnotateRequest{IP: netip.MustParseAddr("1.2.3.4"), Prefix: "[SPD:60M] "}
 
-	want := "vless://u@example.com:443#[SPD:60M] [GEO:NL][ASN:AS64500 EXAMPLE] Old"
+	want := "vless://u@example.com:443#[SPD:60M] [GEO:NL][GEO:DE] Old"
 	if got := annotateReq(t, a, req); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
