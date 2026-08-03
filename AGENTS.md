@@ -87,8 +87,9 @@ coverage, so deleting two of its three arms kept the suite green.
 
 **Comments are a first-class review target,** not polish. The recurring defect here is a
 true-when-written comment: one referenced `merge.go`'s `tagCountry` after a redesign deleted
-it, one said the trace endpoint answers "211 bytes" (measured 202 and 301 — it echoes the
-request User-Agent), one claimed a proxy shape mihomo cannot produce. Per the conventions
+it, one said the trace endpoint answers a fixed "211 bytes" (it has no fixed length — the
+endpoint echoes the request User-Agent back), one claimed a proxy shape mihomo cannot
+produce. Per the conventions
 below, a stale comment is worse than none, so a review that approves the code and ignores
 its comments has not finished.
 
