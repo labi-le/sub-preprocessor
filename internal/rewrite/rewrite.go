@@ -8,10 +8,15 @@ import (
 )
 
 // NodeName writes node to b with the given already-formatted tag prefix folded
-// into its published name, e.g. tags="[GEO:NL][ASN:AS64500 EXAMPLE]" produces
-// "...#[GEO:NL][ASN:AS64500 EXAMPLE] Old Name". An empty tags string writes the
-// node with its known-tag prefix stripped (annotation reduced to a clean
-// relabel). Nodes that do not support fragment rewrites are written verbatim.
+// into its published name, e.g. tags="[GEO:AE][ASN:VDSINA - SERVERS TECH FZCO, AE]"
+// produces "...#[GEO:AE][ASN:VDSINA - SERVERS TECH FZCO, AE] Old Name". An
+// `[ASN:]` value is a Cymru AS NAME and never carries an "AS<number>" prefix:
+// preprocess.annotTag.lookupASN renders geo.Info.ASN, which geo.asnProvider
+// copies from asn.Result.Name, which is asn.parseASRecord's trailing record
+// field ("216071 | AE | ripencc | 2023-10-30 | VDSINA - SERVERS TECH FZCO, AE").
+// An empty tags string writes the node with its known-tag prefix stripped
+// (annotation reduced to a clean relabel). Nodes that do not support fragment
+// rewrites are written verbatim.
 func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
@@ -100,9 +105,13 @@ func StripKnownTags(s string) string {
 //
 // `IP:` has no writer left -- the annotate tag was removed -- and still must
 // stay, on the only path that strips anything: an ANNOTATING config. With
-// `annotate: []` the annotator is nil and both sinks publish node.Raw verbatim
-// (preprocess.bufferSink.emit, stable.BuildPayload), so StripKnownTags never
-// runs and every upstream tag survives whatever this function recognises.
+// `annotate: []` the annotator is nil, so nothing calls NodeName and this
+// function never runs at all: preprocess.bufferSink.emit publishes node.Raw
+// verbatim, while stable.BuildPayload's nil-annotator arm publishes
+// Survivor.Raw -- the Entry.Raw that stable.Merge had already relabelled to
+// <source>-NNN, so no upstream name reaches /stable.txt whatever this
+// function recognises. On `/` every upstream tag survives.
+//
 // Where it does run, the scan consumes a CONTIGUOUS run and returns the
 // remainder from the first tag it does not recognise, so without this arm an
 // upstream `[GEO:RU][IP:1.2.3.4] Moscow` loses only its GEO tag and we
