@@ -59,9 +59,9 @@ type annotStep struct {
 	prov geo.Provider
 }
 
-// annotTag is one resolved annotation tag: a key (GEO/IP/ASN) and, for
-// provider-backed tags (GEO/ASN), the ordered chain that resolves it (first
-// step that answers wins).
+// annotTag is one resolved annotation tag: a key (GEO or ASN) and the ordered
+// chain that resolves it (first step that answers wins). Both surviving tags
+// are provider-backed; the chainless kind went with the IP tag.
 type annotTag struct {
 	key   string
 	chain []annotStep

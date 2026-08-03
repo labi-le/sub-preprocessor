@@ -70,6 +70,15 @@ func newBenchProcessor(b *testing.B) *Processor {
 // parse -> resolve (bare-IPv4 short circuit) -> geofeed filter -> annotate
 // rewrite -> buffer, across 100 nodes. The resolved map is cleared each
 // iteration to mirror a fresh request (no cross-request DNS cache reuse).
+//
+// It annotates exactly ONE tag, GEO via geofeed, and that count is a FIXTURE
+// (newBenchProcessor's Annotate list), not a property of the pipeline: editing
+// it moves this benchmark's baseline with no production code involved. It has.
+// `5d06fb6` dropped a second `{Tag: IP}` entry from that list and the numbers
+// went 18482 -> 15767 ns/op and 4640 -> 1600 B/op on production code that was
+// held constant. Nothing here can attribute a move to the annotator, which is
+// what BenchmarkAnnotate (annotator_bench_test.go) is for — its tag list is
+// fixed, so a move there is the code.
 func BenchmarkProcessBodyPipeline(b *testing.B) {
 	p := newBenchProcessor(b)
 	body := benchBody()

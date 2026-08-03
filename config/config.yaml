@@ -64,8 +64,10 @@ annotate:
   # precisely the origin the fronting hid (108 of 149 traced nodes last cycle
   # published an address different from the resolved one), and /stable.txt is
   # shared. An upstream-authored [IP:...] is still STRIPPED off node names
-  # (rewrite.isKnownTag keeps recognising it), so no foreign address rides
-  # along into what we publish.
+  # (rewrite.isKnownTag keeps recognising it) on any config that annotates at
+  # all. Emptying this list is the exception, not a milder setting: the
+  # annotator goes nil, both paths publish the node line verbatim, and every
+  # upstream tag -- addresses included -- rides along into what we publish.
 geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h

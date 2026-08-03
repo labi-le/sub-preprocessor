@@ -30,7 +30,7 @@ flowchart TD
     GBH["geoblock skip - node host in blocklist? (pre-DNS)"]
     RES["DNS resolve host to IPs - TTL cached"]
     IPF["filters: country (provider geofeed|asn) / asn (deny_patterns)"]
-    ANN["annotate: - prepend GEO/IP/ASN tags to the node name"]
+    ANN["annotate: - prepend GEO/ASN tags to the node name"]
     GBH --> RES --> IPF --> ANN
   end
 

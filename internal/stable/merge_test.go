@@ -59,9 +59,12 @@ func TestMergeDedupesAndRelabels(t *testing.T) {
 }
 
 // TestMergeCarriesNodeIP: the address the IP-filters judged travels with the
-// node so the published [IP:] tag and the offline GEO chain describe THAT
-// address — the worker never resolves a hostname a second time. The country is
-// not merge's business: nothing has annotated the node yet.
+// node so the offline GEO chain annotates THAT address — the worker never
+// resolves a hostname a second time. No tag prints the address itself (the IP
+// annotate tag is gone), which is exactly why the carry is easy to mistake for
+// dead weight: it feeds step.prov.Lookup(), so dropping it kills GEO
+// annotation in the worker. The country is not merge's business: nothing has
+// annotated the node yet.
 func TestMergeCarriesNodeIP(t *testing.T) {
 	t.Parallel()
 
