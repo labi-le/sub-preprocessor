@@ -8,10 +8,10 @@ import (
 )
 
 // NodeName writes node to b with the given already-formatted tag prefix folded
-// into its published name, e.g. tags="[GEO:NL][IP:1.2.3.4]" produces
-// "...#[GEO:NL][IP:1.2.3.4] Old Name". An empty tags string writes the node
-// with its known-tag prefix stripped (annotation reduced to a clean relabel).
-// Nodes that do not support fragment rewrites are written verbatim.
+// into its published name, e.g. tags="[GEO:NL][ASN:AS64500 EXAMPLE]" produces
+// "...#[GEO:NL][ASN:AS64500 EXAMPLE] Old Name". An empty tags string writes the
+// node with its known-tag prefix stripped (annotation reduced to a clean
+// relabel). Nodes that do not support fragment rewrites are written verbatim.
 func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	if !supportsFragmentRewrite(node) {
 		b.WriteString(node.Raw)
@@ -91,6 +91,23 @@ func StripKnownTags(s string) string {
 	return ""
 }
 
+// isKnownTag reports whether tag is one this service strips off an upstream
+// name. The set is deliberately WIDER than the set we write: only `GEO:`/`ASN:`
+// (the configured annotate tags) and `SPD:` (stable.speedPrefix) are ever
+// authored here; `IP:`, `JUR:`, `OK` and `BAD` are recognised so that an
+// upstream-authored tag is removed on relabel instead of accumulating in front
+// of ours.
+//
+// `IP:` has no writer left -- the annotate tag was removed -- and still must
+// stay, on the only path that strips anything: an ANNOTATING config. With
+// `annotate: []` the annotator is nil and both sinks publish node.Raw verbatim
+// (preprocess.bufferSink.emit, stable.BuildPayload), so StripKnownTags never
+// runs and every upstream tag survives whatever this function recognises.
+// Where it does run, the scan consumes a CONTIGUOUS run and returns the
+// remainder from the first tag it does not recognise, so without this arm an
+// upstream `[GEO:RU][IP:1.2.3.4] Moscow` loses only its GEO tag and we
+// republish `[GEO:xx] [IP:1.2.3.4] Moscow`, carrying an address we never
+// verified.
 func isKnownTag(tag string) bool {
 	if tag == "OK" || tag == "BAD" {
 		return true

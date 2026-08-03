@@ -106,7 +106,6 @@ const (
 	ProviderASN      = "asn"
 
 	TagGEO = "GEO"
-	TagIP  = "IP"
 	TagASN = "ASN"
 )
 
@@ -1166,12 +1165,8 @@ func (cfg *Config) validateAnnotate() error {
 			if err := validateProviderChain(i, a.Providers); err != nil {
 				return err
 			}
-		case TagIP:
-			if len(a.Providers) != 0 {
-				return fmt.Errorf("annotate[%d]: tag IP takes no providers", i)
-			}
 		default:
-			return fmt.Errorf("annotate[%d]: unknown tag %q (must be %q, %q or %q)", i, a.Tag, TagGEO, TagIP, TagASN)
+			return fmt.Errorf("annotate[%d]: unknown tag %q (must be %q or %q)", i, a.Tag, TagGEO, TagASN)
 		}
 	}
 	return nil

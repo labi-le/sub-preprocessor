@@ -808,7 +808,7 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 		{
 			name: "shipped chain keeps its order and drops asn",
 			annotate: []config.AnnotateSpec{
-				{Tag: config.TagIP},
+				{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 				{Tag: config.TagGEO, Providers: []string{
 					config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN,
 				}},
@@ -844,7 +844,7 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 		},
 		{
 			name:     "no GEO entry falls back to the geofeed",
-			annotate: []config.AnnotateSpec{{Tag: config.TagIP}, {Tag: config.TagASN, Providers: []string{config.ProviderASN}}},
+			annotate: []config.AnnotateSpec{{Tag: config.TagASN, Providers: []string{config.ProviderASN}}},
 		},
 	}
 	for _, tc := range cases {

@@ -194,8 +194,8 @@ provider, not a gate: see [Annotation](#annotation).
 ### Annotation
 
 The ordered `annotate:` list controls the tags prepended to node names on both
-endpoints: `GEO` (`[GEO:XX]`), `IP` (`[IP:1.2.3.4]`), `ASN` (`[ASN:...]`).
-GEO and ASN entries take `providers:` — an **ordered lookup chain** (e.g.
+endpoints: `GEO` (`[GEO:XX]`) and `ASN` (`[ASN:...]`). Each takes
+`providers:` — an **ordered lookup chain** (e.g.
 `providers: [geotrace, geofeed, dbip, registry, asn]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
 `[GEO:??]` / `[ASN:??]`. An empty `annotate` list disables annotation

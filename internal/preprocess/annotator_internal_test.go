@@ -49,7 +49,6 @@ func TestAnnotatorTagListOrder(t *testing.T) {
 	asnProv := fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}}
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-		{Tag: config.TagIP},
 		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
 	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
 	if a == nil {
@@ -60,7 +59,7 @@ func TestAnnotatorTagListOrder(t *testing.T) {
 	var buf, tagBuf bytes.Buffer
 	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("1.2.3.4")})
 
-	want := "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4][ASN:AS64500 EXAMPLE] Old"
+	want := "vless://u@example.com:443#[GEO:NL][ASN:AS64500 EXAMPLE] Old"
 	if buf.String() != want {
 		t.Fatalf("got %q, want %q", buf.String(), want)
 	}
@@ -73,16 +72,15 @@ func TestAnnotatorUnknownGeoAndASN(t *testing.T) {
 	geofeedProv := fakeProvider{name: "geofeed"}
 	asnProv := fakeProvider{name: "asn"}
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
 		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
-		{Tag: config.TagIP},
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
 	}, map[string]geo.Provider{config.ProviderGeofeed: geofeedProv, config.ProviderASN: asnProv})
 
 	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
 	a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("9.9.9.9")})
 
-	want := "vless://u@example.com:443#[GEO:??][ASN:??][IP:9.9.9.9] Old"
+	want := "vless://u@example.com:443#[ASN:??][GEO:??] Old"
 	if buf.String() != want {
 		t.Fatalf("got %q, want %q", buf.String(), want)
 	}
@@ -211,7 +209,6 @@ func geotraceAnnotator(t *testing.T, order ...string) *annotator {
 	t.Helper()
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: order},
-		{Tag: config.TagIP},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
 	})
@@ -239,18 +236,18 @@ func TestAnnotatorGeoTraceChain(t *testing.T) {
 			name:   "trace first wins",
 			order:  []string{config.ProviderGeoTrace, config.ProviderGeofeed},
 			egress: egress,
-			want:   "vless://u@example.com:443#[GEO:DE][IP:1.2.3.4] Old",
+			want:   "vless://u@example.com:443#[GEO:DE] Old",
 		},
 		{
 			name:  "unmeasured trace falls through",
 			order: []string{config.ProviderGeoTrace, config.ProviderGeofeed},
-			want:  "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4] Old",
+			want:  "vless://u@example.com:443#[GEO:NL] Old",
 		},
 		{
 			name:   "trace behind a hit never runs",
 			order:  []string{config.ProviderGeofeed, config.ProviderGeoTrace},
 			egress: egress,
-			want:   "vless://u@example.com:443#[GEO:NL][IP:1.2.3.4] Old",
+			want:   "vless://u@example.com:443#[GEO:NL] Old",
 		},
 	}
 
@@ -285,7 +282,11 @@ func TestAnnotateReturnsResolvedCountry(t *testing.T) {
 		t.Fatalf("got country %q, want DE", got)
 	}
 
-	noGeo := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{{Tag: config.TagIP}}, nil)
+	noGeo := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
+	}, map[string]geo.Provider{
+		config.ProviderASN: fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
+	})
 	buf.Reset()
 	if got = noGeo.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
 		Node: node, IP: netip.MustParseAddr("1.2.3.4"),
@@ -300,31 +301,18 @@ func TestAnnotateReturnsResolvedCountry(t *testing.T) {
 func TestAnnotatePrefixLeadsConfiguredTags(t *testing.T) {
 	t.Parallel()
 
-	a := geotraceAnnotator(t, config.ProviderGeofeed)
+	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+		{Tag: config.TagASN, Providers: []string{config.ProviderASN}},
+	}, map[string]geo.Provider{
+		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
+		config.ProviderASN:     fakeProvider{name: "asn", info: geo.Info{ASN: "AS64500 EXAMPLE"}},
+	})
 	req := AnnotateRequest{IP: netip.MustParseAddr("1.2.3.4"), Prefix: "[SPD:60M] "}
 
-	want := "vless://u@example.com:443#[SPD:60M] [GEO:NL][IP:1.2.3.4] Old"
+	want := "vless://u@example.com:443#[SPD:60M] [GEO:NL][ASN:AS64500 EXAMPLE] Old"
 	if got := annotateReq(t, a, req); got != want {
 		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// TestAnnotateIPv6Address: netip.Addr.As4 PANICS on a v6 address. The resolver
-// never produces one, but a traced egress can be v6, and the panic would land
-// in the middle of a publication cycle.
-func TestAnnotateIPv6Address(t *testing.T) {
-	t.Parallel()
-
-	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{{Tag: config.TagIP}}, nil)
-
-	for _, tc := range []struct{ ip, want string }{
-		{"2606:4700::6810:85e5", "2606:4700::6810:85e5"},
-		{"::ffff:1.2.3.4", "1.2.3.4"},
-	} {
-		want := "vless://u@example.com:443#[IP:" + tc.want + "] Old"
-		if got := annotateOne(t, a, tc.ip); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
 	}
 }
 

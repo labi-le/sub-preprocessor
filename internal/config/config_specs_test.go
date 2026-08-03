@@ -323,21 +323,18 @@ func TestLoadRejectsBadGeoDatabases(t *testing.T) {
 func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n  - tag: IP\n  - tag: ASN\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n  - tag: ASN\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Annotate) != 3 {
-		t.Fatalf("annotate len=%d, want 3", len(cfg.Annotate))
+	if len(cfg.Annotate) != 2 {
+		t.Fatalf("annotate len=%d, want 2", len(cfg.Annotate))
 	}
 	if !reflect.DeepEqual(cfg.Annotate[0].Providers, []string{config.ProviderGeofeed}) {
 		t.Fatalf("GEO providers default = %v, want [geofeed]", cfg.Annotate[0].Providers)
 	}
-	if len(cfg.Annotate[1].Providers) != 0 {
-		t.Fatalf("IP providers = %v, want none", cfg.Annotate[1].Providers)
-	}
-	if !reflect.DeepEqual(cfg.Annotate[2].Providers, []string{config.ProviderASN}) {
-		t.Fatalf("ASN providers default = %v, want [asn]", cfg.Annotate[2].Providers)
+	if !reflect.DeepEqual(cfg.Annotate[1].Providers, []string{config.ProviderASN}) {
+		t.Fatalf("ASN providers default = %v, want [asn]", cfg.Annotate[1].Providers)
 	}
 
 	rejects := map[string]struct {
@@ -347,7 +344,7 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 		"unknown tag":        {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
 		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", "field provider not found in type config.AnnotateSpec"},
 		"unknown provider":   {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
-		"ip with providers":  {geoBase + "annotate:\n  - tag: IP\n    providers: [geofeed]\n", "tag IP takes no providers"},
+		"retired ip tag":     {geoBase + "annotate:\n  - tag: IP\n", `unknown tag "IP"`},
 		"duplicate provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},
 	}
 	for name, tc := range rejects {
@@ -383,7 +380,7 @@ func TestLoadAnnotateProviderChain(t *testing.T) {
 func TestAnnotateUsesProvider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed]\n  - tag: IP\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
