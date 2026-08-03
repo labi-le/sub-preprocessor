@@ -66,8 +66,13 @@ annotate:
   # shared. An upstream-authored [IP:...] is still STRIPPED off node names
   # (rewrite.isKnownTag keeps recognising it) on any config that annotates at
   # all. Emptying this list is the exception, not a milder setting: the
-  # annotator goes nil, both paths publish the node line verbatim, and every
+  # annotator goes nil, nothing strips anything, and on / the node line is
+  # published verbatim (preprocess.bufferSink.emit writes node.Raw), so every
   # upstream tag -- addresses included -- rides along into what we publish.
+  # /stable.txt is spared, but only incidentally and not by this setting:
+  # stable.Merge relabels every kept node to <source>-NNN before publication,
+  # so the Entry.Raw that BuildPayload's nil-annotator arm emits carries no
+  # upstream name at all.
 geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h

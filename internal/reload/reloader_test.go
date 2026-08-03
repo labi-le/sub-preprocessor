@@ -112,7 +112,10 @@ func TestOptionsFromConfig(t *testing.T) {
 	cfg.Geo.ASN.Timeout = 4 * time.Second
 	cfg.Geo.ASN.CacheTTL = 24 * time.Hour
 	cfg.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"^AS1234 ", "spammy"}}}
-	cfg.Annotate = []config.AnnotateSpec{{Tag: "GEO", Providers: []string{"geofeed", "dbip"}}, {Tag: "IP"}}
+	cfg.Annotate = []config.AnnotateSpec{
+		{Tag: "GEO", Providers: []string{"geofeed", "dbip"}},
+		{Tag: "ASN", Providers: []string{"asn"}},
+	}
 	cfg.Geo.DBIP = config.DBIPConfig{URL: "https://mirror.example.com/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)}
 	cfg.Geo.Registry = config.RegistryConfig{URLs: []string{"https://mirror.example.com/delegated"}, RefreshInterval: new(2 * time.Hour)}
 	cfg.Fetch.Timeout = 3 * time.Second
