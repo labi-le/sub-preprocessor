@@ -68,7 +68,7 @@ with `400` naming the offending token. So does a request whose exclusions cover
 every allowed country.
 
 The response is `text/plain` Mihomo-compatible text; node names are annotated
-according to the `annotate` config (default `[GEO:XX][IP:a.b.c.d] <name>`).
+according to the `annotate` config (shipped config: `[GEO:XX] <name>`).
 Stats come back in the `X-Preprocessor-Stats` header. This path does **no**
 liveness probing — only IP-stage filtering (see below).
 

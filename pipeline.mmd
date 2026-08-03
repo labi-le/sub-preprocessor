@@ -50,7 +50,7 @@ flowchart TD
     CGP["chatgpt - keyless GET api.openai.com/compliance/cookie_requirements, scan body"]
     TDL["tidal - keyless GET api.tidal.com/v1/country, fail-closed: keep only 2xx with a readable countryCode (refused egress = CloudFront 403, no JSON)"]
     BWD["bandwidth - download test_url through the node, drop below min_mbps (last: fewest nodes)"]
-    PUBL["GET /stable.txt - Tagged names (GEO/IP/SPD tags + src-NNN)"]
+    PUBL["GET /stable.txt - Tagged names (GEO/SPD tags + src-NNN)"]
     MERGE --> DEAD --> LAT --> SEL --> GEM --> CLA --> CGP --> TDL --> BWD --> PUBL
   end
   SRC --> FILTER

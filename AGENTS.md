@@ -122,7 +122,7 @@ It exposes two modes.
 3. parses generic URI-style nodes (not VLESS-only; `vmess://` base64-JSON is decoded too)
 4. resolves node hostnames
 5. geofilters by IP country from geofeed sources
-6. rewrites node fragment/name with `[GEO:XX][IP:x.x.x.x] ...`
+6. rewrites node fragment/name with the configured `annotate` tags (shipped config: `[GEO:XX] ...`)
 7. returns raw Mihomo-compatible text/plain subscription body
 
 **Stable subscriptions worker (`GET /stable.txt`)** — a background worker keeps
