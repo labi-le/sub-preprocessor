@@ -344,9 +344,12 @@ nix flake update sub-preprocessor && make switch
   Two things follow for a reader diffing a fresh `make bench` against a
   pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
   not an allocation win the pipeline earned, and the post-`5d06fb6` ns baseline is **~16200,
-  NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. Read
-  the +1.8% as a median shift, not a clean separation: the interquartile ranges are disjoint
-  (hybrid 15856-16027, `5d06fb6` 16162-16348) but the full ranges overlap in the tails, and B/op
+  NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. The
+  +1.8% read as a median shift with disjoint interquartile ranges (hybrid 15856-16027,
+  `5d06fb6` 16162-16348) and overlapping tails, which was taken at the time as a weak
+  separation. It is better evidence than that, for the opposite conclusion: a CONSTANT
+  per-binary offset is exactly what produces disjoint IQRs around two stable medians, and the
+  bullet below measures one such link holding to 19 ns across five sessions hours apart. B/op
   itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
   objdump` on `(*annotator).Annotate` showed the 2-case switch `5d06fb6` left behind
   dispatching on ONE length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the
