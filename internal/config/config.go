@@ -212,9 +212,13 @@ type FilterConfig struct {
 	Version  string `yaml:"version"`
 }
 
-// AnnotateSpec is one entry in the ordered annotation tag list. Providers is
-// the ordered lookup chain for GEO and ASN (first provider that answers wins)
-// and must be empty for IP.
+// AnnotateSpec is one entry in the ordered annotation tag list. GEO and ASN are
+// the only tags the loader accepts — validateAnnotate's default arm rejects
+// everything else, IP included since `5d06fb6` retired it — and both are
+// provider-backed: Providers is their ordered lookup chain, first provider that
+// answers wins, and it must not be empty. Omitting it in YAML is still fine,
+// because applyAnnotateDefaults runs before Validate and fills GEO with
+// geofeed, ASN with asn; the emptiness check only bites a Config built in code.
 //
 // The retired single-provider "provider" key needs no field here: the strict
 // decode in decodeStrict rejects it, and every future rename with it.
@@ -1370,10 +1374,11 @@ func StoresChanged(old, newCfg Config) bool {
 		!reflect.DeepEqual(old.DeadCache.TTL, newCfg.DeadCache.TTL)
 }
 
-// AnnotateChanged reports whether the annotate tag list differs. The processor
-// bakes it into the per-node [GEO]/[IP]/[ASN] tags and the stable worker into
-// the bandwidth [SPD:] tag, so the reloader must rebuild/re-apply when it
-// changes; otherwise the published annotation stays stale.
+// AnnotateChanged reports whether the annotate tag list differs. Both consumers
+// bake it in: the processor renders the per-node [GEO]/[ASN] tags from it, and
+// the stable worker builds published names once per cycle, prepending its own
+// [SPD:] prefix to those same tags. So the reloader must rebuild/re-apply when
+// the list changes; otherwise the published annotation stays stale.
 func AnnotateChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Annotate, newCfg.Annotate)
 }

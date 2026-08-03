@@ -327,21 +327,31 @@ nix flake update sub-preprocessor && make switch
 - Benchmark results are stored in `./benchmarks/bench-<UTC timestamp>.txt`. That directory
   is gitignored, so a figure quoted out of a snapshot is unreachable from a fresh checkout:
   cite the mechanism, or re-measure with `nix-shell --run "make bench"`
-- **`BenchmarkProcessBodyPipeline` moved at `5d06fb6` and NONE of it was the code.** Its
-  annotate list is a FIXTURE (`newBenchProcessor`, `internal/preprocess/pipeline_bench_test.go`),
-  so the commit that removed the `IP` annotate tag also dropped a `{Tag: IP}` entry from it:
-  **18482 -> 15767 ns/op, 4640 -> 1600 B/op, 100 allocs/op unchanged**. Do NOT read that
-  4640 -> 1600 as an allocation win the pipeline earned. A hybrid tree — `23df10f`'s
-  production code with `5d06fb6`'s fixture — measures the same 15767 ns/op and 1600 B/op, so
-  the fixture is **100% of the B/op drop and 114% of the ns drop**, and the production change
-  measured **+2.1% ns/op** (15767 -> 16090; medians of 10 interleaved rounds, distributions
-  disjoint). Not extra work either: swapping only `annotator.go` into the control accounts for
-  1.5 of those 2.1 points, and `go tool objdump` shows the surviving 2-case switch reaching
-  the GEO body with FEWER comparisons than the 3-case one (`CMPQ len,$3` + `CMPW "AS"` against
-  `CMPQ len,$2` + `CMPQ len,$3` + `CMPW "AS"`) — it is block placement. Left alone
-  deliberately: a never-executed switch arm does not buy back three nanoseconds per node.
-  Every `benchmarks/` snapshot older than `5d06fb6` still records `4640 B/op`, so diffing a
-  fresh `make bench` against one reads a 65% allocation win that does not exist.
+- **`BenchmarkProcessBodyPipeline` moved at `5d06fb6` and the FIXTURE, not the code, is the
+  whole of the drop and then some.** Its annotate list is a fixture (`newBenchProcessor`,
+  `internal/preprocess/pipeline_bench_test.go`), so the commit that removed the `IP` annotate
+  tag also dropped a `{Tag: IP}` entry from it. Re-measured as four trees run round-robin in
+  ONE session — `go test -bench '^BenchmarkProcessBodyPipeline$' -benchmem -benchtime 5000x
+  -count=1 ./internal/preprocess`, 41 rounds each, first round discarded, medians of the
+  remaining 40, 9800X3D: `23df10f` **18686 ns/op / 4642 B/op**; a hybrid of `23df10f`
+  production code with `5d06fb6`'s fixture **15933 / 1600**; that hybrid with only
+  `5d06fb6`'s `annotator.go` swapped in **16221 / 1600**; this HEAD **16212 / 1600**; 100
+  allocs/op throughout. So the fixture is **100% of the B/op drop and 111% of the ns drop** —
+  it OVERSHOOTS, because the production change put **+280 ns/op (+1.8%)** back on top of it,
+  and swapping `annotator.go` alone reproduces all of that (+288). Two things follow for a
+  reader diffing a fresh `make bench` against a pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
+  not an allocation win the pipeline earned, and the post-`5d06fb6` ns baseline is **~16200,
+  NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. Read
+  the +1.8% as a median shift, not a clean separation: the interquartile ranges are disjoint
+  (hybrid 15856-16027, HEAD 16162-16348) but the full ranges overlap in the tails, and B/op
+  itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
+  objdump` on `(*annotator).Annotate` shows the surviving 2-case switch dispatching on ONE
+  length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the 3-case one needed two
+  (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares against seven. It is block
+  placement. Left alone deliberately: a never-executed switch arm does not buy back three
+  nanoseconds per node. Every `benchmarks/` snapshot older than `5d06fb6` records
+  `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% allocation win that
+  does not exist.
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations
