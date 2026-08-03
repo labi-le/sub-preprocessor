@@ -400,8 +400,12 @@ nix flake update sub-preprocessor && make switch
   independent export and link (prebuilt binaries, round-robin, 21 rounds, first discarded,
   medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at 15972.0 [15847-16230] and
   `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the opposite sign and two orders of
-  magnitude smaller, with `372749b` at 16134.5 [16054-16194] in the same session and the
-  table's B of 15971.0 reproducing exactly. C and D
+  magnitude smaller: on that link the two trees agree to within 1.0 ns/op, far under the
+  floor this entry's own children establish. Nothing in that session reproduces a row of
+  the table above and nothing can — its `372749b` reads 16134.5 [16054-16194] against the
+  table's A of 16073.5, **+61.0 ns/op on a tree byte-identical to the one the table
+  measured**, which is the per-binary layout offset again and the reason a ns figure from
+  an independent link can neither confirm nor separate a row. C and D
   need no separate pin: both are defined as a one-file swap between A and B, so pinning
   those two fixes all four. The 16 above is `git diff --name-only 372749b 7f93685`, with
   `AGENTS.md` among the paths because `3bddb93` edits it before `7f93685` appends this note.
@@ -438,7 +442,7 @@ nix flake update sub-preprocessor && make switch
     | 3 (this round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
 
     **Four independent LINKS of the same D source** measure the must-be-zero A -> D at
-    **+0.5, +37.5, +317.0 and +323.5 ns/op** (the last is build 2 re-verified on its retained
+    **-0.5, +37.5, +317.0 and +323.5 ns/op** (the last is build 2 re-verified on its retained
     images), while A -> C reads -121.0 (-0.75%), -109.5 (-0.68%), -86.0 (build 2's
     reversed-order session) and -59.0 (-0.37%) — direction consistent, magnitude not. Each
     link's own delta is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 / 16404.0

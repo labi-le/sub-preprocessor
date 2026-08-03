@@ -690,19 +690,28 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 // and used to answer it from different sources: the filter saw the geofeed
 // alone, so a node DB-IP places in DE was geo-dropped as unknown while the tag
 // it would have been published with said [GEO:DE]. Reading the order off the
-// annotate config keeps the two answers identical for any ordering an operator
-// writes, not just the one config.yaml ships. EVERY GEO entry contributes,
-// because Annotate resolves across entries too — it returns the leftmost
-// country any of them placed — so a filter reading one entry judged nodes
-// without a database their own published tag had already consulted. The
-// databases are already in memory (the lazy-build rule in NewProcessor
-// downloads them only when an annotate entry names them), so consulting them
-// costs a binary search on the IPs the earlier providers miss and nothing else.
+// annotate config keeps the two answers identical over the LOCAL databases for
+// any ordering an operator writes, not just the one config.yaml ships. EVERY
+// GEO entry contributes, because Annotate resolves across entries too — it
+// returns the leftmost country any of them placed — so a filter reading one
+// entry judged nodes without a database their own published tag had already
+// consulted. The databases are already in memory (the lazy-build rule in
+// NewProcessor downloads them only when an annotate entry names them), so
+// consulting them costs a binary search on the IPs the earlier providers miss
+// and nothing else.
 //
-// The asn provider stays out: it is a per-IP Cymru round trip, not a local
-// table, and the config exposes it as an explicit `{type: country, provider:
-// asn}` filter for operators who want it. A GEO tag chain ending in asn can
-// therefore still name a country the filter treated as unknown.
+// LOCAL is the whole of the promise, and BOTH exceptions to it sit in the
+// shipped chain. The asn provider stays out: it is a per-IP Cymru round trip,
+// not a local table, and the config exposes it as an explicit `{type: country,
+// provider: asn}` filter for operators who want it. geotrace stays out for a
+// harder reason (countryChainOrder's doc carries it): it is not a lookup at
+// all, so there is no filter form to expose. A GEO chain resolving through
+// either can therefore still name a country the filter treated as unknown, and
+// that is the DEFAULT, not a corner config. Measured on config.yaml's own
+// `[geotrace, geofeed, dbip, registry, asn]`, which merges to
+// [geofeed, dbip, registry]: with all three loaded and none of them able to
+// place the IP, `exclude_countries=DE` keeps the node while the stable worker's
+// traced egress publishes [GEO:DE].
 //
 //nolint:ireturn // returns the CountryLookup interface, like currentEntries
 func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
