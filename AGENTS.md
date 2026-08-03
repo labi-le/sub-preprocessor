@@ -397,9 +397,9 @@ nix flake update sub-preprocessor && make switch
   test binary. This entry once cited +82 ns/op (+0.51%) instead, measured on `093b657`.
   Do not restore it: +0.51% sits under the "up to +2%" per-binary layout offset the
   children below establish, so it cannot separate two trees at all, and a further
-  independent export and link — the merge round's, on a different tree PAIR, and not one of
-  the four A/B/C/D builds tabulated below — (prebuilt binaries, round-robin, 21 rounds,
-  first discarded, medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at
+  independent export and link — `history://FixMergeRound`'s, on a different tree PAIR, and
+  not one of the four A/B/C/D builds tabulated below — (prebuilt binaries, round-robin,
+  21 rounds, first discarded, medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at
   15972.0 [15847-16230] and `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the
   opposite sign and two orders of magnitude smaller: on that link the two trees agree to
   within 1.0 ns/op, far under the floor this entry's own children establish. Nothing in that
@@ -407,7 +407,14 @@ nix flake update sub-preprocessor && make switch
   16134.5 [16054-16194] against the table's A of 16073.5, **+61.0 ns/op on a tree
   byte-identical to the one the table measured**, which is the per-binary layout offset
   again and the reason a ns figure from an independent link can neither confirm nor
-  separate a row. C and D
+  separate a row. **That round has TWO links of that pair and they are not a
+  contradiction**: its performance REVIEWER, `history://PerfMerge`, `git archive`d and
+  linked the same three trees itself (alongside `a392316`) and read `372749b` 16081.0,
+  `7f93685` 15974.0 and `66e5d80` 15926.5 — **-47.5** on the pair where FixMergeRound's
+  link reads -1.0: both negative, 46.5 apart, the layout offset one more time. Take the
+  triple above from `history://FixMergeRound` only, and take nothing but medians from
+  PerfMerge: that session picked up outside machine load (`372749b` maximum 18165 and
+  `66e5d80` 16528 against clean minima of 15992 and 15823). C and D
   need no separate pin: both are defined as a one-file swap between A and B, so pinning
   those two fixes all four. The 16 above is `git diff --name-only 372749b 7f93685`, with
   `AGENTS.md` among the paths because `3bddb93` edits it before `7f93685` appends this note.
@@ -509,9 +516,10 @@ nix flake update sub-preprocessor && make switch
     after `CMPW $0x5341` jumps straight to the GEO test, so for key "GEO" the `CMPB $0x4e`
     is never reached. Every GEO tag on every node paid **one compare and one
     perfectly-predicted taken branch** for an arm it never entered — over the pipeline's 100
-    nodes that is tens of ns/op, not 121, so it is **consistent with the sign of** the
-    pipeline's A -> C, and predicts nothing about its size. `BenchmarkAnnotate` moving the
-    other way over a strictly shorter path says the same thing from the other side.
+    nodes that is tens of ns/op, not 121, so it points the way **three of A -> C's four
+    links** do, and predicts nothing about its size. `BenchmarkAnnotate` moving the other
+    way over a strictly shorter path — its D -> B residual is POSITIVE on all four builds —
+    says the same thing from the other side.
   - No `allocs/op` or `B/op` increase on any of the 49 benchmarks. Five in untouched packages
     (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
     differ between trees at `-benchtime 100x`, and the SAME tree reproduces the same spread
