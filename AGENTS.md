@@ -335,21 +335,24 @@ nix flake update sub-preprocessor && make switch
   -count=1 ./internal/preprocess`, 41 rounds each, first round discarded, medians of the
   remaining 40, 9800X3D: `23df10f` **18686 ns/op / 4642 B/op**; a hybrid of `23df10f`
   production code with `5d06fb6`'s fixture **15933 / 1600**; that hybrid with only
-  `5d06fb6`'s `annotator.go` swapped in **16221 / 1600**; this HEAD **16212 / 1600**; 100
+  `5d06fb6`'s `annotator.go` swapped in **16221 / 1600**; `5d06fb6` **16212 / 1600**; 100
   allocs/op throughout. So the fixture is **100% of the B/op drop and 111% of the ns drop** —
-  it OVERSHOOTS, because the production change put **+280 ns/op (+1.8%)** back on top of it,
-  and swapping `annotator.go` alone reproduces all of that (+288). Two things follow for a
-  reader diffing a fresh `make bench` against a pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
+  it OVERSHOOTS, because a further **+280 ns/op (+1.8%)** came back on top of it — attributed
+  then to the production change, and swapping `annotator.go` alone did reproduce all of it
+  (+288), but see the bullet below: that is the size of this benchmark's per-binary link
+  offset, so the attribution does not hold and only the fixture half of this bullet does.
+  Two things follow for a reader diffing a fresh `make bench` against a
+  pre-`5d06fb6` snapshot: 4640 -> 1600 B/op is
   not an allocation win the pipeline earned, and the post-`5d06fb6` ns baseline is **~16200,
   NOT the hybrid's 15933** — measuring ~16000 today is the baseline, not a regression. Read
   the +1.8% as a median shift, not a clean separation: the interquartile ranges are disjoint
-  (hybrid 15856-16027, HEAD 16162-16348) but the full ranges overlap in the tails, and B/op
+  (hybrid 15856-16027, `5d06fb6` 16162-16348) but the full ranges overlap in the tails, and B/op
   itself drifts a byte or two run to run at these sizes. Not extra work either — `go tool
   objdump` on `(*annotator).Annotate` showed the 2-case switch `5d06fb6` left behind
   dispatching on ONE length compare (`CMPQ $3`, then `CMPW "GE"`/`CMPW "AS"`) where the
   3-case one needed two (`CMPQ $2` first, for the 2-byte `IP`) — five immediate compares
   against seven. It is block placement, and the bullet below shows the +1.8% was the same
-  build-identity floor that made a null control read +1.97%. That switch is gone now: the
+  per-binary link offset that made a null control read +1.97%. That switch is gone now: the
   `ASN` tag removal replaced it with a guard clause (`if t.key != config.TagGEO {
   continue }`), leaving three compares. Its arm was left alone at the time deliberately: a
   never-executed switch arm does not buy back three nanoseconds per node. Every

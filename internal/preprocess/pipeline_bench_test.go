@@ -77,8 +77,9 @@ func newBenchProcessor(b *testing.B) *Processor {
 // `5d06fb6` dropped a second `{Tag: IP}` entry from that list, and holding
 // production code at `23df10f` while taking only that fixture moves the numbers
 // 18686 -> 15933 ns/op and 4642 -> 1600 B/op. AGENTS.md's bench notes carry the
-// full four-tree measurement, including the +280 ns/op the production change
-// put back. Nothing here can attribute a move to the annotator, which is
+// full four-tree measurement, including the +280 ns/op once attributed to the
+// production change and since shown to be indistinguishable from the per-binary
+// link floor. Nothing here can attribute a move to the annotator, which is
 // what BenchmarkAnnotate (annotator_bench_test.go) is for. Its tag list is
 // fixed in ITS OWN file, so a move there is normally the code — the ASN
 // removal is the one round where that fixture changed too (two tags down to
