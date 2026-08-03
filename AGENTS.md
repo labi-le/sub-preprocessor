@@ -17,19 +17,31 @@ nix-shell --run "make bench"
 
 ## Workflow — mandatory, not advisory
 
-Every change to production code or to a contract (an exported API, a config key, a metric
-name, a published output shape) MUST go through this loop:
+Every change to production code, to a contract (an exported API, a config key, a metric
+name, a published output shape), or to a document agents act on (`AGENTS.md`, `routes.md`,
+`README.md`) MUST go through this loop:
 
 > **implement → review (performance + architecture, as SEPARATE passes) → fix → repeat**
 
-It terminates on two conditions, both required: a full round returns **zero** open findings,
-and **every point of what was originally agreed is implemented**. Not "the happy path
-works". Not "tests pass". Reviewers MUST be told what is out of scope, so a round is not
-spent proposing redesigns nobody asked for.
+**Write the agreement down BEFORE the first implement step** — a numbered list of the agreed
+points, plus what is explicitly out of scope, so a round is not spent proposing redesigns
+nobody asked for. Without that list "100% of what was agreed" is unfalsifiable in both
+directions: a reviewer can assert a point was agreed, an implementer can assert a dropped
+point never was, and neither can be disproved.
 
-**Proportionality.** The gate is risk, not diff size. A docs-only or config-only change
-takes one review pass, not two. But the termination conditions NEVER relax: a one-line
-change with an open finding is not done either.
+The loop terminates on two conditions, both required: a full round returns **zero** open
+findings, and **every numbered point is either implemented or struck by explicit agreement**,
+the strike recorded in the list. Not "the happy path works". Not "tests pass".
+
+**Proportionality.** The gate is risk, not diff size. A low-risk change — docs-only,
+config-only — takes ONE pass, and that pass is the ARCHITECTURE one: a document or a key
+that points at the wrong seam sends the next agent there, and neither has a hot path. Never
+leave which pass survives to the agent's guess. Documents agents act on are IN scope
+precisely because they fail this way — this very section is a docs-only change, it was given
+a review pass, and it needed one: two of its load-bearing claims were false, both taken from
+a report about an attempt that was rejected and never committed, so no reader could check
+them. The termination conditions NEVER relax: a one-line change with an open finding is not
+done either.
 
 **A finding may be REFUTED, not only fixed — and the loop must allow it.** A round is clean
 when every finding is either fixed or disproved with evidence, and a wrong finding
@@ -39,59 +51,87 @@ it — measured, `NewShadowSocksR` has no range check at all and accepts `0`, `-
 Another demanded rejecting a `mierus://` link whose first `port` is empty — measured,
 mihomo `continue`s its INNER per-port loop and serves a working proxy from a later port, so
 rejecting would have dropped usable nodes. Verify a finding against the code before
-implementing it; say so with evidence when it is wrong.
+implementing it; say so with evidence when it is wrong. When the refutation is ITSELF
+disputed, neither side closes the finding unilaterally: it goes to whoever owns the numbered
+list — the agent that set the scope — who rules and records the ruling in that list.
 
 **A green suite is not evidence, and MUST NEVER be reported as a review result.** A review
 earns its cost only by trying to break the change; mutation is the cheapest way and is
-expected — revert the fix, confirm the new test fails, restore. That has repeatedly found
-tests here that could not fail at all: the mieru outcome fold shipped with three tests that
-looked like coverage while neutering both production fold conditions left the package green.
+expected — revert the fix, confirm the new test fails, restore. The restore is not done
+until an empty `git diff` against the pre-mutation tree says so, and that check MUST run
+before the round is reported: the mutation deliberately leaves production code wrong, and
+agents here work in worktrees off a parent whose `./config` is bind-mounted read-write into
+a running container (`docker-compose.yaml:14`). Mutation has repeatedly found tests here
+that could not fail at all: the mieru outcome fold shipped with three tests that looked like
+coverage while neutering both production fold conditions left the package green, and
+replacing `betterTraceOutcome`'s body with `return a.name < b.name` also left it green
+(`364a50d`) — every ranked case sorted identically under either key.
 
-**Why review at all when CI is green.** The `geotrace` filter once shipped completely inert.
-`go test ./...`, `-race` and `golangci-lint` were all clean. `swapTagValues` stopped scanning
-at the first space between tags while `rewrite.LeadingTags`, its own input source, skipped
-that whitespace — and because `bandwidth` runs before `geotrace` and prepends
-`"[SPD:<n>M] "`, every survivor in production arrived space-separated and came back
-untouched. Nothing dropped, nothing warned, and the `corrected` counter read 0, which an
-operator reads as "the offline chain was right" — the opposite of the truth. No test caught
-it: every fixture used the pre-bandwidth name shape.
+**Why review at all when CI is green.** The `geotrace` filter once shipped completely inert,
+and stayed that way from `11e5ca3` to `e554307`. `go test ./...`, `-race` and
+`golangci-lint` were all clean the whole time. `swapTagValues` stopped scanning at the first
+space between tags while `rewrite.LeadingTags`, its own input source, skipped that
+whitespace — and because `bandwidth` ran before `geotrace` and prepended `"[SPD:<n>M] "`,
+every survivor in production arrived space-separated and came back untouched. Nothing
+dropped, nothing warned, and the `corrected` counter read 0, which an operator reads as "the
+offline chain was right" — the opposite of the truth. No test caught it: every fixture used
+the pre-bandwidth name shape. (There is no `geotrace` filter now: `abf452b` deleted
+`nodefilter_trace.go` and moved it into the annotate chain.)
 
-**Why performance is its OWN pass.** Read naively, that change's benchmark table showed a
-38.9% regression. It was not one — the benchmark that moved most feeds lines containing no
-`://`, so `parseNode` is never called and it cannot execute one changed instruction.
-Separating binary-layout noise from real cost took a hybrid tree (new production code, old
-test files) plus `go tool objdump` showing the suspect functions instruction-identical.
-Without that pass the branch either ships a regression or gets rewritten to chase a phantom.
-The inverse also happened: a mieru fix that read as obviously correct added a 16-byte field
-to `Entry`, measured at +13% ns and +16.7% B/op on `BenchmarkSelectSurvivors`. **Allocations
-are the binding constraint** — `allocs/op` and `B/op` MUST NOT increase; `ns/op` is noisy and
-means nothing without a control.
+**Why performance is its OWN pass.** A benchmark that moved is not a regression until the
+changed code is shown to be on its path. On that same change the benchmark that moved most
+was `BenchmarkParse_SkipsNonURILines`, which feeds 50 lines containing no `://`
+(`internal/subscription/subscription_bench_test.go:93`) — `parseNode` is never called, so it
+cannot execute one changed instruction and what moved was binary layout. Telling that apart
+from real cost takes a hybrid tree (new production code, old test files) and `go tool
+objdump` on the suspect functions. Without that pass the branch either ships a regression or
+gets rewritten to chase a phantom. The inverse is just as real, and derivable without
+running anything: `SelectSurvivors` does one `make([]Survivor, 0, len(entries))`, so its
+B/op is `len(entries) * unsafe.Sizeof(Survivor{})` rounded up to the allocator's 8 KiB page
+multiple. At the benchmark's `n = 500`, growing `Survivor` from 80 to 88 bytes moves it from
+40960 to 49152 B/op — **+20%, for one added `bool`**. **Allocations are the binding
+constraint:** an `allocs/op` or `B/op` increase is a BLOCKING FINDING the change MUST
+justify and the reviewer MUST accept before the round closes. A finding, not a prohibition,
+because that 20% was paid deliberately: the field is now `Entry.Country` (`0f7af54` swapped
+the bool for the code itself, 88 -> 96 bytes, the same 49152 B/op), and it is what feeds
+`keptCountries` and `stable_kept_country_nodes`. An agent reading the rule as absolute would
+have blocked it. `ns/op` is noisy and means nothing without a control: benchmarks here drift
+several percent run to run over code whose allocation counters do not move at all.
 
-**Why architecture is its OWN pass.** That same mieru fix passed its slice-scoped review: it
-was locally correct. It also fixed one of FOUR places where a mihomo proxy name is matched
-against an `Entry.Label`, leaving `recordDead`, `applyFilters`' proxy map and both
-through-node outcome maps broken. A reviewer given one slice structurally cannot see that;
-someone MUST look at the whole seam, especially where parallel work merges.
-
-**Why loop instead of reviewing once.** Every round has found what the previous missed.
-Round 1 found the inert filter; round 2 found its fix's fold had no coverage; round 3 found
-a comment asserting mihomo cannot emit a shape a leading-zero mieru port makes it emit
-routinely. The loop stopped when a round returned zero — never before.
+**Why architecture is its OWN pass.** `8d2c3a5` fixed, in ONE change, all four places where
+a mihomo proxy name was matched against an `Entry.Label` — mihomo expands one `mierus://`
+link into one proxy per configured port, so every bridge missed for mieru. Every site was
+locally correct afterwards and slice-scoped review had nothing left to say. It still left a
+seam only a whole-package reader could see: the shared proxy map stayed
+`map[string]mihomo.Proxy`, so a multi-port `mierus://` survivor reached the through-node
+filters as whichever port mihomo emitted LAST — undoing the best-of-N choice the latency
+probe had deliberately just made. `448279b` repaired it by folding on the outcome side
+instead of collapsing the proxy set. A reviewer given one slice structurally cannot see
+that; someone MUST look at the whole seam, especially where parallel work merges. Five such
+bridges exist today — `checker.go`, `prober.go`, `prober_api.go`, `prober_bandwidth.go`, and
+`prober_trace.go`'s `TraceCheck` winner map, which was born `entryLabel`-correct after
+`8d2c3a5`. (`applyFilters` is now `filterAndMeasureEgress`, renamed by `abf452b`.)
 
 **Why "100% of what was agreed" is its own condition.** "It works" is not "it is done". All
 of these passed a working-feature check and were still defects: `Entry.Country` kept its
-pre-trace value, so the published list and the country gauge disagreed about one node;
-`corrected`/`unanswered` rode `FilterReport.Dropped` and so appeared on a Grafana panel
-titled "drops by reason" for a filter that drops nothing; `mergedGeoTrace` measured 0.0%
-coverage, so deleting two of its three arms kept the suite green.
+pre-trace value, so `/stable.txt` published `[GEO:DE]` while `stable_kept_country_nodes`
+still counted that node as CA; `corrected`/`unanswered` rode `FilterReport.Dropped` and so
+appeared on a Grafana panel titled "drops by reason" for a filter that drops nothing (both
+`e554307`); `betterTraceOutcome`'s test exercised only the tiebreak, so its primary key
+could be deleted with the suite green (`364a50d`).
 
-**Comments are a first-class review target,** not polish. The recurring defect here is a
-true-when-written comment: one referenced `merge.go`'s `tagCountry` after a redesign deleted
-it, one said the trace endpoint answers a fixed "211 bytes" (it has no fixed length — the
-endpoint echoes the request User-Agent back), one claimed a proxy shape mihomo cannot
-produce. Per the conventions
-below, a stale comment is worse than none, so a review that approves the code and ignores
-its comments has not finished.
+**Comments are a first-class review target,** not polish — and so are the documents, which
+rot the same way with nothing compiling against them. The recurring defect here is the
+true-when-written claim. `routes.md`'s `parseNode` entry kept pointing at
+`stable.tagCountry` (`merge.go`) for the aliasing rule after `abf452b` deleted that
+function, and it survived a dedicated routes.md staleness pass (`322ee2a`) that rewrote
+three other lines; the commit carrying this section is what finally fixed it. One comment
+said the trace endpoint answers a fixed "211 bytes" — it has no fixed length, the endpoint
+echoes the request User-Agent back, 202 and 301 bytes for two of them (`8d11c57`). One
+claimed mihomo cannot emit a proxy shape a leading-zero mieru port makes it emit; rare, not
+impossible (`bed264c`). Per the conventions below, a stale comment is worse than none, so a
+review that approves the code and ignores its comments — or the docs its change falsified —
+has not finished.
 
 ## Code conventions
 
@@ -283,8 +323,9 @@ nix flake update sub-preprocessor && make switch
 
 ## Bench / performance notes
 
-- Benchmark results are stored in `./benchmarks/bench-<UTC timestamp>.txt`
-- Baseline/optimization notes live in `BENCHMARK_OPTIMIZATION_PLAN.md`
+- Benchmark results are stored in `./benchmarks/bench-<UTC timestamp>.txt`. That directory
+  is gitignored, so a figure quoted out of a snapshot is unreachable from a fresh checkout:
+  cite the mechanism, or re-measure with `nix-shell --run "make bench"`
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations
