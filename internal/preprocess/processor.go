@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -681,15 +682,18 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 }
 
 // countryChain returns the lookup the country filter judges nodes with: the
-// local country databases the configured GEO annotate chain names, in the
-// order it names them.
+// local country databases the configured GEO annotate chains name, in the
+// order they name them.
 //
 // Filtering and annotation ask one question — "which country is this IP in?" —
 // and used to answer it from different sources: the filter saw the geofeed
 // alone, so a node DB-IP places in DE was geo-dropped as unknown while the tag
 // it would have been published with said [GEO:DE]. Reading the order off the
-// same config entry the annotator walks keeps the two answers identical for
-// any ordering an operator writes, not just the one config.yaml ships. The
+// annotate config keeps the two answers identical for any ordering an operator
+// writes, not just the one config.yaml ships. EVERY GEO entry contributes,
+// because Annotate resolves across entries too — it returns the leftmost
+// country any of them placed — so a filter reading one entry judged nodes
+// without a database their own published tag had already consulted. The
 // databases are already in memory (the lazy-build rule in NewProcessor
 // downloads them only when an annotate entry names them), so consulting them
 // costs a binary search on the IPs the earlier providers miss and nothing else.
@@ -723,13 +727,21 @@ func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 	return chain
 }
 
-// countryChainOrder is the provider order countryChain walks, taken from the
-// first GEO annotate entry so the filter's verdict and the [GEO:xx] tag resolve
-// an IP through the same databases in the same precedence. asn is dropped (see
-// countryChain), as is any provider this process did not build — the lazy-build
-// rule in NewProcessor makes the latter unreachable for a GEO chain, but a nil
-// geoDB in the chain would panic and that is too sharp an edge to leave resting
-// on an argument made elsewhere.
+// countryChainOrder is the provider order countryChain walks: EVERY GEO
+// annotate entry's chain, concatenated in written order and de-duplicated by
+// first occurrence, so the filter's verdict and the [GEO:xx] tags resolve an IP
+// through the same databases in the same precedence. Reading the FIRST entry
+// alone inverted both verdicts on a config that split one chain across two
+// entries: with the geofeed unable to place an IP DB-IP puts in DE and
+// `[{GEO,[geofeed]},{GEO,[dbip]}]` written, `countries=DE` dropped the node as
+// unplaceable while `exclude_countries=DE` KEPT it and published
+// `[GEO:??][GEO:DE]` — a deny-list quietly ceasing to work. Concatenation is a
+// no-op for every single-entry config, the shipped one included.
+//
+// asn is dropped (see countryChain), as is any provider this process did not
+// build — the lazy-build rule in NewProcessor makes the latter unreachable for
+// a GEO chain, but a nil geoDB in the chain would panic and that is too sharp
+// an edge to leave resting on an argument made elsewhere.
 //
 // geotrace is dropped for a harder reason than asn: it is not a lookup at all.
 // It answers with what a node reported through ITS OWN proxy, and the IP stage
@@ -737,38 +749,62 @@ func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 // filter therefore stays offline, and a GEO chain led by geotrace still
 // filters on the local databases behind it.
 //
-// A geofeed-only chain collapses to an empty order, as does a chain naming
+// A merged order of the geofeed alone collapses to nil, as does one naming
 // nothing local (GEO through asn alone) and a config with no GEO entry at all:
 // countryChain then hands the filter the geofeed lookup directly instead of
 // wrapping a single element. The geofeed is the one database every processor
 // loads, so it is the only sound fallback when the config expresses no
 // preference.
+//
+// Dedup bounds the result at the three local providers however many entries are
+// written, so countryChain's per-request chainLookup cannot grow past what one
+// entry could already ask for, and the walk itself fits a stack array: only the
+// surviving order reaches the heap, exactly sized, and every config that
+// collapses to nil allocates nothing at all. This runs once per processor
+// build, not per request — NewProcessor stores the result in p.countryOrder —
+// so the sizing is tidiness, not a hot path.
 func countryChainOrder(annotate []config.AnnotateSpec, haveDBIP, haveRegistry bool) []string {
+	// localCountryProvider admits exactly three names and the dedup below
+	// rejects repeats, so n can never run past the array.
+	var buf [localCountryProviders]string
+	n := 0
 	for _, a := range annotate {
 		if a.Tag != config.TagGEO {
 			continue
 		}
-		order := make([]string, 0, len(a.Providers))
 		for _, prov := range a.Providers {
-			switch prov {
-			case config.ProviderGeofeed:
-				order = append(order, prov)
-			case config.ProviderDBIP:
-				if haveDBIP {
-					order = append(order, prov)
-				}
-			case config.ProviderRegistry:
-				if haveRegistry {
-					order = append(order, prov)
-				}
+			if !localCountryProvider(prov, haveDBIP, haveRegistry) || slices.Contains(buf[:n], prov) {
+				continue
 			}
+			buf[n] = prov
+			n++
 		}
-		if len(order) == 1 && order[0] == config.ProviderGeofeed {
-			return nil
-		}
-		return order
 	}
-	return nil
+	if n == 0 || (n == 1 && buf[0] == config.ProviderGeofeed) {
+		return nil
+	}
+	return slices.Clone(buf[:n])
+}
+
+// localCountryProviders is how many providers countryChainOrder can emit: the
+// geofeed plus the two downloadable databases.
+const localCountryProviders = 3
+
+// localCountryProvider reports whether prov is a local country database this
+// process built, and so one the IP-stage filter can consult. asn and geotrace
+// are false by the arguments in countryChainOrder's doc comment; a provider
+// this process did not build is false because its geoDB is nil.
+func localCountryProvider(prov string, haveDBIP, haveRegistry bool) bool {
+	switch prov {
+	case config.ProviderGeofeed:
+		return true
+	case config.ProviderDBIP:
+		return haveDBIP
+	case config.ProviderRegistry:
+		return haveRegistry
+	default:
+		return false
+	}
 }
 
 // chainLookup resolves an IP against several country databases in order and

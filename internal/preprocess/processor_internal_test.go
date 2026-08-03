@@ -791,6 +791,186 @@ func TestCountryChainFollowsConfiguredProviderOrder(t *testing.T) {
 	}
 }
 
+// TestEveryGEOEntryFeedsTheCountryFilter pins PP-02/VP-03 for the multi-entry
+// shape. countryChainOrder used to stop at the FIRST GEO entry while Annotate
+// resolves across all of them, so splitting one chain over two entries
+// inverted BOTH verdicts on the same node: with the geofeed unable to place
+// 203.0.113.9 and DB-IP placing it in DE, `countries=DE` dropped it as
+// unplaceable and `exclude_countries=DE` KEPT it — a deny-list not working —
+// and published `[GEO:??][GEO:DE]`, naming the very country it was excluded
+// for. Both directions are pinned because only the allow-list one was ever
+// covered, and the deny-list one is the half that fails silently: nothing
+// warns, no counter moves, the node is simply published.
+//
+// The merged single-entry config is the control: the split config must now
+// agree with it verdict for verdict.
+func TestEveryGEOEntryFeedsTheCountryFilter(t *testing.T) {
+	t.Parallel()
+
+	ip := netip.MustParseAddr("203.0.113.9")
+	// A populated geofeed that does not cover the node: "unplaceable by the
+	// geofeed", not "no geofeed loaded".
+	geofeedElsewhere := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'N', 'L'}},
+	})
+	dbipDE := geofeed.NewRangeLookup([]geofeed.Range{
+		{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}},
+	})
+	body := []byte("vless://u@203.0.113.9:443#n\n")
+
+	split := []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
+	}
+	merged := []config.AnnotateSpec{
+		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}},
+	}
+
+	newProcessor := func(t *testing.T, annotate []config.AnnotateSpec) *Processor {
+		t.Helper()
+		p, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
+			RefreshInterval:  24 * time.Hour,
+			DNSTimeout:       time.Second,
+			PreloadedGeofeed: GeoState{Lookup: geofeedElsewhere, LoadedAt: time.Now()},
+			PreloadedDBIP:    GeoState{Lookup: dbipDE, LoadedAt: time.Now()},
+			// SSRF-unreachable: the preload proves no download is attempted.
+			DBIP:      config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+			IPFilters: []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+			Annotate:  annotate,
+		})
+		if err != nil {
+			t.Fatalf("NewProcessor: %v", err)
+		}
+		return p
+	}
+
+	cases := []struct {
+		name     string
+		annotate []config.AnnotateSpec
+	}{
+		{"one merged entry", merged},
+		{"the same chain split over two entries", split},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The two directions are separate subtests on purpose: a shared
+			// body would t.Fatal on the allow-list half first and never reach
+			// the deny-list assertion, so a regression in the half that fails
+			// SILENTLY would hide behind the half that is already covered.
+			t.Run("countries=DE keeps it", func(t *testing.T) {
+				t.Parallel()
+				assertKeptUnderAllowList(t, newProcessor(t, tc.annotate), body)
+			})
+
+			// The half that used to publish `[GEO:??][GEO:DE]` for a node the
+			// operator excluded DE for: nothing warned, no counter moved.
+			t.Run("exclude_countries=DE drops it", func(t *testing.T) {
+				t.Parallel()
+				assertDroppedUnderDenyList(t, newProcessor(t, tc.annotate), body)
+			})
+		})
+	}
+}
+
+// assertKeptUnderAllowList runs `countries=DE` over body and requires the node
+// to survive carrying a DE tag: DB-IP places it, so every GEO entry's chain
+// reaching the filter is what makes the allow-list admit it.
+func assertKeptUnderAllowList(t *testing.T, p *Processor, body []byte) {
+	t.Helper()
+
+	var kept bytes.Buffer
+	stats, err := p.Filter(t.Context(), &kept, FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.ParseAllowed("DE"),
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if stats.Kept != 1 || stats.GeoDrop != 0 {
+		t.Fatalf("stats = %+v, want kept=1 geo_drop=0: DB-IP places this node in DE and every GEO entry's chain must reach the filter", stats)
+	}
+	if !strings.Contains(kept.String(), "GEO:DE") {
+		t.Fatalf("published %q, want a DE tag", kept.String())
+	}
+}
+
+// assertDroppedUnderDenyList runs `exclude_countries=DE` over the same body and
+// requires the node to be dropped and nothing published. This is the direction
+// that failed silently: a deny-list that stops reaching a database publishes
+// the node instead, with no warning and no counter moving.
+func assertDroppedUnderDenyList(t *testing.T, p *Processor, body []byte) {
+	t.Helper()
+
+	var dropped bytes.Buffer
+	stats, err := p.Filter(t.Context(), &dropped, FilterRequest{
+		Body:             body,
+		AllowedCountries: filter.All(),
+		DeniedCountries:  filter.ParseAllowed("DE"),
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if stats.Kept != 0 || stats.GeoDrop != 1 {
+		t.Fatalf("stats = %+v, want kept=0 geo_drop=1: a deny-list must reach a node only a later GEO entry places", stats)
+	}
+	if dropped.Len() != 0 {
+		t.Fatalf("published %q, want nothing", dropped.String())
+	}
+}
+
+// TestGeofeedFilterNeverDropsATagThatPlacesTheNode pins the routes.md
+// GeofeedFilter contract directly: a node is never dropped as unplaceable
+// while carrying a tag that places it. The published name is the evidence —
+// a drop must leave no name behind, and a name carrying a real country must
+// belong to a node the filter kept.
+func TestGeofeedFilterNeverDropsATagThatPlacesTheNode(t *testing.T) {
+	t.Parallel()
+
+	ip := netip.MustParseAddr("203.0.113.9")
+	geofeedElsewhere := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'N', 'L'}},
+	})
+	registryDE := geofeed.NewRangeLookup([]geofeed.Range{
+		{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}},
+	})
+
+	// Three entries, the placing database written last: nothing before it can
+	// answer, so only a filter that walks every entry sees DE at all.
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
+		RefreshInterval:   24 * time.Hour,
+		DNSTimeout:        time.Second,
+		PreloadedGeofeed:  GeoState{Lookup: geofeedElsewhere, LoadedAt: time.Now()},
+		PreloadedRegistry: GeoState{Lookup: registryDE, LoadedAt: time.Now()},
+		Registry:          config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
+		IPFilters:         []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+		Annotate: []config.AnnotateSpec{
+			{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+			{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+			{Tag: config.TagGEO, Providers: []string{config.ProviderRegistry}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+		Body:             []byte("vless://u@203.0.113.9:443#n\n"),
+		AllowedCountries: filter.ParseAllowed("DE"),
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if stats.Kept != 1 {
+		t.Fatalf("stats = %+v, want kept=1: the registry entry places this node, so it must not be dropped as unplaceable", stats)
+	}
+	if got := buf.String(); !strings.Contains(got, "GEO:DE") {
+		t.Fatalf("published %q, want the placing tag on the kept node", got)
+	}
+}
+
 // TestCountryChainOrderDerivation covers the rest of VP-03: asn is never a
 // filter source (it is a per-IP Cymru round trip, not a local table), a
 // provider the process did not build is dropped before it can be dereferenced,
@@ -818,16 +998,59 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 			want: []string{config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry},
 		},
 		{
-			// countryChainOrder reads the FIRST GEO entry; a second one with a
-			// different chain (the only multi-entry shape the loader still
-			// accepts) must not reopen the order it already settled.
-			name: "a later GEO entry does not override the first",
+			// Every GEO entry feeds the filter: the second entry's chain is
+			// appended in written order, and the geofeed it repeats keeps the
+			// position the first entry gave it.
+			name: "a later GEO entry extends the first, de-duplicated",
 			annotate: []config.AnnotateSpec{
 				{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP, config.ProviderGeofeed}},
 				{Tag: config.TagGEO, Providers: []string{config.ProviderRegistry, config.ProviderGeofeed}},
 			},
 			haveDBIP: true, haveRegistry: true,
-			want: []string{config.ProviderDBIP, config.ProviderGeofeed},
+			want: []string{config.ProviderDBIP, config.ProviderGeofeed, config.ProviderRegistry},
+		},
+		{
+			// The defect shape: split across entries this used to yield the
+			// geofeed alone, so the filter never saw dbip.
+			name: "a chain split across two entries merges back into one",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
+			},
+			haveDBIP: true,
+			want:     []string{config.ProviderGeofeed, config.ProviderDBIP},
+		},
+		{
+			// geotrace is not a lookup: the IP stage runs before any proxy
+			// exists to ask. It is dropped wherever it is written, so a chain
+			// led by it still filters on the local databases behind it — the
+			// first of the three tag/filter asymmetries README documents.
+			name: "geotrace is dropped from every entry",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderGeofeed}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderDBIP}},
+			},
+			haveDBIP: true, haveRegistry: true,
+			want: []string{config.ProviderGeofeed, config.ProviderDBIP},
+		},
+		{
+			name: "entries naming nothing but the geofeed still collapse",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderASN}},
+			},
+			haveDBIP: true, haveRegistry: true,
+		},
+		{
+			// A provider the process did not build is dropped wherever it is
+			// written, so a second entry cannot smuggle a nil geoDB in.
+			name: "an unbuilt database is skipped in a later entry too",
+			annotate: []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderRegistry}},
+			},
+			haveDBIP: true,
+			want:     []string{config.ProviderGeofeed, config.ProviderDBIP},
 		},
 		{
 			name: "operator order is preserved verbatim",
