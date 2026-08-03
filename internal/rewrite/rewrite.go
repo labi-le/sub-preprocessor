@@ -91,6 +91,18 @@ func StripKnownTags(s string) string {
 	return ""
 }
 
+// isKnownTag reports whether tag is one this service strips off an upstream
+// name. The set is deliberately WIDER than the set we write: only `GEO:`/`ASN:`
+// (the configured annotate tags) and `SPD:` (stable.speedPrefix) are ever
+// authored here; `IP:`, `JUR:`, `OK` and `BAD` are recognised so that an
+// upstream-authored tag is removed on relabel instead of accumulating in front
+// of ours.
+//
+// `IP:` has no writer left -- the annotate tag was removed -- and still must
+// stay. StripKnownTags consumes a CONTIGUOUS run and returns the remainder from
+// the first tag it does not recognise, so without this arm an upstream
+// `[GEO:RU][IP:1.2.3.4] Moscow` loses only its GEO tag and we republish
+// `[GEO:xx] [IP:1.2.3.4] Moscow`, carrying an address we never verified.
 func isKnownTag(tag string) bool {
 	if tag == "OK" || tag == "BAD" {
 		return true

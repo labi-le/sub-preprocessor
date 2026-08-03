@@ -58,7 +58,7 @@ func newBenchProcessor(b *testing.B) *Processor {
 	p, err := NewProcessor(context.Background(), zerolog.Nop(), Options{
 		PreloadedGeofeed: GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()},
 		IPFilters:        []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
-		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}, {Tag: config.TagIP}},
+		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
 	})
 	if err != nil {
 		b.Fatalf("NewProcessor: %v", err)

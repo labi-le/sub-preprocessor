@@ -13,11 +13,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const (
-	decimalBase = 10
-	hundred     = 100
-)
-
 // Egress is what a node reported about itself through the geotrace probe. The
 // zero value means the probe never ran — on `GET /` it never does, and in the
 // worker only nodes that survived the latency probe are traced.
@@ -136,10 +131,6 @@ func (a *annotator) Annotate(
 				scratch.WriteByte(c[1])
 			}
 			scratch.WriteByte(']')
-		case config.TagIP:
-			scratch.WriteString("[IP:")
-			writeIP(scratch, req.IP)
-			scratch.WriteByte(']')
 		case config.TagASN:
 			name := t.lookupASN(ctx, req.IP)
 			scratch.WriteString("[ASN:")
@@ -187,36 +178,4 @@ func (t *annotTag) lookupASN(ctx context.Context, ip netip.Addr) string {
 		}
 	}
 	return ""
-}
-
-// writeIP renders ip digit by digit for the v4 family, which is every address
-// the IPv4-only resolver produces. The branch is not cosmetic: As4 PANICS on a
-// real IPv6 address, and a traced egress can be one.
-func writeIP(b *bytes.Buffer, ip netip.Addr) {
-	if !ip.Is4() && !ip.Is4In6() {
-		b.WriteString(ip.String())
-		return
-	}
-	ip4 := ip.As4()
-	writeOctet(b, ip4[0])
-	b.WriteByte('.')
-	writeOctet(b, ip4[1])
-	b.WriteByte('.')
-	writeOctet(b, ip4[2])
-	b.WriteByte('.')
-	writeOctet(b, ip4[3])
-}
-
-func writeOctet(b *bytes.Buffer, n byte) {
-	switch {
-	case n >= hundred:
-		b.WriteByte('0' + n/hundred)
-		b.WriteByte('0' + (n/decimalBase)%decimalBase)
-		b.WriteByte('0' + n%decimalBase)
-	case n >= decimalBase:
-		b.WriteByte('0' + n/decimalBase)
-		b.WriteByte('0' + n%decimalBase)
-	default:
-		b.WriteByte('0' + n)
-	}
 }

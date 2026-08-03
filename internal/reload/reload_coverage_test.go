@@ -477,7 +477,7 @@ var reloadGateFixtures = []struct {
 	{name: "groups", yaml: subsYAML + "groups:\n  nordics:\n    - FI\n", apply: true},
 	{name: "filters", yaml: subsYAML + "filters:\n  - type: country\n    provider: geofeed\n", apply: true},
 	{name: "prober", yaml: subsYAML + "geoblock:\n  claude:\n    endpoint: https://other.example.com\n", apply: true},
-	{name: "annotate", yaml: subsYAML + "annotate:\n  - tag: IP\n", apply: true},
+	{name: "annotate", yaml: subsYAML + "annotate:\n  - tag: GEO\n    providers: [geofeed]\n", apply: true},
 	{name: "listen", yaml: subsYAML + "server:\n  listen: :9999\n", warn: true},
 	{name: "metrics_listen", yaml: subsYAML + "server:\n  metrics_listen: :9991\n", warn: true},
 	{name: "stores", yaml: subsYAML + "deadcache:\n  ttl: 4h\n", warn: true},
