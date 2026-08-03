@@ -57,7 +57,11 @@ annotate:
     # dbip/registry are downloaded in-memory databases (built only because they
     # are referenced here), asn is the cached Cymru DNS last resort.
     providers: [geotrace, geofeed, dbip, registry, asn]
-  - tag: IP # [IP:1.2.3.4] of the chosen address
+  # No IP entry. The tag stays supported; it is off because since geotrace it
+  # carries the MEASURED egress -- for a CDN-fronted node precisely the origin
+  # the fronting hid (108 of 149 traced nodes last cycle published an address
+  # different from the resolved one), and /stable.txt is shared. Re-enable with
+  # one line here: `- tag: IP`.
 geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h
