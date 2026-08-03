@@ -396,16 +396,18 @@ nix flake update sub-preprocessor && make switch
   `config.go`, `processor.go` and `rewrite.go`, all compiled into the `internal/preprocess`
   test binary. This entry once cited +82 ns/op (+0.51%) instead, measured on `093b657`.
   Do not restore it: +0.51% sits under the "up to +2%" per-binary layout offset the
-  children below establish, so it cannot separate two trees at all, and a fourth
-  independent export and link (prebuilt binaries, round-robin, 21 rounds, first discarded,
-  medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at 15972.0 [15847-16230] and
-  `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the opposite sign and two orders of
-  magnitude smaller: on that link the two trees agree to within 1.0 ns/op, far under the
-  floor this entry's own children establish. Nothing in that session reproduces a row of
-  the table above and nothing can — its `372749b` reads 16134.5 [16054-16194] against the
-  table's A of 16073.5, **+61.0 ns/op on a tree byte-identical to the one the table
-  measured**, which is the per-binary layout offset again and the reason a ns figure from
-  an independent link can neither confirm nor separate a row. C and D
+  children below establish, so it cannot separate two trees at all, and a further
+  independent export and link — the merge round's, on a different tree PAIR, and not one of
+  the four A/B/C/D builds tabulated below — (prebuilt binaries, round-robin, 21 rounds,
+  first discarded, medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at
+  15972.0 [15847-16230] and `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the
+  opposite sign and two orders of magnitude smaller: on that link the two trees agree to
+  within 1.0 ns/op, far under the floor this entry's own children establish. Nothing in that
+  session reproduces a row of the table above and nothing can — its `372749b` reads
+  16134.5 [16054-16194] against the table's A of 16073.5, **+61.0 ns/op on a tree
+  byte-identical to the one the table measured**, which is the per-binary layout offset
+  again and the reason a ns figure from an independent link can neither confirm nor
+  separate a row. C and D
   need no separate pin: both are defined as a one-file swap between A and B, so pinning
   those two fixes all four. The 16 above is `git diff --name-only 372749b 7f93685`, with
   `AGENTS.md` among the paths because `3bddb93` edits it before `7f93685` appends this note.
@@ -414,17 +416,18 @@ nix flake update sub-preprocessor && make switch
   build; the pipeline's B/op drifts 1600-1603.
   - `BenchmarkAnnotate`: **D is the control.** A -> D (fixture alone) is -21.28 ns/op and
     the WHOLE of 48 -> 24 B/op. So the fixture is **104% of the ns move and 100% of the
-    B/op move** — the durable result here, reproduced by two later builds at 101% and
-    104% with the same 48 -> 24 at the fixture swap. A reader diffing a fresh `make bench`
-    against a pre-removal snapshot sees 48 -> 24 B/op and must read it as "the benchmark now
-    annotates one tag", never as an allocation win.
+    B/op move** — the durable result here, reproduced by three later builds at 101%,
+    104% and 102.8% with the same 48 -> 24 at the fixture swap. A reader diffing a fresh
+    `make bench` against a pre-removal snapshot sees 48 -> 24 B/op and must read it as
+    "the benchmark now annotates one tag", never as an allocation win.
   - **The D -> B residual is not a quantity this benchmark can report**, for the same
     per-binary reason as the pipeline below. Build 1 measured +0.82 ns/op, build 2 +0.17 and
-    +0.03 on two runs, build 3 +0.855 — while D and D2, the SAME source re-exported under a
-    longer path and relinked, differ by 0.36 (build 2: 57.19 vs 56.83) and 0.26 (build 3:
-    56.55 vs 56.805) with nothing to explain it but the link. Against B's own 20-sample range
-    of 56.29-58.37 the residual is **indistinguishable from zero at a floor of roughly
-    ±0.4 ns/op**; quote it as that, never as a number.
+    +0.03 on two runs, build 3 +0.855, build 4 +0.545 — while D and D2, the SAME source
+    re-exported under a longer path and relinked, differ by 0.36 (build 2: 57.19 vs 56.83),
+    0.26 (build 3: 56.55 vs 56.805) and 0.22 (build 4: 56.875 vs 56.655) with nothing to
+    explain it but the link. Against B's own 20-sample range of 56.29-58.37 the residual is
+    **indistinguishable from zero at a floor of roughly ±0.4 ns/op**; quote it as that,
+    never as a number.
   - **`BenchmarkProcessBodyPipeline`: the delta is NOT resolvable at this benchmark's
     precision, and the D null control is withdrawn.** Its fixture did not change
     (`newBenchProcessor` was already GEO-only after `5d06fb6`, and C differs from B in
@@ -432,35 +435,69 @@ nix flake update sub-preprocessor && make switch
     hash identically), so A -> C is the fixture-held production comparison and D, which
     cannot execute one changed instruction, must reproduce A exactly. It does not, and **the
     variable is the LINKED BINARY, not the session** — that distinction is the whole finding,
-    because it says more rounds cannot rescue the measurement. Medians of three rounds of
-    exports, each having rebuilt every tree itself from the recipe above:
+    because it says more rounds cannot rescue the measurement. Medians of FOUR independent
+    rounds of exports, each having rebuilt every tree itself from the recipe above. Build 4
+    is the closing review's (`history://ClosePerfASN`); its ranges are omitted because that
+    session picked up outside machine load (maxima to 21590 against clean minima) and only
+    its medians survive that. Build 2's D2 cell comes from that build's path-comparison
+    session, in which its A read 16095.5, not the 16104.5 standing in the A column — so
+    take every A -> D2 from the link table below, never by subtracting across a row:
 
     | build | A | C | B | D (must equal A) | D2 (D's source, longer path) |
     |---|---|---|---|---|---|
     | 1 (implement) | 16073.5 | 15952.5 | 15971.0 | 16073.0 | — |
     | 2 (review) | 16104.5 [15992-16249] | 15995.0 [15891-16135] | 15935.0 [15836-16018] | **16421.5 [16357-16582]** | 16116.5 |
-    | 3 (this round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
+    | 3 (fix round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
+    | 4 (closing review) | 16087.0 | 16111.0 | 15961.0 | 16157.0 | 16093.0 |
 
-    **Four independent LINKS of the same D source** measure the must-be-zero A -> D at
-    **-0.5, +37.5, +317.0 and +323.5 ns/op** (the last is build 2 re-verified on its retained
-    images), while A -> C reads -121.0 (-0.75%), -109.5 (-0.68%), -86.0 (build 2's
-    reversed-order session) and -59.0 (-0.37%) — direction consistent, magnitude not. Each
-    link's own delta is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 / 16404.0
-    / 16402.5 / 16407.0 across five sessions hours apart (spread 19 ns, its A spread 24.5) and
-    build 3's A -> D came back +37.5 then +43.0, its A -> D2 exactly -4.0 both times. Nor is
-    it order or edit sensitivity: reversing the round-robin leaves build 2's D at 16413.5, and
-    appending one or four comment lines to A moves it to 16049.0 / 16088.5 in a run where D
-    read 16404.0. And nothing on the measured path differs — `go tool objdump` on
-    `processBody`, `(*annotator).Annotate`, `(*annotTag).lookupCountry`, `rewrite.NodeName`
-    and `rewrite.StripKnownTags` gives opcode-byte-identical listings at IDENTICAL entry
-    addresses for A and D, reproduced on two independent builds (`processBody` 0x6fd720,
-    `Annotate` 0x6f8de0, same SHA-256 over the opcode column). So this benchmark carries a
-    **per-binary layout offset of up to +2%** that no source difference explains, the -0.75%
-    sits under it, and the `objdump` argument below — not the ns number — is what supports the
-    direction. The distribution is fat-tailed rather than a symmetric band: of the four D
-    links three sit in 16071-16137 and one at ~16405, so read it as "up to +2%, one link in
-    four here", never as ±2%. This retroactively confirms the `5d06fb6` bullet above calling
-    its +1.8% block placement: that was the same offset.
+    **Seven independent LINKS of the same D source have now been measured**, and this is
+    the entry's ONLY enumeration of them — every count below is read off it, never
+    reconstructed. D and D2 are one source under two export paths, so each is its own link
+    and a build carrying both contributes two. Every figure is the WITHIN-SESSION A -> D
+    median difference on that link's FIRST session:
+
+    | link | build | tree | A | D-tree | A -> D | where the figure comes from |
+    |---|---|---|---|---|---|---|
+    | L1 | 1 | D | 16073.5 | 16073.0 | **-0.5** | `7f93685` commit body |
+    | L2 | 2 | D (`/tmp/perfasn`) | 16104.5 | 16421.5 | **+317.0** | `agent://PerfASN`, primary session |
+    | L3 | 2 | D2 (longer path) | 16095.5 | 16116.5 | **+21.0** | `history://PerfASN`, path-comparison session |
+    | L4 | 3 | D | 16075.5 | 16113.0 | **+37.5** | `093b657` body; FixASNRound to PerfASN |
+    | L5 | 3 | D2 | 16075.5 | 16071.5 | **-4.0** | same |
+    | L6 | 4 | D (`/tmp/rv6bench`) | 16087.0 | 16157.0 | **+70.0** | `history://ClosePerfASN`, run 1 |
+    | L7 | 4 | D2 | 16087.0 | 16093.0 | **+6.0** | same |
+
+    **No row above is a re-run of another row**, and that separation is what the entry
+    turns on: seven LINKS of identical source disagreeing is evidence about BUILD LAYOUT,
+    which is the thesis here; one link re-run is evidence about SESSION STABILITY, which
+    only makes the first reading trustworthy. Re-runs are therefore reported apart from the
+    count and never added to it. L2's images (SHA-256 re-checked, unchanged) were re-run in
+    four further sessions hours apart at +327.5, +324.0, +307.0 and **+323.5**; L4 re-ran at
+    +43.0, L5 at -4.0 again, L6 at +41.0, L7 at +2.0. An earlier revision of this entry
+    counted L2's +317.0 and that +323.5 re-run as two of "four independent links": they are
+    one link measured twice, and the true link count is seven.
+    Each link's own offset is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 /
+    16404.0 / 16402.5 / 16407.0 across those five sessions (spread 19 ns, its A spread 24.5)
+    and build 3's A -> D2 came back exactly -4.0 both times. Nor is it order or edit
+    sensitivity: reversing the round-robin leaves build 2's D at 16413.5, and appending one
+    or four comment lines to A moves it to 16049.0 / 16088.5 in a run where D read 16404.0.
+    A -> C, the fixture-held production comparison, has FOUR links behind it — one per
+    build, D2 taking no part — and they do not agree even in sign: -121.0 (-0.75%, build 1),
+    -109.5 (-0.68%, build 2) and -59.0 (-0.37%, build 3), against build 4's **+24.0 then
+    -6.0** (`history://ClosePerfASN`, runs 1 and 2). Build 2's -86.0 is its reversed-order
+    re-run of the same link, not a fifth one. So A -> C holds its direction on three links
+    of four and its magnitude on none. And nothing on the measured path differs — `go tool
+    objdump` on `processBody`, `(*annotator).Annotate`, `(*annotTag).lookupCountry`,
+    `rewrite.NodeName` and `rewrite.StripKnownTags` gives opcode-byte-identical listings at
+    IDENTICAL entry addresses for A and D, reproduced on two independent builds
+    (`processBody` 0x6fd720, `Annotate` 0x6f8de0, same SHA-256 over the opcode column). So
+    this benchmark carries a **per-binary layout offset of up to +2%** (L2 is the largest:
+    +317.0 against A's 16104.5 is +1.97%, its re-runs spanning +1.91% to +2.04%) that no
+    source difference explains, the -0.75% sits under it, and the `objdump` argument below —
+    not the ns number — is what supports the direction. The distribution is fat-tailed
+    rather than a symmetric band: six of the seven links sit in 16071-16157 and one (L2) at
+    ~16405, so read it as "up to +2%, one link in seven here", never as ±2%. This
+    retroactively confirms the `5d06fb6` bullet above calling its +1.8% block placement:
+    that was the same offset.
   - Every Annotate range overlaps too (build 1: D 55.72-57.12 vs B 56.22-58.55).
   - **What did change is real, and it is the static shape.** `go tool objdump` on
     `(*annotator).Annotate`: master emits the ASN test FIRST (`annotator.go:134`,
