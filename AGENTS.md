@@ -410,7 +410,8 @@ nix flake update sub-preprocessor && make switch
 
     **Four independent LINKS of the same D source** measure the must-be-zero A -> D at
     **+0.5, +37.5, +317.0 and +323.5 ns/op** (the last is build 2 re-verified on its retained
-    images), while A -> C reads -121.0 (-0.75%), -109.5 (-0.68%) and -59.0 (-0.37%). Each
+    images), while A -> C reads -121.0 (-0.75%), -109.5 (-0.68%), -86.0 (build 2's
+    reversed-order session) and -59.0 (-0.37%) — direction consistent, magnitude not. Each
     link's own delta is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 / 16404.0
     / 16402.5 / 16407.0 across five sessions hours apart (spread 19 ns, its A spread 24.5) and
     build 3's A -> D came back +37.5 then +43.0, its A -> D2 exactly -4.0 both times. Nor is
