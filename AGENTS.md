@@ -364,8 +364,8 @@ nix flake update sub-preprocessor && make switch
   fixture had to go from two tags (`GEO`+`ASN`) to one. Controlled with FOUR trees exported
   by `git archive` into `/tmp` (no checkout touched), verified by SHA-256 tree diff, run
   round-robin in ONE session from prebuilt `go test -c` binaries, 31 rounds each, first
-  discarded, medians of 30, 9800X3D. Three sessions have now rebuilt all four trees from
-  that same recipe; the table is session 1 (the implementing round):
+  discarded, medians of 30, 9800X3D. Three independent rounds of exports have now rebuilt
+  all four trees from that same recipe; the table is build 1 (the implementing round):
 
   | tree | differs from A in | `BenchmarkAnnotate` @500000x | `BenchmarkProcessBodyPipeline` @5000x |
   |---|---|---|---|
@@ -378,48 +378,56 @@ nix flake update sub-preprocessor && make switch
   `AGENTS.md` among them, because `3bddb93` edits it before `7f93685` appends this note.
   A vs C is 15, B vs C is 1, A vs D is 1 (`diff -rq` on the exports agrees). 1 alloc/op on
   `BenchmarkAnnotate` and 100 allocs/op on the pipeline throughout, every tree, every
-  session; the pipeline's B/op drifts 1600-1603.
+  build; the pipeline's B/op drifts 1600-1603.
   - `BenchmarkAnnotate`: **D is the control.** A -> D (fixture alone) is -21.28 ns/op and
     the WHOLE of 48 -> 24 B/op. So the fixture is **104% of the ns move and 100% of the
-    B/op move** — the durable result here, reproduced by two later sessions at 101% and
+    B/op move** — the durable result here, reproduced by two later builds at 101% and
     104% with the same 48 -> 24 at the fixture swap. A reader diffing a fresh `make bench`
     against a pre-removal snapshot sees 48 -> 24 B/op and must read it as "the benchmark now
     annotates one tag", never as an allocation win.
-  - **The D -> B residual is not a quantity this benchmark can report.** Session 1 measured
-    +0.82 ns/op, session 2 +0.17 and +0.03 on two runs, session 3 +0.855 — while D and D2,
-    the SAME source re-exported under a longer path and rebuilt, differ by 0.36 (session 2:
-    57.19 vs 56.83) and 0.26 (session 3: 56.55 vs 56.805) with nothing to explain it but the
-    link. Against B's own 20-sample range of 56.29-58.37 the residual is **indistinguishable
-    from zero at a floor of roughly ±0.4 ns/op**; quote it as that, never as a number.
+  - **The D -> B residual is not a quantity this benchmark can report**, for the same
+    per-binary reason as the pipeline below. Build 1 measured +0.82 ns/op, build 2 +0.17 and
+    +0.03 on two runs, build 3 +0.855 — while D and D2, the SAME source re-exported under a
+    longer path and relinked, differ by 0.36 (build 2: 57.19 vs 56.83) and 0.26 (build 3:
+    56.55 vs 56.805) with nothing to explain it but the link. Against B's own 20-sample range
+    of 56.29-58.37 the residual is **indistinguishable from zero at a floor of roughly
+    ±0.4 ns/op**; quote it as that, never as a number.
   - **`BenchmarkProcessBodyPipeline`: the delta is NOT resolvable at this benchmark's
     precision, and the D null control is withdrawn.** Its fixture did not change
     (`newBenchProcessor` was already GEO-only after `5d06fb6`, and C differs from B in
     `pipeline_bench_test.go` by COMMENT LINES ONLY — comment-stripped, A's and B's copies
     hash identically), so A -> C is the fixture-held production comparison and D, which
-    cannot execute one changed instruction, must reproduce A exactly. It does not. Medians,
-    each session having rebuilt every tree itself:
+    cannot execute one changed instruction, must reproduce A exactly. It does not, and **the
+    variable is the LINKED BINARY, not the session** — that distinction is the whole finding,
+    because it says more rounds cannot rescue the measurement. Medians of three rounds of
+    exports, each having rebuilt every tree itself from the recipe above:
 
-    | session | A | C | B | D (must equal A) | D2 (D's source, longer path) |
+    | build | A | C | B | D (must equal A) | D2 (D's source, longer path) |
     |---|---|---|---|---|---|
     | 1 (implement) | 16073.5 | 15952.5 | 15971.0 | 16073.0 | — |
     | 2 (review) | 16104.5 [15992-16249] | 15995.0 [15891-16135] | 15935.0 [15836-16018] | **16421.5 [16357-16582]** | 16116.5 |
     | 3 (this round) | 16075.5 [16028-16567] | 16016.5 [15932-16130] | 15937.0 [15782-16048] | 16113.0 [16033-16301] | 16071.5 [16006-16161] |
 
-    A -> D reads +0.5, **+317.0 (+1.97%, ranges DISJOINT)** and +37.5 ns/op across the three;
-    A -> C reads -121.0 (-0.75%), -109.5 (-0.68%) and -59.0 (-0.37%). The direction of A -> C
-    is consistent, its magnitude is not, and every value of it is smaller than the spread the
-    null control alone covers. Session 2 pinned that down: D's excursion survives reversing
-    the round-robin order (D 16413.5, n=20), it is not a response to editing source at all
-    (A plus one appended comment line 16049.0, A plus four 16088.5, D 16404.0 in the same
-    run), and `go tool objdump` on `processBody`, `(*annotator).Annotate`,
-    `(*annotTag).lookupCountry`, `rewrite.NodeName` and `rewrite.StripKnownTags` gives
-    opcode-byte-identical listings at IDENTICAL entry addresses for A and D (session 3
-    reproduced this: `processBody` 0x6fd720, `Annotate` 0x6f8de0, same SHA-256 over the
-    opcode column). So there is a **build-identity floor of 0.2-2.0%** on this benchmark that
-    no source difference explains, the -0.75% sits under it, and the `objdump` argument below
-    — not the ns number — is what supports the direction. This retroactively confirms the
-    `5d06fb6` bullet above calling its +1.8% block placement: that was the same floor.
-  - Every Annotate range overlaps too (session 1: D 55.72-57.12 vs B 56.22-58.55).
+    **Four independent LINKS of the same D source** measure the must-be-zero A -> D at
+    **+0.5, +37.5, +317.0 and +323.5 ns/op** (the last is build 2 re-verified on its retained
+    images), while A -> C reads -121.0 (-0.75%), -109.5 (-0.68%) and -59.0 (-0.37%). Each
+    link's own delta is a CONSTANT, not noise: build 2's D landed 16421.5 / 16413.5 / 16404.0
+    / 16402.5 / 16407.0 across five sessions hours apart (spread 19 ns, its A spread 24.5) and
+    build 3's A -> D came back +37.5 then +43.0, its A -> D2 exactly -4.0 both times. Nor is
+    it order or edit sensitivity: reversing the round-robin leaves build 2's D at 16413.5, and
+    appending one or four comment lines to A moves it to 16049.0 / 16088.5 in a run where D
+    read 16404.0. And nothing on the measured path differs — `go tool objdump` on
+    `processBody`, `(*annotator).Annotate`, `(*annotTag).lookupCountry`, `rewrite.NodeName`
+    and `rewrite.StripKnownTags` gives opcode-byte-identical listings at IDENTICAL entry
+    addresses for A and D, reproduced on two independent builds (`processBody` 0x6fd720,
+    `Annotate` 0x6f8de0, same SHA-256 over the opcode column). So this benchmark carries a
+    **per-binary layout offset of up to +2%** that no source difference explains, the -0.75%
+    sits under it, and the `objdump` argument below — not the ns number — is what supports the
+    direction. The distribution is fat-tailed rather than a symmetric band: of the four D
+    links three sit in 16071-16137 and one at ~16405, so read it as "up to +2%, one link in
+    four here", never as ±2%. This retroactively confirms the `5d06fb6` bullet above calling
+    its +1.8% block placement: that was the same offset.
+  - Every Annotate range overlaps too (build 1: D 55.72-57.12 vs B 56.22-58.55).
   - **What did change is real, and it is the static shape.** `go tool objdump` on
     `(*annotator).Annotate`: master emits the ASN test FIRST (`annotator.go:134`,
     `CMPW $0x5341` "AS" then `CMPB $0x4e` 'N') and reaches the GEO test (`CMPW $0x4547` "GE",
@@ -439,9 +447,13 @@ nix flake update sub-preprocessor && make switch
     across three consecutive runs — `Resolution_Concurrent` even flips 64/65 allocs/op — so
     that is the instrument, not the change.
   - **The lesson, since this is the second round it has cost:** a hybrid tree is a control
-    for FIXTURE effects only. It is not a session-stability certificate, and a null control
-    that comes back clean has not proved the session is quiet — rebuild it, and treat any
-    delta smaller than the null control's own spread as unmeasured.
+    for FIXTURE effects only, and a null control that comes back clean has proved nothing
+    about the instrument — the layout offset it is supposed to expose is a property of the
+    LINKED IMAGE, so one clean null says only that this link happens to sit near A. Re-export
+    and relink it; if two links of the same source disagree by more than the delta you are
+    chasing, that delta is unmeasured and no number of extra rounds will change it (each
+    link's own offset is stable to a handful of ns across sessions, so rounds only sharpen a
+    constant you cannot attribute).
 - Recent optimization work improved:
   - geofeed parsing allocations
   - fragment rewrite allocations
