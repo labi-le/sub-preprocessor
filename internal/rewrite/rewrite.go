@@ -114,10 +114,15 @@ func StripKnownTags(s string) string {
 //
 // Where it does run, the scan consumes a CONTIGUOUS run and returns the
 // remainder from the first tag it does not recognise, so dropping either arm
-// costs more than the tag it drops: without `ASN:` an upstream
+// costs more than the tag it drops -- and each arm needs a shape that CONTAINS
+// its own tag to show it, because a shape without one is republished
+// identically either way. Without `ASN:` an upstream
 // `[GEO:RU][ASN:SOME-AS, RU] Moscow` loses only its GEO tag and we republish
-// `[GEO:xx] [ASN:SOME-AS, RU] Moscow`, and without `IP:` the same shape leaks
-// an address we never verified.
+// `[GEO:xx] [ASN:SOME-AS, RU] Moscow`. Without `IP:` an upstream
+// `[GEO:RU][IP:1.2.3.4] Moscow` republishes as `[GEO:xx] [IP:1.2.3.4] Moscow`,
+// leaking an address we never verified. Measured both ways: deleting the `IP:`
+// arm leaves the ASN shape above stripping to `Moscow` unchanged, so testing
+// that shape is what makes the arm look dead.
 func isKnownTag(tag string) bool {
 	if tag == "OK" || tag == "BAD" {
 		return true

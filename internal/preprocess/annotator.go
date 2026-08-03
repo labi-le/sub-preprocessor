@@ -124,10 +124,10 @@ func (a *annotator) Annotate(
 		c := t.lookupCountry(ctx, req)
 		// Nothing forbids a second GEO entry with a different chain; the
 		// caller gets the leftmost tag that resolved, which is the one a
-		// reader of the name takes for the node's country. Repetition stops
-		// here, at RENDERING: countryChainOrder reads the FIRST GEO entry
-		// only, so a second entry's chain never reaches the country FILTER
-		// and can publish a country the filter judged the node without.
+		// reader of the name takes for the node's country. That cross-entry
+		// rule is the country FILTER's too: countryChainOrder concatenates
+		// every GEO entry's chain, so a tag published here can never name a
+		// country the filter judged the node without.
 		if country == (geofeed.CountryCode{}) {
 			country = c
 		}

@@ -226,14 +226,16 @@ type FilterConfig struct {
 // disables annotation outright — a distinct mode, not a milder one, since the
 // annotator then goes nil and nothing strips upstream tags either.
 //
-// Repetition is honoured by the RENDERING stage only. preprocess's country
-// FILTER derives its provider order from the FIRST GEO entry alone
-// (countryChainOrder), so a second entry's chain publishes a tag the filter
-// never consulted — measured: with the geofeed unable to place an IP DB-IP puts
-// in DE, one entry chaining [geofeed, dbip] keeps the node under a `countries=DE`
-// allow-list and publishes [GEO:DE], while two entries [geofeed] then [dbip]
-// render [GEO:??][GEO:DE] and geo-drop it. Deliberately not changed here:
-// merging the chains would alter which nodes survive.
+// Repetition reaches BOTH stages. Rendering emits one tag per entry, and
+// preprocess's country FILTER walks every GEO entry's chain concatenated in
+// written order, de-duplicated by first occurrence (countryChainOrder), so the
+// filter's provider set is the union of what the entries name. Writing one
+// chain as [geofeed, dbip] and writing it as [geofeed] then [dbip] therefore
+// reach the same verdict; only the rendering differs, [GEO:DE] against
+// [GEO:??][GEO:DE]. Splitting the chain used to change the verdict too, in
+// both directions — the filter saw the first entry alone, so a node only DB-IP
+// could place was dropped under `countries=DE` and KEPT under
+// `exclude_countries=DE`.
 //
 // The retired single-provider "provider" key needs no field here: the strict
 // decode in decodeStrict rejects it, and every future rename with it.

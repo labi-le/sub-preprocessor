@@ -200,9 +200,10 @@ both retired, and naming either now fails the load. The entry takes
 `providers: [geotrace, geofeed, dbip, registry, asn]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
 `[GEO:??]`. The list still earns its shape: entries render in order and may
-repeat (two `GEO` entries with different chains publish two tags — rendering
-only; the country filter below reads the FIRST entry's chain alone), and an
-empty `annotate` list disables annotation (original names pass through).
+repeat (two `GEO` entries with different chains publish two tags, and the
+country filter below consults both chains, so repetition changes the tag and
+not the verdict), and an empty `annotate` list disables annotation (original
+names pass through).
 Rewriting is scheme-aware: vmess folds tags into
 the base64 `ps` field, `ssr` into the base64 `remarks` query value, every other
 scheme into the `#fragment`. For `ssr` the fragment is not merely unused but
@@ -236,11 +237,14 @@ no cycle pays for it. Only the address the endpoint saw is a fact — the countr
 beside it is still a geo-IP lookup, just one made about the right address.
 
 The country **filter** (`provider: geofeed`) judges nodes with that same chain,
-in the order the `GEO` entry's `providers:` list gives it: it consults every
-local database that list names. A node only DB-IP can place is therefore
-dropped by an `exclude_countries` naming that country and kept by a `countries`
-allow-list naming it — the filter's verdict and the `[GEO:...]` tag agree for
-every provider the first `GEO` entry's chain names. Four asymmetries remain:
+in the order the `annotate:` list gives it: it consults every local database
+every `GEO` entry names, concatenated in written order and de-duplicated by
+first occurrence. A node only DB-IP can place is therefore dropped by an
+`exclude_countries` naming that country and kept by a `countries` allow-list
+naming it — the filter's verdict and the `[GEO:...]` tag agree for every
+provider any `GEO` entry names, so splitting one chain across entries changes
+what is RENDERED (`[GEO:??][GEO:DE]` instead of `[GEO:DE]`) and never the
+verdict. Three asymmetries remain:
 
 - `geotrace` is skipped by the filter, and cannot be otherwise: the filter runs
   in preprocess, before any probe exists to ask. The tag can name the egress
@@ -251,14 +255,6 @@ every provider the first `GEO` entry's chain names. Four asymmetries remain:
   configure it explicitly as `{type: country, provider: asn}`.
 - with no `GEO` annotate entry (or one naming only `asn`), the filter falls
   back to the geofeed alone — the one database every process loads.
-- only the FIRST `GEO` entry feeds the filter. Repeated entries are a rendering
-  feature: `countryChainOrder` returns on the first one, so a second entry's
-  chain publishes a tag the filter never consulted. Measured on an IP the
-  geofeed cannot place and DB-IP puts in DE: one entry chaining
-  `[geofeed, dbip]` keeps the node under `countries=DE` and publishes
-  `[GEO:DE]`, while two entries — `[geofeed]` then `[dbip]` — render
-  `[GEO:??][GEO:DE]` and drop it as unplaceable. Put every provider the filter
-  should consult in the first entry's chain.
 
 The DB-IP data is the free Country Lite edition, licensed CC BY 4.0 —
 [IP Geolocation by DB-IP](https://db-ip.com) (this link is the required
