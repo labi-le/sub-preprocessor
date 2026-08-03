@@ -201,10 +201,11 @@ type PipelineContext struct {
 	// the nodes themselves so it can annotate after probing them.
 	sink nodeSink
 	// Lookup is the country-resolution chain the geofeed country filter judges
-	// nodes with: every in-memory country database this process loaded, tried
-	// in order. It is the same set of databases the GEO annotation resolves
-	// against, so the verdict and the published [GEO:xx] tag agree; see
-	// countryChain.
+	// nodes with: the LOCAL country databases every GEO annotate entry names,
+	// concatenated in written order. Not "every database this process loaded"
+	// — a chain naming only dbip leaves the geofeed out — and never asn or
+	// geotrace, which are not local tables, so the verdict and the published
+	// [GEO:xx] tag agree on everything but those two; see countryChain.
 	Lookup   geofeed.CountryLookup
 	Allowed  filter.CountrySet
 	Denied   filter.CountrySet
@@ -759,10 +760,25 @@ func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 // Dedup bounds the result at the three local providers however many entries are
 // written, so countryChain's per-request chainLookup cannot grow past what one
 // entry could already ask for, and the walk itself fits a stack array: only the
-// surviving order reaches the heap, exactly sized, and every config that
-// collapses to nil allocates nothing at all. This runs once per processor
-// build, not per request — NewProcessor stores the result in p.countryOrder —
-// so the sizing is tidiness, not a hot path.
+// surviving order reaches the heap, exactly sized. This walk runs once per
+// processor build, not per request — NewProcessor stores the result in
+// p.countryOrder. Measured against a392316, the pre-merge parent, at
+// -benchtime 200000x -count=2 on a 9800X3D: the shipped chain 80 -> 48 B/op,
+// geofeed-only 16 -> 0, a two-entry split 16 -> 32, a three-entry split
+// 16 -> 48; 1 alloc/op throughout except the nil collapse, which reaches 0.
+//
+// The PER-REQUEST cost is where this change is not free, and it is accepted,
+// not absent. countryChain runs once per request from filterInto, and for a
+// split-chain config p.countryOrder goes nil -> 2 or 3 entries, so that call
+// stops handing back the geofeed lookup untouched and starts building a
+// chainLookup and boxing it: `[{GEO,[geofeed]},{GEO,[dbip]}]` measures
+// 0 B/op 0 allocs -> 56 B/op 2 allocs across those same two trees. That is
+// exactly what the equivalent merged `[{GEO,[geofeed,dbip]}]` already cost —
+// 56/2 on BOTH trees — so the split config now pays what its own verdict is
+// worth and nothing more; the shipped single-entry config is unmoved at 72/2
+// and geofeed-only stays at 0/0. AGENTS.md makes an allocs/op increase a
+// finding the reviewer must accept before the round closes: this one was
+// accepted as the price of the restored PP-02/VP-03 verdict.
 func countryChainOrder(annotate []config.AnnotateSpec, haveDBIP, haveRegistry bool) []string {
 	// localCountryProvider admits exactly three names and the dedup below
 	// rejects repeats, so n can never run past the array.

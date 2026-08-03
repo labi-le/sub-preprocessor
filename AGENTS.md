@@ -381,13 +381,27 @@ nix flake update sub-preprocessor && make switch
   | D = A + B's `annotator_bench_test.go` | 1 file | **56.33, 24** | 16073.0, 1601 |
 
   **B is pinned by SHA and must stay that way.** It was written as "removal HEAD", a
-  mutable ref that has since moved five commits, and the neighbouring file count cannot
-  disambiguate it: `git diff --name-only 372749b <sha>` lists **16** paths for `3bddb93`
-  and for every commit after it, this branch's tip included, because `3bddb93` already
-  touches `AGENTS.md` and every later commit only re-edits paths inside that same 16.
-  Following the label literally therefore reads a different tree than the table measured —
-  today's HEAD as B lands about 82 ns/op (+0.51%) off the table's B on the pipeline column,
-  larger than the A -> C effect this entry spends its length refusing to attribute. C and D
+  mutable ref that had already moved **seven** commits by `66e5d80` (`git rev-list --count
+  7f93685..66e5d80`) and moves again with every commit — count it from a named tree or not
+  at all; the five it used to claim is the distance from `093b657`, the tree a review was
+  raised against, not from the commit that wrote the label. The neighbouring file count
+  cannot disambiguate it either: `git diff --name-only 372749b <sha>` lists **16** paths
+  for `3bddb93` and for every commit from there through `66e5d80`, because `3bddb93`
+  already touches `AGENTS.md` and each of those re-edits paths inside that same 16. (The
+  round after `66e5d80` took it to 17 by fixing `filters.go`, which only sharpens the
+  point: a count that moves solely when a commit happens to reach a seventeenth file was
+  never an identifier.) Following the label literally therefore reads a different tree than
+  the table measured, and the evidence for that is the SOURCE, never a ns figure: three of
+  those seven commits — `4084d69`, `712bf9f`, `66e5d80` — edit `annotator.go`,
+  `config.go`, `processor.go` and `rewrite.go`, all compiled into the `internal/preprocess`
+  test binary. This entry once cited +82 ns/op (+0.51%) instead, measured on `093b657`.
+  Do not restore it: +0.51% sits under the "up to +2%" per-binary layout offset the
+  children below establish, so it cannot separate two trees at all, and a fourth
+  independent export and link (prebuilt binaries, round-robin, 21 rounds, first discarded,
+  medians of 20, `-benchtime 5000x`, 9800X3D) puts `7f93685` at 15972.0 [15847-16230] and
+  `66e5d80` at 15971.0 [15909-16056] — **-1.0 ns/op**, the opposite sign and two orders of
+  magnitude smaller, with `372749b` at 16134.5 [16054-16194] in the same session and the
+  table's B of 15971.0 reproducing exactly. C and D
   need no separate pin: both are defined as a one-file swap between A and B, so pinning
   those two fixes all four. The 16 above is `git diff --name-only 372749b 7f93685`, with
   `AGENTS.md` among the paths because `3bddb93` edits it before `7f93685` appends this note.

@@ -126,8 +126,14 @@ func (a *annotator) Annotate(
 		// caller gets the leftmost tag that resolved, which is the one a
 		// reader of the name takes for the node's country. That cross-entry
 		// rule is the country FILTER's too: countryChainOrder concatenates
-		// every GEO entry's chain, so a tag published here can never name a
-		// country the filter judged the node without.
+		// every GEO entry's chain, so no LOCAL database a tag resolved
+		// through went unconsulted by the filter. asn and geotrace are the
+		// standing exceptions — neither is a local table (see countryChain),
+		// so a tag either of them answered still names a country the filter
+		// never asked about. Measured on `[{GEO,[geotrace,geofeed]}]`, the
+		// shipped chain's first two providers, with a geofeed that cannot
+		// place the IP: countryChainOrder comes back empty, the node survives
+		// exclude_countries=DE, and the traced egress publishes [GEO:DE].
 		if country == (geofeed.CountryCode{}) {
 			country = c
 		}

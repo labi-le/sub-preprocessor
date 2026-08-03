@@ -25,10 +25,14 @@ type asnResolver interface {
 // in the deny-list. An IP no database can place has an unknown country, which
 // is in no excluded country, so only the allow-list can drop it.
 //
-// The name is historical: pctx.Lookup is the whole database chain the
-// processor loaded (geofeed, then dbip and registry when built), the same
-// sources the GEO annotation resolves against, so a node is never dropped as
-// unplaceable while carrying a tag that places it. See Processor.countryChain.
+// The name is historical: pctx.Lookup is the LOCAL country databases every GEO
+// annotate entry names, in the order the OPERATOR wrote them — not a hardcoded
+// geofeed-first order, and a chain naming only dbip leaves the geofeed out of
+// the filter entirely. So a node is never dropped as unplaceable while carrying
+// a tag a LOCAL database placed it with. asn and geotrace are not local tables
+// and stay out of the chain, so a node only Cymru or the egress probe can place
+// is still geo-dropped while its tag renders the country. See
+// Processor.countryChain.
 type GeofeedFilter struct{}
 
 func NewGeofeedFilter() *GeofeedFilter {

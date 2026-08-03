@@ -241,7 +241,7 @@ in the order the `annotate:` list gives it: it consults every local database
 every `GEO` entry names, concatenated in written order and de-duplicated by
 first occurrence. A node only DB-IP can place is therefore dropped by an
 `exclude_countries` naming that country and kept by a `countries` allow-list
-naming it — the filter's verdict and the `[GEO:...]` tag agree for every
+naming it — the filter's verdict and the `[GEO:...]` tag agree for every LOCAL
 provider any `GEO` entry names, so splitting one chain across entries changes
 what is RENDERED (`[GEO:??][GEO:DE]` instead of `[GEO:DE]`) and never the
 verdict. Three asymmetries remain:

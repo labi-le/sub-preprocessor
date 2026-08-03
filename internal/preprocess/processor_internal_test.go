@@ -922,9 +922,12 @@ func assertDroppedUnderDenyList(t *testing.T, p *Processor, body []byte) {
 
 // TestGeofeedFilterNeverDropsATagThatPlacesTheNode pins the routes.md
 // GeofeedFilter contract directly: a node is never dropped as unplaceable
-// while carrying a tag that places it. The published name is the evidence —
-// a drop must leave no name behind, and a name carrying a real country must
-// belong to a node the filter kept.
+// while carrying a tag a LOCAL database placed it with. The local scope is
+// part of the contract, not a fixture limitation — this walks geofeed and
+// registry because asn and geotrace are outside countryChainOrder entirely,
+// so no test here can widen the promise to them. The published name is the
+// evidence — a drop must leave no name behind, and a name carrying a real
+// country must belong to a node the filter kept.
 func TestGeofeedFilterNeverDropsATagThatPlacesTheNode(t *testing.T) {
 	t.Parallel()
 
