@@ -62,7 +62,7 @@ func TestAnnotateStripsUpstreamTagsItCannotWrite(t *testing.T) {
 	t.Parallel()
 
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderGeofeed}},
+		{Tag: config.TagGEO, Providers: []string{config.ProviderCloudflare, config.ProviderGeofeed}},
 	}, map[string]geo.Provider{
 		config.ProviderGeofeed: fakeProvider{name: "geofeed", info: geo.Info{Country: geofeed.CountryCode{'N', 'L'}}},
 	})
@@ -276,11 +276,11 @@ func TestAnnotatorSkipsUnbuiltProvider(t *testing.T) {
 	}
 }
 
-// geotraceAnnotator builds a GEO chain over the given provider names, wiring
-// only geofeed into the provider map — geotrace deliberately has no entry
+// cloudflareAnnotator builds a GEO chain over the given provider names, wiring
+// only geofeed into the provider map — cloudflare deliberately has no entry
 // there, so this also pins that newAnnotator resolves it without the
 // "referenced but not built" fallback.
-func geotraceAnnotator(t *testing.T, order ...string) *annotator {
+func cloudflareAnnotator(t *testing.T, order ...string) *annotator {
 	t.Helper()
 	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
 		{Tag: config.TagGEO, Providers: order},
@@ -293,10 +293,10 @@ func geotraceAnnotator(t *testing.T, order ...string) *annotator {
 	return a
 }
 
-// TestAnnotatorGeoTraceChain: the geotrace step is a chain member like any
+// TestAnnotatorCloudflareChain: the cloudflare step is a chain member like any
 // other — it wins when it leads and answered, misses through to the offline
 // database when the trace never ran, and loses to a provider ahead of it.
-func TestAnnotatorGeoTraceChain(t *testing.T) {
+func TestAnnotatorCloudflareChain(t *testing.T) {
 	t.Parallel()
 
 	egress := Egress{IP: netip.MustParseAddr("203.0.113.7"), Country: geofeed.CountryCode{'D', 'E'}}
@@ -309,18 +309,18 @@ func TestAnnotatorGeoTraceChain(t *testing.T) {
 	}{
 		{
 			name:   "trace first wins",
-			order:  []string{config.ProviderGeoTrace, config.ProviderGeofeed},
+			order:  []string{config.ProviderCloudflare, config.ProviderGeofeed},
 			egress: egress,
 			want:   "vless://u@example.com:443#[GEO:DE] Old",
 		},
 		{
 			name:  "unmeasured trace falls through",
-			order: []string{config.ProviderGeoTrace, config.ProviderGeofeed},
+			order: []string{config.ProviderCloudflare, config.ProviderGeofeed},
 			want:  "vless://u@example.com:443#[GEO:NL] Old",
 		},
 		{
 			name:   "trace behind a hit never runs",
-			order:  []string{config.ProviderGeofeed, config.ProviderGeoTrace},
+			order:  []string{config.ProviderGeofeed, config.ProviderCloudflare},
 			egress: egress,
 			want:   "vless://u@example.com:443#[GEO:NL] Old",
 		},
@@ -329,7 +329,7 @@ func TestAnnotatorGeoTraceChain(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			a := geotraceAnnotator(t, tc.order...)
+			a := cloudflareAnnotator(t, tc.order...)
 			req := AnnotateRequest{IP: netip.MustParseAddr("1.2.3.4"), Egress: tc.egress}
 			if got := annotateReq(t, a, req); got != tc.want {
 				t.Fatalf("got %q, want %q", got, tc.want)
@@ -344,7 +344,7 @@ func TestAnnotatorGeoTraceChain(t *testing.T) {
 func TestAnnotateReturnsResolvedCountry(t *testing.T) {
 	t.Parallel()
 
-	a := geotraceAnnotator(t, config.ProviderGeoTrace, config.ProviderGeofeed)
+	a := cloudflareAnnotator(t, config.ProviderCloudflare, config.ProviderGeofeed)
 	node := parseOneNode(t)
 	var buf, tagBuf bytes.Buffer
 

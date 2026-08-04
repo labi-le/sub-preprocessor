@@ -344,12 +344,16 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 		yaml    string
 		wantErr string
 	}{
-		"unknown tag":        {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
-		"renamed provider":   {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", "field provider not found in type config.AnnotateSpec"},
-		"unknown provider":   {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
-		"retired ip tag":     {geoBase + "annotate:\n  - tag: IP\n", `unknown tag "IP"`},
-		"retired asn tag":    {geoBase + "annotate:\n  - tag: ASN\n", `unknown tag "ASN"`},
-		"duplicate provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},
+		"unknown tag":      {geoBase + "annotate:\n  - tag: SPD\n", "unknown tag"},
+		"renamed provider": {geoBase + "annotate:\n  - tag: GEO\n    provider: geofeed\n", "field provider not found in type config.AnnotateSpec"},
+		"unknown provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [bogus]\n", `unknown provider "bogus"`},
+		"retired ip tag":   {geoBase + "annotate:\n  - tag: IP\n", `unknown tag "IP"`},
+		"retired asn tag":  {geoBase + "annotate:\n  - tag: ASN\n", `unknown tag "ASN"`},
+		// The provider is named after its DATA SOURCE now, like every sibling.
+		// No back-compat: the old spelling must fail the load naming the set
+		// that is accepted, not decode to a provider nothing builds.
+		"retired geotrace provider": {geoBase + "annotate:\n  - tag: GEO\n    providers: [geotrace]\n", `unknown provider "geotrace" (must be "cloudflare", "geofeed", "dbip", "registry" or "asn")`},
+		"duplicate provider":        {geoBase + "annotate:\n  - tag: GEO\n    providers: [geofeed, dbip, geofeed]\n", `duplicate provider "geofeed"`},
 	}
 	for name, tc := range rejects {
 		if _, rejErr := loadYAML(t, tc.yaml); rejErr == nil {
@@ -365,12 +369,12 @@ func TestLoadAnnotateDefaultsAndValidation(t *testing.T) {
 func TestLoadAnnotateProviderChain(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed, dbip, registry, asn]\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [cloudflare, geofeed, dbip, registry, asn]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		config.ProviderGeoTrace, config.ProviderGeofeed,
+		config.ProviderCloudflare, config.ProviderGeofeed,
 		config.ProviderDBIP, config.ProviderRegistry, config.ProviderASN,
 	}
 	if !reflect.DeepEqual(cfg.Annotate[0].Providers, want) {
@@ -384,12 +388,12 @@ func TestLoadAnnotateProviderChain(t *testing.T) {
 func TestAnnotateUsesProvider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [geotrace, geofeed]\n")
+	cfg, err := loadYAML(t, geoBase+"annotate:\n  - tag: GEO\n    providers: [cloudflare, geofeed]\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AnnotateUsesProvider(config.ProviderGeoTrace) {
-		t.Fatalf("geotrace is in the GEO chain %v", cfg.Annotate[0].Providers)
+	if !cfg.AnnotateUsesProvider(config.ProviderCloudflare) {
+		t.Fatalf("cloudflare is in the GEO chain %v", cfg.Annotate[0].Providers)
 	}
 	if cfg.AnnotateUsesProvider(config.ProviderDBIP) {
 		t.Fatal("dbip is in no chain, yet reported as used")
@@ -399,15 +403,19 @@ func TestAnnotateUsesProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if offline.AnnotateUsesProvider(config.ProviderGeoTrace) {
+	if offline.AnnotateUsesProvider(config.ProviderCloudflare) {
 		t.Fatal("an offline-only chain must not arm the trace probe")
 	}
 }
 
-// TestLoadRejectsGeoTraceFilterType pins the retirement: geotrace is an
-// annotate provider now, and a config still listing it as a filter must fail
-// loudly rather than silently drop a stage the operator asked for.
-func TestLoadRejectsGeoTraceFilterType(t *testing.T) {
+// TestGeoTraceRenamedToCloudflare pins the rename with NO back-compat, in
+// every namespace the old name ever appeared in: `geotrace` was never a filter
+// type (it moved into the annotate chain in abf452b), is no longer a provider
+// name, and no longer opens a geoblock sub-block. Each must fail loudly rather
+// than silently drop a stage the operator asked for. The tail asserts the
+// surviving surface: geo.cloudflare.{timeout,concurrency} and nothing else --
+// `endpoint` was dropped outright, not moved.
+func TestGeoTraceRenamedToCloudflare(t *testing.T) {
 	t.Parallel()
 
 	_, err := loadYAML(t, geoBase+"filters:\n  - type: geotrace\n")
@@ -416,6 +424,31 @@ func TestLoadRejectsGeoTraceFilterType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unknown type "geotrace"`) {
 		t.Fatalf("error %q does not name the unknown filter type", err)
+	}
+
+	_, err = loadYAML(t, geoBase+"geoblock:\n  geotrace:\n    timeout: 15s\n")
+	if err == nil {
+		t.Fatal("expected error for the retired geoblock.geotrace block")
+	}
+	if !strings.Contains(err.Error(), "field geotrace not found in type config.GeoBlockConfig") {
+		t.Fatalf("error %q does not name the retired geoblock key", err)
+	}
+
+	// The replacement, and the whole surviving surface: two keys under geo,
+	// no endpoint. An `endpoint:` here must fail the same way geoblock does.
+	cfg, err := loadYAML(t, geoBase+"  cloudflare:\n    timeout: 30s\n    concurrency: 3\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Geo.Cloudflare != (config.CloudflareConfig{Timeout: 30 * time.Second, Concurrency: 3}) {
+		t.Fatalf("geo.cloudflare = %+v, want {30s 3}", cfg.Geo.Cloudflare)
+	}
+	_, err = loadYAML(t, geoBase+"  cloudflare:\n    endpoint: https://example.com/trace\n")
+	if err == nil {
+		t.Fatal("geo.cloudflare.endpoint was dropped, not renamed; it must fail the load")
+	}
+	if !strings.Contains(err.Error(), "field endpoint not found in type config.CloudflareConfig") {
+		t.Fatalf("error %q does not name the dropped endpoint key", err)
 	}
 }
 
@@ -439,7 +472,7 @@ func TestShippedConfigLoads(t *testing.T) {
 			t.Fatalf("filters[%d] still lists the retired geotrace filter", i)
 		}
 	}
-	if !cfg.AnnotateUsesProvider(config.ProviderGeoTrace) {
+	if !cfg.AnnotateUsesProvider(config.ProviderCloudflare) {
 		t.Fatal("shipped annotate chain no longer asks the node for its egress")
 	}
 }

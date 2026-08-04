@@ -35,7 +35,7 @@ func country(t *testing.T, code string) geofeed.CountryCode {
 // PUBLISHED form — vmess tags folded into the base64 ps, ssr emitted without a
 // fragment — instead of a stub's idea of it. offline is what the offline chain
 // resolves for any address; a valid Egress answers first, exactly as the
-// geotrace provider does in front of the offline ones.
+// cloudflare provider does in front of the offline ones.
 type tagAnnotator struct {
 	offline geofeed.CountryCode
 }

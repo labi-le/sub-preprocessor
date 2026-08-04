@@ -84,8 +84,8 @@ func TestMetricsObserveRender(t *testing.T) {
 	// The trace is an annotation stage, not a gate. Its counters must never
 	// reach the filter series, where a reader would read 47 nodes moved as 47
 	// nodes thrown away.
-	if strings.Contains(out, `filter="geotrace"`) {
-		t.Errorf("geotrace is no longer a filter:\n%s", out)
+	if strings.Contains(out, `filter="cloudflare"`) {
+		t.Errorf("cloudflare is no longer a filter:\n%s", out)
 	}
 }
 

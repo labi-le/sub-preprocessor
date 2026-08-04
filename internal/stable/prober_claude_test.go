@@ -33,6 +33,7 @@ func TestClaudeURL(t *testing.T) {
 		config.CheckConfig{ExpectedStatus: "204"},
 		config.BandwidthConfig{},
 		config.GeoBlockConfig{Claude: config.ClaudeConfig{Endpoint: "https://api.anthropic.com/"}},
+		config.CloudflareConfig{},
 		"",
 		zerolog.Nop(),
 	)

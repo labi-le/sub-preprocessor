@@ -100,6 +100,44 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 	}
 }
 
+// TestApplyCarriesCloudflareTimeoutToRunningWorker pins the half of the
+// geo.cloudflare move that a reload-gate test cannot see. reload's coverage
+// table proves a geo.cloudflare.timeout edit reaches Controller.Apply at all;
+// this proves the value then lands in the spec the RUNNING worker reads, on the
+// prober its post-probe trace stage calls. Its geo.* siblings are carried by
+// OptionsFromConfig into a freshly built processor instead, and a worker that
+// kept its old prober would look identical from outside.
+func TestApplyCarriesCloudflareTimeoutToRunningWorker(t *testing.T) {
+	t.Parallel()
+
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, zerolog.Nop(), nil)
+	defer ctl.Stop()
+
+	cfg := testControllerConfig("alpha")
+	cfg.Geo.Cloudflare = config.CloudflareConfig{Timeout: 15 * time.Second, Concurrency: 8}
+	if err := ctl.Apply(cfg); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	running := ctl.checker
+
+	cfg.Geo.Cloudflare.Timeout = 30 * time.Second
+	if err := ctl.Apply(cfg); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if ctl.checker != running {
+		t.Fatal("Apply must reconfigure the running worker, not replace it")
+	}
+	prober, ok := ctl.checker.spec.Load().Prober.(*MihomoProber)
+	if !ok {
+		t.Fatalf("worker spec holds a %T, not the MihomoProber that runs the trace", ctl.checker.spec.Load().Prober)
+	}
+	if got := prober.cloudflare.Timeout; got != 30*time.Second {
+		t.Fatalf("running worker traces with a %v timeout, want 30s: the edit never reached its spec", got)
+	}
+}
+
 // TestApplyKeepsWorkerWhenSourcesGone: an empty merged source list is refused,
 // not obeyed. Every source of this deployment arrives from an overlay, so an
 // empty list is nearly always a missing or truncated sources.yaml/private.yaml;

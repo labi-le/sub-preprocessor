@@ -480,7 +480,7 @@ func testProberWith(t *testing.T, bandwidth config.BandwidthConfig) *MihomoProbe
 	t.Helper()
 
 	p, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
-		bandwidth, config.GeoBlockConfig{}, "", zerolog.Nop())
+		bandwidth, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

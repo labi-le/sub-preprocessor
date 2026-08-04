@@ -30,7 +30,7 @@ func TestProbeCancelledContextReturnsError(t *testing.T) {
 		Timeout:        time.Second,
 		TestURL:        "http://127.0.0.1:0/",
 		ExpectedStatus: "204",
-	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestProbeZeroConcurrencyDoesNotDeadlock(t *testing.T) {
 		Timeout:        50 * time.Millisecond,
 		TestURL:        "http://127.0.0.1:0/",
 		ExpectedStatus: "204",
-	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

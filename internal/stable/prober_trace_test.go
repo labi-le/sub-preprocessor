@@ -189,14 +189,16 @@ func traceServer(t *testing.T, status int, body string) *httptest.Server {
 	return srv
 }
 
+// traceProber points the probe at a local httptest server. The endpoint is no
+// config key -- only Cloudflare's body parses (see cloudflareTraceURL) -- so
+// the seam is the unexported traceEndpoint field, and nothing an operator can
+// write reaches it.
 func traceProber(endpoint string, logger zerolog.Logger) *MihomoProber {
-	return &MihomoProber{logger: logger, geo: config.GeoBlockConfig{
-		GeoTrace: config.GeoTraceConfig{
-			Endpoint:    endpoint,
-			Timeout:     5 * time.Second,
-			Concurrency: 2,
-		},
-	}}
+	return &MihomoProber{
+		logger:        logger,
+		cloudflare:    config.CloudflareConfig{Timeout: 5 * time.Second, Concurrency: 2},
+		traceEndpoint: endpoint,
+	}
 }
 
 // TestTraceCheckKeepsOnlyAnsweredNodes drives the whole through-node path —
@@ -326,7 +328,7 @@ func TestTraceCheckAccountsForEveryNode(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("log line %q: %v", line, err)
 		}
-		if ev.Message != "geotrace" {
+		if ev.Message != "cloudflare trace" {
 			continue
 		}
 		if ev.Of != int64(len(pxs)) {
