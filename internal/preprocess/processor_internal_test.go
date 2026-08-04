@@ -1165,10 +1165,13 @@ func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
 	}
 }
 
-// TestShippedConfigStillBuildsTheASNResolver reads the repository's own
-// config/config.yaml rather than a fixture: its GEO chain ends in asn, and
-// that single line is what keeps the Cymru resolver in the running service.
-func TestShippedConfigStillBuildsTheASNResolver(t *testing.T) {
+// TestShippedConfigDropsASNButKeepsTheCapability reads the repository's own
+// config/config.yaml rather than a fixture. Two halves, and the second is the
+// point: the shipped GEO chain no longer names asn, so the running service
+// builds no Cymru resolver -- measured, the provider contributed zero hits
+// behind dbip+registry -- but the provider is NOT retired, and a config that
+// asks for it must still load and still build it.
+func TestShippedConfigDropsASNButKeepsTheCapability(t *testing.T) {
 	t.Parallel()
 
 	// Copied into a temp dir because config.Load merges the sibling overlays,
@@ -1187,18 +1190,20 @@ func TestShippedConfigStillBuildsTheASNResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var viaChain bool
 	for _, a := range cfg.Annotate {
-		viaChain = viaChain || slices.Contains(a.Providers, config.ProviderASN)
+		if slices.Contains(a.Providers, config.ProviderASN) {
+			t.Fatalf("shipped GEO chain names asn again (%v) without a new measurement", a.Providers)
+		}
 	}
-	if !viaChain {
-		t.Fatal("precondition: the shipped annotate chain no longer names the asn provider")
+	for _, f := range cfg.IPFilterSpecs() {
+		if f.Provider == config.ProviderASN || f.Type == config.FilterASN {
+			t.Fatalf("shipped filters reach asn (%+v); the resolver assertions below are then vacuous", f)
+		}
 	}
 
-	// The shipped chain also names dbip and registry, so both geoDBs are built
-	// too; preloading them keeps this test off the network. Nothing here
-	// preloads the ASN resolver — that one is constructed or not, and which is
-	// the whole question.
+	// The shipped chain names dbip and registry, so both geoDBs are built;
+	// preloading them keeps this test off the network. Nothing preloads the ASN
+	// resolver — whether it is constructed at all is the question.
 	offline := GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()}
 	opts := Options{
 		IPFilters:         cfg.IPFilterSpecs(),
@@ -1209,14 +1214,46 @@ func TestShippedConfigStillBuildsTheASNResolver(t *testing.T) {
 		PreloadedDBIP:     offline,
 		PreloadedRegistry: offline,
 	}
-	if needsASN, _, _ := providerNeeds(opts); !needsASN {
-		t.Fatal("the shipped config must still need the ASN resolver")
+	if needsASN, _, _ := providerNeeds(opts); needsASN {
+		t.Fatal("nothing in the shipped config reaches asn, yet the resolver is wanted")
 	}
 	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
 	if err != nil {
 		t.Fatalf("NewProcessor: %v", err)
 	}
-	if p.ASNState() == nil {
-		t.Fatal("the shipped config must still build the ASN resolver")
+	if p.ASNState() != nil {
+		t.Fatal("the shipped config must not build the Cymru resolver")
+	}
+
+	// Capability retained: the SAME yaml with asn appended to the chain must
+	// still pass config.Load's provider validation and still build the
+	// resolver. Going through the loader is the point -- a config naming asn is
+	// not a retired spelling, and nothing may start rejecting it.
+	const shippedChain = "providers: [cloudflare, geofeed, dbip, registry]"
+	if !bytes.Contains(shipped, []byte(shippedChain)) {
+		t.Fatalf("shipped config no longer contains %q; re-point this test", shippedChain)
+	}
+	withASN := bytes.Replace(shipped, []byte(shippedChain),
+		[]byte("providers: [cloudflare, geofeed, dbip, registry, asn]"), 1)
+	pathASN := filepath.Join(dir, "with-asn.yaml")
+	if writeErr := os.WriteFile(pathASN, withASN, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfgASN, err := config.Load(pathASN)
+	if err != nil {
+		t.Fatalf("a chain naming asn must still load: %v", err)
+	}
+
+	optsASN := opts
+	optsASN.Annotate = cfgASN.Annotate
+	if needsASN, _, _ := providerNeeds(optsASN); !needsASN {
+		t.Fatal("a chain naming asn must want the resolver")
+	}
+	pASN, err := NewProcessor(t.Context(), zerolog.Nop(), optsASN)
+	if err != nil {
+		t.Fatalf("NewProcessor with asn re-added: %v", err)
+	}
+	if pASN.ASNState() == nil {
+		t.Fatal("a chain naming asn must build the resolver")
 	}
 }

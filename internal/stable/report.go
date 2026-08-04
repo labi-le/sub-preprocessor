@@ -16,7 +16,14 @@ type CycleReport struct {
 	Probed      int
 	Kept        int
 	// GeoUnknown counts published nodes carrying a [GEO:??] tag: the
-	// annotation chain resolved no country for them.
+	// annotation chain resolved no country for them. It has an irreducible
+	// floor and zero is not the target. A DNS-poisoning sinkhole answers with
+	// RFC 2544 / RFC 5737 space (198.18.0.0/15, 192.0.2.0/24) and some sources
+	// publish 127.0.0.1 or 255.255.255.255 outright; no geo source can place
+	// any of those, and Cymru correctly has no record for them either -- so a
+	// non-zero value here is NOT a regression from `asn` leaving the shipped
+	// chain. Measured with the provider added back: the same addresses render
+	// [GEO:??] either way.
 	GeoUnknown int
 	// KeptCountries counts published nodes per resolved country code.
 	KeptCountries map[string]int

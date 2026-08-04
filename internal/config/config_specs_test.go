@@ -477,6 +477,39 @@ func TestShippedConfigLoads(t *testing.T) {
 	if !cfg.AnnotateUsesProvider(config.ProviderCloudflare) {
 		t.Fatal("shipped annotate chain no longer asks the node for its egress")
 	}
+
+	// asn is deliberately OUT of the shipped chain: it redistributes the same
+	// RIR data registry already holds in memory, and measured behind
+	// dbip+registry it answered nothing they had not. The chain is pinned whole
+	// so re-adding it is a visible edit here, not a silent one.
+	wantChain := []string{
+		config.ProviderCloudflare, config.ProviderGeofeed,
+		config.ProviderDBIP, config.ProviderRegistry,
+	}
+	if len(cfg.Annotate) != 1 || !reflect.DeepEqual(cfg.Annotate[0].Providers, wantChain) {
+		t.Fatalf("shipped GEO chain = %+v, want one entry with %v", cfg.Annotate, wantChain)
+	}
+	if cfg.AnnotateUsesProvider(config.ProviderASN) {
+		t.Fatal("asn is back in the shipped chain; it needs a fresh measurement, not a re-add")
+	}
+
+	// Retained on purpose, and neither form is reachable from the chain: the
+	// country filter's asn provider, and the {type: asn} deny-pattern filter
+	// whose AS names only Cymru carries. Both must still load.
+	viaFilter, err := loadYAML(t, geoBase+
+		"filters:\n  - type: country\n    provider: asn\n    exclude_countries: [ir]\n"+
+		"  - type: asn\n    deny_patterns: [\"(?i)hetzner\"]\n"+
+		"annotate:\n  - tag: GEO\n    providers: [geofeed]\n")
+	if err != nil {
+		t.Fatalf("the asn filter forms must still load: %v", err)
+	}
+	wantSpecs := []config.IPFilterSpec{
+		{Type: config.FilterCountry, Provider: config.ProviderASN},
+		{Type: config.FilterASN, Provider: config.ProviderASN, DenyPatterns: []string{"(?i)hetzner"}},
+	}
+	if !reflect.DeepEqual(viaFilter.IPFilterSpecs(), wantSpecs) {
+		t.Fatalf("asn filter specs = %+v, want %+v", viaFilter.IPFilterSpecs(), wantSpecs)
+	}
 }
 
 // TestFiltersChanged proves the filters list drives its own change detection.

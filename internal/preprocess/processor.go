@@ -708,8 +708,8 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 // stage can make, so there is no filter form to expose. A GEO chain resolving
 // through either can therefore still name a country the filter treated as
 // unknown, and that is the DEFAULT, not a corner config. Measured on
-// config.yaml's own `[cloudflare, geofeed, dbip, registry, asn]`, which
-// merges to [geofeed, dbip, registry]: with all three loaded and none of them
+// config.yaml's own `[cloudflare, geofeed, dbip, registry]`, which merges to
+// [geofeed, dbip, registry]: with all three loaded and none of them
 // able to place the IP, `exclude_countries=DE` keeps the node while the stable
 // worker's traced egress publishes [GEO:DE].
 //

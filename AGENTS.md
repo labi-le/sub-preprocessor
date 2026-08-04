@@ -232,8 +232,8 @@ Important keys:
 - `server.metrics_listen` — internal Prometheus `/metrics` endpoint (default `:9090`; docker-compose publishes it loopback-only on `127.0.0.1:9091`, never public)
 - `geo.geofeed.refresh_interval` (default 24h when unset, explicit `0` = load once and never refresh) / `geo.geofeed.sources[].url` / `geo.geofeed.sources[].type` (`raw` or `gzip`)
 - `geo.dbip.url` / `geo.dbip.refresh_interval` — DB-IP Country Lite monthly gzip CSV (`{yyyy-mm}`-templated URL, default built-in, 24h refresh; unlike the geofeed sibling, an explicit `0` means that same default — a month-stamped mirror frozen for the process lifetime is never what an operator wants, and a non-positive interval also blocks the retry a failed initial download arms); in-memory IP→country DB for the `dbip` annotate provider, built only when an annotate chain references it
-- `geo.registry.urls[]` / `geo.registry.refresh_interval` — the five RIR delegated-extended files (defaults built-in, 24h refresh; explicit `0` = that default, as for `geo.dbip`); in-memory registration-country DB for the `registry` annotate provider, built only when referenced
-- `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h)
+- `geo.registry.urls[]` / `geo.registry.refresh_interval` — the five RIR delegated-extended files (defaults built-in, 24h refresh; explicit `0` = that default, as for `geo.dbip`); in-memory registration-country DB for the `registry` annotate provider, built only when referenced. **APNIC's file comes from `ftp.ripe.net`, not `ftp.apnic.net`, and that is not cosmetic.** APNIC's own host answers the ClientHello without echoing the legacy session ID RFC 8446 4.1.3 requires, so `crypto/tls` aborts with "server did not echo the legacy session ID" (curl: "invalid session id" / connection reset) — the RIR then drops out of the build with `sources_failed=1` and the database loads 4 of 5 registries. Measured cost of that one dead URL: 255972 ranges instead of 330937, and 97.30% of the addresses behind the configured subscriptions placed instead of 99.85%. RIPE and LACNIC serve the file byte-identically and both publish APNIC's own `.md5` for it, so the mirror is the same artifact, not a snapshot. Do not "fix" the URL back to the direct host
+- `geo.asn.timeout` / `geo.asn.cache_ttl` — Team-Cymru ASN lookups, in-memory TTL cache (default 24h). **`asn` is not in the shipped `annotate` chain and re-adding it needs a new measurement, not a hunch.** Cymru's `origin.asn.cymru.com` redistributes over DNS the same RIR delegation data `registry` already holds in RAM, so it is a registry lookup with a network hop, not a geolocation source: measured over every address behind every configured subscription it was a strict SUBSET of a complete `registry` (zero countries it placed that registry did not, zero disagreements where both answered, and its disagreement rate against `dbip` was indistinguishable from `registry`'s), and behind the shipped chain its MARGINAL contribution was zero hits — `dbip` sits two steps ahead at ~99.85% coverage, and the residue is unroutable sinkhole / RFC 5737+2544 space Cymru correctly has no record for. Dropping it from the chain added no `[GEO:??]`. What it uniquely carries is the AS **name**, which no local database has, so `{type: asn}` deny patterns and `{type: country, provider: asn}` stay live and stay tested
 - `resolver.timeout`
 - `resolver.address` — upstream DNS server, passed verbatim to the dialer, so it MUST be `host:port` (`1.1.1.1:53`); a portless value is rejected at load, because it dials nothing and would drop every node as a DNS failure. Empty keeps the system resolver
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
@@ -353,11 +353,14 @@ nix flake update sub-preprocessor && make switch
   (`if t.key != config.TagGEO { continue }`) as the two tags were removed, seven immediate
   compares down to three. That is an argument about work removed, not about nanoseconds.
 - **Allocations are the binding constraint and they are clean across both changes**: no
-  `allocs/op` or `B/op` increase on any benchmark. Five in untouched packages
-  (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`)
-  differ between trees at `-benchtime 100x` while the SAME tree reproduces the same spread
-  across consecutive runs - `Resolution_Concurrent` even flips 64/65 allocs/op - so that is
-  the instrument. The one deliberate increase is in `countryChainOrder`: a config splitting
+  `allocs/op` or `B/op` increase on any benchmark. A handful in untouched packages
+  (`Parse_1000Entries`, `ParseProxies`, `Parse_Vmess`, `Resolution`, `Resolution_Concurrent`,
+  `Merge`, `MergeSSR`, and `CacheStore_RWMutexMap/parallel` / `CacheStore_SyncMap/parallel`,
+  which swing 13 <-> 52 B/op) differ between trees at `-benchtime 100x` while the SAME tree
+  reproduces the same spread across consecutive runs - `Resolution_Concurrent` even flips
+  64/65 allocs/op - so that is the instrument, and the honest comparison diffs the TOUCHED
+  packages rather than the whole list. The one deliberate increase is in
+  `countryChainOrder`: a config splitting
   one `GEO` chain across several entries now pays a per-request `chainLookup` it did not
   before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
   already cost. The shipped config is unmoved, and the alternative was the wrong filter
