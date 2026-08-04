@@ -140,9 +140,10 @@ var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 // apnic = 163160 = 49.3%) as flatly as ftp.ripe.net. Measured with
 // ParseDelegated over the live files: ripencc 126845, apnic 74965, lacnic 33819
 // of 330937 total. Hanging APNIC off ftp.ripe.net puts 201810 ranges = 61.0% on
-// one host, where the worst single-host loss used to be ripencc's own 38.3%;
-// ftp.lacnic.net (200.3.14.15, Apache, versus RIPE's 193.0.11.24, nginx) caps it
-// at 108784 = 32.9%. That cliff is live, not hypothetical: swapRefusal protects
+// one host; ftp.lacnic.net (200.3.14.15, Apache, versus RIPE's 193.0.11.24,
+// nginx) leaves the worst host at ripencc's own 126845 = 38.3% -- the floor no
+// mirror choice can beat -- with ftp.lacnic.net itself only second at
+// 108784 = 32.9%. That cliff is live, not hypothetical: swapRefusal protects
 // only a process that already holds a good database, while newGeoDB at STARTUP
 // takes the partial build with a Warn. Do not "tidy" APNIC over to the RIPE URL
 // its neighbour uses.
