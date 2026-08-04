@@ -192,17 +192,20 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 //
 // The caller needs ONE number for the AS<n>.asn.cymru.com name lookup and the
 // record ranks nothing, so this takes the first listed. That name is read only
-// by the {type: asn} deny patterns, so on a prefix whose ASes belong to
-// DIFFERENT operators a pattern written for any but the first is missed. That
-// is measured, not hypothetical: of 50 sampled live multi-origin records, 28
-// list ASes of unrelated operators (188.72.253.0/24 is AS7979 Servers.com plus
-// AS35415 Webzilla B.V.; 136.144.60.0/23 is AS15830 Equinix plus AS54825 Packet
-// Host), and that includes one of this file's own test fixtures --
-// TestParseOriginRecord_MultiOrigin's 87.250.224.0/19 is AS13238 YANDEX plus
-// AS208398 Edge Technology Plus, RS. The
-// change is still strictly better than what it replaced, which missed every AS
-// on such a prefix AND the country; taking one AS is a deliberate residual gap,
-// not a solved problem.
+// by the {type: asn} deny patterns, and they match the NAME STRING -- so what
+// decides whether dropping the rest costs a match is whether the names share a
+// token a pattern could have been written around. Corporate affiliation is a
+// different question and is deliberately not the one measured here. Measured,
+// not hypothetical: of 68 live multi-origin records found by sampling random
+// RIR delegations on 2026-08-04, 28 pair the first-listed AS with one whose
+// name shares no token with it -- and one of this file's own test fixtures is
+// among them. TestParseOriginRecord_MultiOrigin's 87.250.224.0/19 is AS13238
+// "YANDEX - YANDEX LLC, RU" plus AS208398 "TELETECH - Edge Technology Plus
+// d.o.o. Beograd, RS", two RIPE orgs (ORG-YA1-RIPE, ORG-TDB4-RIPE) with no
+// token in common, so a pattern for either misses the other. The change is
+// still strictly better than what it replaced, which missed every AS on such a
+// prefix AND the country; taking one AS is a deliberate residual gap, not a
+// solved problem.
 func parseOriginRecord(txt string) (uint32, geofeed.CountryCode, error) {
 	parts := strings.Split(txt, "|")
 	asnField := strings.TrimSpace(parts[0])
