@@ -251,8 +251,10 @@ not in hosts. The five URLs sit on four hosts either way (`ftp.lacnic.net`
 serves APNIC's mirror and LACNIC's own file), so a host count cannot tell the
 candidates apart and the weights are the whole argument: `ripencc` already
 comes from `ftp.ripe.net`, so parking APNIC there would put 201810 of the
-330937 loaded ranges (61.0%) behind one outage, where `ftp.lacnic.net` caps the
-worst host at 108784 (32.9%). The same arithmetic rules out `ftp.arin.net`
+330937 loaded ranges (61.0%) behind one outage, where `ftp.lacnic.net` leaves
+the worst host at ripencc's own 126845 (38.3%) — the floor no mirror choice can
+beat — with `ftp.lacnic.net` itself only second at 108784 (32.9%). The same
+arithmetic rules out `ftp.arin.net`
 (163160, 49.3%), which a keep-them-on-separate-hosts reading would have waved
 through; `assertRegistryHostConcentration` in `internal/config` enforces it as
 a rule over the range weights, so re-pointing any of these URLs has to argue
