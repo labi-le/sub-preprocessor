@@ -10,9 +10,11 @@ import (
 
 // rejectReason names why one discovered candidate did not become a managed
 // source. The crawler's per-cycle counters used to be the only trace of the
-// decision — a cycle reporting `discovered=109` said nothing about the hundred
-// links it looked at and dropped, so a link that stopped becoming a source was
-// indistinguishable from a link nobody ever posted.
+// decision — a cycle reported `discovered` and `productive` and nothing about
+// the links it looked at and dropped, so a link that stopped becoming a source
+// was indistinguishable from a link nobody ever posted. (Those two counters
+// cannot be subtracted for a rejected count: `productive` is len(state.Productive),
+// a map of CHANNELS, despite its "live subscriptions discovered" message.)
 //
 // The set covers both pre-fetch gates (candidate) and every post-fetch verdict
 // (classifyAll). It is a string type because its only consumers are a log field
@@ -54,9 +56,8 @@ var rejectField = map[rejectReason]string{
 // no level knob — a DEBUG line here would emit zero times in production and
 // could not be turned on without a rebuild.
 //
-// INFO therefore needs its own ceiling. The observed cycle rejected 103
-// candidates, so the cap sits above a normal cycle and every line survives; it
-// is set to defaultMaxDiscovered because that is what bounds the fan-out
+// INFO therefore needs its own ceiling. It is set to defaultMaxDiscovered
+// because that is what bounds the fan-out
 // feeding it — up to 200 discovered channels per cycle, each contributing
 // candidates — so a repost-graph blow-up costs a bounded number of lines instead
 // of a multiple of the previous cycle's. Counting is NOT capped: the per-cycle
