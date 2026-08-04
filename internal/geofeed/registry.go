@@ -18,6 +18,22 @@ import (
 // take down startup (mirrors LoadAll). It fails only when NO ranges load;
 // failed reports how many RIRs were skipped, so a caller that already holds a
 // good database can refuse to replace it with a partial one.
+//
+// Every source that loads logs its header serial. That is an OBSERVABLE, not a
+// gate -- nothing branches on it and a stale file still loads. It exists
+// because not every default URL is served by the RIR that cut the file
+// (config.defaultRegistryURLs reads APNIC off a mirror), and a copy frozen
+// months ago is otherwise indistinguishable from a current one: it fetches 200,
+// parses clean, reports sources_failed=0, and lands a range count well inside
+// swapRefusal's minSwapRatio. Deciding what to DO about lag needs a policy this
+// does not have; seeing it needs only the field.
+//
+// The serial's FORM is the publishing registry's business and the five do not
+// agree -- apnic, lacnic and afrinic write YYYYMMDD (20260804), ripencc a unix
+// second count (1785794399), arin unix milliseconds (1785848421615) -- so read
+// it per source against that source's own last value, never across sources. It
+// is monotonic within a source, which is all a lag signal needs, and on the one
+// URL that is actually a third party's copy it happens to be legible as a date.
 func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) (ranges []Range, failed int, err error) {
 	for _, url := range urls {
 		if url == "" {
@@ -37,6 +53,8 @@ func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) (ra
 			logger.Warn().Str("url", url).Msg("registry source parsed no ranges; skipping")
 			continue
 		}
+		logger.Info().Str("url", url).Str("serial", delegatedSerial(body)).
+			Int("ranges", len(part)).Msg("registry source loaded")
 		ranges = append(ranges, part...)
 	}
 
@@ -44,6 +62,38 @@ func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) (ra
 		return nil, failed, fmt.Errorf("no registry ranges loaded (%d source(s) failed)", failed)
 	}
 	return ranges, failed, nil
+}
+
+// delegatedSerial reads the serial out of a delegated-extended version header
+// -- "2.3|apnic|20260804|188932||20260803|+1000" yields "20260804". The header
+// is the first non-comment line of the body and ParseDelegated drops it (field
+// 2, where a record carries its type, holds the serial instead, so it matches
+// neither ipv4 nor ipv6), which is why the loaded database otherwise carries no
+// trace of when the file was cut.
+//
+// Returns "" for a body that does not open on a header, rather than reporting a
+// record's own field 2: "serial=ipv4" in a log line is worse than no field.
+func delegatedSerial(body []byte) string {
+	sep := []byte{'|'}
+	it := ioutil.NewLines(body)
+	line := it.Next()
+	if line == nil {
+		return ""
+	}
+	_, rest, ok := bytes.Cut(line, sep) // version
+	if !ok {
+		return ""
+	}
+	_, rest, ok = bytes.Cut(rest, sep) // registry
+	if !ok {
+		return ""
+	}
+	serial, _, ok := bytes.Cut(rest, sep)
+	if !ok || bytes.Equal(serial, []byte("ipv4")) || bytes.Equal(serial, []byte("ipv6")) ||
+		bytes.Equal(serial, []byte("asn")) {
+		return ""
+	}
+	return string(serial)
 }
 
 // ParseDelegated parses an RIR delegated-extended body:

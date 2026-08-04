@@ -77,7 +77,9 @@ annotate:
     # `registry` -- zero countries it placed that registry did not, zero
     # disagreements where both answered -- and its marginal contribution BEHIND
     # this chain was zero hits, because dbip alone answers all but a handful and
-    # the handful are unroutable sinkhole/RFC-5737 artifacts Cymru correctly
+    # the handful are unroutable: RFC 2544 / RFC 5737 space (198.18.0.0/15,
+    # 192.0.2.0/24) handed back by DNS-poisoning sinkholes, plus sources that
+    # publish 127.0.0.1 or 255.255.255.255 outright, all of which Cymru
     # NXDOMAINs. It stays accepted here (and `{type: country, provider: asn}`
     # and `{type: asn}` stay live) because only Cymru carries the AS NAME the
     # deny patterns match; it just buys no coverage. Re-measure before re-adding.

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -255,15 +256,44 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	}
 	wantURLs := []string{
 		"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
-		// APNIC via RIPE's mirror: ftp.apnic.net's ServerHello does not echo
-		// the legacy session ID, so crypto/tls cannot fetch it at all.
-		"https://ftp.ripe.net/pub/stats/apnic/delegated-apnic-extended-latest",
+		// APNIC via LACNIC's mirror: ftp.apnic.net's ServerHello does not echo
+		// the legacy session ID, so crypto/tls cannot fetch it at all, and the
+		// RIPE copy of the same bytes would stack apnic on top of ripencc's own
+		// host (61% of the ranges behind one outage instead of 33%).
+		"https://ftp.lacnic.net/pub/stats/apnic/delegated-apnic-extended-latest",
 		"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 		"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
 		"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
 	}
 	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, wantURLs) {
 		t.Fatalf("registry urls default = %v", cfg.Geo.Registry.URLs)
+	}
+	// LoadRegistry's outage promise is worth the number of DISTINCT hosts, and
+	// ripencc is the big one: whatever the mirrors do, apnic must not land on
+	// ripencc's host. Asserted as a rule rather than as a URL so a future edit
+	// that re-points either one has to think about the concentration.
+	hostOf := func(raw string) string {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			t.Fatalf("parse %q: %v", raw, parseErr)
+		}
+		return u.Host
+	}
+	var ripencc, apnic string
+	for _, u := range cfg.Geo.Registry.URLs {
+		switch {
+		case strings.Contains(u, "delegated-ripencc-"):
+			ripencc = hostOf(u)
+		case strings.Contains(u, "delegated-apnic-"):
+			apnic = hostOf(u)
+		}
+	}
+	if ripencc == "" || apnic == "" {
+		t.Fatalf("default registry urls no longer cover ripencc and apnic: %v", cfg.Geo.Registry.URLs)
+	}
+	if ripencc == apnic {
+		t.Fatalf("apnic is mirrored on ripencc's own host %q; that is 61%% of the ranges "+
+			"behind one outage, see defaultRegistryURLs", apnic)
 	}
 	if cfg.Geo.Registry.RefreshInterval == nil || *cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
 		t.Fatalf("registry refresh default = %v, want 24h", cfg.Geo.Registry.RefreshInterval)

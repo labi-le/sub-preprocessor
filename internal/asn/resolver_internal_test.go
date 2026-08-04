@@ -141,7 +141,7 @@ func TestResolve_UsesConfiguredCacheTTL(t *testing.T) {
 // several ASes. Field 0 is an AS LIST, and parsing it whole used to fail the
 // record and throw away the country in field 2 -- so the annotate chain missed
 // and the ASN filter fell open on every multi-origin prefix. Records below are
-// verbatim Cymru answers for 35.212.182.82, 77.88.44.55 and 87.250.251.10.
+// verbatim Cymru answers for 146.103.121.1, 35.212.182.82 and 87.250.251.10.
 func TestParseOriginRecord_MultiOrigin(t *testing.T) {
 	t.Parallel()
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"domains.lst/sub-preprocessor/internal/asn"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -1165,30 +1166,52 @@ func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
 	}
 }
 
+// shippedConfigOffline loads the repository's own config/config.yaml (copied
+// into a temp dir, because config.Load merges the sibling overlays and these
+// tests are about config.yaml alone) and returns Options wired for an offline
+// run. The shipped chain names dbip and registry, so both geoDBs are built;
+// preloading them keeps the callers off the network. Nothing preloads the ASN
+// resolver -- whether it is constructed at all is what the callers ask.
+func shippedConfigOffline(t *testing.T) (shipped []byte, dir string, cfg config.Config, opts Options) {
+	t.Helper()
+
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir = t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if writeErr := os.WriteFile(path, shipped, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offline := GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()}
+	return shipped, dir, cfg, Options{
+		IPFilters:         cfg.IPFilterSpecs(),
+		Annotate:          cfg.Annotate,
+		DBIP:              cfg.Geo.DBIP,
+		Registry:          cfg.Geo.Registry,
+		PreloadedGeofeed:  offline,
+		PreloadedDBIP:     offline,
+		PreloadedRegistry: offline,
+	}
+}
+
 // TestShippedConfigDropsASNButKeepsTheCapability reads the repository's own
 // config/config.yaml rather than a fixture. Two halves, and the second is the
 // point: the shipped GEO chain no longer names asn, so the running service
 // builds no Cymru resolver -- measured, the provider contributed zero hits
 // behind dbip+registry -- but the provider is NOT retired, and a config that
-// asks for it must still load and still build it.
+// asks for it must still load and still build it. What a config that asks for
+// it gets BUILT is TestASNFilterFormsStillBuild's half.
 func TestShippedConfigDropsASNButKeepsTheCapability(t *testing.T) {
 	t.Parallel()
 
-	// Copied into a temp dir because config.Load merges the sibling overlays,
-	// and this is about config.yaml alone.
-	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if writeErr := os.WriteFile(path, shipped, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	shipped, dir, cfg, opts := shippedConfigOffline(t)
 
 	for _, a := range cfg.Annotate {
 		if slices.Contains(a.Providers, config.ProviderASN) {
@@ -1201,19 +1224,6 @@ func TestShippedConfigDropsASNButKeepsTheCapability(t *testing.T) {
 		}
 	}
 
-	// The shipped chain names dbip and registry, so both geoDBs are built;
-	// preloading them keeps this test off the network. Nothing preloads the ASN
-	// resolver — whether it is constructed at all is the question.
-	offline := GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()}
-	opts := Options{
-		IPFilters:         cfg.IPFilterSpecs(),
-		Annotate:          cfg.Annotate,
-		DBIP:              cfg.Geo.DBIP,
-		Registry:          cfg.Geo.Registry,
-		PreloadedGeofeed:  offline,
-		PreloadedDBIP:     offline,
-		PreloadedRegistry: offline,
-	}
 	if needsASN, _, _ := providerNeeds(opts); needsASN {
 		t.Fatal("nothing in the shipped config reaches asn, yet the resolver is wanted")
 	}
@@ -1255,5 +1265,90 @@ func TestShippedConfigDropsASNButKeepsTheCapability(t *testing.T) {
 	}
 	if pASN.ASNState() == nil {
 		t.Fatal("a chain naming asn must build the resolver")
+	}
+}
+
+// TestASNFilterFormsStillBuild covers what the ANNOTATE half above does not.
+// The provider was retained for its two FILTER forms -- `{type: asn}` deny
+// patterns over the AS NAME no local database carries, and `{type: country,
+// provider: asn}` -- and buildFilters is where a config that asks for either
+// turns into something that RUNS. Each is one `case` arm: delete either and
+// every assertion in the sibling test still passes while the configured filter
+// silently never executes (an asn entry vanishing from the chain, or a
+// country/asn entry quietly downgrading to a geofeed one). So this pins the
+// built chain itself -- how many filters, of which concrete types, in config
+// order, each with the live resolver behind it.
+func TestASNFilterFormsStillBuild(t *testing.T) {
+	t.Parallel()
+
+	shipped, dir, _, opts := shippedConfigOffline(t)
+
+	const shippedFilters = "filters:\n  - type: country\n    provider: geofeed\n"
+	if !bytes.Contains(shipped, []byte(shippedFilters)) {
+		t.Fatalf("shipped config no longer opens filters with %q; re-point this test", shippedFilters)
+	}
+	withFilters := bytes.Replace(shipped, []byte(shippedFilters),
+		[]byte("filters:\n  - type: asn\n    deny_patterns: [\"(?i)servers\\\\.com\"]\n"+
+			"  - type: country\n    provider: asn\n  - type: country\n    provider: geofeed\n"), 1)
+	path := filepath.Join(dir, "with-asn-filters.yaml")
+	if writeErr := os.WriteFile(path, withFilters, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("both asn filter forms must still load: %v", err)
+	}
+
+	opts.IPFilters = cfg.IPFilterSpecs()
+	if len(opts.IPFilters) != 3 {
+		t.Fatalf("IPFilterSpecs() = %+v, want the 3 spliced entries", opts.IPFilters)
+	}
+	// The GEO chain is still the shipped one, so a resolver here can only have
+	// been asked for by a FILTER.
+	if needsASN, _, _ := providerNeeds(opts); !needsASN {
+		t.Fatal("an asn FILTER must want the resolver even with asn out of the annotate chain")
+	}
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("NewProcessor with both asn filter forms: %v", err)
+	}
+	if len(p.filters) != 3 {
+		t.Fatalf("built %d filters, want 3 (asn deny, country/asn, country/geofeed)", len(p.filters))
+	}
+
+	// Entry 0: `{type: asn}` -- an ASNFilter CARRYING the compiled patterns. A
+	// pattern-less ASNFilter here would mean the deny list was dropped.
+	denyFilter, ok := p.filters[0].(*ASNFilter)
+	if !ok {
+		t.Fatalf("filters[0] = %T, want *ASNFilter for `{type: asn}`", p.filters[0])
+	}
+	if len(denyFilter.patterns) != 1 {
+		t.Fatalf("the asn deny filter compiled %d patterns, want 1", len(denyFilter.patterns))
+	}
+	// Entry 1: `{type: country, provider: asn}` -- also an ASNFilter, and NOT
+	// the GeofeedFilter the same case builds for every other provider.
+	countryASN, ok := p.filters[1].(*ASNFilter)
+	if !ok {
+		t.Fatalf("filters[1] = %T, want *ASNFilter for `{type: country, provider: asn}`", p.filters[1])
+	}
+	if len(countryASN.patterns) != 0 {
+		t.Fatalf("a country/asn filter carries %d deny patterns, want 0", len(countryASN.patterns))
+	}
+	// Entry 2 proves the switch still discriminates rather than answering
+	// *ASNFilter to everything.
+	if _, isGeofeed := p.filters[2].(*GeofeedFilter); !isGeofeed {
+		t.Fatalf("filters[2] = %T, want *GeofeedFilter for `{type: country, provider: geofeed}`", p.filters[2])
+	}
+	// Both must be able to actually resolve: buildFilters hands them the one
+	// resolver NewProcessor constructed, and a typed-nil behind the interface
+	// would make Process fall open on every IP.
+	for i, f := range []*ASNFilter{denyFilter, countryASN} {
+		r, isReal := f.resolver.(*asn.Resolver)
+		if !isReal || r == nil {
+			t.Fatalf("filters[%d] holds resolver %#v, want the live *asn.Resolver", i, f.resolver)
+		}
+		if r != p.ASNState() {
+			t.Fatalf("filters[%d] holds a different resolver than ASNState()", i)
+		}
 	}
 }

@@ -219,7 +219,7 @@ Available providers:
 | `cloudflare` | Cloudflare's geo-IP database, asked through the node itself via `/cdn-cgi/trace` (`geo.cloudflare.*`) | the only one asked about the EXIT address; worker-only |
 | `geofeed` | RFC 8805 CSV feeds (`geo.geofeed.sources`) | precise, low coverage |
 | `dbip` | DB-IP Country Lite — monthly gzip CSV; the `{yyyy-mm}` URL placeholder expands to the current UTC month, with one previous-month retry on a 404 right after rollover | broad coverage, in-memory |
-| `registry` | the five RIR delegated-extended files (APNIC's is read from RIPE's mirror — see below) | *registration* country of the allocated block, not necessarily where it routes |
+| `registry` | the five RIR delegated-extended files (APNIC's is read from LACNIC's mirror — see below) | *registration* country of the allocated block, not necessarily where it routes |
 | `asn` | Team Cymru DNS | accepted, but NOT in the shipped chain — see below |
 
 The `dbip`/`registry` databases are downloaded and indexed in memory only when
@@ -233,17 +233,26 @@ subscription it was a strict SUBSET of a complete `registry` — no country it
 placed that `registry` did not, and no disagreement where both answered — and
 placed behind this chain its marginal contribution was zero hits, because
 `dbip` alone answers all but a handful of addresses and that handful is
-unroutable sinkhole/documentation space Cymru correctly has no record for. It
+unroutable — RFC 2544 / RFC 5737 space (198.18.0.0/15, 192.0.2.0/24) returned
+by DNS-poisoning sinkholes, and sources publishing 127.0.0.1 or
+255.255.255.255 outright — which Cymru correctly has no record for either. It
 remains reachable as `{type: country, provider: asn}` and as the `{type: asn}`
 deny-pattern filter, whose AS *names* no local database carries. Re-measure
 before putting it back in a chain.
 
-`registry` reads APNIC from `ftp.ripe.net`, not `ftp.apnic.net`: APNIC's own
+`registry` reads APNIC from `ftp.lacnic.net`, not `ftp.apnic.net`: APNIC's own
 host answers the TLS ClientHello without echoing the legacy session ID that
 RFC 8446 requires, which Go's `crypto/tls` rejects outright, so that RIR
 silently dropped out of the build and cost roughly two and a half points of
-coverage. RIPE and LACNIC mirror the file byte-identically (both publish
-APNIC's own checksum for it).
+coverage. RIPE and LACNIC both mirror the file byte-identically under APNIC's
+own published checksum, and LACNIC is chosen over the nearer RIPE copy only to
+keep the five URLs on five hosts: `ripencc` is already served from
+`ftp.ripe.net`, so parking APNIC there too would put 61% of the loaded ranges
+behind a single outage instead of 33%. A mirror is also a copy on someone
+else's schedule, so `LoadRegistry` logs each file's own header serial — an
+observable for lag, not a gate. Its form is the publishing registry's business
+(`20260804` from APNIC, a unix timestamp from RIPE, unix ms from ARIN), so read
+it against the same source's previous value, not across sources.
 
 `cloudflare` is the odd one out, but not in the way the old name suggested. It
 is a geo-IP database like the others — the tag carries the `loc=` line it
@@ -388,7 +397,7 @@ Key sections:
   `geo.registry.refresh_interval` — optional blocks for the downloadable
   IP→country databases; defaults are built in (the DB-IP Country Lite
   `{yyyy-mm}` monthly URL, the five RIR delegated-extended files with APNIC
-  taken from RIPE's mirror, 24h refresh).
+  taken from LACNIC's mirror, 24h refresh).
 - `geo.cloudflare.timeout` / `geo.cloudflare.concurrency` (default 15s, 8) —
   the `/cdn-cgi/trace` probe behind the `cloudflare` ANNOTATE provider. Two
   keys and no `endpoint`: only Cloudflare's own body parses, so the URL is a
