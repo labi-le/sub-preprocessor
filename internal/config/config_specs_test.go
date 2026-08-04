@@ -255,7 +255,9 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	}
 	wantURLs := []string{
 		"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
-		"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+		// APNIC via RIPE's mirror: ftp.apnic.net's ServerHello does not echo
+		// the legacy session ID, so crypto/tls cannot fetch it at all.
+		"https://ftp.ripe.net/pub/stats/apnic/delegated-apnic-extended-latest",
 		"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 		"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
 		"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",

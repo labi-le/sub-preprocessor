@@ -114,10 +114,23 @@ const (
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 // The five RIR delegated-extended-latest files together cover the full
-// allocated IP space with registration countries.
+// allocated IP space with registration countries. Dropping one costs real
+// coverage, not a rounding error: without APNIC the database builds from
+// 255972 ranges instead of 330937 and places 97.30% of the resolved addresses
+// instead of 99.85% (LoadRegistry logs the skip as sources_failed=1).
+//
+// APNIC is read from RIPE's mirror on purpose. ftp.apnic.net's TLS is broken
+// for Go: its ServerHello does not echo the ClientHello's legacy_session_id,
+// which RFC 8446 4.1.3 requires, so crypto/tls aborts the handshake with
+// "server did not echo the legacy session ID" (curl reports the same reject as
+// "invalid session id" / connection reset). It is the server, not us -- do not
+// "fix" this back to the direct host. The mirror is byte-identical to what
+// APNIC publishes: RIPE and LACNIC serve the same md5 as APNIC's own
+// delegated-apnic-extended-latest.md5, and the file's own header record count
+// matches its summary rows.
 var defaultRegistryURLs = []string{
 	"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
-	"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+	"https://ftp.ripe.net/pub/stats/apnic/delegated-apnic-extended-latest",
 	"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 	"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
 	"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
