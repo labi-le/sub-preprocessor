@@ -67,6 +67,13 @@ const maxRejectLines = defaultMaxDiscovered
 // after substitution; see safeError.
 const redactedError = "redacted: error names the candidate url"
 
+// redactedPathError replaces an error message that names the candidate's path or
+// query while carrying no scheme for the redactedError rule to catch; see
+// safeError. It is a separate string because it means something else: no error
+// on the reject path has that shape today, so this text in a log is a report
+// that one now does — the guard held, and the code it names needs a look.
+const redactedPathError = "redacted: error names the candidate url path or query"
+
 // maxRejectTracked bounds the dedupe set. It deliberately mirrors
 // maxInlineAccum, which bounds the OTHER accumulator fed by the same regex pass
 // over the same pages in the same loop, for the same reason: a single page can
@@ -125,6 +132,12 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 	// scan returns. Measured on a 200-page cycle: 10,486,464 B retained shared
 	// against 881,664 B cloned, and the cloned figure does not move with page
 	// size.
+	//
+	// This map was never the only holder, and the accepted key was always the
+	// longer-lived one: harvestPages puts it in cand, classifyAll copies it into
+	// live, and scanChannel hands live up to RunOnce for mergeManaged. It clones
+	// for this same reason, and did not before — the pin there predates this map
+	// rather than arriving with it.
 	r.verdict[strings.Clone(rawURL)] = reason
 	if r.logged >= maxRejectLines {
 		return
@@ -160,7 +173,10 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 // report emits the per-cycle summary: one count per reason plus the total, so
 // "why did this cycle find fewer subscriptions" is answerable without reading
 // every line. The counts are complete even when the cap withheld lines, and the
-// withheld count is reported with them.
+// withheld count is reported with them. They are complete only up to
+// maxRejectTracked, though: past that bound record can no longer dedupe, so the
+// overflow is reported as `untracked` beside the columns rather than counted
+// into them, and `rejected` still equals their sum.
 //
 // live is the cycle's accepted set. A URL rejected in one channel and classified
 // live in another is not a rejection — the cycle adopted it — so it is dropped
@@ -240,15 +256,52 @@ func logHost(u *url.URL) string {
 // credential. Dropping the text loses a diagnosis; editing it down guesses with
 // the credential.
 //
-// An error naming only a URL's path, with no scheme, would slip both rules. No
-// error classify.URL or candidate can return has that shape, so there is no
-// guard for it here — a guard nothing exercises is a guard nobody can trust.
-// TestRejectLinesCarryNoCredential greps the whole log stream for the fixture
-// paths, so a change that introduces the shape fails there.
+// An error naming a URL's path or query with NO scheme slips both rules above:
+// the substitution matches the whole URL only, and there is no "://" left to
+// see. namesSecret is the guard for that, and it is the last line of defence
+// for the credential — for Marzban and 3x-ui the path IS the token (see
+// logHost). Nothing on the reject path returns that shape today: candidate's two
+// wraps quote the URL through %q with its scheme intact, and classify.URL's are
+// `validate url`, `do request` (*url.Error, %q-quoted, scheme intact),
+// `read response` and `response too large` — its `create request` wrap is
+// unreachable, since http.NewRequestWithContext re-parses a URL ValidateHTTPSURL
+// already parsed, and its *StatusError never arrives here at all (classifyAll
+// records rejectStatus with the code and a nil err). That inventory is the
+// invariant, and it is one edit away from false — `read response %s` naming
+// req.URL.EscapedPath() is the obvious "which subscription failed?" change and
+// would land the token in a log verbatim.
+//
+// So the guard is not a spare tyre for a shape nobody produces: it is what makes
+// the inventory safe to be wrong about. TestRejectLineKeepsRealClassifyErrors
+// routes each of those errors, produced by a real server through the real
+// classify.URL, into record and asserts the diagnosis SURVIVES — so the edit
+// above stops being a silent leak and becomes a failing test, because the guard
+// redacts it. TestSafeErrorRedactsASchemelessPath exercises the guard itself.
 func safeError(err error, rawURL string, u *url.URL) string {
 	msg := strings.ReplaceAll(err.Error(), rawURL, logHost(u))
 	if strings.Contains(msg, "://") {
 		return redactedError
 	}
+	if namesSecret(msg, u) {
+		return redactedPathError
+	}
 	return msg
+}
+
+// namesSecret reports whether msg still carries the part of the candidate URL
+// that may BE the credential: its path or its query. Deliberately substring
+// matching, and deliberately over-eager — a one-character path like "/o" also
+// matches the "i/o" in a dial timeout, costing that line its diagnosis. The
+// asymmetry is the point: a false positive loses a message, a false negative
+// publishes a subscription token. A path of exactly "/" is not a secret and
+// would match nearly every message, so it is excluded.
+func namesSecret(msg string, u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	if q := u.RawQuery; q != "" && strings.Contains(msg, q) {
+		return true
+	}
+	p := u.EscapedPath()
+	return len(p) > 1 && strings.Contains(msg, p)
 }

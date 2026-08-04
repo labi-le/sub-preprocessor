@@ -760,6 +760,22 @@ func pageCursor(page string) string {
 // error where there is one, so the caller can log a candidate's fate instead of
 // dropping it silently. The gates and their order are unchanged: which URLs pass
 // is exactly what it was.
+//
+// The fmt.Errorf wraps are eager: both are built before record knows whether the
+// line survives dedupe or the cap, measured at +4.5 allocs and +160 B per
+// invalid-url reject. Kept deliberately — only invalid-url pays it, that reason
+// is rare, and moving the wrap into record means handing back a bare external
+// error and buying a wrapcheck suppression with a cold-path 160 B.
+//
+// The accept path is ALLOCATION-identical, which is what was measured and all
+// that argument needs: 336 B / 3 allocs both here and on 26c8fe2, six samples
+// each, every sample equal. It is NOT instruction-identical — 3551cd0's message
+// declined this finding with that word and the word was wrong, since an
+// allocation counter cannot establish it. go tool nm puts candidate at 124 B
+// before and 421 B after; walking the accept path it executes 25 instructions
+// before and 30 after (alignment NOPs excluded); the frame grows SUBQ $0x10 ->
+// SUBQ $0x48; and the tail TESTQ AX, AX; SETE AL becomes a branch into a block
+// that materialises the three-value return.
 func candidate(raw string) (bool, rejectReason, error) {
 	u, err := url.Parse(raw)
 	if err != nil {

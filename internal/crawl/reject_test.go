@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -381,6 +383,184 @@ func mustQuery(t *testing.T, raw string) string {
 	return u.RawQuery
 }
 
+// TestRejectLineKeepsRealClassifyErrors closes the gap every other test in this
+// file leaves open. crawl.New wires the real classify.URL, but each test here
+// replaces classifyFn with fixtureClassify, so nothing routed an error the real
+// classify.URL built into a reject line — safeError's inventory of reachable
+// shapes was checked by reading the code, not by running it. Each case below
+// makes a real server produce a real error through the real classify.URL, with a
+// candidate URL whose last path segment is the credential (the Marzban shape).
+//
+// Two assertions per case, and the SECOND is the one that bites. The path must
+// not reach the log — that is the leak namesSecret guards. And the diagnosis must
+// SURVIVE: a redacted message here means an error on this path started naming the
+// candidate's path or query, which is exactly what the inventory claims does not
+// happen. Changing classify.go's read-response wrap to `read response %s` with
+// req.URL.EscapedPath() fails this test for that reason, and used to fail nothing.
+//
+// classify.URL's *StatusError is deliberately absent: classifyAll records it as
+// rejectStatus with the code and a nil err, so it never reaches safeError.
+func TestRejectLineKeepsRealClassifyErrors(t *testing.T) {
+	t.Parallel()
+
+	const credToken = "REALTOKEN8888"
+	const credPath = "/sub/eyJhbGciOiJIUzI1NiJ9." + credToken
+	cases := []struct {
+		name string
+		// setup returns the candidate URL and the client classify.URL must use.
+		setup func(t *testing.T) (string, *http.Client)
+		want  []string
+	}{{
+		// classify.go's read-response wrap: Content-Length promises more than the
+		// handler delivers, and the partial body is flushed before the abort so
+		// the failure lands in io.ReadAll rather than in client.Do.
+		name: "read response",
+		setup: func(t *testing.T) (string, *http.Client) {
+			srv := tlsFixtureServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "4096")
+				_, _ = w.Write([]byte("vless://truncated"))
+				w.(http.Flusher).Flush() //nolint:forcetypeassert // httptest's ResponseWriter is one
+				panic(http.ErrAbortHandler)
+			})
+			return srv.URL + credPath, srv.Client()
+		},
+		want: []string{"read response", "unexpected EOF"},
+	}, {
+		// The reachable *url.Error: net/http embeds the whole request URL, so
+		// this is the case the substitution exists for.
+		name: "do request",
+		setup: func(*testing.T) (string, *http.Client) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			client := srv.Client()
+			srv.Close()
+			return srv.URL + credPath, client
+		},
+		want: []string{"do request", "connection refused"},
+	}, {
+		name: "response too large",
+		setup: func(t *testing.T) (string, *http.Client) {
+			srv := tlsFixtureServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				chunk := bytes.Repeat([]byte("x"), 1<<16)
+				for range (10 << 20 / (1 << 16)) + 1 {
+					if _, err := w.Write(chunk); err != nil {
+						return
+					}
+				}
+			})
+			return srv.URL + credPath, srv.Client()
+		},
+		want: []string{"response too large", "10485760"},
+	}, {
+		name: "validate url",
+		setup: func(*testing.T) (string, *http.Client) {
+			return "http://plain.example" + credPath, http.DefaultClient
+		},
+		want: []string{"validate url", "only https"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, client := tc.setup(t)
+			_, err := classify.URL(context.Background(), client, fetch.SubscriptionURL(raw))
+			if err == nil {
+				t.Fatalf("classify.URL(%q) succeeded; the case produced no error to log", raw)
+			}
+			assertRealErrorSurvives(t, tc.name, raw, err, tc.want, credToken, credPath)
+		})
+	}
+}
+
+// assertRealErrorSurvives records err against raw and checks both halves of the
+// invariant: no part of the credential reaches the line, and the diagnosis is not
+// redacted away.
+func assertRealErrorSurvives(t *testing.T, name, raw string, err error, want []string, secrets ...string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	newRejects(zerolog.New(&buf)).record(fixChannel, raw, rejectFetch, 0, err)
+	line := buf.String()
+	for _, secret := range append(secrets, mustPath(t, raw)) {
+		if strings.Contains(line, secret) {
+			t.Errorf("reject line leaks %q from a real %s error:\n%s", secret, name, line)
+		}
+	}
+
+	var m map[string]any
+	if uErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &m); uErr != nil {
+		t.Fatalf("log line is not JSON (%v): %s", uErr, line)
+	}
+	got, _ := m["error"].(string)
+	if got == redactedError || got == redactedPathError {
+		t.Fatalf("a real %s error was redacted (%q), so classify or fetch now names a request "+
+			"path or query and safeError's inventory is stale; raw error: %v", name, got, err)
+	}
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("error field %q lost %q from the real diagnosis %v", got, w, err)
+		}
+	}
+}
+
+func tlsFixtureServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(h)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestSafeErrorRedactsASchemelessPath exercises namesSecret itself, with the
+// exact shape the guard exists for: an error naming the candidate's path (or its
+// query) and nothing else, so neither the URL substitution nor the "://" check
+// sees anything. Restoring the guard was ruled after a mutation proved the shape
+// leaks verbatim without it while the whole suite stayed green.
+func TestSafeErrorRedactsASchemelessPath(t *testing.T) {
+	t.Parallel()
+
+	u, err := url.Parse(fixPanel)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	qURL, err := url.Parse(fixLive)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	cases := map[string]struct {
+		err  error
+		raw  string
+		u    *url.URL
+		want string
+	}{
+		// The mutation: `read response %s` with req.URL.EscapedPath().
+		"path only": {
+			err: fmt.Errorf("read response %s: %w", u.EscapedPath(), io.ErrUnexpectedEOF),
+			raw: fixPanel, u: u, want: redactedPathError,
+		},
+		"query only": {
+			err: fmt.Errorf("read response %s: %w", qURL.RawQuery, io.ErrUnexpectedEOF),
+			raw: fixLive, u: qURL, want: redactedPathError,
+		},
+		// Still the other rule's job: a scheme survives, so it is redactedError.
+		"second url": {
+			err: errors.New("refused redirect to https://elsewhere.example/x"),
+			raw: fixPanel, u: u, want: redactedError,
+		},
+		// A real message must not be redacted for merely containing a "/".
+		"clean diagnosis": {
+			err: errors.New("read response: unexpected EOF"),
+			raw: fixPanel, u: u, want: "read response: unexpected EOF",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := safeError(tc.err, tc.raw, tc.u); got != tc.want {
+				t.Fatalf("safeError = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRejectSummaryCountsSumToTotal: the summary is the answer to "why did this
 // cycle find fewer subscriptions", so its per-reason counts must account for
 // every rejection. Completeness of the column set is enforced by `exhaustive`
@@ -580,12 +760,47 @@ func TestRejectKeyDoesNotPinThePage(t *testing.T) {
 	if key != target {
 		t.Fatalf("recorded key = %q, want %q", key, target)
 	}
-	// extractURLs unescapes into a fresh string, so the sub-slice points into
-	// that copy rather than into page; compare against the slice we were given.
+	// html.UnescapeString returns its argument unchanged when there is no '&' —
+	// and this page has none — so the sub-slice points into page itself. Compare
+	// against the slice we were given rather than against target, which is a
+	// separate constant.
 	base := uintptr(unsafe.Pointer(unsafe.StringData(urls[0])))
 	got := uintptr(unsafe.Pointer(unsafe.StringData(key)))
 	if got == base {
 		t.Fatal("the reject key is the page sub-slice itself, pinning the whole page")
+	}
+}
+
+// TestHarvestedKeyDoesNotPinThePage: the ACCEPTED key is the longer-lived of the
+// two, so the same sub-slice mechanic costs more here. keys(cand) feeds
+// classifyAll, which copies every live URL into the cycle-wide live map
+// scanChannel hands to RunOnce for mergeManaged — so this key holds its page
+// past scan, not merely until it returns. Measured over 200 pages of 53,248 B
+// with 3 accepted URLs each: 11,506,808 B retained by sub-slice keys against
+// 46,568 B by cloned ones.
+func TestHarvestedKeyDoesNotPinThePage(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://harvest.example/sub"
+	page := strings.Repeat("x", 4096) + " " + target + " " + strings.Repeat("y", 4096)
+	urls := extractURLs(page)
+	if len(urls) != 1 || urls[0] != target {
+		t.Fatalf("extractURLs = %q, want exactly %q", urls, target)
+	}
+	base := uintptr(unsafe.Pointer(unsafe.StringData(urls[0])))
+
+	var inline []string
+	cand := (&Crawler{}).harvestPages([]string{page}, &inline, nil, fixChannel)
+	if len(cand) != 1 {
+		t.Fatalf("harvestPages accepted %d candidates, want 1: %v", len(cand), cand)
+	}
+	for key := range cand {
+		if key != target {
+			t.Fatalf("harvested key = %q, want %q", key, target)
+		}
+		if uintptr(unsafe.Pointer(unsafe.StringData(key))) == base {
+			t.Fatal("the harvested key is the page sub-slice itself, pinning the whole page")
+		}
 	}
 }
 

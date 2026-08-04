@@ -368,7 +368,13 @@ the credential lives in the query on some panels (`?payload=…`) and in the pat
 on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
 a query at all), so only the `sha6` identifies which subscription it was. They
 are capped at 200 per cycle and the cycle reports how many it withheld; the
-summary counts stay complete regardless.
+summary counts stay complete regardless. Dedupe is what keeps them complete, and
+it is bounded in turn: past 20,000 distinct rejected URLs in one cycle the
+summary stops tracking and reports the overflow as `untracked=<n>` instead.
+`untracked` is deliberately *not* folded into the total — past the bound a repeat
+cannot be told from a new candidate — so the per-reason counts still sum exactly
+to `rejected`, and `untracked` is the rejections beside them that went
+unaccounted for.
 
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
