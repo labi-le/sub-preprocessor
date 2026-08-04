@@ -27,9 +27,11 @@ import (
 	"domains.lst/sub-preprocessor/internal/fetch"
 )
 
-// The fixture covers every path a discovered URL can take: both pre-fetch gates
-// (noise host, non-public literal IP) and every post-fetch verdict (live,
-// nodeless 2xx, expired, gone status, transient status, transport failure). The
+// The fixture covers two of candidate's three pre-fetch gates (noise host, and a
+// non-public literal IP for the validate gate) and every post-fetch verdict
+// (live, nodeless 2xx, expired, gone status, transient status, transport
+// failure). The parse gate is the one path no fixture takes: every URL here
+// parses, so record's `unparseable` field is not exercised from a cycle. The
 // payload queries stand in for the real subscription credential — these URLs
 // carry `?payload=<base64>` in production, and nothing that logs a candidate may
 // reproduce it.
@@ -775,9 +777,7 @@ func TestRejectKeyDoesNotPinThePage(t *testing.T) {
 // two, so the same sub-slice mechanic costs more here. keys(cand) feeds
 // classifyAll, which copies every live URL into the cycle-wide live map
 // scanChannel hands to RunOnce for mergeManaged — so this key holds its page
-// past scan, not merely until it returns. Measured over 200 pages of 53,248 B
-// with 3 accepted URLs each: 11,506,808 B retained by sub-slice keys against
-// 46,568 B by cloned ones.
+// past scan, not merely until it returns, and a page is up to maxPageBytes.
 func TestHarvestedKeyDoesNotPinThePage(t *testing.T) {
 	t.Parallel()
 

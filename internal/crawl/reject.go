@@ -16,9 +16,11 @@ import (
 // cannot be subtracted for a rejected count: `productive` is len(state.Productive),
 // a map of CHANNELS, despite its "live subscriptions discovered" message.)
 //
-// The set covers both pre-fetch gates (candidate) and every post-fetch verdict
-// (classifyAll). It is a string type because its only consumers are a log field
-// and a summary key; nothing branches on it.
+// The set covers candidate's pre-fetch rejections and every post-fetch verdict
+// (classifyAll). Two reasons, not three, cover candidate: its parse gate and its
+// validate gate both report invalid-url, and only the noise-host gate has a
+// reason to itself. It is a string type because its only consumers are a log
+// field and a summary key; nothing branches on it.
 type rejectReason string
 
 const (
@@ -26,7 +28,8 @@ const (
 	rejectInvalidURL rejectReason = "invalid-url" // unparseable, or a URL config.Load would refuse
 	// rejectFetch is every non-status error classify.URL can return, not only a
 	// transport one: DNS, TLS, timeout and read failures, but also a rejected
-	// URL, a request that could not be built, and a body over the 10 MiB cap.
+	// URL and a body over the 10 MiB cap. Its `create request` wrap is NOT on
+	// that list — it is unreachable, for the reason safeError's inventory gives.
 	rejectFetch    rejectReason = "fetch-failed"
 	rejectStatus   rejectReason = "bad-status"   // origin answered non-2xx; the code is logged alongside
 	rejectNodeless rejectReason = "nodeless-2xx" // 2xx body carrying no proxy-scheme node
@@ -57,11 +60,11 @@ var rejectField = map[rejectReason]string{
 // could not be turned on without a rebuild.
 //
 // INFO therefore needs its own ceiling. It is set to defaultMaxDiscovered
-// because that is what bounds the fan-out
-// feeding it — up to 200 discovered channels per cycle, each contributing
-// candidates — so a repost-graph blow-up costs a bounded number of lines instead
-// of a multiple of the previous cycle's. Counting is NOT capped: the per-cycle
-// summary stays complete no matter how many lines were withheld.
+// because that is what bounds the fan-out feeding it — up to 200 discovered
+// channels per cycle, each contributing candidates — so a repost-graph blow-up
+// costs a bounded number of lines instead of a multiple of the previous
+// cycle's. Counting is NOT capped: the per-cycle summary stays complete no
+// matter how many lines were withheld.
 const maxRejectLines = defaultMaxDiscovered
 
 // redactedError replaces an error message that still names the candidate URL
@@ -70,9 +73,27 @@ const redactedError = "redacted: error names the candidate url"
 
 // redactedPathError replaces an error message that names the candidate's path or
 // query while carrying no scheme for the redactedError rule to catch; see
-// safeError. It is a separate string because it means something else: no error
-// on the reject path has that shape today, so this text in a log is a report
-// that one now does — the guard held, and the code it names needs a look.
+// safeError. It is a separate string because it means something else — but that
+// is two possibilities, not one, and the likelier one is a false positive.
+// namesSecret substring-matches and is deliberately over-eager, so a SHORT path
+// collides with ordinary error prose: a candidate whose path is "/o" matches the
+// "i/o" of `dial tcp: i/o timeout`, and `net/http: TLS handshake timeout` has a
+// slash of its own — the two commonest crawler failures. Demonstrated on this
+// tree: repoint reject_test.go's fixDead at
+// https://dead.example/o?payload=DEADSECRET9999, and
+// TestRejectLinesCarryNoCredential's dead.example line loses its real diagnosis
+// to this string with no code naming any path. Keep a query on fixDead when you
+// try it — TestRejectLinesCarryNoCredential runs mustQuery over it, so a bare
+// https://dead.example/o aborts on that precondition before a line is emitted.
+// (mustQuery covers five of the thirteen fixture URLs. fixPanel deliberately has
+// no query at all — see its own comment — so "every fixture carries a query" is
+// NOT the contract, and adding one to fixPanel would destroy the Marzban/3x-ui
+// shape this file exists to keep out of the log.)
+// So read this string in that order: check the candidate's own path and query
+// against the message the code would have produced, and only if they cannot
+// collide does the text mean the other thing — that an error on the reject path
+// really did grow the shape nothing produces today, and the code it names needs
+// a look.
 const redactedPathError = "redacted: error names the candidate url path or query"
 
 // maxRejectTracked bounds the dedupe set. It deliberately mirrors
@@ -80,9 +101,9 @@ const redactedPathError = "redacted: error names the candidate url path or query
 // over the same pages in the same loop, for the same reason: a single page can
 // carry a huge list, and unlike live there is no network brake here — a URL
 // that fails a candidate gate is rejected by local string work alone, so one
-// 8 MiB page of `https://t.me/a` links yields hundreds of thousands of distinct
-// keys. maxRejectLines does not bound this: it caps lines, and counting is
-// deliberately not capped.
+// 8 MiB page of `https://t.me/a`-shaped links yields hundreds of thousands of
+// distinct keys. maxRejectLines does not bound this: it caps lines, and counting
+// is deliberately not capped.
 const maxRejectTracked = maxInlineAccum
 
 // rejects accumulates, over one cycle, why each discovered candidate failed to
@@ -129,16 +150,15 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 	// Clone: rawURL is a sub-slice of the scraped page. extractURLs runs
 	// html.UnescapeString then urlRe.FindAllString, regexp returns s[a:b], and
 	// strings.TrimRight narrows without copying — so a 40-byte key kept for the
-	// whole cycle would pin its entire page (up to maxPageBytes, 8 MiB) until
-	// scan returns. Measured on a 200-page cycle: 10,486,464 B retained shared
-	// against 881,664 B cloned, and the cloned figure does not move with page
-	// size.
+	// whole cycle would keep its entire page reachable (up to maxPageBytes,
+	// 8 MiB) until scan returns. A cloned key costs its own length and nothing
+	// else, whatever the page size.
 	//
 	// This map was never the only holder, and the accepted key was always the
 	// longer-lived one: harvestPages puts it in cand, classifyAll copies it into
 	// live, and scanChannel hands live up to RunOnce for mergeManaged. It clones
 	// for this same reason, and did not before — the pin there predates this map
-	// rather than arriving with it.
+	// rather than arriving with it. BenchmarkHarvestPages prices that twin.
 	r.verdict[strings.Clone(rawURL)] = reason
 	if r.logged >= maxRejectLines {
 		return
@@ -261,9 +281,16 @@ func logHost(u *url.URL) string {
 // the substitution matches the whole URL only, and there is no "://" left to
 // see. namesSecret is the guard for that, and it is the last line of defence
 // for the credential — for Marzban and 3x-ui the path IS the token (see
-// logHost). Nothing on the reject path returns that shape today: candidate's two
-// wraps quote the URL through %q with its scheme intact, and classify.URL's are
-// `validate url`, `do request` (*url.Error, %q-quoted, scheme intact),
+// logHost). Nothing on the reject path returns that shape today, but not for one
+// reason. candidate's parse wrap carries a *url.Error, %q-quoted with its scheme
+// intact; its validate wrap carries no part of the URL at all, since the
+// reachable returns of fetch.ValidatePublicHTTPSURL are the four static strings
+// at internal/fetch/fetch.go:35-38 and the one branch that would quote a URL
+// (`invalid url: %w`) cannot fire from candidate, which ran the same url.Parse
+// one line above. Do NOT read that as "internal/fetch quotes its URLs" — nothing
+// in that package quotes anything, so an %s of URL detail appended to one of
+// those four strings is precisely the leak this guard exists for. classify.URL's
+// are `validate url`, `do request` (*url.Error, %q-quoted, scheme intact),
 // `read response` and `response too large` — its `create request` wrap is
 // unreachable, since http.NewRequestWithContext re-parses a URL ValidateHTTPSURL
 // already parsed, and its *StatusError never arrives here at all (classifyAll

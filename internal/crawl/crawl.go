@@ -762,20 +762,25 @@ func pageCursor(page string) string {
 // is exactly what it was.
 //
 // The fmt.Errorf wraps are eager: both are built before record knows whether the
-// line survives dedupe or the cap, measured at +4.5 allocs and +160 B per
-// invalid-url reject. Kept deliberately — only invalid-url pays it, that reason
-// is rare, and moving the wrap into record means handing back a bare external
-// error and buying a wrapcheck suppression with a cold-path 160 B.
+// line survives dedupe or the cap. Kept deliberately — only invalid-url pays
+// them, that reason is rare, and moving a wrap into record means handing back a
+// bare external error and buying a wrapcheck suppression. What they cost is
+// BenchmarkCandidate against BenchmarkCandidateUnwrapped, which is this function
+// without them: not one number, since %w re-renders the wrapped message and the
+// cost scales with its text.
 //
-// The accept path is ALLOCATION-identical, which is what was measured and all
-// that argument needs: 336 B / 3 allocs both here and on 26c8fe2, six samples
-// each, every sample equal. It is NOT instruction-identical — 3551cd0's message
-// declined this finding with that word and the word was wrong, since an
-// allocation counter cannot establish it. go tool nm puts candidate at 124 B
-// before and 421 B after; walking the accept path it executes 25 instructions
-// before and 30 after (alignment NOPs excluded); the frame grows SUBQ $0x10 ->
-// SUBQ $0x48; and the tail TESTQ AX, AX; SETE AL becomes a branch into a block
-// that materialises the three-value return.
+// The accept path is ALLOCATION-identical to 26c8fe2's — which is what was
+// measured and all that argument needs — as BenchmarkCandidate/accept against
+// BenchmarkCandidatePreReason, whose body is that commit's. It is NOT
+// instruction-identical: the review round that this branch's feature commit
+// squashed declined this finding with that word, and the word was wrong, since
+// an allocation counter cannot establish it. (That round's own sha is gone —
+// the squash rewrote it — which is why it is named by position here.)
+// go tool nm on the test binary puts candidate at 421 B against
+// candidatePreReason's 124 B; walking the accept path it executes 25
+// instructions before and 30 after (alignment NOPs excluded); the frame grows
+// SUBQ $0x10 -> SUBQ $0x48; and the tail TESTQ AX, AX; SETE AL becomes a branch
+// into a block that materialises the three-value return.
 func candidate(raw string) (bool, rejectReason, error) {
 	u, err := url.Parse(raw)
 	if err != nil {

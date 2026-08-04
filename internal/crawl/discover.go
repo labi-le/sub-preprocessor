@@ -221,17 +221,17 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 			// returns to RunOnce for mergeManaged, so an accepted key outlives
 			// this page by the whole cycle. extractURLs hands out sub-slices
 			// (html.UnescapeString, then urlRe.FindAllString returns s[a:b],
-			// then strings.TrimRight narrows without copying), so a 40-byte key
-			// would pin its entire page — up to maxPageBytes, 8 MiB. Measured
-			// over 200 pages of 53,248 B with 3 accepted URLs each: 11,506,808 B
-			// retained by the sub-slice keys against 46,568 B by cloned ones.
-			// The pin predates the reject map and is not what that fix removed.
+			// then strings.TrimRight narrows without copying), so an uncloned
+			// 40-byte key keeps its entire page reachable — up to maxPageBytes,
+			// 8 MiB. That is what a string sub-slice IS, not a measurement. The
+			// pin predates the reject map and is not what that fix removed.
 			//
 			// Guarded like record's dedupe rather than written blind: the same
 			// link recurs across posts and pages, so a blind insert pays a copy
-			// per OCCURRENCE for a key it already has. One extra lookup buys
-			// that back — measured on a page repeating one link 20 times,
-			// 105 -> 86 allocs/op and 9,479 -> 8,251 B/op.
+			// per OCCURRENCE where this pays one per DISTINCT url. The
+			// difference an extra lookup buys back is arithmetic, not a sample —
+			// a page repeating one link 20 times pays 20 copies against 1.
+			// BenchmarkHarvestPages prices both halves.
 			if _, dup := cand[raw]; !dup {
 				cand[strings.Clone(raw)] = struct{}{}
 			}

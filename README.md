@@ -376,6 +376,19 @@ cannot be told from a new candidate — so the per-reason counts still sum exact
 to `rejected`, and `untracked` is the rejections beside them that went
 unaccounted for.
 
+A line's `error` field is guarded by two rules, and each has its own replacement
+text. The candidate's URL is substituted out of the message, and if any URL
+survives that (a refused redirect names a second one) the whole message is
+dropped for `redacted: error names the candidate url`. An error naming only the
+path or query slips that rule — no `://` is left to see — so a second check
+replaces it with `redacted: error names the candidate url path or query`. That
+second one is deliberately over-eager and matches substrings, so **read it as a
+false positive first**: a candidate whose path is `/o` matches the `i/o` in
+`dial tcp: i/o timeout`, and `net/http: TLS handshake timeout` has a slash too,
+so the commonest failures can lose their diagnosis to a short path. Only when
+the candidate's own path and query cannot collide with the expected message does
+it mean what it says.
+
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
 for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
