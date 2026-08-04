@@ -131,7 +131,13 @@ var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 // md5 as APNIC's own delegated-apnic-extended-latest.md5 (077c5ac4...) on both
 // hosts -- so the tiebreak is not fidelity but blast radius, and LoadRegistry's
 // promise that one registry outage cannot take down startup is worth exactly as
-// much as the number of distinct hosts behind these five URLs. Measured with
+// much as the RANGES behind the worst host, NOT the number of distinct hosts:
+// these five URLs sit on four of those (ftp.lacnic.net serves this mirror and
+// LACNIC's own file), and re-pointing apnic at any other host already in the
+// set leaves that count at four, so only the weights tell the candidates
+// apart. config_specs_test.go's assertRegistryHostConcentration is the
+// enforcement, and being weighted it rejects ftp.arin.net (arin's own 88195 +
+// apnic = 163160 = 49.3%) as flatly as ftp.ripe.net. Measured with
 // ParseDelegated over the live files: ripencc 126845, apnic 74965, lacnic 33819
 // of 330937 total. Hanging APNIC off ftp.ripe.net puts 201810 ranges = 61.0% on
 // one host, where the worst single-host loss used to be ripencc's own 38.3%;

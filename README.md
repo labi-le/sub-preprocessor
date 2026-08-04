@@ -245,14 +245,22 @@ host answers the TLS ClientHello without echoing the legacy session ID that
 RFC 8446 requires, which Go's `crypto/tls` rejects outright, so that RIR
 silently dropped out of the build and cost roughly two and a half points of
 coverage. RIPE and LACNIC both mirror the file byte-identically under APNIC's
-own published checksum, and LACNIC is chosen over the nearer RIPE copy only to
-keep the five URLs on five hosts: `ripencc` is already served from
-`ftp.ripe.net`, so parking APNIC there too would put 61% of the loaded ranges
-behind a single outage instead of 33%. A mirror is also a copy on someone
-else's schedule, so `LoadRegistry` logs each file's own header serial — an
-observable for lag, not a gate. Its form is the publishing registry's business
-(`20260804` from APNIC, a unix timestamp from RIPE, unix ms from ARIN), so read
-it against the same source's previous value, not across sources.
+own published checksum, so the choice between them is about blast radius, not
+fidelity — and blast radius is measured in RANGES behind the worst single host,
+not in hosts. The five URLs sit on four hosts either way (`ftp.lacnic.net`
+serves APNIC's mirror and LACNIC's own file), so a host count cannot tell the
+candidates apart and the weights are the whole argument: `ripencc` already
+comes from `ftp.ripe.net`, so parking APNIC there would put 201810 of the
+330937 loaded ranges (61.0%) behind one outage, where `ftp.lacnic.net` caps the
+worst host at 108784 (32.9%). The same arithmetic rules out `ftp.arin.net`
+(163160, 49.3%), which a keep-them-on-separate-hosts reading would have waved
+through; `assertRegistryHostConcentration` in `internal/config` enforces it as
+a rule over the range weights, so re-pointing any of these URLs has to argue
+with the numbers. A mirror is also a copy on someone else's schedule, so
+`LoadRegistry` logs each file's own header serial — an observable for lag, not a
+gate. Its form is the publishing registry's business (`20260804` from APNIC, a
+unix timestamp from RIPE, unix ms from ARIN), so read it against the same
+source's previous value, not across sources.
 
 `cloudflare` is the odd one out, but not in the way the old name suggested. It
 is a geo-IP database like the others — the tag carries the `loc=` line it
