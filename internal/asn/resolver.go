@@ -179,13 +179,32 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 	return Result{Country: country, Name: name}, nil
 }
 
+// parseOriginRecord parses one Cymru origin TXT record, e.g.
+// "216071 | 146.103.121.0/24 | AE | ripencc | 1992-10-23".
+//
+// Field 0 is a space-separated AS LIST, not a single number: a prefix announced
+// by more than one AS reads "15169 43515 | 35.212.128.0/17 | US | arin |
+// 2018-08-07". Only that field is ambiguous -- the prefix, country and registry
+// describe the one registration behind it -- so a list of any length must still
+// yield the country. Parsing field 0 whole used to fail the record and discard
+// it, which cost the annotate chain a hit and left the ASN filter fail-open
+// (Resolve returning an error keeps the node).
+//
+// The caller needs ONE number for the AS<n>.asn.cymru.com name lookup and the
+// record ranks nothing, so this takes the first listed. That name is read only
+// by the {type: asn} deny patterns, so on a prefix announced by two UNRELATED
+// operators a pattern written for the second one is missed; before this it
+// missed both of them and the country too.
 func parseOriginRecord(txt string) (uint32, geofeed.CountryCode, error) {
-	// "216071 | 146.103.121.0/24 | AE | ripencc | 1992-10-23"
 	parts := strings.Split(txt, "|")
-	asnStr := strings.TrimSpace(parts[0])
+	asnField := strings.TrimSpace(parts[0])
+	asnStr := asnField
+	if i := strings.IndexAny(asnStr, " \t"); i >= 0 {
+		asnStr = asnStr[:i]
+	}
 	asn, err := strconv.ParseUint(asnStr, 10, 32)
 	if err != nil {
-		return 0, geofeed.CountryCode{}, fmt.Errorf("parse asn %q: %w", asnStr, err)
+		return 0, geofeed.CountryCode{}, fmt.Errorf("parse asn %q: %w", asnField, err)
 	}
 	var country geofeed.CountryCode
 	if len(parts) >= minOriginFields {
