@@ -68,12 +68,12 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
-	// Cloudflare's trace endpoint answers key=value lines from the edge the
-	// request actually reached, so it reports the egress rather than a
-	// registration. Concurrency matches the other through-node checks.
-	defaultGeoTraceEndpoint    = "https://cloudflare.com/cdn-cgi/trace"
-	defaultGeoTraceTimeout     = 15 * time.Second
-	defaultGeoTraceConcurrency = 8
+	// The cdn-cgi/trace probe behind the cloudflare annotate provider. Only
+	// these two are configurable: the endpoint is a compile-time constant in
+	// internal/stable, for the reason recorded there. Concurrency matches the
+	// other through-node checks.
+	defaultCloudflareTimeout     = 15 * time.Second
+	defaultCloudflareConcurrency = 8
 
 	// Free downloadable IP->country databases for the annotate provider chain.
 	// {yyyy-mm} in the dbip URL expands to the current UTC month at fetch time.
@@ -95,15 +95,18 @@ const (
 	FilterTidal     = "tidal"
 	FilterBandwidth = "bandwidth"
 
-	// ProviderGeoTrace answers from what the node reported about its own egress
-	// (Cloudflare's cdn-cgi/trace, run by the stable worker after the probes).
-	// The on-demand GET / path has no post-probe stage, so there it always
-	// misses and the chain falls through to the offline providers below.
-	ProviderGeoTrace = "geotrace"
-	ProviderGeofeed  = "geofeed"
-	ProviderDBIP     = "dbip"
-	ProviderRegistry = "registry"
-	ProviderASN      = "asn"
+	// ProviderCloudflare answers from Cloudflare's own geo-IP database, read
+	// through cdn-cgi/trace from the node itself (the stable worker runs it
+	// after the probes). Its siblings look up the address the RESOLVER
+	// returned; this one looks up the address the traffic actually LEFT from,
+	// which is the same kind of answer about a better question. The on-demand
+	// GET / path has no post-probe stage, so there it always misses and the
+	// chain falls through to the offline providers below.
+	ProviderCloudflare = "cloudflare"
+	ProviderGeofeed    = "geofeed"
+	ProviderDBIP       = "dbip"
+	ProviderRegistry   = "registry"
+	ProviderASN        = "asn"
 
 	TagGEO = "GEO"
 )
@@ -156,12 +159,30 @@ type Config struct {
 
 // GeoConfig groups the geo provider settings shared by the country/asn filters
 // and by annotation: the geofeed IP->country lookup, the DB-IP and RIR-registry
-// downloadable databases, and the Team-Cymru ASN resolver.
+// downloadable databases, the Team-Cymru ASN resolver, and Cloudflare's
+// geo-IP database read through cdn-cgi/trace. Every member is named after the
+// DATA SOURCE it queries, and cloudflare is here rather than under geoblock
+// for the same reason: geoblock is the namespace of gates, and this one gates
+// nothing -- it was the only tenant there that drops no node.
 type GeoConfig struct {
-	Geofeed  GeofeedConfig  `yaml:"geofeed"`
-	DBIP     DBIPConfig     `yaml:"dbip"`
-	Registry RegistryConfig `yaml:"registry"`
-	ASN      ASNConfig      `yaml:"asn"`
+	Geofeed    GeofeedConfig    `yaml:"geofeed"`
+	DBIP       DBIPConfig       `yaml:"dbip"`
+	Registry   RegistryConfig   `yaml:"registry"`
+	ASN        ASNConfig        `yaml:"asn"`
+	Cloudflare CloudflareConfig `yaml:"cloudflare"`
+}
+
+func (g *GeoConfig) applyDefaults() {
+	if g.ASN.Timeout == 0 {
+		g.ASN.Timeout = defaultTimeout
+	}
+	if g.ASN.CacheTTL == 0 {
+		g.ASN.CacheTTL = defaultASNCacheTTL
+	}
+	g.Geofeed.applyDefaults()
+	g.DBIP.applyDefaults()
+	g.Registry.applyDefaults()
+	g.Cloudflare.applyDefaults()
 }
 
 // FilterConfig is one entry in the unified filters list. Type selects which
@@ -314,9 +335,9 @@ func (cfg *Config) DeniedCountries() filter.CountrySet {
 }
 
 // AnnotateUsesProvider reports whether any annotate tag's chain names the given
-// provider. The stable worker asks for ProviderGeoTrace: the trace probe costs
-// one request through every survivor, so it is only worth running when a tag
-// can actually render its answer.
+// provider. The stable worker asks for ProviderCloudflare: the trace probe
+// costs one request through every survivor, so it is only worth running when a
+// tag can actually render its answer.
 func (cfg *Config) AnnotateUsesProvider(name string) bool {
 	for _, a := range cfg.Annotate {
 		if slices.Contains(a.Providers, name) {
@@ -584,24 +605,63 @@ type ASNConfig struct {
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
+// CloudflareConfig configures the cdn-cgi/trace probe behind the "cloudflare"
+// annotate provider. Like its geo.* siblings it names a geo-IP database --
+// Cloudflare's own, whose verdict arrives as the loc= line. Unlike them it is
+// asked about the address the node's traffic actually LEFT from rather than
+// the address our resolver returned for its hostname, which is the whole
+// value: 41% of the pool's named hosts sit in Cloudflare's shared anycast
+// ranges, terminating in many countries at once, so an offline lookup
+// described Cloudflare's registration while traffic left from the origin (a
+// node tagged CA exiting in Germany).
+//
+// It is no gate: it drops nothing, and a bad answer costs tag accuracy, never
+// survivors. There is no endpoint key -- see stable.cloudflareTraceURL for why
+// one would be a false affordance.
+type CloudflareConfig struct {
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
+func (c *CloudflareConfig) applyDefaults() {
+	if c.Timeout == 0 {
+		c.Timeout = defaultCloudflareTimeout
+	}
+	if c.Concurrency == 0 {
+		c.Concurrency = defaultCloudflareConcurrency
+	}
+}
+
+// validate rejects what would misbehave downstream: a negative concurrency
+// reaches make(chan struct{}, n) in the trace fan-out, and a negative timeout
+// bypasses the ==0 default guard.
+func (c *CloudflareConfig) validate() error {
+	if c.Timeout < 0 {
+		return errors.New("geo.cloudflare.timeout must not be negative")
+	}
+	if c.Concurrency < 0 {
+		return errors.New("geo.cloudflare.concurrency must not be negative")
+	}
+	return nil
+}
+
 // GeoBlockConfig configures the per-node geo-block list -- a SQLite TTL store of
 // node hosts that failed a through-node API reachability check (Gemini, Claude,
-// ChatGPT) -- plus the base params of every through-node check. Tidal's
+// ChatGPT) -- plus the base params of every through-node GATE. Tidal's
 // params live here for uniformity even though the tidal filter deliberately
 // never writes to the store: its verdict is a bare status code, a far weaker
 // signal than the explicit refusal markers the other checks match, so a
 // transient CDN error or rate-limit would otherwise evict the host from every
-// endpoint for the store's whole TTL. Geotrace's live here for the same
-// uniformity and never reach the store either -- it gates nothing, it only
-// answers the annotate chain.
+// endpoint for the store's whole TTL. Every member here drops nodes; the
+// cdn-cgi/trace probe used to sit alongside them and does not, so it moved to
+// geo.cloudflare with the other geo databases.
 type GeoBlockConfig struct {
-	DBPath   string         `yaml:"db_path"`
-	TTL      time.Duration  `yaml:"ttl"`
-	Gemini   GeminiConfig   `yaml:"gemini"`
-	Claude   ClaudeConfig   `yaml:"claude"`
-	ChatGPT  ChatGPTConfig  `yaml:"chatgpt"`
-	Tidal    TidalConfig    `yaml:"tidal"`
-	GeoTrace GeoTraceConfig `yaml:"geotrace"`
+	DBPath  string        `yaml:"db_path"`
+	TTL     time.Duration `yaml:"ttl"`
+	Gemini  GeminiConfig  `yaml:"gemini"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
+	Tidal   TidalConfig   `yaml:"tidal"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -690,21 +750,6 @@ type TidalConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
-// GeoTraceConfig configures the through-node egress lookup behind the
-// "geotrace" annotate provider. It is no gate: it drops nothing and only tells
-// the annotate chain where the node's traffic actually leaves from.
-//
-// The offline providers cannot know that. They place the address our resolver
-// returned for the node's hostname, and 41% of the named hosts measured in the
-// pool sit in Cloudflare's shared anycast ranges, which terminate in many
-// countries at once -- so the tag described Cloudflare's registration while the
-// traffic left from the origin (a node tagged CA exiting in Germany).
-type GeoTraceConfig struct {
-	Endpoint    string        `yaml:"endpoint"`
-	Timeout     time.Duration `yaml:"timeout"`
-	Concurrency int           `yaml:"concurrency"`
-}
-
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
@@ -766,19 +811,6 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if td.Concurrency == 0 {
 		td.Concurrency = defaultTidalConcurrency
-	}
-	applyGeoTraceDefaults(&g.GeoTrace)
-}
-
-func applyGeoTraceDefaults(gt *GeoTraceConfig) {
-	if gt.Endpoint == "" {
-		gt.Endpoint = defaultGeoTraceEndpoint
-	}
-	if gt.Timeout == 0 {
-		gt.Timeout = defaultGeoTraceTimeout
-	}
-	if gt.Concurrency == 0 {
-		gt.Concurrency = defaultGeoTraceConcurrency
 	}
 }
 
@@ -861,15 +893,7 @@ func Load(path string) (Config, error) {
 		ttl := defaultDNSNegativeCache
 		cfg.Resolver.CacheNegativeTTL = &ttl
 	}
-	if cfg.Geo.ASN.Timeout == 0 {
-		cfg.Geo.ASN.Timeout = defaultTimeout
-	}
-	if cfg.Geo.ASN.CacheTTL == 0 {
-		cfg.Geo.ASN.CacheTTL = defaultASNCacheTTL
-	}
-	cfg.Geo.Geofeed.applyDefaults()
-	cfg.Geo.DBIP.applyDefaults()
-	cfg.Geo.Registry.applyDefaults()
+	cfg.Geo.applyDefaults()
 	cfg.applyFilterDefaults()
 	cfg.Subscriptions.applyDefaults()
 	cfg.GeoBlock.applyDefaults()
@@ -991,6 +1015,9 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 	if err := cfg.Geo.Registry.validate(); err != nil {
+		return err
+	}
+	if err := cfg.Geo.Cloudflare.validate(); err != nil {
 		return err
 	}
 	if err := cfg.Groups.Validate(); err != nil {
@@ -1188,10 +1215,10 @@ func (cfg *Config) validateAnnotate() error {
 func validateProviderChain(i int, providers []string) error {
 	for j, p := range providers {
 		switch p {
-		case ProviderGeoTrace, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN:
+		case ProviderCloudflare, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN:
 		default:
 			return fmt.Errorf("annotate[%d]: unknown provider %q (must be %q, %q, %q, %q or %q)",
-				i, p, ProviderGeoTrace, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN)
+				i, p, ProviderCloudflare, ProviderGeofeed, ProviderDBIP, ProviderRegistry, ProviderASN)
 		}
 		if slices.Contains(providers[:j], p) {
 			return fmt.Errorf("annotate[%d]: duplicate provider %q", i, p)
@@ -1230,12 +1257,6 @@ func (g *GeoBlockConfig) validate() error {
 	}
 	if g.Tidal.Concurrency < 0 {
 		return errors.New("geoblock.tidal.concurrency must not be negative")
-	}
-	if g.GeoTrace.Timeout < 0 {
-		return errors.New("geoblock.geotrace.timeout must not be negative")
-	}
-	if g.GeoTrace.Concurrency < 0 {
-		return errors.New("geoblock.geotrace.concurrency must not be negative")
 	}
 	return nil
 }
@@ -1363,15 +1384,24 @@ func FiltersChanged(old, newCfg Config) bool {
 }
 
 // ProberChanged reports whether the through-node prober settings
-// (gemini/claude/chatgpt/tidal/geotrace) differ; the stable worker must be
+// (gemini/claude/chatgpt/tidal/cloudflare) differ; the stable worker must be
 // re-applied when they do. The store-only geoblock fields (db_path, ttl) are
 // covered by StoresChanged instead.
+//
+// geo.cloudflare is the one member not under geoblock, and it is here because
+// THE GATE FOLLOWS THE CONSUMER, NOT THE NAMESPACE. Its geo.* siblings are
+// processor-side: OptionsFromConfig carries geo.dbip/geo.registry/geo.asn into
+// preprocess.NewProcessor. This one is read only by the stable worker's
+// post-probe stage (stable.filterAndMeasureEgress -> MihomoProber.TraceCheck),
+// which OptionsFromConfig never touches, so inheriting the siblings' class
+// would silently stop geo.cloudflare.timeout re-applying to the RUNNING
+// worker. internal/reload/reload_coverage_test.go pins both halves.
 func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
 		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
 		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal) ||
-		!reflect.DeepEqual(old.GeoBlock.GeoTrace, newCfg.GeoBlock.GeoTrace)
+		!reflect.DeepEqual(old.Geo.Cloudflare, newCfg.Geo.Cloudflare)
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at

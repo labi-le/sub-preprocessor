@@ -13,6 +13,9 @@ geo:
   # unset) as the 24h default -- NOT as "never", unlike geofeed's below: both
   # are month-stamped mirrors that go stale on their own, so refresh rarely
   # with a long interval (e.g. 720h) instead of disabling.
+  # `cloudflare:` (timeout, concurrency; default 15s, 8) configures the
+  # cdn-cgi/trace probe behind the `cloudflare` annotate provider -- also
+  # omitted here, and it has no endpoint key by design (see annotate below).
   geofeed:
     refresh_interval: 24h # unset => 24h; an explicit 0 loads once at startup and never refreshes
     sources:
@@ -52,21 +55,24 @@ filters:
 # only the rendering, never which nodes survive.
 annotate:
   - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
-    # Ordered chain, first hit wins. geotrace asks the node itself where its
-    # traffic leaves from (cdn-cgi/trace); it answers only in the stable
-    # worker, which has a post-probe stage to ask from -- on / it always misses
-    # and the chain falls through to geofeed. It is no gate and drops nobody.
-    # First because it is the only provider that reports the EXIT: the offline
-    # ones place the address the RESOLVER returned, and 41% of named hosts sit
-    # in Cloudflare anycast ranges that terminate in many countries at once, so
-    # a node tagged CA was exiting in Germany (~46% of the list was mistagged).
+    # Ordered chain, first hit wins. cloudflare is Cloudflare's own geo-IP
+    # database, asked through cdn-cgi/trace from the node itself; it answers
+    # only in the stable worker, which has a post-probe stage to ask from -- on
+    # / it always misses and the chain falls through to geofeed. It is no gate
+    # and drops nobody. First because it is the only one asked about the EXIT
+    # address: the others place the address the RESOLVER returned, and 41% of
+    # named hosts sit in Cloudflare anycast ranges that terminate in many
+    # countries at once, so a node tagged CA was exiting in Germany (~46% of
+    # the list was mistagged). Its timeout/concurrency are geo.cloudflare.*;
+    # the endpoint is not configurable, because only Cloudflare's own body
+    # parses (stable.cloudflareTraceURL).
     # dbip/registry are downloaded in-memory databases (built only because they
     # are referenced here), asn is the cached Cymru DNS last resort.
-    providers: [geotrace, geofeed, dbip, registry, asn]
+    providers: [cloudflare, geofeed, dbip, registry, asn]
   # GEO is the last tag standing. The IP and ASN tags were both removed
   # outright, because nothing consumed them and no config selected them, so
   # `- tag: IP` and `- tag: ASN` are now load errors (unknown tag). IP had also
-  # stopped being the thing its name promised -- since geotrace it carried the
+  # stopped being the thing its name promised -- since the trace it carried the
   # MEASURED egress, for a CDN-fronted node precisely the origin the fronting
   # hid (108 of 149 traced nodes last cycle published an address different from
   # the resolved one), and /stable.txt is shared. Note what did NOT go: `asn`

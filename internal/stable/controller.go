@@ -88,7 +88,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if keyErr != nil {
 		c.logger.Warn().Err(keyErr).Msg("gemini key unavailable; geo-block check disabled")
 	}
-	prober, err := NewMihomoProber(subs.Check, bandwidth, geo, geminiKey, c.logger)
+	prober, err := NewMihomoProber(subs.Check, bandwidth, geo, cfg.Geo.Cloudflare, geminiKey, c.logger)
 	if err != nil {
 		return fmt.Errorf("create prober: %w", err)
 	}
@@ -104,7 +104,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		SourceTimeout: subs.Check.SourceTimeout,
 		Prober:        prober,
 		Filters:       filters,
-		Trace:         cfg.AnnotateUsesProvider(config.ProviderGeoTrace),
+		Trace:         cfg.AnnotateUsesProvider(config.ProviderCloudflare),
 	}
 
 	if c.checker != nil {

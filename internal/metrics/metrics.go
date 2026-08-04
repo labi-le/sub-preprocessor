@@ -127,7 +127,7 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 	}
 }
 
-// writeTrace renders the geotrace annotation stage. It is not a filter and has
+// writeTrace renders the cloudflare annotation stage. It is not a filter and has
 // no FilterReport: the trace drops nothing, so answered+unanswered is simply
 // the published list split by whether the node told us where it exits.
 func writeTrace(w io.Writer, t stable.TraceReport) {

@@ -204,7 +204,7 @@ type PipelineContext struct {
 	// nodes with: the LOCAL country databases every GEO annotate entry names,
 	// concatenated in written order. Not "every database this process loaded"
 	// — a chain naming only dbip leaves the geofeed out — and never asn or
-	// geotrace, which are not local tables, so the verdict and the published
+	// cloudflare, which are not local tables, so the verdict and the published
 	// [GEO:xx] tag agree on everything but those two; see countryChain.
 	Lookup   geofeed.CountryLookup
 	Allowed  filter.CountrySet
@@ -703,15 +703,15 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 // LOCAL is the whole of the promise, and BOTH exceptions to it sit in the
 // shipped chain. The asn provider stays out: it is a per-IP Cymru round trip,
 // not a local table, and the config exposes it as an explicit `{type: country,
-// provider: asn}` filter for operators who want it. geotrace stays out for a
-// harder reason (countryChainOrder's doc carries it): it is not a lookup at
-// all, so there is no filter form to expose. A GEO chain resolving through
-// either can therefore still name a country the filter treated as unknown, and
-// that is the DEFAULT, not a corner config. Measured on config.yaml's own
-// `[geotrace, geofeed, dbip, registry, asn]`, which merges to
-// [geofeed, dbip, registry]: with all three loaded and none of them able to
-// place the IP, `exclude_countries=DE` keeps the node while the stable worker's
-// traced egress publishes [GEO:DE].
+// provider: asn}` filter for operators who want it. cloudflare stays out for a
+// harder reason (countryChainOrder's doc carries it): it is not a lookup this
+// stage can make, so there is no filter form to expose. A GEO chain resolving
+// through either can therefore still name a country the filter treated as
+// unknown, and that is the DEFAULT, not a corner config. Measured on
+// config.yaml's own `[cloudflare, geofeed, dbip, registry, asn]`, which
+// merges to [geofeed, dbip, registry]: with all three loaded and none of them
+// able to place the IP, `exclude_countries=DE` keeps the node while the stable
+// worker's traced egress publishes [GEO:DE].
 //
 //nolint:ireturn // returns the CountryLookup interface, like currentEntries
 func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
@@ -753,11 +753,11 @@ func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 // a GEO chain, but a nil geoDB in the chain would panic and that is too sharp
 // an edge to leave resting on an argument made elsewhere.
 //
-// geotrace is dropped for a harder reason than asn: it is not a lookup at all.
-// It answers with what a node reported through ITS OWN proxy, and the IP stage
-// runs before any proxy exists — there is nothing to ask. A `{type: country}`
-// filter therefore stays offline, and a GEO chain led by geotrace still
-// filters on the local databases behind it.
+// cloudflare is dropped for a harder reason than asn: the address it is asked
+// about does not exist yet. It answers with what a node reported through ITS
+// OWN proxy, and the IP stage runs before any proxy exists — there is nothing
+// to ask. A `{type: country}` filter therefore stays offline, and a GEO chain
+// led by cloudflare still filters on the local databases behind it.
 //
 // A merged order of the geofeed alone collapses to nil, as does one naming
 // nothing local (GEO through asn alone) and a config with no GEO entry at all:
@@ -816,7 +816,7 @@ func countryChainOrder(annotate []config.AnnotateSpec, haveDBIP, haveRegistry bo
 const localCountryProviders = 3
 
 // localCountryProvider reports whether prov is a local country database this
-// process built, and so one the IP-stage filter can consult. asn and geotrace
+// process built, and so one the IP-stage filter can consult. asn and cloudflare
 // are false by the arguments in countryChainOrder's doc comment; a provider
 // this process did not build is false because its geoDB is nil.
 func localCountryProvider(prov string, haveDBIP, haveRegistry bool) bool {

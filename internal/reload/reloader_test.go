@@ -382,12 +382,17 @@ func TestReloadListenChangeWarns(t *testing.T) {
 	}
 }
 
-// subsYAML adds a minimal valid subscriptions block on top of the base config.
-const subsYAML = baseGeofeedYAML +
-	"subscriptions:\n" +
+// subsBlock is a minimal valid subscriptions block. It is separate so a fixture
+// can insert extra keys INTO the geo block baseGeofeedYAML opens before it: the
+// two cannot simply be concatenated the other way round, since a second
+// top-level `geo:` is a duplicate mapping key yaml.v3 rejects.
+const subsBlock = "subscriptions:\n" +
 	"  sources:\n" +
 	"    - name: alpha\n" +
 	"      url: https://example.com/sub.txt\n"
+
+// subsYAML adds a minimal valid subscriptions block on top of the base config.
+const subsYAML = baseGeofeedYAML + subsBlock
 
 // TestReloadAppliesSubscriptions: adding a subscriptions block must trigger
 // Controller.Apply on the wired controller (observed via the reloader's own

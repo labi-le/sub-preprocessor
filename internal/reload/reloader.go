@@ -148,11 +148,11 @@ func (r *Reloader) Reload(ctx context.Context) {
 	r.holder.Store(server.NewSnapshot(newProc, newProc, newCfg.Groups))
 
 	// The stable worker derives its allow set and through-node filters from the
-	// unified filters list, plus subscriptions, groups, the geoblock prober
-	// settings (gemini/claude/chatgpt/tidal/geotrace), and the annotate list
-	// (which decides the published tags and whether the egress trace runs at
-	// all), so a change to any of them re-applies it; unrelated config edits
-	// must leave it running.
+	// unified filters list, plus subscriptions, groups, the through-node prober
+	// settings (gemini/claude/chatgpt/tidal under geoblock, cloudflare under
+	// geo), and the annotate list (which decides the published tags and whether
+	// the egress trace runs at all), so a change to any of them re-applies it;
+	// unrelated config edits must leave it running.
 	subsAffected := config.SubscriptionsChanged(r.currentCfg, newCfg) ||
 		config.GroupsChanged(r.currentCfg, newCfg) ||
 		config.FiltersChanged(r.currentCfg, newCfg) ||

@@ -202,7 +202,7 @@ func BenchmarkBuildPayload(b *testing.B) {
 func BenchmarkParseProxies(b *testing.B) {
 	prober, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop(),
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop(),
 	)
 	if err != nil {
 		b.Fatal(err)

@@ -19,7 +19,33 @@ const (
 	// locNoCountry is Cloudflare's reserved loc for a client it has no country
 	// data for; see validCountry.
 	locNoCountry = "XX"
+
+	// cloudflareTraceURL is deliberately NOT a config key. parseTrace and
+	// validCountry below encode this one vendor's answer down to the reserved
+	// loc values Cloudflare documents for CF-IPCountry (XX, T1) and its
+	// uppercase convention, so no other VENDOR's endpoint can satisfy this
+	// parser without emulating Cloudflare. An `endpoint:` key would therefore
+	// have been a false affordance: what it invites is another vendor's
+	// trace-like endpoint, which parses to no answer -- and silently, since a
+	// rejected body is reported as "unanswered", which drops nothing and looks
+	// exactly like an unreachable node. The exception is intra-vendor, and is
+	// stated here rather than left as "every other value": Cloudflare serves
+	// /cdn-cgi/trace on every domain it proxies, so any Cloudflare-fronted host
+	// parses identically. If cloudflare.com is ever unreachable or intercepted
+	// from an egress, that substitution is the one that works -- and it is made
+	// here, in this constant.
+	cloudflareTraceURL = "https://cloudflare.com/cdn-cgi/trace"
 )
+
+// traceURL is the endpoint TraceCheck probes. m.traceEndpoint is the test
+// seam and is empty in every production build; see MihomoProber.
+func (m *MihomoProber) traceURL() string {
+	if m.traceEndpoint != "" {
+		return m.traceEndpoint
+	}
+
+	return cloudflareTraceURL
+}
 
 // TraceResult is one node's measured egress. IP is a fact: the address the
 // endpoint saw the request arrive from. Country is Cloudflare's geo-IP lookup
@@ -52,9 +78,9 @@ type TraceResult struct {
 // response down to a blocked/reachable verdict and discards the body, and four
 // production gates depend on that signature.
 func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult {
-	c := m.geo.GeoTrace
+	c := m.cloudflare
 	opLog := log.Op(m.logger, "stable.TraceCheck")
-	prog := newProgress(opLog, "geotrace progress", len(proxies))
+	prog := newProgress(opLog, "cloudflare trace progress", len(proxies))
 
 	// winner folds a label's proxies down to ONE outcome by a total order over
 	// them, so the stored result does not depend on which goroutine finished
@@ -70,7 +96,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			reachable, status, body := apiProbeOne(ctx, px, c.Endpoint, nil, c.Timeout)
+			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout)
 			res, ok := parseTrace(body)
 			host, _, splitErr := net.SplitHostPort(px.Addr())
 			if splitErr != nil {
@@ -80,7 +106,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 			opLog.Debug().Str("node", px.Name()).Str("server", host).
 				Bool("reachable", reachable).Int("status", status).
 				Stringer("loc", res.Country).Stringer("egress", res.IP).
-				Int64("n", n).Int64("of", prog.total).Msg("geotrace")
+				Int64("n", n).Int64("of", prog.total).Msg("cloudflare trace")
 			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok {
 				return
 			}

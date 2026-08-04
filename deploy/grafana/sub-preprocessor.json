@@ -484,7 +484,7 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "geotrace egress (annotation, not a gate)",
+      "title": "cloudflare egress (annotation, not a gate)",
       "description": "What the published nodes reported about themselves through cloudflare cdn-cgi/trace. Nothing here is a drop: a trace that fails, or contradicts the offline chain, still publishes the node. answered/unanswered split the survivors by whether the trace completed — a large unanswered share makes the moved ratio below it that much less representative. moved = answered nodes whose final country differs from what the offline chain placed the resolved address in, i.e. how often the tag would have been wrong without the trace (measured: 47 of 102). It is a property of the pool, not a fault: an anycast front-end registers in one country and exits in another.",
       "datasource": {
         "type": "prometheus",

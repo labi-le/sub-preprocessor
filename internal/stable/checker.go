@@ -65,7 +65,7 @@ type CheckerSpec struct {
 	Prober        Prober
 	Filters       []NodeFilter
 	// Trace turns on the per-node egress probe, from the annotate chain naming
-	// the geotrace provider. The probe still depends on the prober being able
+	// the cloudflare provider. The probe still depends on the prober being able
 	// to run it.
 	Trace bool
 }
@@ -345,7 +345,7 @@ func (c *Checker) filterAndMeasureEgress(
 ) ([]Survivor, []FilterReport, TraceReport) {
 	tracer, canTrace := spec.Prober.(traceChecker)
 	if spec.Trace && !canTrace {
-		c.logger.Warn().Msg("geotrace annotation requested but prober lacks trace support; skipping")
+		c.logger.Warn().Msg("cloudflare annotation requested but prober lacks trace support; skipping")
 	}
 	trace := spec.Trace && canTrace
 	if (len(spec.Filters) == 0 && !trace) || len(survivors) == 0 {

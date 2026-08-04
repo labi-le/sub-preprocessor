@@ -189,14 +189,51 @@ func traceServer(t *testing.T, status int, body string) *httptest.Server {
 	return srv
 }
 
+// TestTraceURLIsTheVendorEndpoint covers the branch every other trace test
+// rides past: traceProber sets traceEndpoint, so nothing else in the package
+// executes `return cloudflareTraceURL`. It is the branch that runs in
+// production, and its failure mode is the invisible one -- a wrong URL books
+// every node unanswered, drops nobody, and republishes the offline tags, which
+// reads exactly like an egress that cannot reach Cloudflare.
+//
+// Built through the real constructor, as TestClaudeURL and
+// TestGeminiURLAndEnabled do, so it also pins the safety property those three
+// comments assert and nothing executed: NewMihomoProber leaves the seam empty,
+// so no config an operator writes can move the probe. The want is spelled out
+// rather than compared to cloudflareTraceURL -- comparing the constant to
+// itself would survive any edit to it.
+func TestTraceURLIsTheVendorEndpoint(t *testing.T) {
+	t.Parallel()
+
+	p, err := NewMihomoProber(
+		config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{},
+		config.GeoBlockConfig{},
+		config.CloudflareConfig{},
+		"",
+		zerolog.Nop(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.traceEndpoint != "" {
+		t.Fatalf("NewMihomoProber must leave the test seam empty, got %q", p.traceEndpoint)
+	}
+	if got, want := p.traceURL(), "https://cloudflare.com/cdn-cgi/trace"; got != want {
+		t.Fatalf("traceURL = %q, want %q", got, want)
+	}
+}
+
+// traceProber points the probe at a local httptest server. The endpoint is no
+// config key -- only Cloudflare's body parses (see cloudflareTraceURL) -- so
+// the seam is the unexported traceEndpoint field, and nothing an operator can
+// write reaches it.
 func traceProber(endpoint string, logger zerolog.Logger) *MihomoProber {
-	return &MihomoProber{logger: logger, geo: config.GeoBlockConfig{
-		GeoTrace: config.GeoTraceConfig{
-			Endpoint:    endpoint,
-			Timeout:     5 * time.Second,
-			Concurrency: 2,
-		},
-	}}
+	return &MihomoProber{
+		logger:        logger,
+		cloudflare:    config.CloudflareConfig{Timeout: 5 * time.Second, Concurrency: 2},
+		traceEndpoint: endpoint,
+	}
 }
 
 // TestTraceCheckKeepsOnlyAnsweredNodes drives the whole through-node path —
@@ -326,7 +363,7 @@ func TestTraceCheckAccountsForEveryNode(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("log line %q: %v", line, err)
 		}
-		if ev.Message != "geotrace" {
+		if ev.Message != "cloudflare trace" {
 			continue
 		}
 		if ev.Of != int64(len(pxs)) {

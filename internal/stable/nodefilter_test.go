@@ -54,7 +54,7 @@ func TestBandwidthFilterApply(t *testing.T) {
 func TestBuildNodeFilters(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "KEY", zerolog.Nop())
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "KEY", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func (stubBlocklist) Prune() error       { return nil }
 func TestTidalFilterKeepsNoStore(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 
 	prober, err := NewMihomoProber(
 		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, "", zerolog.Nop())
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

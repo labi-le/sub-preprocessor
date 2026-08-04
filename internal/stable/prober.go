@@ -31,23 +31,33 @@ type Prober interface {
 
 // MihomoProber runs repeated URL tests through mihomo's adapter stack.
 type MihomoProber struct {
-	cfg       config.CheckConfig
-	bandwidth config.BandwidthConfig
-	expected  utils.IntRanges[uint16]
-	geo       config.GeoBlockConfig
-	geminiKey string
-	logger    zerolog.Logger
+	cfg        config.CheckConfig
+	bandwidth  config.BandwidthConfig
+	expected   utils.IntRanges[uint16]
+	geo        config.GeoBlockConfig
+	cloudflare config.CloudflareConfig
+	geminiKey  string
+	logger     zerolog.Logger
+	// traceEndpoint overrides the cdn-cgi/trace URL for tests, which point it
+	// at an httptest server. It is a field rather than a config key because
+	// the answer is only parseable from Cloudflare (see cloudflareTraceURL);
+	// NewMihomoProber leaves it empty, so nothing an operator writes can move
+	// the probe.
+	traceEndpoint string
 }
 
 // NewMihomoProber takes the whole geoblock block rather than one parameter per
 // through-node API check: a new check then adds a GeoBlockConfig field and a
 // Controller.Apply switch case, both required anyway, instead of widening this
-// signature again. geminiKey stays separate because only Gemini needs a
-// credential and resolving it can fail, which is the caller's decision to log.
+// signature again. cf is separate because the cdn-cgi/trace probe is no gate
+// and so lives under geo.cloudflare, not geoblock. geminiKey stays separate
+// because only Gemini needs a credential and resolving it can fail, which is
+// the caller's decision to log.
 func NewMihomoProber(
 	cfg config.CheckConfig,
 	bandwidth config.BandwidthConfig,
 	geo config.GeoBlockConfig,
+	cf config.CloudflareConfig,
 	geminiKey string,
 	logger zerolog.Logger,
 ) (*MihomoProber, error) {
@@ -56,7 +66,10 @@ func NewMihomoProber(
 		return nil, fmt.Errorf("parse expected_status %q: %w", cfg.ExpectedStatus, err)
 	}
 
-	return &MihomoProber{cfg: cfg, bandwidth: bandwidth, expected: expected, geo: geo, geminiKey: geminiKey, logger: logger}, nil
+	return &MihomoProber{
+		cfg: cfg, bandwidth: bandwidth, expected: expected,
+		geo: geo, cloudflare: cf, geminiKey: geminiKey, logger: logger,
+	}, nil
 }
 
 type delayAcc struct {

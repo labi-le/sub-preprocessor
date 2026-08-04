@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Egress is what a node reported about itself through the geotrace probe. The
+// Egress is what a node reported about itself through the cloudflare probe. The
 // zero value means the probe never ran — on `GET /` it never does, and in the
 // worker only nodes that survived the latency probe are traced.
 type Egress struct {
@@ -48,13 +48,21 @@ type Annotator interface {
 }
 
 // annotStep is one link of a tag's resolution chain. A nil prov marks the
-// geotrace step: it resolves nothing, it repeats what the node said about
-// itself, so there is no geo.Provider behind it — a Provider looks an address
-// up, and no address lookup can tell where a proxy's traffic leaves from.
+// cloudflare step, and it is the one provider that cannot be a geo.Provider.
+// cloudflare IS a geo-IP database like its siblings — the tag carries its
+// loc= verdict, not the ip= line — but a Provider is handed an ADDRESS to look
+// up, and this one is not asked about the address our resolver returned. It is
+// asked about the address the traffic actually LEFT from, which only the node
+// itself can report and only through a proxy that exists. That is the whole
+// value of the provider, and it is why the answer is MEASURED post-probe
+// rather than looked up: it is also the only provider that cannot answer on
+// GET /, where no probe has run.
 //
-// That is also why geotrace is absent from the provider map newAnnotator
-// resolves names against: a name missing from that map is a wiring bug worth
-// an Error log, and geotrace would trip it on every processor build.
+// So the step repeats what the node already said (req.Egress) instead of
+// resolving anything, and cloudflare is absent from the provider map
+// newAnnotator resolves names against: a name missing from that map is a
+// wiring bug worth an Error log, and cloudflare would trip it on every
+// processor build.
 type annotStep struct {
 	prov geo.Provider
 }
@@ -90,7 +98,7 @@ func newAnnotator(logger zerolog.Logger, specs []config.AnnotateSpec, providers 
 	for _, s := range specs {
 		t := annotTag{key: s.Tag}
 		for _, name := range s.Providers {
-			if name == config.ProviderGeoTrace {
+			if name == config.ProviderCloudflare {
 				t.chain = append(t.chain, annotStep{})
 				continue
 			}
@@ -127,10 +135,10 @@ func (a *annotator) Annotate(
 		// reader of the name takes for the node's country. That cross-entry
 		// rule is the country FILTER's too: countryChainOrder concatenates
 		// every GEO entry's chain, so no LOCAL database a tag resolved
-		// through went unconsulted by the filter. asn and geotrace are the
+		// through went unconsulted by the filter. asn and cloudflare are the
 		// standing exceptions — neither is a local table (see countryChain),
 		// so a tag either of them answered still names a country the filter
-		// never asked about. Measured on `[{GEO,[geotrace,geofeed]}]`, the
+		// never asked about. Measured on `[{GEO,[cloudflare,geofeed]}]`, the
 		// shipped chain's first two providers, with a geofeed that cannot
 		// place the IP: countryChainOrder comes back empty, the node survives
 		// exclude_countries=DE, and the traced egress publishes [GEO:DE].
@@ -151,9 +159,9 @@ func (a *annotator) Annotate(
 }
 
 // lookupCountry walks the tag's chain and returns the first non-zero country;
-// all-miss returns the zero code (rendered as ??). The geotrace step answers
+// all-miss returns the zero code (rendered as ??). The cloudflare step answers
 // only when the trace ran: an unmeasured egress is a miss, so a chain that
-// names geotrace first still annotates every node the probe skipped.
+// names cloudflare first still annotates every node the probe skipped.
 func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofeed.CountryCode {
 	for _, step := range t.chain {
 		if step.prov == nil {

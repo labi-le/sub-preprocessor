@@ -924,7 +924,7 @@ func assertDroppedUnderDenyList(t *testing.T, p *Processor, body []byte) {
 // GeofeedFilter contract directly: a node is never dropped as unplaceable
 // while carrying a tag a LOCAL database placed it with. The local scope is
 // part of the contract, not a fixture limitation — this walks geofeed and
-// registry because asn and geotrace are outside countryChainOrder entirely,
+// registry because asn and cloudflare are outside countryChainOrder entirely,
 // so no test here can widen the promise to them. The published name is the
 // evidence — a drop must leave no name behind, and a name carrying a real
 // country must belong to a node the filter kept.
@@ -1024,14 +1024,16 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 			want:     []string{config.ProviderGeofeed, config.ProviderDBIP},
 		},
 		{
-			// geotrace is not a lookup: the IP stage runs before any proxy
-			// exists to ask. It is dropped wherever it is written, so a chain
-			// led by it still filters on the local databases behind it — the
-			// first of the three tag/filter asymmetries README documents.
-			name: "geotrace is dropped from every entry",
+			// The address cloudflare is asked about does not exist at the IP
+			// stage: it is the one the node's traffic LEFT from, and the stage
+			// runs before any proxy exists to ask. It is dropped wherever it
+			// is written, so a chain led by it still filters on the local
+			// databases behind it — the first of the three tag/filter
+			// asymmetries README documents.
+			name: "cloudflare is dropped from every entry",
 			annotate: []config.AnnotateSpec{
-				{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderGeofeed}},
-				{Tag: config.TagGEO, Providers: []string{config.ProviderGeoTrace, config.ProviderDBIP}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderCloudflare, config.ProviderGeofeed}},
+				{Tag: config.TagGEO, Providers: []string{config.ProviderCloudflare, config.ProviderDBIP}},
 			},
 			haveDBIP: true, haveRegistry: true,
 			want: []string{config.ProviderGeofeed, config.ProviderDBIP},
@@ -1130,7 +1132,7 @@ func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
 			name:    "an annotate chain ending in asn, no asn filter",
 			filters: []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
 			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{
-				config.ProviderGeoTrace, config.ProviderGeofeed, config.ProviderASN,
+				config.ProviderCloudflare, config.ProviderGeofeed, config.ProviderASN,
 			}}},
 			want: true,
 		},

@@ -44,6 +44,22 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Geo.Geofeed.RefreshInterval == nil || *cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
 		t.Fatalf("refresh interval default = %v, want 24h", cfg.Geo.Geofeed.RefreshInterval)
 	}
+	// geo.cloudflare's two defaults are the ones GeoConfig.applyDefaults owns
+	// that no other test reads, and dropping them is silent: a zero Timeout
+	// reaches apiProbeOne, context.WithTimeout(ctx, 0) expires before the dial,
+	// and every survivor is booked unanswered -- the trace annotation goes
+	// inert while nothing drops and no other assertion fails.
+	if cfg.Geo.Cloudflare.Timeout != 15*time.Second {
+		t.Fatalf("geo.cloudflare.timeout default = %v, want 15s", cfg.Geo.Cloudflare.Timeout)
+	}
+	if cfg.Geo.Cloudflare.Concurrency != 8 {
+		t.Fatalf("geo.cloudflare.concurrency default = %d, want 8", cfg.Geo.Cloudflare.Concurrency)
+	}
+	// Same method, same gap: geo.asn.cache_ttl has TestLoadASNCacheTTL, the
+	// timeout beside it had nothing.
+	if cfg.Geo.ASN.Timeout != 5*time.Second {
+		t.Fatalf("geo.asn.timeout default = %v, want 5s", cfg.Geo.ASN.Timeout)
+	}
 }
 
 func TestLoadRejectsMissingGeofeedType(t *testing.T) {
@@ -473,30 +489,30 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		yaml    string
 		wantErr string
 	}{
-		"negative gemini concurrency":   {base + "geoblock:\n  gemini:\n    concurrency: -1\n", "geoblock.gemini.concurrency"},
-		"negative claude concurrency":   {base + "geoblock:\n  claude:\n    concurrency: -1\n", "geoblock.claude.concurrency"},
-		"negative gemini timeout":       {base + "geoblock:\n  gemini:\n    timeout: -1s\n", "geoblock.gemini.timeout"},
-		"negative claude timeout":       {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
-		"negative chatgpt concurrency":  {base + "geoblock:\n  chatgpt:\n    concurrency: -1\n", "geoblock.chatgpt.concurrency"},
-		"negative chatgpt timeout":      {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
-		"negative tidal concurrency":    {base + "geoblock:\n  tidal:\n    concurrency: -1\n", "geoblock.tidal.concurrency"},
-		"negative tidal timeout":        {base + "geoblock:\n  tidal:\n    timeout: -1s\n", "geoblock.tidal.timeout"},
-		"negative geotrace concurrency": {base + "geoblock:\n  geotrace:\n    concurrency: -1\n", "geoblock.geotrace.concurrency"},
-		"negative geotrace timeout":     {base + "geoblock:\n  geotrace:\n    timeout: -1s\n", "geoblock.geotrace.timeout"},
-		"negative geoblock ttl":         {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
-		"negative resolver timeout":     {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
-		"negative asn timeout":          {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
-		"negative fetch timeout":        {base + "fetch:\n  timeout: -1s\n", "fetch.timeout"},
-		"negative deadcache ttl":        {base + "deadcache:\n  ttl: -1h\n", "deadcache.ttl"},
-		"negative geofeed refresh":      {"geo:\n  geofeed:\n    refresh_interval: -1m\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n", "geo.geofeed.refresh_interval"},
-		"negative subs interval":        {base + "subscriptions:\n  interval: -1m\n", "subscriptions.interval"},
-		"negative check timeout":        {base + "subscriptions:\n  check:\n    timeout: -1s\n", "subscriptions.check.timeout"},
-		"negative check source timeout": {base + "subscriptions:\n  check:\n    source_timeout: -1s\n", "subscriptions.check.source_timeout"},
-		"unknown filter type":           {base + "filters:\n  - type: bogus\n", `unknown type "bogus"`},
-		"bad log level":                 {base + "log:\n  level: verbose\n", "log.level"},
-		"bad expected status":           {base + subs + "  check:\n    expected_status: not-a-range\n", "expected_status"},
-		"non-http test url":             {base + subs + "  check:\n    test_url: ftp://example.com/generate_204\n", "test_url"},
-		"hostless test url":             {base + subs + "  check:\n    test_url: ./relative\n", "test_url"},
+		"negative gemini concurrency":     {base + "geoblock:\n  gemini:\n    concurrency: -1\n", "geoblock.gemini.concurrency"},
+		"negative claude concurrency":     {base + "geoblock:\n  claude:\n    concurrency: -1\n", "geoblock.claude.concurrency"},
+		"negative gemini timeout":         {base + "geoblock:\n  gemini:\n    timeout: -1s\n", "geoblock.gemini.timeout"},
+		"negative claude timeout":         {base + "geoblock:\n  claude:\n    timeout: -1s\n", "geoblock.claude.timeout"},
+		"negative chatgpt concurrency":    {base + "geoblock:\n  chatgpt:\n    concurrency: -1\n", "geoblock.chatgpt.concurrency"},
+		"negative chatgpt timeout":        {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
+		"negative tidal concurrency":      {base + "geoblock:\n  tidal:\n    concurrency: -1\n", "geoblock.tidal.concurrency"},
+		"negative tidal timeout":          {base + "geoblock:\n  tidal:\n    timeout: -1s\n", "geoblock.tidal.timeout"},
+		"negative cloudflare concurrency": {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  cloudflare:\n    concurrency: -1\n", "geo.cloudflare.concurrency"},
+		"negative cloudflare timeout":     {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  cloudflare:\n    timeout: -1s\n", "geo.cloudflare.timeout"},
+		"negative geoblock ttl":           {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
+		"negative resolver timeout":       {base + "resolver:\n  timeout: -1s\n", "resolver.timeout"},
+		"negative asn timeout":            {"geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n  asn:\n    timeout: -1s\n", "geo.asn.timeout"},
+		"negative fetch timeout":          {base + "fetch:\n  timeout: -1s\n", "fetch.timeout"},
+		"negative deadcache ttl":          {base + "deadcache:\n  ttl: -1h\n", "deadcache.ttl"},
+		"negative geofeed refresh":        {"geo:\n  geofeed:\n    refresh_interval: -1m\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n", "geo.geofeed.refresh_interval"},
+		"negative subs interval":          {base + "subscriptions:\n  interval: -1m\n", "subscriptions.interval"},
+		"negative check timeout":          {base + "subscriptions:\n  check:\n    timeout: -1s\n", "subscriptions.check.timeout"},
+		"negative check source timeout":   {base + "subscriptions:\n  check:\n    source_timeout: -1s\n", "subscriptions.check.source_timeout"},
+		"unknown filter type":             {base + "filters:\n  - type: bogus\n", `unknown type "bogus"`},
+		"bad log level":                   {base + "log:\n  level: verbose\n", "log.level"},
+		"bad expected status":             {base + subs + "  check:\n    expected_status: not-a-range\n", "expected_status"},
+		"non-http test url":               {base + subs + "  check:\n    test_url: ftp://example.com/generate_204\n", "test_url"},
+		"hostless test url":               {base + subs + "  check:\n    test_url: ./relative\n", "test_url"},
 	}
 	for name, tc := range cases {
 		_, err := loadRaw(t, tc.yaml)

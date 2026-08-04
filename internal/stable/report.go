@@ -27,7 +27,7 @@ type CycleReport struct {
 	Trace         TraceReport
 }
 
-// TraceReport accounts the geotrace annotation stage: how many survivors told
+// TraceReport accounts the cloudflare annotation stage: how many survivors told
 // us where their traffic actually leaves from, and how much that changed.
 //
 // Moved is the number the trace exists to justify — a published country that
