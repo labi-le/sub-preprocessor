@@ -1,9 +1,11 @@
 package geofeed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +143,43 @@ func TestLoadRegistry_SkipsFailedSource(t *testing.T) {
 	})
 	if _, _, emptyErr := LoadRegistry(context.Background(), urls, zerolog.Nop()); emptyErr == nil {
 		t.Fatal("zero total ranges must return an error")
+	}
+}
+
+// TestRegistrySerialIsLogged pins the freshness observable. delegatedSerial
+// must read field 2 of the version header (the neighbouring fields are a
+// record COUNT and a date, so an off-by-one reads plausibly and means nothing),
+// and LoadRegistry must put it on the per-source load line -- that log is the
+// entire signal that a mirrored copy has stopped tracking its upstream.
+func TestRegistrySerialIsLogged(t *testing.T) {
+	const header = "2.3|apnic|20260804|188932||20260803|+1000\n"
+	const record = "apnic|AU|ipv4|1.0.0.0|256|20110811|assigned\n"
+
+	if got := delegatedSerial([]byte(header + record)); got != "20260804" {
+		t.Fatalf("delegatedSerial = %q, want the header's field 2 %q", got, "20260804")
+	}
+	// Comment banner first, as every real file ships it.
+	if got := delegatedSerial([]byte("# CONDITIONS OF USE\n#\n" + header + record)); got != "20260804" {
+		t.Fatalf("delegatedSerial past the comment banner = %q, want %q", got, "20260804")
+	}
+	// A body opening on a RECORD has no serial, and must not pass that record's
+	// own field 2 off as one -- "serial=ipv4" would read like a live value.
+	if got := delegatedSerial([]byte(record)); got != "" {
+		t.Fatalf("delegatedSerial on a headerless body = %q, want empty", got)
+	}
+	if got := delegatedSerial(nil); got != "" {
+		t.Fatalf("delegatedSerial(nil) = %q, want empty", got)
+	}
+
+	stubFetch(t, func(fetch.SubscriptionURL, fetch.FileType) ([]byte, error) {
+		return []byte(header + record), nil
+	})
+	var logged bytes.Buffer
+	if _, _, err := LoadRegistry(context.Background(),
+		[]string{"https://good.example/delegated"}, zerolog.New(&logged)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), `"serial":"20260804"`) {
+		t.Fatalf("the per-source load line carries no serial: %s", logged.String())
 	}
 }

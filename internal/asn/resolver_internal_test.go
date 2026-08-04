@@ -136,3 +136,62 @@ func TestResolve_UsesConfiguredCacheTTL(t *testing.T) {
 		t.Fatalf("zero ttl should fall back to %v, got %v", defaultCacheTTL, rd.cacheTTL)
 	}
 }
+
+// TestParseOriginRecord_MultiOrigin pins the country of a prefix announced by
+// several ASes. Field 0 is an AS LIST, and parsing it whole used to fail the
+// record and throw away the country in field 2 -- so the annotate chain missed
+// and the ASN filter fell open on every multi-origin prefix. Records below are
+// verbatim Cymru answers for 146.103.121.1, 35.212.182.82 and 87.250.251.10.
+func TestParseOriginRecord_MultiOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		txt         string
+		wantASN     uint32
+		wantCountry geofeed.CountryCode
+	}{
+		{
+			name:        "single origin",
+			txt:         "216071 | 146.103.121.0/24 | AE | ripencc | 1992-10-23",
+			wantASN:     216071,
+			wantCountry: geofeed.CountryCode{'A', 'E'},
+		},
+		{
+			name:        "two origins arin",
+			txt:         "15169 43515 | 35.212.128.0/17 | US | arin | 2017-09-29",
+			wantASN:     15169,
+			wantCountry: geofeed.CountryCode{'U', 'S'},
+		},
+		{
+			name:        "two origins ripencc",
+			txt:         "13238 208398 | 87.250.224.0/19 | RU | ripencc | 2006-01-30",
+			wantASN:     13238,
+			wantCountry: geofeed.CountryCode{'R', 'U'},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotASN, gotCountry, err := parseOriginRecord(tc.txt)
+			if err != nil {
+				t.Fatalf("parseOriginRecord(%q) = %v", tc.txt, err)
+			}
+			if gotCountry != tc.wantCountry {
+				t.Errorf("country = %q, want %q", gotCountry.String(), tc.wantCountry.String())
+			}
+			// One number, because the caller builds AS<n>.asn.cymru.com from it.
+			if gotASN != tc.wantASN {
+				t.Errorf("asn = %d, want %d (first listed origin)", gotASN, tc.wantASN)
+			}
+		})
+	}
+
+	// A field 0 with no number at all is still an error: there is no AS to name
+	// and no reason to invent a Resolve success shape for it.
+	if _, _, err := parseOriginRecord("nonsense | 10.0.0.0/8 | US | arin | 2020-01-01"); err == nil {
+		t.Error("an unparseable AS field must still error")
+	}
+}

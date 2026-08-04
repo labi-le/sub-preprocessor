@@ -114,10 +114,50 @@ const (
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 // The five RIR delegated-extended-latest files together cover the full
-// allocated IP space with registration countries.
+// allocated IP space with registration countries. Dropping one costs real
+// coverage, not a rounding error: without APNIC the database builds from
+// 255972 ranges instead of 330937 and places 97.30% of the resolved addresses
+// instead of 99.85% (LoadRegistry logs the skip as sources_failed=1).
+//
+// APNIC is read from a MIRROR on purpose. ftp.apnic.net's TLS is broken for
+// Go: its ServerHello does not echo the ClientHello's legacy_session_id, which
+// RFC 8446 4.1.3 requires, so crypto/tls aborts the handshake with "server did
+// not echo the legacy session ID" (curl reports the same reject as "invalid
+// session id" / connection reset). It is the server, not us -- do not "fix"
+// this back to the direct host.
+//
+// The mirror is LACNIC's and NOT the obvious ftp.ripe.net one, which is the
+// only interesting part of the choice. Both serve the identical bytes -- same
+// md5 as APNIC's own delegated-apnic-extended-latest.md5 (077c5ac4...) on both
+// hosts -- so the tiebreak is not fidelity but blast radius, and LoadRegistry's
+// promise that one registry outage cannot take down startup is worth exactly as
+// much as the RANGES behind the worst host, NOT the number of distinct hosts:
+// these five URLs sit on four of those (ftp.lacnic.net serves this mirror and
+// LACNIC's own file), and re-pointing apnic at any other host already in the
+// set leaves that count at four, so only the weights tell the candidates
+// apart. config_specs_test.go's assertRegistryHostConcentration is the
+// enforcement, and being weighted it rejects ftp.arin.net (arin's own 88195 +
+// apnic = 163160 = 49.3%) as flatly as ftp.ripe.net. Measured with
+// ParseDelegated over the live files: ripencc 126845, apnic 74965, lacnic 33819
+// of 330937 total. Hanging APNIC off ftp.ripe.net puts 201810 ranges = 61.0% on
+// one host; ftp.lacnic.net (200.3.14.15, Apache, versus RIPE's 193.0.11.24,
+// nginx) leaves the worst host at ripencc's own 126845 = 38.3% -- the floor no
+// mirror choice can beat -- with ftp.lacnic.net itself only second at
+// 108784 = 32.9%. That cliff is live, not hypothetical: swapRefusal protects
+// only a process that already holds a good database, while newGeoDB at STARTUP
+// takes the partial build with a Warn. Do not "tidy" APNIC over to the RIPE URL
+// its neighbour uses.
+//
+// One caveat the checksum does not cover: a mirror is a COPY, re-cut on the
+// upstream's schedule, so byte-identity is a statement about the instant it was
+// checked and not a guarantee of freshness. A copy frozen months ago fetches
+// 200, parses clean and lands a plausible range count, so LoadRegistry logs
+// each source's header serial (apnic's reads 20260804) as the observable that
+// makes lag visible. It is an observable and NOT a gate -- nothing here
+// branches on it.
 var defaultRegistryURLs = []string{
 	"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
-	"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+	"https://ftp.lacnic.net/pub/stats/apnic/delegated-apnic-extended-latest",
 	"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 	"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
 	"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",

@@ -196,8 +196,8 @@ provider, not a gate: see [Annotation](#annotation).
 The ordered `annotate:` list controls the tags prepended to node names on both
 endpoints. `GEO` (`[GEO:XX]`) is the only tag it accepts — `IP` and `ASN` were
 both retired, and naming either now fails the load. The entry takes
-`providers:` — an **ordered lookup chain** (e.g.
-`providers: [cloudflare, geofeed, dbip, registry, asn]`): the first provider that
+`providers:` — an **ordered lookup chain** (the shipped one is
+`providers: [cloudflare, geofeed, dbip, registry]`): the first provider that
 resolves the IP wins, and when every provider misses the tag renders as
 `[GEO:??]`. The list still earns its shape: entries render in order and may
 repeat (two `GEO` entries with different chains publish two tags, and the
@@ -219,11 +219,50 @@ Available providers:
 | `cloudflare` | Cloudflare's geo-IP database, asked through the node itself via `/cdn-cgi/trace` (`geo.cloudflare.*`) | the only one asked about the EXIT address; worker-only |
 | `geofeed` | RFC 8805 CSV feeds (`geo.geofeed.sources`) | precise, low coverage |
 | `dbip` | DB-IP Country Lite — monthly gzip CSV; the `{yyyy-mm}` URL placeholder expands to the current UTC month, with one previous-month retry on a 404 right after rollover | broad coverage, in-memory |
-| `registry` | the five RIR delegated-extended files | *registration* country of the allocated block, not necessarily where it routes |
-| `asn` | Team Cymru DNS | cached last resort |
+| `registry` | the five RIR delegated-extended files (APNIC's is read from LACNIC's mirror — see below) | *registration* country of the allocated block, not necessarily where it routes |
+| `asn` | Team Cymru DNS | accepted, but NOT in the shipped chain — see below |
 
 The `dbip`/`registry` databases are downloaded and indexed in memory only when
 an annotate chain actually references them.
+
+`asn` is accepted here and deliberately unused. It is Team Cymru's DNS
+redistribution of the same RIR delegation data `registry` already holds in
+memory, so it behaves as a registry lookup over the network rather than as a
+geolocation source: measured over every address behind every configured
+subscription it was a strict SUBSET of a complete `registry` — no country it
+placed that `registry` did not, and no disagreement where both answered — and
+placed behind this chain its marginal contribution was zero hits, because
+`dbip` alone answers all but a handful of addresses and that handful is
+unroutable — RFC 2544 / RFC 5737 space (198.18.0.0/15, 192.0.2.0/24) returned
+by DNS-poisoning sinkholes, and sources publishing 127.0.0.1 or
+255.255.255.255 outright — which Cymru correctly has no record for either. It
+remains reachable as `{type: country, provider: asn}` and as the `{type: asn}`
+deny-pattern filter, whose AS *names* no local database carries. Re-measure
+before putting it back in a chain.
+
+`registry` reads APNIC from `ftp.lacnic.net`, not `ftp.apnic.net`: APNIC's own
+host answers the TLS ClientHello without echoing the legacy session ID that
+RFC 8446 requires, which Go's `crypto/tls` rejects outright, so that RIR
+silently dropped out of the build and cost roughly two and a half points of
+coverage. RIPE and LACNIC both mirror the file byte-identically under APNIC's
+own published checksum, so the choice between them is about blast radius, not
+fidelity — and blast radius is measured in RANGES behind the worst single host,
+not in hosts. The five URLs sit on four hosts either way (`ftp.lacnic.net`
+serves APNIC's mirror and LACNIC's own file), so a host count cannot tell the
+candidates apart and the weights are the whole argument: `ripencc` already
+comes from `ftp.ripe.net`, so parking APNIC there would put 201810 of the
+330937 loaded ranges (61.0%) behind one outage, where `ftp.lacnic.net` leaves
+the worst host at ripencc's own 126845 (38.3%) — the floor no mirror choice can
+beat — with `ftp.lacnic.net` itself only second at 108784 (32.9%). The same
+arithmetic rules out `ftp.arin.net`
+(163160, 49.3%), which a keep-them-on-separate-hosts reading would have waved
+through; `assertRegistryHostConcentration` in `internal/config` enforces it as
+a rule over the range weights, so re-pointing any of these URLs has to argue
+with the numbers. A mirror is also a copy on someone else's schedule, so
+`LoadRegistry` logs each file's own header serial — an observable for lag, not a
+gate. Its form is the publishing registry's business (`20260804` from APNIC, a
+unix timestamp from RIPE, unix ms from ARIN), so read it against the same
+source's previous value, not across sources.
 
 `cloudflare` is the odd one out, but not in the way the old name suggested. It
 is a geo-IP database like the others — the tag carries the `loc=` line it
@@ -259,10 +298,11 @@ verdict. Three asymmetries remain:
 - `cloudflare` is skipped by the filter, and cannot be otherwise: the address
   it is asked about does not exist yet. The filter runs in preprocess, before
   any probe exists to ask. The tag can name the egress the filter never saw.
-- `asn` is skipped by the filter: it is a per-IP Cymru round trip, not a local
-  table. A node only Cymru can place counts as unplaceable for the filter while
-  its tag names the country. Operators who want that lookup in the filter too
-  configure it explicitly as `{type: country, provider: asn}`.
+- `asn` is skipped by the filter whenever a chain does name it (the shipped one
+  does not): it is a per-IP Cymru round trip, not a local table. A node only
+  Cymru can place counts as unplaceable for the filter while its tag names the
+  country. Operators who want that lookup in the filter too configure it
+  explicitly as `{type: country, provider: asn}`.
 - with no `GEO` annotate entry (or one naming only `asn`), the filter falls
   back to the geofeed alone — the one database every process loads.
 
@@ -366,8 +406,8 @@ Key sections:
 - `geo.dbip.url` / `geo.dbip.refresh_interval` and `geo.registry.urls[]` /
   `geo.registry.refresh_interval` — optional blocks for the downloadable
   IP→country databases; defaults are built in (the DB-IP Country Lite
-  `{yyyy-mm}` monthly URL, the five RIR delegated-extended files, 24h
-  refresh).
+  `{yyyy-mm}` monthly URL, the five RIR delegated-extended files with APNIC
+  taken from LACNIC's mirror, 24h refresh).
 - `geo.cloudflare.timeout` / `geo.cloudflare.concurrency` (default 15s, 8) —
   the `/cdn-cgi/trace` probe behind the `cloudflare` ANNOTATE provider. Two
   keys and no `endpoint`: only Cloudflare's own body parses, so the URL is a

@@ -67,8 +67,23 @@ annotate:
     # the endpoint is not configurable, because only Cloudflare's own body
     # parses (stable.cloudflareTraceURL).
     # dbip/registry are downloaded in-memory databases (built only because they
-    # are referenced here), asn is the cached Cymru DNS last resort.
-    providers: [cloudflare, geofeed, dbip, registry, asn]
+    # are referenced here).
+    #
+    # `asn` is NOT in this chain, and putting it back needs a new argument.
+    # It is Cymru's DNS redistribution of the same RIR delegation data
+    # `registry` already holds in RAM, so it is a registry lookup over the
+    # network rather than a geolocation source: measured over every address
+    # behind every configured subscription it was a strict SUBSET of a complete
+    # `registry` -- zero countries it placed that registry did not, zero
+    # disagreements where both answered -- and its marginal contribution BEHIND
+    # this chain was zero hits, because dbip alone answers all but a handful and
+    # the handful are unroutable: RFC 2544 / RFC 5737 space (198.18.0.0/15,
+    # 192.0.2.0/24) handed back by DNS-poisoning sinkholes, plus sources that
+    # publish 127.0.0.1 or 255.255.255.255 outright, all of which Cymru
+    # NXDOMAINs. It stays accepted here (and `{type: country, provider: asn}`
+    # and `{type: asn}` stay live) because only Cymru carries the AS NAME the
+    # deny patterns match; it just buys no coverage. Re-measure before re-adding.
+    providers: [cloudflare, geofeed, dbip, registry]
   # GEO is the last tag standing. The IP and ASN tags were both removed
   # outright, because nothing consumed them and no config selected them, so
   # `- tag: IP` and `- tag: ASN` are now load errors (unknown tag). IP had also
@@ -76,7 +91,8 @@ annotate:
   # MEASURED egress, for a CDN-fronted node precisely the origin the fronting
   # hid (108 of 149 traced nodes last cycle published an address different from
   # the resolved one), and /stable.txt is shared. Note what did NOT go: `asn`
-  # the PROVIDER above and the `{type: asn}` FILTER are both live. An
+  # is still an ACCEPTED provider name here (this chain just does not list it,
+  # see above) and the `{type: asn}` FILTER is live. An
   # upstream-authored [IP:...] or [ASN:...] is still STRIPPED off node names
   # (rewrite.isKnownTag keeps recognising both) on any config that annotates at
   # all. Emptying this list is the exception, not a milder setting: the

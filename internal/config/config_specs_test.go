@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -255,7 +256,12 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	}
 	wantURLs := []string{
 		"https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
-		"https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
+		// APNIC via LACNIC's mirror: ftp.apnic.net's ServerHello does not echo
+		// the legacy session ID, so crypto/tls cannot fetch it at all, and the
+		// RIPE copy of the same bytes would stack apnic on top of ripencc's own
+		// host: 61% of the ranges behind one outage, against the 38% that
+		// ripencc alone already costs and that no mirror choice can beat.
+		"https://ftp.lacnic.net/pub/stats/apnic/delegated-apnic-extended-latest",
 		"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 		"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
 		"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
@@ -263,9 +269,73 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Geo.Registry.URLs, wantURLs) {
 		t.Fatalf("registry urls default = %v", cfg.Geo.Registry.URLs)
 	}
+	assertRegistryHostConcentration(t, cfg.Geo.Registry.URLs)
 	if cfg.Geo.Registry.RefreshInterval == nil || *cfg.Geo.Registry.RefreshInterval != 24*time.Hour {
 		t.Fatalf("registry refresh default = %v, want 24h", cfg.Geo.Registry.RefreshInterval)
 	}
+}
+
+// assertRegistryHostConcentration fails when one host serves more of the RIR
+// ranges than the largest single file carries on its own.
+//
+// LoadRegistry's outage promise is worth the ranges behind the WORST host, and
+// counting DISTINCT hosts cannot express that: moving apnic back onto
+// ripencc's host leaves five urls on four hosts, exactly as many as now, while
+// putting 61% of the ranges behind one outage. The five files are wildly
+// uneven, so what a shared host costs is what its registries carry.
+//
+// Range counts are geofeed.ParseDelegated's own over the live files
+// (2026-08-04, 330937 total). The threshold is DERIVED from them rather than
+// fixed: ripencc alone is 38% of the ranges and no mirror choice can lower
+// that, so the biggest single file is the floor this promise cannot beat, and
+// any host carrying more than it is a concentration someone chose. Drift
+// therefore cannot fail this spuriously -- both sides move together. Asserted
+// as a rule rather than as a URL so a future edit that re-points one has to
+// think about the concentration.
+func assertRegistryHostConcentration(t *testing.T, urls []string) {
+	t.Helper()
+
+	ranges := map[string]int{
+		"ripencc": 126845, "apnic": 74965, "arin": 88195, "lacnic": 33819, "afrinic": 7113,
+	}
+	total, floor, floorRIR := 0, 0, ""
+	for rir, n := range ranges {
+		total += n
+		if n > floor {
+			floor, floorRIR = n, rir
+		}
+	}
+	perHost := map[string]int{}
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		rir := rirOf(raw, ranges)
+		if rir == "" {
+			t.Fatalf("registry url %q names no rir this guard knows, so its ranges are "+
+				"weightless here; add the file's range count to `ranges`", raw)
+		}
+		perHost[u.Host] += ranges[rir]
+	}
+	for host, n := range perHost {
+		if n > floor {
+			t.Fatalf("registry host %q serves %d of %d ranges (%.0f%%), more than the "+
+				"largest single file carries on its own (%s, %.0f%%); one outage then "+
+				"costs more than the unavoidable worst case, see defaultRegistryURLs: %v",
+				host, n, total, 100*float64(n)/float64(total),
+				floorRIR, 100*float64(floor)/float64(total), urls)
+		}
+	}
+}
+
+func rirOf(rawURL string, ranges map[string]int) string {
+	for rir := range ranges {
+		if strings.Contains(rawURL, "delegated-"+rir+"-") {
+			return rir
+		}
+	}
+	return ""
 }
 
 // TestLoadGeoDatabaseOverrides proves explicit dbip/registry settings are kept
@@ -474,6 +544,39 @@ func TestShippedConfigLoads(t *testing.T) {
 	}
 	if !cfg.AnnotateUsesProvider(config.ProviderCloudflare) {
 		t.Fatal("shipped annotate chain no longer asks the node for its egress")
+	}
+
+	// asn is deliberately OUT of the shipped chain: it redistributes the same
+	// RIR data registry already holds in memory, and measured behind
+	// dbip+registry it answered nothing they had not. The chain is pinned whole
+	// so re-adding it is a visible edit here, not a silent one.
+	wantChain := []string{
+		config.ProviderCloudflare, config.ProviderGeofeed,
+		config.ProviderDBIP, config.ProviderRegistry,
+	}
+	if len(cfg.Annotate) != 1 || !reflect.DeepEqual(cfg.Annotate[0].Providers, wantChain) {
+		t.Fatalf("shipped GEO chain = %+v, want one entry with %v", cfg.Annotate, wantChain)
+	}
+	if cfg.AnnotateUsesProvider(config.ProviderASN) {
+		t.Fatal("asn is back in the shipped chain; it needs a fresh measurement, not a re-add")
+	}
+
+	// Retained on purpose, and neither form is reachable from the chain: the
+	// country filter's asn provider, and the {type: asn} deny-pattern filter
+	// whose AS names only Cymru carries. Both must still load.
+	viaFilter, err := loadYAML(t, geoBase+
+		"filters:\n  - type: country\n    provider: asn\n    exclude_countries: [ir]\n"+
+		"  - type: asn\n    deny_patterns: [\"(?i)hetzner\"]\n"+
+		"annotate:\n  - tag: GEO\n    providers: [geofeed]\n")
+	if err != nil {
+		t.Fatalf("the asn filter forms must still load: %v", err)
+	}
+	wantSpecs := []config.IPFilterSpec{
+		{Type: config.FilterCountry, Provider: config.ProviderASN},
+		{Type: config.FilterASN, Provider: config.ProviderASN, DenyPatterns: []string{"(?i)hetzner"}},
+	}
+	if !reflect.DeepEqual(viaFilter.IPFilterSpecs(), wantSpecs) {
+		t.Fatalf("asn filter specs = %+v, want %+v", viaFilter.IPFilterSpecs(), wantSpecs)
 	}
 }
 

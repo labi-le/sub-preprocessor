@@ -700,16 +700,19 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 // consulting them costs a binary search on the IPs the earlier providers miss
 // and nothing else.
 //
-// LOCAL is the whole of the promise, and BOTH exceptions to it sit in the
-// shipped chain. The asn provider stays out: it is a per-IP Cymru round trip,
-// not a local table, and the config exposes it as an explicit `{type: country,
-// provider: asn}` filter for operators who want it. cloudflare stays out for a
-// harder reason (countryChainOrder's doc carries it): it is not a lookup this
-// stage can make, so there is no filter form to expose. A GEO chain resolving
-// through either can therefore still name a country the filter treated as
-// unknown, and that is the DEFAULT, not a corner config. Measured on
-// config.yaml's own `[cloudflare, geofeed, dbip, registry, asn]`, which
-// merges to [geofeed, dbip, registry]: with all three loaded and none of them
+// LOCAL is the whole of the promise, and it has two exceptions -- ONE of which
+// the shipped chain still names. The asn provider stays out: it is a per-IP
+// Cymru round trip, not a local table, and the config exposes it as an explicit
+// `{type: country, provider: asn}` filter for operators who want it. Since it
+// left the shipped annotate chain it costs the default config nothing, and only
+// a config that puts it back reopens that half of the gap. cloudflare stays out
+// for a harder reason (countryChainOrder's doc carries it): it is not a lookup
+// this stage can make, so there is no filter form to expose -- and it IS in the
+// shipped chain, which is what keeps the gap a DEFAULT rather than a corner
+// config. A GEO chain resolving through either can therefore still name a
+// country the filter treated as unknown. Measured on config.yaml's own
+// `[cloudflare, geofeed, dbip, registry]`, which merges to
+// [geofeed, dbip, registry]: with all three loaded and none of them
 // able to place the IP, `exclude_countries=DE` keeps the node while the stable
 // worker's traced egress publishes [GEO:DE].
 //
