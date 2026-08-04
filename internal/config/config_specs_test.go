@@ -259,7 +259,8 @@ func TestLoadGeoDatabaseDefaults(t *testing.T) {
 		// APNIC via LACNIC's mirror: ftp.apnic.net's ServerHello does not echo
 		// the legacy session ID, so crypto/tls cannot fetch it at all, and the
 		// RIPE copy of the same bytes would stack apnic on top of ripencc's own
-		// host (61% of the ranges behind one outage instead of 33%).
+		// host: 61% of the ranges behind one outage, against the 38% that
+		// ripencc alone already costs and that no mirror choice can beat.
 		"https://ftp.lacnic.net/pub/stats/apnic/delegated-apnic-extended-latest",
 		"https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
 		"https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
