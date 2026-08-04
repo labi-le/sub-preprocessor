@@ -23,11 +23,17 @@ const (
 	// cloudflareTraceURL is deliberately NOT a config key. parseTrace and
 	// validCountry below encode this one vendor's answer down to the reserved
 	// loc values Cloudflare documents for CF-IPCountry (XX, T1) and its
-	// uppercase convention, so no other vendor's endpoint could satisfy this
+	// uppercase convention, so no other VENDOR's endpoint can satisfy this
 	// parser without emulating Cloudflare. An `endpoint:` key would therefore
-	// have been a false affordance: every value but this one parses to no
-	// answer, and a silent one -- a rejected body is reported as "unanswered",
-	// which drops nothing and looks exactly like an unreachable node.
+	// have been a false affordance: what it invites is another vendor's
+	// trace-like endpoint, which parses to no answer -- and silently, since a
+	// rejected body is reported as "unanswered", which drops nothing and looks
+	// exactly like an unreachable node. The exception is intra-vendor, and is
+	// stated here rather than left as "every other value": Cloudflare serves
+	// /cdn-cgi/trace on every domain it proxies, so any Cloudflare-fronted host
+	// parses identically. If cloudflare.com is ever unreachable or intercepted
+	// from an egress, that substitution is the one that works -- and it is made
+	// here, in this constant.
 	cloudflareTraceURL = "https://cloudflare.com/cdn-cgi/trace"
 )
 

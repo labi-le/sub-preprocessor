@@ -44,6 +44,22 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Geo.Geofeed.RefreshInterval == nil || *cfg.Geo.Geofeed.RefreshInterval != 24*time.Hour {
 		t.Fatalf("refresh interval default = %v, want 24h", cfg.Geo.Geofeed.RefreshInterval)
 	}
+	// geo.cloudflare's two defaults are the ones GeoConfig.applyDefaults owns
+	// that no other test reads, and dropping them is silent: a zero Timeout
+	// reaches apiProbeOne, context.WithTimeout(ctx, 0) expires before the dial,
+	// and every survivor is booked unanswered -- the trace annotation goes
+	// inert while nothing drops and no other assertion fails.
+	if cfg.Geo.Cloudflare.Timeout != 15*time.Second {
+		t.Fatalf("geo.cloudflare.timeout default = %v, want 15s", cfg.Geo.Cloudflare.Timeout)
+	}
+	if cfg.Geo.Cloudflare.Concurrency != 8 {
+		t.Fatalf("geo.cloudflare.concurrency default = %d, want 8", cfg.Geo.Cloudflare.Concurrency)
+	}
+	// Same method, same gap: geo.asn.cache_ttl has TestLoadASNCacheTTL, the
+	// timeout beside it had nothing.
+	if cfg.Geo.ASN.Timeout != 5*time.Second {
+		t.Fatalf("geo.asn.timeout default = %v, want 5s", cfg.Geo.ASN.Timeout)
+	}
 }
 
 func TestLoadRejectsMissingGeofeedType(t *testing.T) {

@@ -239,9 +239,12 @@ chain is what arms that probe; leaving it out means no cycle pays for it.
 
 Its `timeout`/`concurrency` are `geo.cloudflare.*`. There is deliberately no
 `endpoint` key: the parser encodes Cloudflare's documented reserved `loc`
-values (`XX`, `T1`) and its uppercase convention, so no other vendor's endpoint
-could satisfy it, and a key whose every other value silently yields "no answer"
-would be a false affordance.
+values (`XX`, `T1`) and its uppercase convention, so no other VENDOR's endpoint
+can satisfy it, and a key whose every cross-vendor value silently yields "no
+answer" would be a false affordance. The one substitution that does parse is
+intra-vendor — Cloudflare serves `/cdn-cgi/trace` on every domain it proxies,
+so any Cloudflare-fronted host answers the same shape — and that belongs in
+`stable.cloudflareTraceURL`, not in a config key.
 
 The country **filter** (`provider: geofeed`) judges nodes with that same chain,
 in the order the `annotate:` list gives it: it consults every local database
