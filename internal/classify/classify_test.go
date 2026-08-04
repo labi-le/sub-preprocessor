@@ -158,3 +158,53 @@ func TestStatusErrorGone(t *testing.T) {
 		}
 	}
 }
+
+// TestResultReasonAgreesWithLive: Reason is what lets a caller distinguish the
+// two very different ways a body fails Live — an origin-advertised expiry is a
+// death verdict, a nodeless 2xx is not — so the two must never disagree about
+// which one it is. Expired outranks a zero node count: a body that is both is
+// dead, not merely nodeless.
+func TestResultReasonAgreesWithLive(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		res    classify.Result
+		reason classify.Reason
+		name   string
+	}{
+		{classify.Result{Nodes: 3}, classify.ReasonLive, "live"},
+		{classify.Result{}, classify.ReasonNodeless, "nodeless-2xx"},
+		{classify.Result{Nodes: 3, Expired: true}, classify.ReasonExpired, "expired"},
+		{classify.Result{Expired: true}, classify.ReasonExpired, "expired"},
+	} {
+		got := tc.res.Reason()
+		if got != tc.reason {
+			t.Errorf("%+v: Reason = %v, want %v", tc.res, got, tc.reason)
+		}
+		if got.String() != tc.name {
+			t.Errorf("%+v: Reason.String = %q, want %q", tc.res, got.String(), tc.name)
+		}
+		if live := tc.res.Live(); live != (got == classify.ReasonLive) {
+			t.Errorf("%+v: Live = %v but Reason = %v", tc.res, live, got)
+		}
+	}
+}
+
+// TestBodyReportsWhyItIsNotLive walks Body end to end: the reason has to come
+// out of a parsed body, not only out of a hand-built Result.
+func TestBodyReportsWhyItIsNotLive(t *testing.T) {
+	t.Parallel()
+
+	const node = "vless://uuid@host.example:443?type=tcp#n"
+	const now = 1786085295
+
+	if got := classify.Body([]byte(node), "", now).Reason(); got != classify.ReasonLive {
+		t.Errorf("a one-node body reads %v, want live", got)
+	}
+	if got := classify.Body([]byte("<html>login</html>"), "", now).Reason(); got != classify.ReasonNodeless {
+		t.Errorf("a login page reads %v, want nodeless-2xx", got)
+	}
+	if got := classify.Body([]byte(node), "expire=1786085294", now).Reason(); got != classify.ReasonExpired {
+		t.Errorf("an expired subscription reads %v, want expired", got)
+	}
+}

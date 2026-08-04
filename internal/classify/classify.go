@@ -38,6 +38,34 @@ var proxySchemes = map[string]bool{
 	"mierus": true,
 }
 
+// Reason enumerates the verdicts Body can reach. It exists so a caller can say
+// WHY a body is not a live subscription — "not a subscription at all" and "the
+// origin says it expired" are the same `!Live()` to anything that only asks the
+// predicate, and they call for opposite handling.
+//
+// It is derived from Nodes and Expired rather than stored: a Result cannot then
+// carry a reason that contradicts the counts it was built from, and Result keeps
+// its two fields (no per-node cost anywhere Body is called in a loop).
+type Reason uint8
+
+const (
+	ReasonLive     Reason = iota // at least one proxy-scheme node and no advertised expiry
+	ReasonExpired                // subscription-userinfo advertised an expiry already past
+	ReasonNodeless               // 2xx body carrying no proxy-scheme node
+)
+
+func (r Reason) String() string {
+	switch r {
+	case ReasonLive:
+		return "live"
+	case ReasonExpired:
+		return "expired"
+	case ReasonNodeless:
+		return "nodeless-2xx"
+	}
+	return "unknown"
+}
+
 // Result reports what a fetched body looks like.
 type Result struct {
 	Nodes   int  // parseable scheme:// nodes after base64 normalization
@@ -50,7 +78,21 @@ type Result struct {
 // only Expired — an expiry the origin itself advertised — and a Gone status
 // prove a URL stopped being a subscription; callers that delete on a dead
 // verdict must not delete on a merely nodeless one.
-func (r Result) Live() bool { return r.Nodes > 0 && !r.Expired }
+func (r Result) Live() bool { return r.Reason() == ReasonLive }
+
+// Reason reports the verdict behind Live. Expired outranks a zero node count:
+// an origin-advertised expiry is a death verdict and a nodeless body is not, so
+// a body that is both must never read as merely nodeless.
+func (r Result) Reason() Reason {
+	switch {
+	case r.Expired:
+		return ReasonExpired
+	case r.Nodes <= 0:
+		return ReasonNodeless
+	default:
+		return ReasonLive
+	}
+}
 
 // Body classifies an already-fetched subscription body. subUserinfo is the raw
 // `subscription-userinfo` response header (may be empty); now is the reference

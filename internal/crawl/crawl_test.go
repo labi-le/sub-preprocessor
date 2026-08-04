@@ -71,7 +71,7 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 		logger: zerolog.Nop(),
 	}
 	live, unknown := c.classifyAll(context.Background(),
-		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"})
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, "")
 
 	if !live["https://live.example/sub"] || len(live) != 1 {
 		t.Errorf("live = %v, want exactly the live URL", live)
@@ -116,7 +116,7 @@ func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone})
+	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, "")
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL served a node", live)
@@ -157,7 +157,7 @@ func TestClassifyAllBoundsConcurrency(t *testing.T) {
 	for i := range cap(urls) {
 		urls = append(urls, fmt.Sprintf("https://h%d.example/sub", i))
 	}
-	live, unknown := c.classifyAll(context.Background(), urls)
+	live, unknown := c.classifyAll(context.Background(), urls, nil, "")
 	if len(live) != len(urls) || len(unknown) != 0 {
 		t.Fatalf("live=%d unknown=%d, want %d/0", len(live), len(unknown), len(urls))
 	}
@@ -267,7 +267,7 @@ func TestClassifyAllTreatsTransientStatusAsUnknown(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), urls)
+	live, unknown := c.classifyAll(context.Background(), urls, nil, "")
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL answered 2xx", live)
@@ -366,17 +366,28 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 func TestCandidate(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]bool{
-		"https://is.wepogp.gay/x?payload=abc": true,
-		"https://host.example/sub":            true,
-		"https://t.me/chan":                   false, // telegram noise
-		"https://cdn4.telesco.pe/file/x.jpg":  false, // telegram media cdn
-		"https://192.168.1.1/sub":             false, // literal private ip: config.Load would reject the source
-		"http://host.example/sub":             false, // not https
+	cases := map[string]struct {
+		ok     bool
+		reason rejectReason
+	}{
+		"https://is.wepogp.gay/x?payload=abc": {ok: true},
+		"https://host.example/sub":            {ok: true},
+		"https://t.me/chan":                   {reason: rejectNoiseHost},
+		"https://cdn4.telesco.pe/file/x.jpg":  {reason: rejectNoiseHost},
+		// Literal private ip and non-https: config.Load would reject the source.
+		"https://192.168.1.1/sub": {reason: rejectInvalidURL},
+		"http://host.example/sub": {reason: rejectInvalidURL},
 	}
 	for u, want := range cases {
-		if got := candidate(u); got != want {
-			t.Errorf("candidate(%q) = %v, want %v", u, got, want)
+		got, reason, err := candidate(u)
+		if got != want.ok {
+			t.Errorf("candidate(%q) = %v, want %v", u, got, want.ok)
+		}
+		if reason != want.reason {
+			t.Errorf("candidate(%q) reason = %q, want %q", u, reason, want.reason)
+		}
+		if !want.ok && want.reason == rejectInvalidURL && err == nil {
+			t.Errorf("candidate(%q) returned no error for an invalid url", u)
 		}
 	}
 }

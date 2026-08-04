@@ -125,7 +125,7 @@ func runClassify(args []string) int {
 		return 1
 	}
 	if !res.Live() {
-		fmt.Fprintf(os.Stderr, "not a live subscription (nodes=%d expired=%v)\n", res.Nodes, res.Expired)
+		fmt.Fprintf(os.Stderr, "not a live subscription (reason=%s nodes=%d)\n", res.Reason(), res.Nodes)
 		return 1
 	}
 	fmt.Fprintln(os.Stdout, res.Nodes)

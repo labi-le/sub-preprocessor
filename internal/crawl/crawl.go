@@ -302,7 +302,8 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		// hours would leave that refusal standing to authorize whatever the
 		// next fault comes up with.
 		c.withdrawBulkPrune(&st)
-		c.logger.Info().Int("managed", len(managed)).Msg("no change")
+		c.logger.Info().Int("managed", len(managed)).
+			Int("rechecked", rr.checked).Int("revived", rr.revived).Msg("no change")
 		return
 	}
 	if !c.allowShrink(&st, before, deleted, len(managed)) {
@@ -313,7 +314,12 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		c.logger.Error().Err(writeErr).Msg("write private.yaml failed")
 		return
 	}
-	c.logger.Info().Int("managed", len(managed)).Int("inline", inlineCount).Int("total", len(next)).Msg("private.yaml updated")
+	// rechecked/revived ride the terminal lines because nothing else reports
+	// them on a healthy cycle: rr.checked reaches a log only on the dark-cycle
+	// fault above, and without them the recheck population — the one that
+	// produces prunes — is invisible whenever it works.
+	c.logger.Info().Int("managed", len(managed)).Int("inline", inlineCount).Int("total", len(next)).
+		Int("rechecked", rr.checked).Int("revived", rr.revived).Msg("private.yaml updated")
 }
 
 // abortReason names why a cycle stopped early: its own budget (see cycleBudget)
@@ -367,7 +373,10 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 			pending = append(pending, s.URL)
 		}
 	}
-	relive, unknown := c.classifyAll(ctx, pending)
+	// nil recorder: these are existing managed sources, not candidates this
+	// cycle discovered, and their fate is already reported by checked/revived
+	// and the prune decision.
+	relive, unknown := c.classifyAll(ctx, pending, nil, "")
 	rr.unknown = unknown
 	rr.checked = len(pending)
 	rr.revived = len(relive)
@@ -610,7 +619,12 @@ func channelSlug(ch string) string {
 // past. Everything else — transport failure, transient status, oversized body,
 // or a 2xx carrying no node — is undetermined, because callers prune on the
 // absence of both verdicts.
-func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown map[string]bool) {
+//
+// Every URL that does not end up live is reported to rej, attributed to channel.
+// rej is nil for the recheck pass: those URLs are existing managed sources, not
+// candidates discovered this cycle, and folding them into the discovery summary
+// would mix two populations under one total.
+func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, channel string) (live, unknown map[string]bool) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
 	var mu sync.Mutex
@@ -625,19 +639,28 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown
 			cctx, cancel := context.WithTimeout(ctx, classifyTimeout)
 			defer cancel()
 			res, err := c.classifyFn(cctx, c.httpClient, fetch.SubscriptionURL(u))
+			// rej is not concurrency-safe; recording under the same mutex that
+			// guards the result maps is what makes the fan-out safe.
 			mu.Lock()
 			defer mu.Unlock()
-			var statusErr *classify.StatusError
-			switch {
-			case err != nil:
+			if err != nil {
+				var statusErr *classify.StatusError
 				if !errors.As(err, &statusErr) || !statusErr.Gone() {
 					// Transport failure, or a status that proves nothing about
 					// the subscription: the verdict stays undetermined.
 					unknown[u] = true
 				}
-			case res.Live():
+				if statusErr != nil {
+					rej.record(channel, u, rejectStatus, statusErr.Code, nil)
+				} else {
+					rej.record(channel, u, rejectFetch, 0, err)
+				}
+				return
+			}
+			switch res.Reason() {
+			case classify.ReasonLive:
 				live[u] = true
-			case !res.Expired:
+			case classify.ReasonNodeless:
 				// A 2xx carrying no proxy-scheme node is not proof of death.
 				// The parser counts only real node schemes (PP-07), so a
 				// captive portal, a Cloudflare interstitial, a panel login page
@@ -646,10 +669,13 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string) (live, unknown
 				// delivered as 403 or 503, is already undetermined. A panel
 				// whose pool is momentarily empty looks identical.
 				unknown[u] = true
+				rej.record(channel, u, rejectNodeless, 0, nil)
+			case classify.ReasonExpired:
+				// The only 2xx answer that proves the subscription is over,
+				// because the origin itself advertised the expiry. It joins
+				// neither set, so it prunes.
+				rej.record(channel, u, rejectExpired, 0, nil)
 			}
-			// The remaining case — fetched, not live, Expired — is the only 2xx
-			// answer that proves the subscription is over, because the origin
-			// itself advertised the expiry. It joins neither set, so it prunes.
 		}(u)
 	}
 	wg.Wait()
@@ -729,12 +755,23 @@ func pageCursor(page string) string {
 // the crawler's own client is unrestricted — a harvested literal-private-IP
 // source is one config.Load rejects, and channel content is third-party
 // controlled.
-func candidate(raw string) bool {
+//
+// A false verdict carries the gate that produced it, and the validator's own
+// error where there is one, so the caller can log a candidate's fate instead of
+// dropping it silently. The gates and their order are unchanged: which URLs pass
+// is exactly what it was.
+func candidate(raw string) (bool, rejectReason, error) {
 	u, err := url.Parse(raw)
-	if err != nil || isNoiseHost(u.Hostname()) {
-		return false
+	if err != nil {
+		return false, rejectInvalidURL, fmt.Errorf("parse candidate url: %w", err)
 	}
-	return fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)) == nil
+	if isNoiseHost(u.Hostname()) {
+		return false, rejectNoiseHost, nil
+	}
+	if err = fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)); err != nil {
+		return false, rejectInvalidURL, fmt.Errorf("validate candidate url: %w", err)
+	}
+	return true, "", nil
 }
 
 // isNoiseHost matches hosts that never serve subscriptions (Telegram itself and

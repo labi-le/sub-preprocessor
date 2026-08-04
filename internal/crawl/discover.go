@@ -62,6 +62,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 	visited := map[string]bool{}
 	discovered := 0
 	var cursors cursorStats
+	rej := newRejects(c.logger)
 
 	seeds := c.buildSeeds(st)
 	if len(seeds) == 0 {
@@ -92,13 +93,14 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 		}
 		visited[n.channel] = true
 
-		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors) {
+		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors, rej) {
 			if !visited[ch] {
 				queue = append(queue, scanNode{channel: ch, depth: n.depth + 1})
 			}
 		}
 	}
 	c.reportCursors(cursors)
+	rej.report(live)
 	return live, inline
 }
 
@@ -160,7 +162,7 @@ func (c *Crawler) reportCursors(cs cursorStats) {
 // scanChannel scrapes one channel, classifies its candidate URLs into live,
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string, cs *cursorStats) []string {
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string, cs *cursorStats, rej *rejects) []string {
 	pages, cursorLost := c.scrapeChannel(ctx, n.channel, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
@@ -172,8 +174,8 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 		return nil
 	}
 
-	cand := c.harvestPages(pages, inline)
-	found, _ := c.classifyAll(ctx, keys(cand))
+	cand := c.harvestPages(pages, inline, rej, n.channel)
+	found, _ := c.classifyAll(ctx, keys(cand), rej, n.channel)
 	for u := range found {
 		// First discoverer wins: BFS visits seeds before discovered channels,
 		// so attribution prefers the operator-configured origin.
@@ -199,13 +201,21 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 // pages and, in the same pass, accumulates its inline nodes. The inline
 // accumulator is cycle-wide and capped: one prolific channel must not spend the
 // whole budget, and a single page can overshoot the cap in one append.
-func (c *Crawler) harvestPages(pages []string, inline *[]string) map[string]struct{} {
+//
+// Every URL the candidate gates turn down is recorded against channel, so a link
+// dropped before it was ever fetched is as visible as one that failed to
+// classify. rej dedupes, which matters here: the same link is repeated across
+// posts and pages.
+func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
 	for _, p := range pages {
 		for _, raw := range extractURLs(p) {
-			if candidate(raw) {
-				cand[raw] = struct{}{}
+			ok, reason, err := candidate(raw)
+			if !ok {
+				rej.record(channel, raw, reason, 0, err)
+				continue
 			}
+			cand[raw] = struct{}{}
 		}
 		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
 			*inline = append(*inline, extractInlineNodes(p)...)

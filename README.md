@@ -359,6 +359,17 @@ compose sidecar) that discovers new sources automatically:
   overlay the service merges into `subscriptions.sources` and **hot-reloads**
   on change.
 
+Every candidate that fails a gate or does not classify live gets one log line
+saying which channel it came from, which `tg-<slug>-<sha6>` source it would have
+been, and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
+`fetch-failed`, `nodeless-2xx` or `expired` — followed by one per-cycle summary
+counting each reason. These lines carry the host and nothing more of the URL:
+the credential lives in the query on some panels (`?payload=…`) and in the path
+on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
+a query at all), so only the `sha6` identifies which subscription it was. They
+are capped at 200 per cycle and the cycle reports how many it withheld; the
+summary counts stay complete regardless.
+
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
 for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
