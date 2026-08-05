@@ -359,6 +359,36 @@ compose sidecar) that discovers new sources automatically:
   overlay the service merges into `subscriptions.sources` and **hot-reloads**
   on change.
 
+Every candidate that fails a gate or does not classify live gets one log line
+saying which channel it came from, which `tg-<slug>-<sha6>` source it would have
+been, and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
+`fetch-failed`, `nodeless-2xx` or `expired` — followed by one per-cycle summary
+counting each reason. These lines carry the host and nothing more of the URL:
+the credential lives in the query on some panels (`?payload=…`) and in the path
+on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
+a query at all), so only the `sha6` identifies which subscription it was. They
+are capped at 200 per cycle and the cycle reports how many it withheld; the
+summary counts stay complete regardless. Dedupe is what keeps them complete, and
+it is bounded in turn: past 20,000 distinct rejected URLs in one cycle the
+summary stops tracking and reports the overflow as `untracked=<n>` instead.
+`untracked` is deliberately *not* folded into the total — past the bound a repeat
+cannot be told from a new candidate — so the per-reason counts still sum exactly
+to `rejected`, and `untracked` is the rejections beside them that went
+unaccounted for.
+
+A line's `error` field is guarded by two rules, and each has its own replacement
+text. The candidate's URL is substituted out of the message, and if any URL
+survives that (a refused redirect names a second one) the whole message is
+dropped for `redacted: error names the candidate url`. An error naming only the
+path or query slips that rule — no `://` is left to see — so a second check
+replaces it with `redacted: error names the candidate url path or query`. That
+second one is deliberately over-eager and matches substrings, so **read it as a
+false positive first**: a candidate whose path is `/o` matches the `i/o` in
+`dial tcp: i/o timeout`, and `net/http: TLS handshake timeout` has a slash too,
+so the commonest failures can lose their diagnosis to a short path. Only when
+the candidate's own path and query cannot collide with the expected message does
+it mean what it says.
+
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
 for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
