@@ -178,8 +178,9 @@ filters (`gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) on the survivors. Only
 then are the published names built — once, from what the probes learned, with
 the egress each survivor reports about itself through `cdn-cgi/trace` when the
 `annotate` chain names the `cloudflare` provider. The result is
-swapped in atomically; the last good list is kept if a cycle fails (`503` only
-until the first cycle completes).
+swapped in atomically; the last good list is kept if a cycle fails, and with
+`subscriptions.snapshot_path` set it is also written to disk and reloaded at
+startup, so `503` is left for a genuinely cold start rather than every restart.
 
 ## Important current design decisions
 
@@ -248,6 +249,7 @@ Important keys:
 - `subscriptions.interval` and every `subscriptions.check.*` param are validated on every load, even with no sources configured (they all arrive from the overlays here, and a list-gated check let a bad value boot clean and then fail every later reload)
 - `subscriptions.sources[].name` + `url` *or* inline `body` (base64/raw node URIs; used by the crawler's `tg-inline` harvest)
 - `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `expected_status`, `concurrency`, `source_timeout`) — URL-test (latency) prober params ONLY; through-node filters and exclusions live in the top-level `filters` list
+- `subscriptions.snapshot_path` — where the worker persists the list it just published, reloaded at startup so `/stable.txt` serves the last good list instead of `503` while the first cycle runs (measured 58 minutes on a 68266-node pool). Empty disables. The shipped value is `/tmp/sub-preprocessor-stable.json`: `/tmp` is tmpfs here, so staleness is bounded by host uptime instead of surviving the reboot an operator made to start clean. There is no TTL, deliberately — the in-memory rule already keeps the last good list through failing cycles, and the age stays visible in `X-Stable-Stats updated=`. It takes no validator beyond the strict decoder, exactly like `geoblock.db_path`. **Startup-only:** it is in `config.StoresChanged` and EXCLUDED from `config.SubscriptionsChanged`, so a reload warns instead of re-applying the worker — the only key in the block that behaves that way
 - `fetch.timeout` — per-subscription fetch deadline (default 3s)
 - `log.level` — zerolog level, hot-reloadable
 
@@ -265,7 +267,7 @@ Important keys:
 - `internal/rewrite` — node name/fragment rewrite (`[GEO:XX]`, vmess `ps` rewrite)
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
-- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), the post-filter `cdn-cgi/trace` egress measurement, one-shot name annotation at publication, checker loop, holder
+- `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), the post-filter `cdn-cgi/trace` egress measurement, one-shot name annotation at publication, checker loop, holder, and the JSON snapshot (`snapshot.go`) that carries the published list across a restart
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
@@ -279,7 +281,7 @@ Important keys:
   - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. (Folding exclusions into `All()` used to drop every unplaceable IP the moment one country was excluded.) Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
 - `GET /` no longer publishes a portless `http`/`https`/`socks`/`socks5`/`socks5h` line as a node: a bare `https://t.me/somechannel` in a source body used to be emitted as a node and now counts in `Stats.Unsupported` (`unsupported=` in `X-Preprocessor-Stats`) instead. A portful one (`https://example.com:8443`) is still a node
 - `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 33.4k-node aggregator source outright
-- `GET /stable.txt` serves the worker's current list; `503` until the first cycle completes. Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
+- `GET /stable.txt` serves the worker's current list; `503` until there is one — the first completed cycle, or the snapshot restored at startup when `subscriptions.snapshot_path` is set (a restored list keeps its original `updated=`, so its age shows). Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
 - `/` stats are returned in `X-Preprocessor-Stats`
 

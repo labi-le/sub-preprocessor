@@ -170,6 +170,13 @@ groups:
     - "BY"
 subscriptions:
   interval: 1h
+  # Where the last published list is kept so a restart serves it immediately;
+  # without it /stable.txt answers 503 for a whole cycle (measured 58 minutes
+  # on a 68266-node pool). /tmp is the deliberate choice: it is tmpfs here, so
+  # the file dies with the host and staleness is bounded by host uptime instead
+  # of surviving a reboot the operator made precisely to start clean. Empty
+  # disables. Changing it needs a restart, not a reload.
+  snapshot_path: /tmp/sub-preprocessor-stable.json
   check:
     # URL-test (latency) prober params only; through-node filters live in `filters`.
     rounds: 2

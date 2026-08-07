@@ -9,13 +9,15 @@ import (
 	"time"
 )
 
-// Stats describes one completed check cycle.
+// Stats describes one completed check cycle. The json tags are the on-disk
+// snapshot format (see snapshot.go); renaming one changes a file older
+// processes wrote.
 type Stats struct {
-	SourcesOK    int
-	SourcesTotal int
-	Merged       int
-	Tested       int
-	Kept         int
+	SourcesOK    int `json:"sources_ok"`
+	SourcesTotal int `json:"sources_total"`
+	Merged       int `json:"merged"`
+	Tested       int `json:"tested"`
+	Kept         int `json:"kept"`
 }
 
 // Snapshot is an immutable result of one successful check cycle.

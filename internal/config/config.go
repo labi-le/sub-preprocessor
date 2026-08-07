@@ -497,6 +497,12 @@ type SubscriptionsConfig struct {
 	Interval time.Duration        `yaml:"interval"`
 	Check    CheckConfig          `yaml:"check"`
 	Sources  []SubscriptionSource `yaml:"sources"`
+	// SnapshotPath is where the worker persists the list it just published, so
+	// a restart serves the last good one instead of 503 until the first cycle
+	// finishes -- measured at 58 minutes on a 68266-node pool. Empty disables
+	// persistence. Read once at startup, by app.Run and by the checker the
+	// controller builds; StoresChanged is what keeps a reload off it.
+	SnapshotPath string `yaml:"snapshot_path"`
 }
 
 // CheckConfig holds the URL-test (latency) prober params only. The through-node
@@ -1407,8 +1413,16 @@ func (c *CheckConfig) validate() error {
 	return nil
 }
 
+// SubscriptionsChanged reports whether anything the RUNNING worker reads from
+// the subscriptions block differs. snapshot_path is excluded because the worker
+// never re-reads it: the checker is handed the path when it is constructed and
+// a reload only swaps its CheckerSpec, so re-applying over a snapshot_path edit
+// would claim a reach the value does not have. StoresChanged warns instead.
 func SubscriptionsChanged(old, newCfg Config) bool {
-	return !reflect.DeepEqual(old.Subscriptions, newCfg.Subscriptions)
+	o, n := old.Subscriptions, newCfg.Subscriptions
+	o.SnapshotPath, n.SnapshotPath = "", ""
+
+	return !reflect.DeepEqual(o, n)
 }
 
 func GroupsChanged(old, newCfg Config) bool {
@@ -1445,11 +1459,13 @@ func ProberChanged(old, newCfg Config) bool {
 }
 
 // StoresChanged reports whether a setting baked into the stores built once at
-// startup changed: geoblock.db_path / geoblock.ttl (SQLite blocklist) or
-// deadcache.ttl. Such a change requires a restart to take effect.
+// startup changed: geoblock.db_path / geoblock.ttl (SQLite blocklist),
+// deadcache.ttl, or subscriptions.snapshot_path. Such a change requires a
+// restart to take effect.
 func StoresChanged(old, newCfg Config) bool {
 	return old.GeoBlock.DBPath != newCfg.GeoBlock.DBPath ||
 		old.GeoBlock.TTL != newCfg.GeoBlock.TTL ||
+		old.Subscriptions.SnapshotPath != newCfg.Subscriptions.SnapshotPath ||
 		!reflect.DeepEqual(old.DeadCache.TTL, newCfg.DeadCache.TTL)
 }
 

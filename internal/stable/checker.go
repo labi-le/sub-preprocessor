@@ -84,11 +84,15 @@ type Checker struct {
 	filterer func() Filterer
 	// store is the same Blocklist the apiFilters write through. The checker
 	// holds it only to prune it once per cycle; it never writes to it.
-	store    Blocklist
-	dead     DeadCache
-	holder   *Holder
-	logger   zerolog.Logger
-	reporter Reporter
+	store  Blocklist
+	dead   DeadCache
+	holder *Holder
+	// snapshotPath is where each publication is persisted so a restart serves
+	// the last good list. Fixed for the process lifetime like the fields above
+	// it: a reload swaps the spec, never this.
+	snapshotPath string
+	logger       zerolog.Logger
+	reporter     Reporter
 }
 
 func NewChecker(
@@ -97,17 +101,19 @@ func NewChecker(
 	store Blocklist,
 	dead DeadCache,
 	holder *Holder,
+	snapshotPath string,
 	logger zerolog.Logger,
 	reporter Reporter,
 ) *Checker {
 	c := &Checker{
-		reload:   make(chan struct{}, 1),
-		filterer: filterer,
-		store:    store,
-		dead:     dead,
-		holder:   holder,
-		logger:   logger,
-		reporter: reporter,
+		reload:       make(chan struct{}, 1),
+		filterer:     filterer,
+		store:        store,
+		dead:         dead,
+		holder:       holder,
+		snapshotPath: snapshotPath,
+		logger:       logger,
+		reporter:     reporter,
 	}
 	c.spec.Store(&spec)
 
@@ -211,7 +217,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	payload := BuildPayload(ctx, ann, survivors)
 	trace.Moved = movedCount(ctx, ann, survivors)
 
-	c.holder.Store(&Snapshot{
+	snap := &Snapshot{
 		Payload:   payload,
 		UpdatedAt: time.Now(),
 		Stats: Stats{
@@ -221,7 +227,15 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 			Tested:       len(probe),
 			Kept:         len(survivors),
 		},
-	})
+	}
+	c.holder.Store(snap)
+	// After the in-memory publication and never gating it: a snapshot that
+	// cannot be written costs the NEXT restart its head start, and nothing at
+	// all in this cycle, so it is a warning rather than an error return.
+	if saveErr := SaveSnapshot(c.snapshotPath, snap); saveErr != nil {
+		c.logger.Warn().Err(saveErr).Str("path", c.snapshotPath).
+			Msg("persisting the stable snapshot failed; the list is published in memory only")
+	}
 	c.logger.Info().
 		Int("sources_ok", len(bodies)).
 		Int("merged", len(entries)).

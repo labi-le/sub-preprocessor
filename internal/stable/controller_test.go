@@ -78,7 +78,7 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 	holder := NewHolder()
 	ctl := NewController(t.Context(), holder,
 		func() Filterer { return emptyFilterer{} },
-		nil, nil, zerolog.Nop(), nil)
+		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
 
 	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
@@ -112,7 +112,7 @@ func TestApplyCarriesCloudflareTimeoutToRunningWorker(t *testing.T) {
 
 	ctl := NewController(t.Context(), NewHolder(),
 		func() Filterer { return emptyFilterer{} },
-		nil, nil, zerolog.Nop(), nil)
+		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
 
 	cfg := testControllerConfig("alpha")
@@ -152,7 +152,7 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 	holder := NewHolder()
 	ctl := NewController(t.Context(), holder,
 		func() Filterer { return emptyFilterer{} },
-		nil, nil, zerolog.New(&logBuf), nil)
+		nil, nil, "", zerolog.New(&logBuf), nil)
 	defer ctl.Stop()
 
 	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
@@ -178,7 +178,7 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 
 	idle := NewController(t.Context(), holder,
 		func() Filterer { return emptyFilterer{} },
-		nil, nil, zerolog.Nop(), nil)
+		nil, nil, "", zerolog.Nop(), nil)
 	if err := idle.Apply(config.Config{}); err != nil {
 		t.Fatalf("Apply with no sources and no worker: %v", err)
 	}

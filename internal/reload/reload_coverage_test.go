@@ -118,6 +118,10 @@ var reloadClassification = map[string]string{
 	"subscriptions.check.expected_status": liveWorker,
 	"subscriptions.check.concurrency":     liveWorker,
 	"subscriptions.check.source_timeout":  liveWorker,
+	// The one subscriptions key that is NOT live-worker: the checker is handed
+	// it at construction and never re-reads it, so config.SubscriptionsChanged
+	// excludes it and config.StoresChanged warns instead.
+	"subscriptions.snapshot_path": restartWarned,
 
 	"geoblock.db_path":             restartWarned,
 	"geoblock.ttl":                 restartWarned,
@@ -195,7 +199,8 @@ func coverageBase() config.Config {
 				ExpectedStatus: "204", MaxFail: 1, MaxAvgMs: 1000,
 				SourceTimeout: 2 * time.Minute, Concurrency: 16,
 			},
-			Sources: []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example.com/s", Body: "seed"}},
+			Sources:      []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example.com/s", Body: "seed"}},
+			SnapshotPath: "/var/lib/stable.json",
 		},
 		GeoBlock: config.GeoBlockConfig{
 			DBPath:  "/var/lib/geoblock.db",
@@ -299,6 +304,9 @@ var keyMutators = map[string]func(*config.Config){
 	"subscriptions.check.expected_status": func(c *config.Config) { c.Subscriptions.Check.ExpectedStatus = "200" },
 	"subscriptions.check.concurrency":     func(c *config.Config) { c.Subscriptions.Check.Concurrency = 8 },
 	"subscriptions.check.source_timeout":  func(c *config.Config) { c.Subscriptions.Check.SourceTimeout = 5 * time.Minute },
+	"subscriptions.snapshot_path": func(c *config.Config) {
+		c.Subscriptions.SnapshotPath = "/var/lib/other.json"
+	},
 
 	"geoblock.db_path":             func(c *config.Config) { c.GeoBlock.DBPath = "/var/lib/other.db" },
 	"geoblock.ttl":                 func(c *config.Config) { c.GeoBlock.TTL = time.Hour },
@@ -501,6 +509,16 @@ var reloadGateFixtures = []struct {
 	{name: "listen", yaml: subsYAML + "server:\n  listen: :9999\n", warn: true},
 	{name: "metrics_listen", yaml: subsYAML + "server:\n  metrics_listen: :9991\n", warn: true},
 	{name: "stores", yaml: subsYAML + "deadcache:\n  ttl: 4h\n", warn: true},
+	// snapshot_path is the trap in the other direction: it sits INSIDE the
+	// subscriptions block, every other key of which re-applies the worker. Only
+	// a real reload proves the exclusion in SubscriptionsChanged holds, so the
+	// edit earns a restart warning and leaves the running worker alone.
+	{
+		name: "snapshot_path",
+		yaml: baseGeofeedYAML + "subscriptions:\n  snapshot_path: /tmp/snap.json\n" +
+			"  sources:\n    - name: alpha\n      url: https://example.com/sub.txt\n",
+		warn: true,
+	},
 	// The negative case: an edit no gate covers must neither re-apply the worker
 	// (or every reload would) nor claim a restart is needed.
 	{name: "unrelated", yaml: subsYAML + "resolver:\n  timeout: 10s\n"},

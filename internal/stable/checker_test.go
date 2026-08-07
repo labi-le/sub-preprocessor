@@ -1,9 +1,12 @@
 package stable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +90,7 @@ func newTestChecker(filterer stable.Filterer, prober stable.Prober, holder *stab
 		nil,
 		nil,
 		holder,
+		"",
 		zerolog.Nop(),
 		nil,
 	)
@@ -235,6 +239,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 		func() stable.Filterer { return fakeFilterer{} },
 		nil,
 		nil,
+		"",
 		zerolog.Nop(),
 		nil,
 	)
@@ -283,6 +288,7 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 		func() stable.Filterer { return fakeFilterer{} },
 		nil,
 		nil,
+		"",
 		zerolog.Nop(),
 		nil,
 	)
@@ -333,7 +339,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	holder := stable.NewHolder()
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, "", zerolog.Nop(), nil,
 	)
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
@@ -389,7 +395,7 @@ func TestCheckerPrunesBlocklistEveryCycle(t *testing.T) {
 	store := &fakeBlocklist{}
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, store, nil, stable.NewHolder(), zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, store, nil, stable.NewHolder(), "", zerolog.Nop(), nil,
 	)
 
 	for cycle := 1; cycle <= 2; cycle++ {
@@ -434,7 +440,7 @@ func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, "", zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(context.Background())
 	if !errors.Is(err, context.Canceled) {
@@ -468,7 +474,7 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, nil, dead, holder, zerolog.Nop(), nil,
+		func() stable.Filterer { return filterer }, nil, dead, holder, "", zerolog.Nop(), nil,
 	)
 	err := c.RunOnce(ctx)
 	if !errors.Is(err, context.Canceled) {
@@ -551,7 +557,7 @@ func TestCheckerReportsPublishedCycle(t *testing.T) {
 	rep := &fakeReporter{}
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
-		func() stable.Filterer { return filterer }, nil, nil, holder, zerolog.Nop(), rep,
+		func() stable.Filterer { return filterer }, nil, nil, holder, "", zerolog.Nop(), rep,
 	)
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -670,7 +676,7 @@ func TestReconfigureAppliesIntervalWhileIdle(t *testing.T) {
 	spec := testCheckerSpec(prober)
 	spec.Interval = time.Hour
 	c := stable.NewChecker(spec, func() stable.Filterer { return filterer },
-		nil, nil, stable.NewHolder(), zerolog.Nop(), nil)
+		nil, nil, stable.NewHolder(), "", zerolog.Nop(), nil)
 
 	go c.Run(t.Context()) // cancelled on test cleanup, which stops the loop
 
@@ -736,7 +742,7 @@ func TestCheckerAnnotatesBeforeCountingCountries(t *testing.T) {
 	spec.Trace = true
 	holder := stable.NewHolder()
 	rep := &fakeReporter{}
-	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, holder, zerolog.Nop(), rep)
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, holder, "", zerolog.Nop(), rep)
 
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -787,7 +793,7 @@ func TestCheckerTraceAgreeingWithOfflineChainIsNotMoved(t *testing.T) {
 	spec := testCheckerSpec(prober)
 	spec.Trace = true
 	rep := &fakeReporter{}
-	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), zerolog.Nop(), rep)
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep)
 
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -817,7 +823,7 @@ func TestCheckerTraceSkippedWithoutProberSupport(t *testing.T) {
 	spec := testCheckerSpec(&fakeProber{res: map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}}})
 	spec.Trace = true
 	rep := &fakeReporter{}
-	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), zerolog.Nop(), rep)
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep)
 
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -827,5 +833,93 @@ func TestCheckerTraceSkippedWithoutProberSupport(t *testing.T) {
 	}
 	if rep.last.Trace != (stable.TraceReport{}) {
 		t.Errorf("Trace = %+v, want the zero report", rep.last.Trace)
+	}
+}
+
+// publishingChecker is the two-source cycle every test below publishes from,
+// wired to snapshotPath. Its outcome is fixed so the assertions can be about
+// persistence alone.
+func publishingChecker(snapshotPath string, logger zerolog.Logger, holder *stable.Holder) *stable.Checker {
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#orig\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#z\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 300},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}}
+
+	return stable.NewChecker(
+		testCheckerSpec(prober), func() stable.Filterer { return filterer },
+		nil, nil, holder, snapshotPath, logger, nil,
+	)
+}
+
+// TestCheckerPersistsPublishedSnapshot: the cycle that publishes must also
+// leave the list on disk, or the next restart serves 503 for a whole cycle.
+func TestCheckerPersistsPublishedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "stable.json")
+	holder := stable.NewHolder()
+
+	if err := publishingChecker(path, zerolog.Nop(), holder).RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	published := holder.Load()
+	if published == nil {
+		t.Fatal("the cycle published nothing, so this test proves nothing about persistence")
+	}
+	restored := stable.LoadSnapshot(path, zerolog.Nop())
+	if restored == nil {
+		t.Fatal("the published cycle wrote no snapshot; a restart would answer 503 until the next cycle")
+	}
+	if string(restored.Payload) != string(published.Payload) {
+		t.Errorf("persisted payload:\ngot  %q\nwant %q", restored.Payload, published.Payload)
+	}
+	if restored.Stats != published.Stats {
+		t.Errorf("persisted stats: got %+v want %+v", restored.Stats, published.Stats)
+	}
+	if !restored.UpdatedAt.Equal(published.UpdatedAt) {
+		t.Errorf("persisted updated_at: got %v want %v", restored.UpdatedAt, published.UpdatedAt)
+	}
+}
+
+// TestCheckerSurvivesSnapshotWriteFailure: persistence is a side effect, never
+// a gate. An unwritable path costs the next restart its head start and must
+// leave the cycle successful and the in-memory publication untouched.
+func TestCheckerSurvivesSnapshotWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	// A directory component that is not a directory: creating the sibling temp
+	// file fails with ENOTDIR on every attempt.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	holder := stable.NewHolder()
+
+	err := publishingChecker(filepath.Join(blocker, "stable.json"), zerolog.New(&logBuf), holder).
+		RunOnce(context.Background())
+
+	if err != nil {
+		t.Fatalf("a snapshot that cannot be written must not fail the cycle: %v", err)
+	}
+	snap := holder.Load()
+	if snap == nil {
+		t.Fatal("the in-memory publication must survive a failed snapshot write")
+	}
+	want := "vless://u@2.2.2.2:443#beta-001\nvless://u@1.1.1.1:443#alpha-001\n"
+	if got := string(snap.Payload); got != want {
+		t.Errorf("published payload:\ngot  %q\nwant %q", got, want)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, `"level":"warn"`) || !strings.Contains(logs, "persisting the stable snapshot failed") {
+		t.Errorf("a failed snapshot write must warn, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "stable list updated") {
+		t.Errorf("the cycle must still report a published list, got:\n%s", logs)
 	}
 }

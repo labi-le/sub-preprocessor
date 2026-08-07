@@ -336,7 +336,7 @@ func TestFilterMieruSurvivorEntersSubset(t *testing.T) {
 	c := NewChecker(CheckerSpec{
 		Prober:  prober,
 		Filters: []NodeFilter{&apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}},
-	}, nil, nil, nil, nil, zerolog.Nop(), nil)
+	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
 	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
@@ -405,7 +405,7 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 			&apiFilter{filterName: "test", check: api, logger: zerolog.Nop()},
 			&bandwidthFilter{minMbps: 10, check: bw, logger: zerolog.Nop()},
 		},
-	}, nil, nil, nil, nil, zerolog.Nop(), nil)
+	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
 	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
