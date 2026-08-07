@@ -15,18 +15,6 @@ import (
 	"domains.lst/sub-preprocessor/internal/stable"
 )
 
-// restoreInto mirrors what app.Run does with the loaded snapshot, so these
-// tests measure the composition that actually decides whether /stable.txt
-// answers 503 rather than LoadSnapshot's return value alone.
-func restoreInto(path string, logger zerolog.Logger) *stable.Holder {
-	h := stable.NewHolder()
-	if snap := stable.LoadSnapshot(path, logger); snap != nil {
-		h.Store(snap)
-	}
-
-	return h
-}
-
 func TestSnapshotRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -40,7 +28,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("SaveSnapshot: %v", err)
 	}
 
-	got := restoreInto(path, zerolog.Nop()).Load()
+	got := stable.LoadSnapshot(path, zerolog.Nop())
 	if got == nil {
 		t.Fatal("the saved snapshot did not come back; /stable.txt would still answer 503 after a restart")
 	}
@@ -124,10 +112,10 @@ func TestLoadSnapshotRejectedInputs(t *testing.T) {
 			}
 			var logBuf bytes.Buffer
 
-			h := restoreInto(path, zerolog.New(&logBuf))
+			got := stable.LoadSnapshot(path, zerolog.New(&logBuf))
 
-			if h.Load() != nil {
-				t.Error("holder must stay empty so /stable.txt answers 503 exactly as before")
+			if got != nil {
+				t.Error("a rejected snapshot must restore nothing; app.restoreStableList then leaves the holder empty")
 			}
 			logs := logBuf.String()
 			if !strings.Contains(logs, `"level":"warn"`) {
@@ -150,7 +138,7 @@ func TestSnapshotDisabled(t *testing.T) {
 	if err := stable.SaveSnapshot("", &stable.Snapshot{Payload: []byte("x")}); err != nil {
 		t.Fatalf("SaveSnapshot with persistence off: %v", err)
 	}
-	if h := restoreInto("", zerolog.New(&logBuf)); h.Load() != nil {
+	if stable.LoadSnapshot("", zerolog.New(&logBuf)) != nil {
 		t.Error("an empty path must restore nothing")
 	}
 	if logBuf.Len() != 0 {
@@ -200,7 +188,7 @@ func TestSaveSnapshotReplacesAtomically(t *testing.T) {
 	if !bytes.Equal(held, before) {
 		t.Errorf("a reader open across the save saw %d bytes of changed content; the replace is not a rename", len(held))
 	}
-	if got := restoreInto(path, zerolog.Nop()).Load(); got == nil || !bytes.Equal(got.Payload, second.Payload) {
+	if got := stable.LoadSnapshot(path, zerolog.Nop()); got == nil || !bytes.Equal(got.Payload, second.Payload) {
 		t.Error("the new snapshot is not what the path resolves to after the save")
 	}
 	assertOnlyFile(t, dir, "stable.json")
@@ -230,7 +218,7 @@ func TestSaveSnapshotFailureKeepsPreviousFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("a snapshot that cannot be written must report the failure, not swallow it")
 	}
-	got := restoreInto(path, zerolog.Nop()).Load()
+	got := stable.LoadSnapshot(path, zerolog.Nop())
 	if got == nil || !bytes.Equal(got.Payload, good.Payload) {
 		t.Errorf("the failed write destroyed the previous snapshot: %+v", got)
 	}
