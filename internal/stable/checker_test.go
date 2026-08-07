@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -836,6 +837,27 @@ func TestCheckerTraceSkippedWithoutProberSupport(t *testing.T) {
 	}
 }
 
+// lockedBuffer collects log output from the cycle's concurrent per-source
+// goroutines; bytes.Buffer alone is not safe for that and -race says so.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
 // publishingChecker is the two-source cycle every test below publishes from,
 // wired to snapshotPath. Its outcome is fixed so the assertions can be about
 // persistence alone.
@@ -898,7 +920,7 @@ func TestCheckerSurvivesSnapshotWriteFailure(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var logBuf bytes.Buffer
+	var logBuf lockedBuffer
 	holder := stable.NewHolder()
 
 	err := publishingChecker(filepath.Join(blocker, "stable.json"), zerolog.New(&logBuf), holder).
