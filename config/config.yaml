@@ -172,11 +172,19 @@ subscriptions:
   interval: 1h
   # Where the last published list is kept so a restart serves it immediately;
   # without it /stable.txt answers 503 for a whole cycle (measured 58 minutes
-  # on a 68266-node pool). /tmp is the deliberate choice: it is tmpfs here, so
-  # the file dies with the host and staleness is bounded by host uptime instead
-  # of surviving a reboot the operator made precisely to start clean. Empty
-  # disables. Changing it needs a restart, not a reload.
-  snapshot_path: /tmp/sub-preprocessor-stable.json
+  # on a 68266-node pool). It sits in the /config mount because that is the
+  # only writable directory outliving the container that this service already
+  # owns as uid 1000 -- .geoblock.db and .crawler-state.json are its
+  # neighbours -- so persistence adds no volume, no host-side provisioning and
+  # no new way to fail. Anywhere under /tmp would instead land in the
+  # container's own layer, which `docker compose up -d` recreates after a
+  # build: it would survive the restarts that never hurt and never the
+  # redeploy that caused those 58 minutes. So the file outlives a redeploy AND
+  # a host reboot, the same guarantee those two neighbours already have; a
+  # restored list keeps its original timestamp, leaving its age visible in
+  # X-Stable-Stats updated= instead of reset by the restart. Empty disables.
+  # Changing it needs a restart, not a reload.
+  snapshot_path: /config/.stable-snapshot.json
   check:
     # URL-test (latency) prober params only; through-node filters live in `filters`.
     rounds: 2

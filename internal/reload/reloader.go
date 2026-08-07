@@ -142,7 +142,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	if config.StoresChanged(r.currentCfg, newCfg) {
 		r.logger.Warn().
-			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl change requires restart; stores are built once at startup")
+			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl/subscriptions.snapshot_path change requires restart; stores are built once at startup")
 	}
 
 	r.holder.Store(server.NewSnapshot(newProc, newProc, newCfg.Groups))
