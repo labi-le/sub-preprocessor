@@ -482,6 +482,242 @@
       ]
     },
     {
+      "id": 16,
+      "type": "stat",
+      "title": "Gemini gate: is it verifying?",
+      "description": "Whether the gemini gate ran at all last cycle. OFF means it is configured as a filter but has no usable API key, so it checked NOTHING and passed every survivor through unverified — on the two filter panels above that gate then looks like one that simply found nobody to drop, which is the failure this panel exists to expose. No data does NOT mean “not configured” on its own — it has four causes: nothing scraped yet, no cycle published yet, no gemini filter in the filters list, or one configured that never reached its check (the prober has no Gemini support and buildNodeFilters skipped it with only a WARN, or ParseProxies failed and the whole through-node chain was skipped, publishing every survivor UNFILTERED). Only the first two are benign. The gate's verdict is invisible without a working credential: the API answers caller identity, then key validity, and only then the location precondition this gate reads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 20
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NOT RUNNING",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OFF — no usable key",
+                  "index": 0
+                },
+                "1": {
+                  "text": "VERIFYING",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "NOT RUNNING",
+                  "index": 2
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_enabled"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Gemini gate: share it could not verify",
+      "description": "Of the Gemini API responses the gate classified last cycle, the share that told it nothing about the egress location — the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID: a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified, so this is gate health, not a drop rate. The denominator is the gate's own classified-response count, not stable_filter_in_nodes: only a proxy that ANSWERED reaches the classifier, so a proxy that never answered is in neither term — and it reaches reason=\"unreachable\" on the drops panel only when EVERY proxy of its node was unreachable, since that reason is counted per surviving NODE off an outcome already folded best-of-ports: one live port keeps the node and its dead siblings are counted nowhere. Empty when the gate classified nothing — read the panel to the left for why.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 20
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "noValue": "gate classified nothing",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.001
+              },
+              {
+                "color": "red",
+                "value": 0.02
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_unverified_checks / (stable_gemini_gate_checks > 0)"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Gemini gate: verified vs unverified (the unverified are all KEPT)",
+      "description": "The gate's classified responses split by whether a location verdict came back. The unverified series is never a drop — those nodes are published exactly like one the gate cleared, which is why it cannot ride the drops panel above. The verified series is NOT all kept: a verified response carrying the geo-block marker drops its node, and that one does show up above as reason=\"blocked\". The two series sum to stable_gemini_gate_checks. One response per proxy that ANSWERED, so a mierus:// node contributes one per answering port — not one per configured port, and not one per node.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unverified (kept, gate learned nothing)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verified (a location verdict came back)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_checks - stable_gemini_gate_unverified_checks",
+          "legendFormat": "verified (a location verdict came back)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_unverified_checks",
+          "legendFormat": "unverified (kept, gate learned nothing)"
+        }
+      ]
+    },
+    {
       "id": 15,
       "type": "timeseries",
       "title": "cloudflare egress (annotation, not a gate)",
@@ -494,7 +730,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -564,7 +800,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -645,7 +881,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -741,7 +977,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -812,7 +1048,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -862,7 +1098,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
@@ -914,7 +1150,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {

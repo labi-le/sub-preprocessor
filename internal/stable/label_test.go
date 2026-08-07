@@ -338,7 +338,7 @@ func TestFilterMieruSurvivorEntersSubset(t *testing.T) {
 		Filters: []NodeFilter{&apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}},
 	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
-	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
+	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
 	if len(checked) != 2 {
 		t.Fatalf("check saw %v, want one proxy per survivor (the mieru node must reach the subset)", checked)
@@ -407,7 +407,7 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 		},
 	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
-	kept, reports, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
+	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors)
 
 	if len(subset) != 2 || !strings.Contains(subset[len(subset)-1], deadPort) {
 		t.Fatalf("filter subset was %v, want both ports with the dead one last", subset)

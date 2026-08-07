@@ -28,10 +28,13 @@ type NodeFilter interface {
 	apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) (kept []Survivor, rep FilterReport)
 }
 
-// geminiChecker is the through-node Gemini capability of a Prober.
+// geminiChecker is the through-node Gemini capability of a Prober. Unlike its
+// siblings the check also returns an account of itself: the gate's verdict is
+// invisible without a working credential, so how much of it was actually
+// obtained is a number the cycle has to publish (see GeminiReport).
 type geminiChecker interface {
 	GeminiEnabled() bool
-	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) (map[string]APIOutcome, GeminiReport)
 }
 
 // claudeChecker is the through-node Anthropic capability of a Prober.
@@ -144,6 +147,59 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	return kept, rep
 }
 
+// geminiFilter is the gemini gate: an apiFilter plus the account of how much
+// of that gate's verdict the cycle actually obtained. It exists as its own
+// type for two reasons a shared field on apiFilter could not serve.
+//
+// The concept is gemini's alone. claude and chatgpt geo-block BEFORE
+// authentication and tidal's verdict is a bare status code, so none of them
+// can be answered ahead of their own verdict; a field on apiFilter would
+// publish a permanently-zero series for each of them, and a zero reads as
+// "measured, fine" — the exact misreading this metric exists to remove.
+//
+// And the DISABLED state has to survive to the report. apiFilter.apply returns
+// before it calls check when enabled() is false, so nothing the check produces
+// can mark that state; the reset here is what does, and it also stops last
+// cycle's numbers being republished when this one never reached the check.
+type geminiFilter struct {
+	apiFilter
+
+	gemini geminiChecker
+	rep    GeminiReport
+}
+
+func newGeminiFilter(gc geminiChecker, store Blocklist, logger zerolog.Logger) *geminiFilter {
+	f := &geminiFilter{gemini: gc}
+	f.apiFilter = apiFilter{
+		filterName: geminiFilterName,
+		enabled:    gc.GeminiEnabled,
+		check:      f.checkAndAccount,
+		store:      store,
+		logger:     logger,
+	}
+	return f
+}
+
+func (f *geminiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
+	f.rep = GeminiReport{State: GeminiGateSkipped}
+	return f.apiFilter.apply(ctx, survivors, proxies)
+}
+
+// verification reports what the gate managed to verify in the cycle just
+// applied. Read once per cycle by filterAndMeasureEgress, on the same
+// goroutine that called apply.
+func (f *geminiFilter) verification() GeminiReport {
+	return f.rep
+}
+
+// checkAndAccount is the apiFilter check hook: it runs the gate and keeps the
+// gate's own account of itself, which apiFilter's map-only return cannot carry.
+func (f *geminiFilter) checkAndAccount(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
+	out, rep := f.gemini.GeminiCheck(ctx, proxies)
+	f.rep = rep
+	return out
+}
+
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps (minMbps==0 disables the floor and keeps all
 // reachable nodes) and records Mbps on each kept survivor, which the
@@ -232,13 +288,7 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				logger.Warn().Msg("gemini filter requested but prober lacks Gemini support; skipping")
 				continue
 			}
-			filters = append(filters, &apiFilter{
-				filterName: geminiFilterName,
-				enabled:    gc.GeminiEnabled,
-				check:      gc.GeminiCheck,
-				store:      store,
-				logger:     logger,
-			})
+			filters = append(filters, newGeminiFilter(gc, store, logger))
 		case claudeFilterName:
 			cc, ok := prober.(claudeChecker)
 			if !ok {

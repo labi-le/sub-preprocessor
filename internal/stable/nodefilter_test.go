@@ -3,11 +3,13 @@ package stable //nolint:testpackage // exercises unexported stable internals
 import (
 	"context"
 	"testing"
+	"time"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
 func TestBandwidthFilterApply(t *testing.T) {
@@ -67,6 +69,12 @@ func TestBuildNodeFilters(t *testing.T) {
 	if len(fs) != 5 {
 		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
 	}
+	// Concrete type, not just the name: only *geminiFilter carries the gate's
+	// verification account through to the report, and a plain *apiFilter here
+	// would still pass every name and behaviour assertion in this file.
+	if _, ok := fs[0].(*geminiFilter); !ok {
+		t.Fatalf("gemini filter has type %T, want *geminiFilter", fs[0])
+	}
 	if got := builtFilterName(fs[2]); got != "chatgpt" {
 		t.Fatalf("expected chatgpt filter third, got %q", got)
 	}
@@ -84,6 +92,8 @@ func TestBuildNodeFilters(t *testing.T) {
 // types buildNodeFilters returns.
 func builtFilterName(f NodeFilter) string {
 	switch v := f.(type) {
+	case *geminiFilter:
+		return v.filterName
 	case *apiFilter:
 		return v.filterName
 	case *bandwidthFilter:
@@ -197,5 +207,198 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		if s.Label == "s-003" {
 			t.Fatal("s-003 (absent from proxy map) must be dropped as unreachable")
 		}
+	}
+}
+
+// fakeGeminiChecker drives the gemini gate with no network: enabled selects
+// apiFilter.apply's disabled branch, and rep is the account GeminiCheck hands
+// back. calls proves the disabled branch never reaches the check at all.
+type fakeGeminiChecker struct {
+	outcomes map[string]APIOutcome
+	rep      GeminiReport
+	enabled  bool
+	calls    int
+}
+
+func (f *fakeGeminiChecker) GeminiEnabled() bool { return f.enabled }
+
+func (f *fakeGeminiChecker) GeminiCheck(context.Context, []mihomo.Proxy) (map[string]APIOutcome, GeminiReport) {
+	f.calls++
+	return f.outcomes, f.rep
+}
+
+// TestGeminiFilterKeepsUnverifiedOutOfDropped is point 2 of the agreement made
+// executable. These nodes are KEPT and published; FilterReport.Dropped renders
+// as stable_filter_dropped_nodes{reason=...}, so a count landing there tells
+// an operator the gate threw away what it actually let through — the defect
+// corrected/unanswered already shipped once (shipped by b545d0a, corrected in
+// e554307).
+func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
+	t.Parallel()
+
+	const unverified = 22
+	gc := &fakeGeminiChecker{
+		enabled:  true,
+		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
+		rep:      GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: unverified},
+	}
+	f := newGeminiFilter(gc, nil, zerolog.Nop())
+
+	kept, rep := f.apply(context.Background(), []Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
+
+	if len(kept) != 1 {
+		t.Fatalf("an unverified node is KEPT, not dropped: kept %d", len(kept))
+	}
+	if got := f.verification(); got != gc.rep {
+		t.Fatalf("verification() = %+v, want %+v", got, gc.rep)
+	}
+	for reason, n := range rep.Dropped {
+		if n == unverified {
+			t.Fatalf("the unverified count reached Dropped[%q]; it renders as a drop reason", reason)
+		}
+	}
+	if len(rep.Dropped) != 2 || rep.Dropped[dropBlocked] != 0 || rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("gemini must report only its two drop reasons, both zero here: %+v", rep.Dropped)
+	}
+}
+
+// TestGeminiFilterDisabledIsNotAGateThatRanClean covers the state the metric
+// exists for. A keyless gate checks NOTHING and passes every survivor through,
+// which from outside looks exactly like a gate that verified them all; the two
+// must not reach the report as the same value. The second apply also pins that
+// last cycle's numbers are not republished when this cycle never checked.
+func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
+	t.Parallel()
+
+	survivors := []Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}
+	gc := &fakeGeminiChecker{
+		enabled:  true,
+		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
+		rep:      GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 22},
+	}
+	f := newGeminiFilter(gc, nil, zerolog.Nop())
+	if _, _ = f.apply(context.Background(), survivors, nil); f.verification().State != GeminiGateRan {
+		t.Fatalf("setup: an enabled gate must report GeminiGateRan, got %+v", f.verification())
+	}
+
+	gc.enabled = false
+	kept, _ := f.apply(context.Background(), survivors, nil)
+
+	if len(kept) != 1 {
+		t.Fatalf("a skipped gate passes survivors through: kept %d", len(kept))
+	}
+	if gc.calls != 1 {
+		t.Fatalf("the disabled branch must not call the check: calls = %d", gc.calls)
+	}
+	want := GeminiReport{State: GeminiGateSkipped}
+	if got := f.verification(); got != want {
+		t.Fatalf("verification() = %+v, want %+v (never last cycle's numbers)", got, want)
+	}
+}
+
+// oneNodeFilterer and oneNodeProber are the smallest pipeline that reaches
+// publication: one node, probed clean, so RunOnce gets as far as Observe.
+type oneNodeFilterer struct{}
+
+func (oneNodeFilterer) FilterNodes(
+	context.Context, preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return []preprocess.NodeResult{{Raw: benchVlessLine("1.1.1.1", "443", "n")}}, preprocess.Stats{}, nil
+}
+
+//nolint:ireturn // implements Filterer; handing out the interface is the point
+func (oneNodeFilterer) Annotator() preprocess.Annotator { return nil }
+
+type oneNodeProber struct{}
+
+func (oneNodeProber) Probe(context.Context, []byte) (map[string]ProbeResult, error) {
+	return map[string]ProbeResult{"src-001": {Successes: 5, MeanMs: 100}}, nil
+}
+
+func (oneNodeProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+type cycleRecorder struct{ last *CycleReport }
+
+func (r *cycleRecorder) Observe(c CycleReport) { r.last = &c }
+func (r *cycleRecorder) ObserveError()         {}
+
+// TestGeminiAccountReachesTheCycleReport walks the whole seam the metric rides:
+// filter -> filterAndMeasureEgress -> CycleReport -> Reporter. Each hand-off
+// can drop the account without failing anything, because a lost one is the
+// zero GeminiReport and that renders as a gate that never ran -- so the
+// assertion is on what a Reporter actually receives, not on the filter's own
+// verification().
+func TestGeminiAccountReachesTheCycleReport(t *testing.T) {
+	t.Parallel()
+
+	want := GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 22}
+	gc := &fakeGeminiChecker{
+		enabled:  true,
+		outcomes: map[string]APIOutcome{"src-001": {Server: "1.1.1.1", Reachable: true}},
+		rep:      want,
+	}
+	rec := &cycleRecorder{}
+	c := NewChecker(CheckerSpec{
+		Sources:       []config.SubscriptionSource{{Name: "src", Body: benchVlessLine("1.1.1.1", "443", "n")}},
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        oneNodeProber{},
+		Filters:       []NodeFilter{newGeminiFilter(gc, nil, zerolog.Nop())},
+	}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rec.last == nil {
+		t.Fatal("a published cycle must reach the Reporter")
+	}
+	if rec.last.Gemini != want {
+		t.Fatalf("CycleReport.Gemini = %+v, want %+v", rec.last.Gemini, want)
+	}
+}
+
+// TestKeylessGateReachesTheReportAsSkipped is the same walk with nothing faked
+// between the config name and the report: a real keyless MihomoProber through
+// the real buildNodeFilters. This is the production shape of the failure --
+// the key resolves to "", the filter is built anyway, and the cycle publishes
+// every survivor unverified -- and it must arrive as Skipped, never as the
+// zero value a cycle without a gemini gate at all produces.
+func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
+	t.Parallel()
+
+	keyless, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyless.GeminiEnabled() {
+		t.Fatal("setup: an empty key must disable the gate")
+	}
+
+	rec := &cycleRecorder{}
+	c := NewChecker(CheckerSpec{
+		Sources:       []config.SubscriptionSource{{Name: "src", Body: benchVlessLine("1.1.1.1", "443", "n")}},
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        oneNodeProber{},
+		Filters:       buildNodeFilters([]string{geminiFilterName}, keyless, nil, zerolog.Nop()),
+	}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+	if err = c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rec.last == nil {
+		t.Fatal("a skipped gate still publishes: the survivors passed through")
+	}
+	if rec.last.Kept != 1 {
+		t.Fatalf("a skipped gate drops nobody, Kept = %d", rec.last.Kept)
+	}
+	want := GeminiReport{State: GeminiGateSkipped}
+	if rec.last.Gemini != want {
+		t.Fatalf("CycleReport.Gemini = %+v, want %+v", rec.last.Gemini, want)
 	}
 }
