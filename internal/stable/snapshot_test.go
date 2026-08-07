@@ -225,6 +225,34 @@ func TestSaveSnapshotFailureKeepsPreviousFile(t *testing.T) {
 	assertOnlyFile(t, dir, "stable.json")
 }
 
+// TestSaveSnapshotLateFailureRemovesTemp covers the failure the read-only
+// directory cannot reach: one that happens AFTER the temp file exists. Both
+// other save tests leave nothing to clean up -- one succeeds, so the rename
+// consumes the temp, and the other cannot create it at all -- so without this
+// case the removal can be deleted with the suite green.
+//
+// A directory at path is what makes it late and deterministic: the open, write,
+// sync and close all succeed against the sibling temp, and os.Rename then
+// refuses on its own terms -- it returns EEXIST for an existing directory
+// before reaching the syscall, so this is Go's behaviour rather than one
+// kernel's. The real temp file is then left for the defer to remove.
+func TestSaveSnapshotLateFailureRemovesTemp(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stable.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := stable.SaveSnapshot(path, &stable.Snapshot{Payload: []byte("newer\n"), Stats: stable.Stats{Kept: 7}})
+
+	if err == nil {
+		t.Fatal("a snapshot whose rename cannot land must report the failure, not swallow it")
+	}
+	assertOnlyFile(t, dir, "stable.json")
+}
+
 // assertOnlyFile fails when dir holds anything besides name -- a leftover temp
 // file is the failure it is looking for.
 func assertOnlyFile(t *testing.T, dir, name string) {
