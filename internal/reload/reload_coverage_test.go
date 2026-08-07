@@ -118,6 +118,10 @@ var reloadClassification = map[string]string{
 	"subscriptions.check.expected_status": liveWorker,
 	"subscriptions.check.concurrency":     liveWorker,
 	"subscriptions.check.source_timeout":  liveWorker,
+	// The one subscriptions key that is NOT live-worker: the checker is handed
+	// it at construction and never re-reads it, so config.SubscriptionsChanged
+	// excludes it and config.StoresChanged warns instead.
+	"subscriptions.snapshot_path": restartWarned,
 
 	"geoblock.db_path":             restartWarned,
 	"geoblock.ttl":                 restartWarned,
@@ -195,7 +199,8 @@ func coverageBase() config.Config {
 				ExpectedStatus: "204", MaxFail: 1, MaxAvgMs: 1000,
 				SourceTimeout: 2 * time.Minute, Concurrency: 16,
 			},
-			Sources: []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example.com/s", Body: "seed"}},
+			Sources:      []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example.com/s", Body: "seed"}},
+			SnapshotPath: "/var/lib/stable.json",
 		},
 		GeoBlock: config.GeoBlockConfig{
 			DBPath:  "/var/lib/geoblock.db",
@@ -299,6 +304,9 @@ var keyMutators = map[string]func(*config.Config){
 	"subscriptions.check.expected_status": func(c *config.Config) { c.Subscriptions.Check.ExpectedStatus = "200" },
 	"subscriptions.check.concurrency":     func(c *config.Config) { c.Subscriptions.Check.Concurrency = 8 },
 	"subscriptions.check.source_timeout":  func(c *config.Config) { c.Subscriptions.Check.SourceTimeout = 5 * time.Minute },
+	"subscriptions.snapshot_path": func(c *config.Config) {
+		c.Subscriptions.SnapshotPath = "/var/lib/other.json"
+	},
 
 	"geoblock.db_path":             func(c *config.Config) { c.GeoBlock.DBPath = "/var/lib/other.db" },
 	"geoblock.ttl":                 func(c *config.Config) { c.GeoBlock.TTL = time.Hour },
@@ -481,6 +489,12 @@ var reloadGateFixtures = []struct {
 	yaml  string
 	apply bool // Reload hands the new config to the stable worker
 	warn  bool // Reload logs a restart-required warning
+	// warnNames is the key the warning must NAME. The message enumerates the
+	// keys its gate covers, and that list drifted once already: snapshot_path
+	// joined StoresChanged without joining the string, so an operator editing
+	// only it was told three keys they had not touched needed a restart.
+	// Asserting the substring is what makes the enumeration bite.
+	warnNames string
 }{
 	{
 		name:  "subscriptions",
@@ -498,9 +512,20 @@ var reloadGateFixtures = []struct {
 	// different, non-applying outcome.
 	{name: "cloudflare", yaml: baseGeofeedYAML + "  cloudflare:\n    timeout: 30s\n" + subsBlock, apply: true},
 	{name: "annotate", yaml: subsYAML + "annotate:\n  - tag: GEO\n    providers: [geofeed]\n", apply: true},
-	{name: "listen", yaml: subsYAML + "server:\n  listen: :9999\n", warn: true},
-	{name: "metrics_listen", yaml: subsYAML + "server:\n  metrics_listen: :9991\n", warn: true},
-	{name: "stores", yaml: subsYAML + "deadcache:\n  ttl: 4h\n", warn: true},
+	{name: "listen", yaml: subsYAML + "server:\n  listen: :9999\n", warn: true, warnNames: "server.listen"},
+	{name: "metrics_listen", yaml: subsYAML + "server:\n  metrics_listen: :9991\n", warn: true, warnNames: "server.metrics_listen"},
+	{name: "stores", yaml: subsYAML + "deadcache:\n  ttl: 4h\n", warn: true, warnNames: "deadcache.ttl"},
+	// snapshot_path is the trap in the other direction: it sits INSIDE the
+	// subscriptions block, every other key of which re-applies the worker. Only
+	// a real reload proves the exclusion in SubscriptionsChanged holds, so the
+	// edit earns a restart warning and leaves the running worker alone.
+	{
+		name: "snapshot_path",
+		yaml: baseGeofeedYAML + "subscriptions:\n  snapshot_path: /config/.other-snapshot.json\n" +
+			"  sources:\n    - name: alpha\n      url: https://example.com/sub.txt\n",
+		warn:      true,
+		warnNames: "subscriptions.snapshot_path",
+	},
 	// The negative case: an edit no gate covers must neither re-apply the worker
 	// (or every reload would) nor claim a restart is needed.
 	{name: "unrelated", yaml: subsYAML + "resolver:\n  timeout: 10s\n"},
@@ -527,6 +552,9 @@ func TestReloadGatesMatchHelpers(t *testing.T) {
 			if got.warned != f.warn {
 				t.Errorf("Reload warned=%v, want %v: this edit no longer earns its restart warning", got.warned, f.warn)
 			}
+			if f.warnNames != "" && !strings.Contains(got.warnLog, f.warnNames) {
+				t.Errorf("the restart warning does not name %q, so it points the operator at keys they did not edit; got: %s", f.warnNames, got.warnLog)
+			}
 			if w := workerAffected(got.base, got.changed); w != got.applied {
 				t.Errorf("workerAffected=%v but Reload applied=%v: the subsAffected gate list in reloader.go and its copy here have drifted", w, got.applied)
 			}
@@ -544,6 +572,7 @@ type reloadOutcome struct {
 	changed config.Config
 	applied bool
 	warned  bool
+	warnLog string
 }
 
 // reloadFixture commits subsYAML as the reloader's current config, then reloads
@@ -574,7 +603,8 @@ func reloadFixture(t *testing.T, content string) reloadOutcome {
 		t.Fatal("fixture changed nothing, so it proves nothing")
 	}
 	out.applied = fake.calls > 0
-	out.warned = strings.Contains(logBuf.String(), "requires restart")
+	out.warnLog = logBuf.String()
+	out.warned = strings.Contains(out.warnLog, "requires restart")
 
 	return out
 }

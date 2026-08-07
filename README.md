@@ -111,14 +111,26 @@ Every `subscriptions.interval` it:
    the `cloudflare` provider — nothing is dropped here,
 10. builds each node's tags **once**, from the address that survived the
     pipeline (the traced egress when there is one), and atomically publishes
-    the result.
+    the result,
+11. writes the published list to `subscriptions.snapshot_path`, if set.
 
 `GET /stable.txt` serves the current list as `text/plain` (or
-`503 stable list not ready` until the first cycle completes) with an
+`503 stable list not ready` while there is no list at all) with an
 `X-Stable-Stats` header
 (`updated=<RFC3339> sources=<ok>/<total> merged=<n> tested=<n> kept=<n>`).
 A failed cycle keeps the last good list, so the router never gets an empty
 response.
+
+**Across a restart** the list survives too, when `subscriptions.snapshot_path`
+is set: startup reloads the file into the same holder, so the endpoint answers
+with the previous run's list from the first request instead of `503` for a
+whole cycle — measured at 58 minutes on a 68266-node pool. The restored list
+keeps its original `updated=`, so its age is visible rather than reset by the
+restart, and there is no expiry: the in-memory rule already serves the last
+good list through failing cycles. A missing, unreadable or malformed file is a
+warning and nothing more — the endpoint then behaves exactly as it did before
+the file existed. The write is atomic (temp file in the same directory, then
+rename), and a write that fails warns without touching the published list.
 
 ## The filter pipeline
 
@@ -316,6 +328,7 @@ attribution).
 |---|---|---|
 | geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
+| stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
 | geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
@@ -409,9 +422,9 @@ naming the key, because a silently dropped key means a silently restored
 default (an empty or comment-only overlay is still fine). All
 three are watched and **hot-reloaded** on
 change; on any reload error the previous settings stay active. Changing
-`server.listen`, `server.metrics_listen`, `geoblock.db_path`/`ttl`, or
-`deadcache.ttl` requires a restart (logged as a warning; listeners and stores
-are built once at startup). Everything else — filters, annotate, groups,
+`server.listen`, `server.metrics_listen`, `geoblock.db_path`/`ttl`,
+`deadcache.ttl`, or `subscriptions.snapshot_path` requires a restart (logged as
+a warning; listeners and stores are built once at startup). Everything else — filters, annotate, groups,
 sources, prober knobs, log level — applies live; worker-side keys (sources,
 prober knobs, through-node filters) take effect on the worker's next cycle. A
 reflection test (`TestReloadCoverageComplete`) classifies every config key's
@@ -458,9 +471,11 @@ Key sections:
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
-  `body`), and `check.*`: URL-test prober params only (`rounds`, `timeout`,
+  `body`), `check.*`: URL-test prober params only (`rounds`, `timeout`,
   `max_fail`, `max_avg_ms`, `concurrency`, `source_timeout`, `test_url`,
-  `expected_status` in mihomo IntRanges syntax).
+  `expected_status` in mihomo IntRanges syntax), and `snapshot_path` — where
+  the published list is persisted so a restart serves it instead of `503`
+  (empty disables; restart-only, see above).
 
 ## Security
 

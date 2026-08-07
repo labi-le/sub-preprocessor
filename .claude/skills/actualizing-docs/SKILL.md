@@ -56,7 +56,8 @@ to a file:line you read in this session.
   `private.yaml` (crawler-managed). Docs repeatedly said two.
 - **Restart-required keys.** `server.listen` (warned), `server.metrics_listen`
   (silently ignored — the metrics server starts once in `app.Run`, no diff helper),
-  `geoblock.db_path`/`ttl`, `deadcache.ttl` (warned via `StoresChanged`).
+  `geoblock.db_path`/`ttl`, `deadcache.ttl`, `subscriptions.snapshot_path` (all four
+  warned via `StoresChanged`, which is also what the warn message must enumerate).
 - **Defaults vs deployment.** `main.go` consts (CRAWL_DEPTH=2, interval 30m) differ
   from `docker-compose.yaml` values (3, 1h). Say which one you are documenting.
 - **Cycle ordering.** Read `checker.go` before claiming ordering or failure

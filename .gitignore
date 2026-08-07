@@ -40,6 +40,7 @@ config/private.yaml
 # Runtime state (untracked)
 config/.crawler-state.json
 config/.geoblock.db*
+config/.stable-snapshot.json*
 
 benchmarks
 

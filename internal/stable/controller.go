@@ -24,16 +24,32 @@ type Controller struct {
 	filterer func() Filterer
 	store    Blocklist
 	dead     DeadCache
-	logger   zerolog.Logger
-	reporter Reporter
+	// snapshotPath is handed to the checker when one is first started. It is
+	// startup-only for the same reason store and dead are: config.StoresChanged
+	// warns on an edit instead of a reload re-applying it.
+	snapshotPath string
+	logger       zerolog.Logger
+	reporter     Reporter
 
 	checker *Checker
 	cancel  context.CancelFunc
 	done    chan struct{}
 }
 
-func NewController(ctx context.Context, holder *Holder, filterer func() Filterer, store Blocklist, dead DeadCache, logger zerolog.Logger, reporter Reporter) *Controller {
-	return &Controller{baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead, logger: logger, reporter: reporter}
+func NewController(
+	ctx context.Context,
+	holder *Holder,
+	filterer func() Filterer,
+	store Blocklist,
+	dead DeadCache,
+	snapshotPath string,
+	logger zerolog.Logger,
+	reporter Reporter,
+) *Controller {
+	return &Controller{
+		baseCtx: ctx, holder: holder, filterer: filterer, store: store, dead: dead,
+		snapshotPath: snapshotPath, logger: logger, reporter: reporter,
+	}
 }
 
 // Apply hands cfg to the running checker, or starts one when none is running.
@@ -115,7 +131,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		return nil
 	}
 
-	checker := NewChecker(spec, c.filterer, c.store, c.dead, c.holder, c.logger, c.reporter)
+	checker := NewChecker(spec, c.filterer, c.store, c.dead, c.holder, c.snapshotPath, c.logger, c.reporter)
 	ctx, cancel := context.WithCancel(c.baseCtx)
 	done := make(chan struct{})
 	c.checker = checker

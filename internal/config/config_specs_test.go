@@ -546,6 +546,17 @@ func TestShippedConfigLoads(t *testing.T) {
 		t.Fatal("shipped annotate chain no longer asks the node for its egress")
 	}
 
+	// Dropping this line is what a restart costs 58 minutes of 503 over, and
+	// nothing else in the suite would notice: the key defaults to empty, which
+	// is the documented OFF switch. The directory is pinned along with it:
+	// /config is the only WRITABLE host bind mount (the other, the agenix
+	// secret at docker-compose.yaml:16, is a read-only file), so a value
+	// outside it lands in the container's own writable layer, which `docker
+	// compose up -d` discards on exactly the redeploy this feature exists for.
+	if got := cfg.Subscriptions.SnapshotPath; got != "/config/.stable-snapshot.json" {
+		t.Fatalf("shipped subscriptions.snapshot_path = %q; /stable.txt no longer survives a restart", got)
+	}
+
 	// asn is deliberately OUT of the shipped chain: it redistributes the same
 	// RIR data registry already holds in memory, and measured behind
 	// dbip+registry it answered nothing they had not. The chain is pinned whole
