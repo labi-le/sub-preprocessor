@@ -39,6 +39,7 @@ func TestMetricsObserveRender(t *testing.T) {
 			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}},
 		},
 		Trace:         stable.TraceReport{Answered: 157, Unanswered: 8, Moved: 47},
+		Gemini:        stable.GeminiReport{State: stable.GeminiGateRan, Checks: 306, Unverified: 22},
 		KeptSpeeds:    []int{3, 7, 30, 120},
 		GeoUnknown:    3,
 		KeptCountries: map[string]int{"NL": 40, "FI": 12},
@@ -75,6 +76,10 @@ func TestMetricsObserveRender(t *testing.T) {
 		"stable_kept_speed_max_mbps 120",
 		`stable_kept_country_nodes{country="FI"} 12`,
 		`stable_kept_country_nodes{country="NL"} 40`,
+		"# TYPE stable_gemini_gate_enabled gauge",
+		"stable_gemini_gate_enabled 1",
+		"stable_gemini_gate_checks 306",
+		"stable_gemini_gate_unverified_checks 22",
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {
@@ -87,6 +92,101 @@ func TestMetricsObserveRender(t *testing.T) {
 	if strings.Contains(out, `filter="cloudflare"`) {
 		t.Errorf("cloudflare is no longer a filter:\n%s", out)
 	}
+	// Same rule, for the same reason, on the gemini gate: its 22 unverified
+	// nodes were KEPT and published, so nothing about them may render as a
+	// drop reason on a panel that means "thrown away".
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_filter_dropped_nodes{") && strings.HasSuffix(line, " 22") {
+			t.Errorf("the gemini unverified count reached a drop series: %q", line)
+		}
+	}
+	if strings.Contains(out, `reason="unverified"`) {
+		t.Errorf("unverified is not a drop reason:\n%s", out)
+	}
+}
+
+// TestMetricsGeminiGateStatesRenderApart is the point of the whole series. A
+// gate skipped for want of a key checks NOTHING and passes every survivor
+// through, so from the drops panel it is indistinguishable from a gate that
+// found nothing wrong -- which is how a rotated key stayed invisible for a
+// full production day. So the keyless gate renders an explicit zero rather
+// than nothing: absence says only "no gemini gate ran", which has four causes
+// -- nothing scraped yet, no cycle published yet, no gemini filter in the
+// chain, or one configured that never reached its check (buildNodeFilters
+// dropped it with a WARN for want of Gemini support on the prober, or
+// ParseProxies failed and the whole through-node stage was skipped, publishing
+// every survivor UNFILTERED) -- and only the first two are benign.
+func TestMetricsGeminiGateStatesRenderApart(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[stable.GeminiGateState]string{}
+	for _, tc := range []struct {
+		name string
+		rep  stable.GeminiReport
+		want []string
+		deny []string
+	}{
+		{
+			name: "absent",
+			rep:  stable.GeminiReport{},
+			deny: []string{"stable_gemini_gate_"},
+		},
+		{
+			name: "configured but keyless",
+			rep:  stable.GeminiReport{State: stable.GeminiGateSkipped},
+			want: []string{
+				"stable_gemini_gate_enabled 0",
+				"stable_gemini_gate_checks 0",
+				"stable_gemini_gate_unverified_checks 0",
+			},
+		},
+		{
+			name: "ran and verified everything",
+			rep:  stable.GeminiReport{State: stable.GeminiGateRan, Checks: 285},
+			want: []string{
+				"stable_gemini_gate_enabled 1",
+				"stable_gemini_gate_checks 285",
+				"stable_gemini_gate_unverified_checks 0",
+			},
+		},
+	} {
+		m := metrics.New()
+		m.Observe(stable.CycleReport{Gemini: tc.rep})
+		out := render(t, m)
+		for _, w := range tc.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: missing %q in:\n%s", tc.name, w, out)
+			}
+		}
+		for _, d := range tc.deny {
+			if strings.Contains(out, d) {
+				t.Errorf("%s: must render no %q series:\n%s", tc.name, d, out)
+			}
+		}
+		rendered[tc.rep.State] = geminiLines(out)
+	}
+
+	// The assertion the three cases exist for: no two states may look alike.
+	for a, ra := range rendered {
+		for b, rb := range rendered {
+			if a != b && ra == rb {
+				t.Errorf("gate states %d and %d render identically as %q", a, b, ra)
+			}
+		}
+	}
+}
+
+// geminiLines extracts the gemini gate samples (not the HELP/TYPE headers,
+// which are constant) so two renderings can be compared for equality.
+func geminiLines(out string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_gemini_gate_") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 func TestMetricsObserveError(t *testing.T) {

@@ -32,6 +32,56 @@ type CycleReport struct {
 	Filters       []FilterReport
 	KeptSpeeds    []int
 	Trace         TraceReport
+	Gemini        GeminiReport
+}
+
+// GeminiGateState is what the gemini gate did in a cycle. The zero value is
+// GeminiGateAbsent, so a CycleReport assembled without a gemini filter -- or
+// one whose whole through-node stage was skipped -- says so without anyone
+// setting a field.
+type GeminiGateState uint8
+
+const (
+	// GeminiGateAbsent means no gemini filter ran in this cycle's chain.
+	GeminiGateAbsent GeminiGateState = iota
+	// GeminiGateSkipped means the filter was configured but had no usable API
+	// key, so it checked nothing and passed every survivor through
+	// (nodefilter.go, apiFilter.apply). That is NOT "the gate found nothing
+	// wrong", and the two must not render alike.
+	GeminiGateSkipped
+	// GeminiGateRan means the gate issued its checks.
+	GeminiGateRan
+)
+
+// GeminiReport accounts what the gemini gate could actually verify in one
+// cycle: Unverified nodes got an API answer that predates the location verdict
+// (401/403/404/429, or a 400 carrying API_KEY_INVALID -- see
+// geminiInconclusive), so the gate learned nothing about them and KEPT them.
+//
+// This is deliberately not part of FilterReport. FilterReport.Dropped renders
+// as stable_filter_dropped_nodes{reason=...}, and putting a kept-node count
+// there is the defect the trace's corrected/unanswered counts already shipped
+// once -- shipped by b545d0a, corrected in e554307 -- appearing on a "drops by
+// reason" panel for a filter that drops nothing.
+//
+// Checks is the gate's OWN denominator and is not interchangeable with
+// stable_filter_in_nodes{filter="gemini"}: the check fans out over PROXIES and
+// only one that ANSWERED reaches the classifier, so a mierus:// node
+// contributes one per answering port, not one per configured port. A port that
+// never answered is in neither term, and is not picked up elsewhere either:
+// apiFilter.apply counts reason="unreachable" per SURVIVOR, off the outcome
+// betterAPIOutcome already folded best-of-ports, so a node with one live port
+// is KEPT and its dead siblings are invisible. Only a node whose every proxy
+// was unreachable reaches that reason. Unverified/Checks is therefore a closed
+// ratio; Unverified over the survivor count is not.
+//
+// It is three words by value inside CycleReport, filled once per cycle from
+// two counters the check already had to keep -- nothing here is on a per-node
+// path and it allocates nothing.
+type GeminiReport struct {
+	State      GeminiGateState
+	Checks     int
+	Unverified int
 }
 
 // TraceReport accounts the cloudflare annotation stage: how many survivors told

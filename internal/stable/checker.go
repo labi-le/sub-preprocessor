@@ -198,7 +198,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
-	survivors, filterReports, trace := c.filterAndMeasureEgress(ctx, spec, survivors)
+	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors)
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
@@ -258,6 +258,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Filters:       filterReports,
 		KeptSpeeds:    keptSpeeds(survivors),
 		Trace:         trace,
+		Gemini:        gemini,
 	})
 
 	return nil
@@ -354,16 +355,21 @@ func movedCount(ctx context.Context, ann preprocess.Annotator, survivors []Survi
 // The trace runs LAST, on the final survivor set, because its answer only
 // annotates: measuring a node a later gate drops would spend a request on a
 // tag nobody sees.
+//
+// The fourth return is the gemini gate's account of itself, empty unless that
+// gate is in the chain. It rides beside the FilterReports rather than inside
+// one because the nodes it counts are KEPT, and a FilterReport's only
+// per-reason field is Dropped.
 func (c *Checker) filterAndMeasureEgress(
 	ctx context.Context, spec *CheckerSpec, survivors []Survivor,
-) ([]Survivor, []FilterReport, TraceReport) {
+) ([]Survivor, []FilterReport, TraceReport, GeminiReport) {
 	tracer, canTrace := spec.Prober.(traceChecker)
 	if spec.Trace && !canTrace {
 		c.logger.Warn().Msg("cloudflare annotation requested but prober lacks trace support; skipping")
 	}
 	trace := spec.Trace && canTrace
 	if (len(spec.Filters) == 0 && !trace) || len(survivors) == 0 {
-		return survivors, nil, TraceReport{}
+		return survivors, nil, TraceReport{}, GeminiReport{}
 	}
 
 	entries := make([]Entry, len(survivors))
@@ -373,7 +379,7 @@ func (c *Checker) filterAndMeasureEgress(
 	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-		return survivors, nil, TraceReport{}
+		return survivors, nil, TraceReport{}, GeminiReport{}
 	}
 	defer func() {
 		for _, px := range proxies {
@@ -394,16 +400,23 @@ func (c *Checker) filterAndMeasureEgress(
 		byLabel[label] = append(byLabel[label], px)
 	}
 	reports := make([]FilterReport, 0, len(spec.Filters))
+	var gemini GeminiReport
 	for _, f := range spec.Filters {
 		var rep FilterReport
 		survivors, rep = f.apply(ctx, survivors, byLabel)
 		reports = append(reports, rep)
+		// Optional capability, read exactly like spec.Prober.(traceChecker)
+		// above: only the gemini gate can answer before its own verdict
+		// exists, so only it accounts for what it could not verify.
+		if gf, ok := f.(*geminiFilter); ok {
+			gemini = gf.verification()
+		}
 	}
 	if !trace {
-		return survivors, reports, TraceReport{}
+		return survivors, reports, TraceReport{}, gemini
 	}
 
-	return survivors, reports, applyTrace(ctx, tracer, survivors, byLabel)
+	return survivors, reports, applyTrace(ctx, tracer, survivors, byLabel), gemini
 }
 
 // applyTrace records what each survivor reported about its own egress. It

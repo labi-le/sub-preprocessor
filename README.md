@@ -500,6 +500,20 @@ skipped before probing, all of them dead-cached, so the funnel closes),
 per-source and per-filter in/kept/dropped-by-reason counters, kept-node speed
 histogram, cycle duration, success timestamp, and cycle/failure totals.
 
+A gate that verified nothing is reported separately from a gate that dropped
+nothing. The gemini check needs a working credential to see a location verdict
+at all, so `stable_gemini_gate_checks` / `stable_gemini_gate_unverified_checks`
+publish how many API responses it classified and how many of those arrived
+before the location check (401/403/404/429, or a 400 `API_KEY_INVALID`).
+Those nodes are **kept and published unverified**, so the pair is deliberately
+outside the per-filter drop counters. `stable_gemini_gate_enabled` separates
+the third state: 0 means the gate is configured but has no usable key, so it
+checked nothing at all. All three are absent when the gate did not run, which
+is not the same as "not configured": nothing has been scraped, no cycle has
+published yet, no `gemini` filter is in `filters`, or one is and never reached
+its check (the prober has no Gemini support, or parsing the survivors into
+proxies failed and the whole through-node chain was skipped).
+
 The metrics listener is bound synchronously at startup, so a port conflict is a
 startup failure like any other rather than a silently missing monitoring
 surface — the service's stable-list health is only observable through these
