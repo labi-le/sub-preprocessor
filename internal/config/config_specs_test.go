@@ -546,6 +546,14 @@ func TestShippedConfigLoads(t *testing.T) {
 		t.Fatal("shipped annotate chain no longer asks the node for its egress")
 	}
 
+	// Dropping this line is what a restart costs 58 minutes of 503 over, and
+	// nothing else in the suite would notice: the key defaults to empty, which
+	// is the documented OFF switch. /tmp is pinned too — it is tmpfs on the
+	// host, which is what bounds staleness to host uptime.
+	if got := cfg.Subscriptions.SnapshotPath; got != "/tmp/sub-preprocessor-stable.json" {
+		t.Fatalf("shipped subscriptions.snapshot_path = %q; /stable.txt no longer survives a restart", got)
+	}
+
 	// asn is deliberately OUT of the shipped chain: it redistributes the same
 	// RIR data registry already holds in memory, and measured behind
 	// dbip+registry it answered nothing they had not. The chain is pinned whole
