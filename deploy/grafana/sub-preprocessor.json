@@ -37,13 +37,13 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 8,
         "x": 0,
         "y": 0
       },
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -53,6 +53,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "noValue": "NO KEPT-NODE COUNT",
           "color": {
             "mode": "thresholds"
           },
@@ -82,47 +83,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_kept_nodes"
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Merged nodes (last cycle)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 0
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_merged_nodes"
+          "expr": "stable_kept_nodes",
+          "instant": true
         }
       ]
     },
@@ -136,8 +98,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 0
       },
       "options": {
@@ -152,7 +114,23 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "noValue": "NO SOURCE COUNTS"
         },
         "overrides": []
       },
@@ -164,7 +142,8 @@
             "uid": "${datasource}"
           },
           "expr": "stable_sources_ok",
-          "legendFormat": "ok"
+          "legendFormat": "ok",
+          "instant": true
         },
         {
           "refId": "B",
@@ -173,22 +152,24 @@
             "uid": "${datasource}"
           },
           "expr": "stable_sources_total",
-          "legendFormat": "total"
+          "legendFormat": "total",
+          "instant": true
         }
-      ]
+      ],
+      "description": "Two counts from the last cycle: sources that returned a usable body, and sources configured. Neither is a health reading on its own — a source dropping out shows here as ok falling below total, and whether that cost anything is the kept count to the left. Colour therefore carries no health direction here: every value from 0 up is painted in the plain text colour, and the only coloured state is red for no data. That base step is deliberate, not decoration. A stat that declares no thresholds does NOT render neutral — Grafana merges the standard field-config default into it, a green base with red from 80 — so before 2026-08-08 this tile painted an absent series GREEN, and painted a real count RED only once it reached 80. Both counts sat in the hundreds for all but 81 of the 20578 sample-minutes in the 15d window ending 2026-08-08 19:30Z — total never fell below 164, and ok was at or above 100 in 20497 of those 20578, 99.61% of them — but in those 81 minutes, 2026-07-26 19:59–21:19Z, ok sat at exactly 1, so the old tile painted the worst source outage in the window GREEN beside a RED total. Read as an INSTANT query: if the gauges are not being exported right now the tile reads NO SOURCE COUNTS on red, whatever the dashboard time range holds — writeMetrics returns before both of them while m.last is nil, so that is every restart before the first published cycle."
     },
     {
       "id": 4,
       "type": "stat",
-      "title": "Last cycle age",
+      "title": "Last publish age",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 8,
+        "x": 16,
         "y": 0
       },
       "options": {
@@ -209,8 +190,12 @@
           "thresholds": {
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -221,7 +206,8 @@
                 "value": 7200
               }
             ]
-          }
+          },
+          "noValue": "NO PUBLISH TIMESTAMP"
         },
         "overrides": []
       },
@@ -232,14 +218,16 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "time() - stable_last_success_timestamp_seconds"
+          "expr": "time() - stable_last_success_timestamp_seconds",
+          "instant": true
         }
-      ]
+      ],
+      "description": "Time since the last cycle that PUBLISHED a list. A cycle that runs and fails does not reset it — Metrics.Observe sets the timestamp, ObserveError does not — so this answers \"how stale is /stable.txt\", not \"when did the worker last run\"; for that read cycles/h on the cycle panel. Read as an INSTANT query: if stable_last_success_timestamp_seconds is not being exported right now the tile reads NO PUBLISH TIMESTAMP on red, whatever the dashboard time range holds. Three causes, and this tile cannot tell them apart: the process restarted and has not published yet (writeMetrics returns before every gauge while m.last is nil), the scrape is failing, or the worker is gone. cycles/h separates the first from the rest."
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Pipeline funnel (merged -> probed -> kept)",
+      "title": "Pipeline funnel",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -307,7 +295,8 @@
           "expr": "stable_kept_nodes",
           "legendFormat": "kept"
         }
-      ]
+      ],
+      "description": "Four counts from the last cycle, listed here in pipeline order (the legend runs in target order: merged, probed, dead-skipped, kept). merged = unique nodes after dedupe; dead-skipped = nodes never probed because a recent probe found them dead; probed = nodes latency-probed; kept = nodes published. merged = dead-skipped + probed, so the gap between the merged and probed lines is entirely the dead cache and is not loss. The drop from probed to kept is the latency probe plus the through-node gates."
     },
     {
       "id": 6,
@@ -367,7 +356,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Through-node filter drops by reason",
-      "description": "blocked = the service answered but refused this egress; unreachable = the request never completed through the node (it still passed the latency probe, so this is the service refusing at the CDN or the node failing on real traffic); slow = below the bandwidth filter minimum.",
+      "description": "blocked = the service answered but refused this egress; unreachable = the request never completed through the node (it still passed the latency probe, so this is the service refusing at the CDN or the node failing on real traffic); slow = below the bandwidth filter minimum. A gate that RAN and dropped nobody IS here, at zero: apiFilter.apply and bandwidthFilter.apply each assign a fully populated Dropped map on the path that completes — {blocked, unreachable} and {slow, unreachable}, both keys, zero-valued or not — so it emits zero-valued samples; chatgpt/blocked and tidal/blocked were both 0 in the cycle published 2026-08-08 18:26Z, beside chatgpt/unreachable 8 and tidal/unreachable 2. A gate that emits NOTHING never reached that assignment: apiFilter's three early returns (enabled() false — configured but with no usable key; nil outcomes; context cancelled mid-check) and bandwidthFilter's two (nil outcomes, cancelled context) all keep the EMPTY Dropped map the FilterReport was initialised with, and writeFilters iterates sortedKeys(Dropped), so no drop sample is written at all — while filter_in/filter_kept still are, on the in-vs-kept panel. Absence therefore means INERT, a present zero means RAN CLEAN, and this panel does separate them. A gate absent from `filters:` is a third state: it emits nothing NEW on either panel, but the rows it already wrote do not disappear, they stop. gemini was commented out on 2026-08-08 and its last sample is 05:26:03Z, so it still draws blocked and unreachable lines ending there on any range reaching back that far — as this dashboard's own now-24h default still did at 2026-08-08 19:30Z. The legend reduces with `last`, not `lastNotNull`: a gate that stops mid-window leaves its legend cell empty rather than freezing at the last healthy value it published.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -396,7 +385,7 @@
           "displayMode": "table",
           "placement": "right",
           "calcs": [
-            "lastNotNull"
+            "last"
           ]
         },
         "tooltip": {
@@ -418,7 +407,7 @@
     {
       "id": 8,
       "type": "table",
-      "title": "Top sources by kept nodes (last cycle)",
+      "title": "Top sources by nodes contributed (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -433,7 +422,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "kept",
+            "displayName": "contributed",
             "desc": true
           }
         ]
@@ -475,17 +464,18 @@
               "__name__": true
             },
             "renameByName": {
-              "Value": "kept"
+              "Value": "contributed"
             }
           }
         }
-      ]
+      ],
+      "description": "Each source's contribution after the IP-stage filters, top 25 by count, from the last cycle. This is NOT the published list: it is counted in preprocess, per source, before merge/dedupe and before any probing. Two unmeasured stages sit in between and their product is the whole gap — dedupe, where sum(stable_source_kept_nodes) / scalar(stable_merged_nodes) ran 1.00–4.93 (avg 3.37) over the 15d window ending 2026-08-08 19:30Z, and then the latency probe plus the through-node gates, which is the merged→kept collapse on the funnel panel. One cycle, published 2026-08-08 17:29Z: the top row here was 15034 nodes from a single source against 130 nodes in the entire published list — 15034/130 = 116x, one source's pre-dedupe yield over the whole post-probe result — while the full metric summed to 119159 across 228 sources, of which this table shows the top 25. Use it to spot a source that has stopped yielding or started yielding junk, not to attribute published nodes to a source — nothing on this dashboard does that."
     },
     {
       "id": 16,
       "type": "stat",
-      "title": "Gemini gate: is it verifying?",
-      "description": "Whether the gemini gate ran at all last cycle. OFF means it is configured as a filter but has no usable API key, so it checked NOTHING and passed every survivor through unverified — on the two filter panels above that gate then looks like one that simply found nobody to drop, which is the failure this panel exists to expose. No data does NOT mean “not configured” on its own — it has four causes: nothing scraped yet, no cycle published yet, no gemini filter in the filters list, or one configured that never reached its check (the prober has no Gemini support and buildNodeFilters skipped it with only a WARN, or ParseProxies failed and the whole through-node chain was skipped, publishing every survivor UNFILTERED). Only the first two are benign. The gate's verdict is invisible without a working credential: the API answers caller identity, then key validity, and only then the location precondition this gate reads.",
+      "title": "Gemini gate state",
+      "description": "Whether the gemini gate ran at all last cycle. OFF means it is configured as a filter but has no usable API key, so it checked NOTHING and passed every survivor through unverified — on the two filter panels above that gate then looks like one that simply found nobody to drop, which is the failure this panel exists to expose. No data does NOT mean “not configured” on its own — it has four causes: nothing scraped yet, no cycle published yet, no gemini filter in the filters list, or one configured that never reached its check (the prober has no Gemini support and buildNodeFilters skipped it with only a WARN, or ParseProxies failed and the whole through-node chain was skipped, publishing every survivor UNFILTERED). Only the first two are benign. The gate's verdict is invisible without a working credential: the API answers caller identity, then key validity, and only then the location precondition this gate reads. Read as an INSTANT query, so it shows the CURRENT state with no lag: the moment stable_gemini_gate_enabled stops being exported this reads NOT RUNNING on red, whatever the dashboard time range still holds.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -559,15 +549,16 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_gemini_gate_enabled"
+          "expr": "stable_gemini_gate_enabled",
+          "instant": true
         }
       ]
     },
     {
       "id": 17,
       "type": "stat",
-      "title": "Gemini gate: share it could not verify",
-      "description": "Of the Gemini API responses the gate classified last cycle, the share that told it nothing about the egress location — the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID: a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified, so this is gate health, not a drop rate. The denominator is the gate's own classified-response count, not stable_filter_in_nodes: only a proxy that ANSWERED reaches the classifier, so a proxy that never answered is in neither term — and it reaches reason=\"unreachable\" on the drops panel only when EVERY proxy of its node was unreachable, since that reason is counted per surviving NODE off an outcome already folded best-of-ports: one live port keeps the node and its dead siblings are counted nowhere. Empty when the gate classified nothing — read the panel to the left for why.",
+      "title": "Gemini gate: unverified share",
+      "description": "Of the Gemini API responses the gate classified last cycle, the share that told it nothing about the egress location — the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID: a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified, so this is gate health, not a drop rate. The denominator is the gate's own classified-response count, not stable_filter_in_nodes: only a proxy that ANSWERED reaches the classifier, so a proxy that never answered is in neither term — and it reaches reason=\"unreachable\" on the drops panel only when EVERY proxy of its node was unreachable, since that reason is counted per surviving NODE off an outcome already folded best-of-ports: one live port keeps the node and its dead siblings are counted nowhere. Read as an INSTANT query and painted from the BASE threshold step, which is RED: an empty result reads NO CLASSIFIED RESPONSES on red, so this tile agrees with the gate-state panel to the left about an absent gate instead of sitting green beside its NOT RUNNING. Three things produce that empty result and this tile cannot separate them — the gate did not run at all (nothing exported), it is configured without a usable key (checks is 0, so the `> 0` guard drops the sample), or it ran and no proxy answered. The panel to the left tells them apart.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -580,7 +571,7 @@
       },
       "options": {
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -591,15 +582,19 @@
         "defaults": {
           "unit": "percentunit",
           "decimals": 1,
-          "noValue": "gate classified nothing",
+          "noValue": "NO CLASSIFIED RESPONSES",
           "color": {
             "mode": "thresholds"
           },
           "thresholds": {
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -621,14 +616,15 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_gemini_gate_unverified_checks / (stable_gemini_gate_checks > 0)"
+          "expr": "stable_gemini_gate_unverified_checks / (stable_gemini_gate_checks > 0)",
+          "instant": true
         }
       ]
     },
     {
       "id": 18,
       "type": "timeseries",
-      "title": "Gemini gate: verified vs unverified (the unverified are all KEPT)",
+      "title": "Gemini gate: verified vs unverified",
       "description": "The gate's classified responses split by whether a location verdict came back. The unverified series is never a drop — those nodes are published exactly like one the gate cleared, which is why it cannot ride the drops panel above. The verified series is NOT all kept: a verified response carrying the geo-block marker drops its node, and that one does show up above as reason=\"blocked\". The two series sum to stable_gemini_gate_checks. One response per proxy that ANSWERED, so a mierus:// node contributes one per answering port — not one per configured port, and not one per node.",
       "datasource": {
         "type": "prometheus",
@@ -689,7 +685,7 @@
           "displayMode": "table",
           "placement": "right",
           "calcs": [
-            "lastNotNull"
+            "last"
           ]
         },
         "tooltip": {
@@ -720,8 +716,8 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "cloudflare egress (annotation, not a gate)",
-      "description": "What the published nodes reported about themselves through cloudflare cdn-cgi/trace. Nothing here is a drop: a trace that fails, or contradicts the offline chain, still publishes the node. answered/unanswered split the survivors by whether the trace completed — a large unanswered share makes the moved ratio below it that much less representative. moved = answered nodes whose final country differs from what the offline chain placed the resolved address in, i.e. how often the tag would have been wrong without the trace (measured: 47 of 102). It is a property of the pool, not a fault: an anycast front-end registers in one country and exits in another.",
+      "title": "Cloudflare egress trace",
+      "description": "What the published nodes reported about themselves through Cloudflare's cdn-cgi/trace. Nothing here is a drop: a trace that fails, or one that contradicts the offline chain, still publishes the node. answered/unanswered split the published list by whether the trace completed — a large unanswered share makes the moved count below it that much less representative. moved = answered nodes whose measured egress country differs from the country the offline chain placed their resolved address in, i.e. how often the tag would have been wrong without the trace. It is a property of the pool, not a fault: an anycast front-end registers in one country and exits in another.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -750,7 +746,7 @@
           "displayMode": "table",
           "placement": "right",
           "calcs": [
-            "lastNotNull"
+            "last"
           ]
         },
         "tooltip": {
@@ -790,8 +786,8 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Kept-node speed (Mbps): min / p50 / avg / p90 / max",
-      "description": "p50/p90 are interpolated from 7 fixed buckets (5-500 Mbps); a quantile landing above the top bucket reports 500, so p90 pinned at 500 under a higher max means \"faster than 500\", not a plateau. min/max are exact per-cycle values. The whole panel is empty unless a bandwidth filter runs: without one no node has a measured speed.",
+      "title": "Kept-node speed",
+      "description": "Measured download speed of the nodes published last cycle. p50/p90 are interpolated from 7 fixed buckets (5-500 Mbps); a quantile landing above the top bucket reports 500, so p90 pinned at 500 under a higher max means \"faster than 500\", not a plateau. max is the exact per-cycle value. Without a bandwidth filter no node has a measured speed, but the panel does NOT go blank: writeHistogram runs unconditionally and always prints _sum and _count, which are 0 and 0 over an empty slice, so the avg target's clamp_min(…, 1) evaluates 0/1 and draws a FLAT ZERO — which reads \"every node is unmeasurably slow\", the inverse of \"not measured\". Only p50/p90 (NaN over all-zero buckets) and max (its gauge is guarded by len(KeptSpeeds) > 0) actually vanish. There is deliberately no min line: the bandwidth filter drops everything below config min_mbps, so min is pinned to that floor (5–10 Mbps over the 15d window ending 2026-08-08 19:30Z, exactly 5 in 81.7% of samples) on an axis that reaches 546. stable_kept_speed_min_mbps is still exported and now renders nowhere; the actionable form of the question it was meant to answer — how many kept nodes sit ON the floor — is stable_kept_speed_mbps_bucket{le=\"5.0\"}, which no panel on this dashboard plots either.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -841,15 +837,6 @@
           "legendFormat": "p90"
         },
         {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_kept_speed_min_mbps",
-          "legendFormat": "min"
-        },
-        {
           "refId": "D",
           "datasource": {
             "type": "prometheus",
@@ -872,7 +859,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Cycle duration & failures",
+      "title": "Cycle duration, rate & failures",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -963,12 +950,13 @@
           "expr": "increase(stable_cycles_total[1h])",
           "legendFormat": "cycles/h"
         }
-      ]
+      ],
+      "description": "Wall time of the last cycle on the left axis; cycles and failures counted over a rolling hour on the right. cycles/h counts every attempt, published or failed (stable_cycles_total HELP: \"Stable cycles attempted (published + failed)\"), so failures/h is a subset of it, not a parallel series. cycles/h falling to zero while the process is up is itself the alarm. TWO of these three series survive a restart with no published cycle, not all three: writeMetrics emits stable_cycles_total and stable_cycle_failures_total BEFORE its `if m.last == nil` return, so cycles/h and failures/h still say whether the worker is alive when every other panel on this dashboard reads no-data. duration is not one of them — stable_cycle_duration_seconds is a gauge written AFTER that return, so the duration line is simply absent until the first cycle publishes, and that gap is the documented cold-start state, not a scrape fault."
     },
     {
       "id": 11,
       "type": "timeseries",
-      "title": "GEO coverage: unresolved [GEO:??] in published list",
+      "title": "Unresolved GEO tags in published list",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1034,7 +1022,8 @@
           "expr": "100 * stable_geo_unknown_nodes / clamp_min(stable_kept_nodes, 1)",
           "legendFormat": "% of kept"
         }
-      ]
+      ],
+      "description": "Published nodes whose GEO tag came out as [GEO:??] — no annotation provider resolved a country for them — as a count on the left axis and as a percentage of the published list on the right. Zero is healthy. stable_geo_unknown_nodes HELP: \"Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.\" Unresolved nodes are absent from stable_kept_country_nodes, so the countries panel cannot show this: an annotation chain that collapses reads there as nothing worse than a shorter list."
     },
     {
       "id": 12,
@@ -1053,9 +1042,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "noValue": "NO COUNTRY COUNTS",
           "min": 0,
           "color": {
-            "mode": "continuous-GrYlRd"
+            "mode": "continuous-BlPu"
           }
         },
         "overrides": []
@@ -1083,13 +1073,14 @@
           "legendFormat": "{{country}}",
           "instant": true
         }
-      ]
+      ],
+      "description": "At most 15 countries: the ones contributing most to the published list, last cycle. topk(15) returns one bar per country that HAS nodes, so a collapsed cycle shows fewer — over the 15d window ending 2026-08-08 19:30Z the resolved-country count was under 15 for 1668 of 20578 sample-minutes and bottomed at 3. Bar colour is scaled to the largest bar on the panel (min 0), so it encodes share of the top country and nothing else: no colour on this panel means \"bad\". Thresholds cannot leak into that. A continuous palette derives a bar's colour purely from its percent of the panel maximum and ignores the threshold step outright, so the green-base/red-from-80 set Grafana merges into every panel that declares none of its own — this one included — is inert here. The palette is deliberately not a green-yellow-red one all the same: a no-value display is coloured at percent 0, the LOW end of whatever scale the panel carries, and for green-yellow-red that is GREEN, an empty panel painted healthy. Blue-purple's low end asserts nothing. Nodes no provider could place are not in this metric at all; they are the [GEO:??] count on the panel to the left."
     },
     {
       "id": 13,
       "type": "timeseries",
-      "title": "IP-stage filter drops by reason (preprocess, both endpoints)",
-      "description": "Per-node filters that run before probing: DNS resolution failure, country allow-list, ASN deny-patterns, and the geoblock store populated by the through-node gemini/claude/chatgpt checks.",
+      "title": "IP-stage drops by reason",
+      "description": "Nodes the per-node filters dropped in preprocess, summed over every source and split by reason. dns = the server name resolved to nothing; ipv6 = the server is an IPv6 literal, which this pipeline refuses before any lookup; geo = the country allow-list; asn = the ASN deny-patterns; geoblock = the host is in the geoblock store the through-node gemini/claude/chatgpt checks populate. unsupported is the odd one out and is not a filter drop at all: it counts input lines containing \"://\" that did not parse as a node — a truncated body, a corrupt vmess payload, an HTML error page — so it is a source going bad, and it is deliberately outside the fetched total on the yield panel. ALL SIX ARE EMITTED EVERY CYCLE whether or not a filter behind them is configured: writeSources builds a fixed six-entry table per source and never consults the filter list. But only geo and asn are GATED by `filters:` — geo needs a `- type: country` with a non-empty exclude set (GeofeedFilter returns early when the allow set is full and the deny set empty) or a `- type: asn` whose ASN-resolved country the policy rejects; asn needs that same entry's name-deny patterns. So a zero is ambiguous on those two only, between filter-absent, filter-configured-with-an-empty-exclude-list and filter-configured-and-broken, and config/config.yaml is the authority on which: over the 15d window ending 2026-08-08 19:30Z max_over_time of both was 0, because no `- type: asn` filter is configured and the country filter's exclude_groups is commented out. The other four are unconditional pipeline behaviour that no `filters:` entry can switch off — geoblock fires whenever the geoblock store is open (the separate `geoblock:` block), ipv6 and dns fire inside processNode straight off resolveNode, and unsupported is counted by the parser before any filter exists — so on those four a zero does mean the pipeline looked and found nothing. All six every cycle holds for the CURRENT build, not for every sample behind it: reason=\"ipv6\" was only added on 2026-07-29, and its first sample is 2026-07-29T19:08:03Z — the first cycle published after that day's 18:20Z restart — so a range starting before that instant plots five series, not six. Worker cycle only: the on-demand GET / path runs the same IP-stage chain but reports no metrics.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1118,7 +1109,7 @@
           "displayMode": "table",
           "placement": "right",
           "calcs": [
-            "lastNotNull"
+            "last"
           ]
         },
         "tooltip": {
@@ -1140,8 +1131,8 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Preprocess yield: nodes fetched vs surviving the IP-stage filters",
-      "description": "Raw nodes all sources yielded versus what reached the merge step. The gap is everything the IP-stage filters dropped.",
+      "title": "IP-stage yield",
+      "description": "Raw nodes every source yielded against what reached the merge step, plus the survival percentage on the right axis. Both are summed per source and counted before dedupe, so \"survived IP-stage\" normally sits well above merged nodes on the funnel — 119159 against 33737 in the cycle published 2026-08-08 17:29Z. Its floor is equality, not a margin: the ratio to merged hit exactly 1.00 for 81 minutes of the 15d window ending 2026-08-08 19:30Z — the same 81 in which a source outage held ok at 1 on the sources tile, when a single source supplied every node and there was nothing left to dedupe across sources. \"fetched\" excludes input lines the parser refused: those are counted as reason=unsupported on the drops panel to the left and are deliberately not in this total, so the two panels do not add up and are not meant to.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1164,7 +1155,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "% kept"
+              "options": "% survived"
             },
             "properties": [
               {
@@ -1214,7 +1205,7 @@
             "uid": "${datasource}"
           },
           "expr": "100 * sum(stable_source_kept_nodes) / clamp_min(sum(stable_source_nodes_total), 1)",
-          "legendFormat": "% kept"
+          "legendFormat": "% survived"
         }
       ]
     }
