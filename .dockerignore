@@ -1,0 +1,69 @@
+# Allow-list, not a deny-list. `COPY . .` (Dockerfile:8) otherwise ships whatever
+# happens to sit in the checkout, and the worst residents are rewritten on a timer:
+# config/private.yaml hourly by the tg-sub-crawler container (docker-compose.yaml:38),
+# config/.geoblock.db-wal continuously, config/.crawler-state.json and
+# config/.stable-snapshot.json once per cycle. A deny-list that misses one of those
+# silently re-invalidates the COPY layer and every layer below it, which is the whole
+# bug this file exists to fix. Inverting it makes the context exactly the compile
+# inputs, so anything added to the tree later stays out until someone opts it in.
+#
+# Nothing else is needed to build: there is no //go:embed anywhere in the tree, and the
+# runtime stage (Dockerfile:12-16) copies only the compiled binary out of the builder,
+# so no config, doc, or deploy file can reach the published image by any route.
+#
+# Cost of the inversion: adding a //go:embed later fails the compile with
+# "pattern ...: no matching files found" until its asset is unignored here. That is a
+# loud failure at build time, unlike the silent cache miss a deny-list leaks.
+*
+
+# Resolved on their own layer before the source copy (Dockerfile:5-6).
+!go.mod
+!go.sum
+
+# The main package: main.go, plus the whole internal/ tree, which holds .go files and
+# nothing else.
+!main.go
+#
+# `!internal` has to be the bare directory name, and it is not interchangeable with the
+# tighter-looking `!internal/**/*.go`. Both context walkers refuse to descend into an
+# ignored directory unless some un-ignore pattern's LITERAL text prefix-extends that
+# directory's path: `internal/**/*.go` does that for `internal/` but not for
+# `internal/app/`, and only BuildKit compensates for the `**`. Measured here (docker
+# 29.6.2, buildx 0.35.0, buildkit 0.31.2) with `internal/**/*.go` as the only un-ignore:
+# BuildKit shipped 62 files, `DOCKER_BUILDKIT=0` shipped 4 -- internal/ absent outright
+# -- and the compile died on "no required module provides package
+# domains.lst/sub-preprocessor/internal/app". `docker compose build` honours
+# DOCKER_BUILDKIT=0, so that is reachable from the documented deploy path. With the bare
+# name both walkers ship the same 62 files, so do not "simplify" this back.
+#
+# The cost is granularity: un-ignoring a directory un-ignores everything under it, so a
+# non-.go file dropped into internal/ rides along -- today there are none. Re-ignoring
+# part of the tree later is not blocked, on either walker: appending `internal/app` (or
+# `internal/app/`) drops that package identically under both, 60 files / 503,823 bytes.
+# The wall above bites only the un-ignore side, and only when a pattern's literal text
+# stops prefix-extending the directory: after that re-ignore, `!internal/app/app.go`
+# keeps that one file on both walkers (61 / 512,547), while the same intent spelled
+# `!internal/**/app.go` keeps it on BuildKit and loses it on the classic one (61 vs 60).
+# So a future internal/testdata/ can be excluded -- just spell any exception reaching
+# under it out literally, never through `**`.
+!internal
+
+# `go build` reads default.pgo from the main package directory on its own (-pgo=auto is
+# the default since Go 1.21). Dropping it still produces a working binary, just a
+# quietly slower one -- a regression no smoke test would catch.
+!default.pgo
+
+# The builder only runs `go build`, so tests never compile here, and they are 60% of
+# internal/ by size; excluding them lets a test-only commit reuse the cached compile.
+# Gotcha if that changes: `go test ./...` against this context reports "no test files"
+# for all 21 packages and PASSES (exit 0), so a builder test step needs BOTH this line
+# deleted and `!config/config.yaml` added -- internal/config/config_specs_test.go:532
+# and internal/preprocess/processor_internal_test.go:1178 read ../../config/config.yaml
+# and t.Fatal on error. Measured: deleting this line alone fails TestShippedConfigLoads,
+# TestShippedConfigDropsASNButKeepsTheCapability and TestASNFilterFormsStillBuild with
+# "open ../../config/config.yaml: no such file or directory"; with both changes
+# `go test ./internal/config/ ./internal/preprocess/` passes. One residue is not this
+# file's problem: the builder stage runs as root, so the 0500-directory assertion in
+# TestSaveSnapshotFailureKeepsPreviousFile cannot fail as designed and `go test ./...`
+# still exits 1 there.
+internal/**/*_test.go
