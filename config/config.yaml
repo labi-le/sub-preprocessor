@@ -63,24 +63,27 @@ filters:
   #   stable_gemini_gate_* series are ABSENT rather than reading 0. The three states are:
   #   nothing rendered = no gemini gate ran; enabled 0 = configured but no usable key, so
   #   it checked NOTHING and every survivor passed through unverified; enabled 1 = it ran.
-  #   Panel 16 ("Gemini gate state") goes red IMMEDIATELY. Its target sets instant: true, so
-  #   the query returns an empty vector the moment the series stops being exported, whatever
-  #   the dashboard time range still holds; the frame is empty, the special-null mapping and
-  #   noValue both read NOT RUNNING, and the base threshold step paints it red -- until this
-  #   entry is uncommented. (Until 2026-08-08 the target set neither instant nor range, which
-  #   Grafana runs as a RANGE query, reduced with lastNotNull: while the window still held a
-  #   pre-disable sample the panel rendered the last exported 1 -- VERIFYING, in GREEN, for a
-  #   gate that is off -- for roughly the first day on the default now-24h. That lag is gone.)
-  #   Panel 17 ("Gemini gate: unverified share") is instant for the same reason and its base
-  #   threshold step is red too, so it reads NO CLASSIFIED RESPONSES on red beside panel 16
-  #   rather than sitting green next to its NOT RUNNING: Grafana paints a no-value display
-  #   from the BASE step, so a green base would have made "no gate" green. (Until 2026-08-08
-  #   that base was green and the noValue read "gate classified nothing".) Panel 18's legend
-  #   reduces with last rather than lastNotNull, so its rows go empty instead of freezing at
-  #   the final pre-disable counts.
-  #   While panel 16 is red it still cannot tell this deliberate disable from
-  #   filterAndMeasureEgress bailing on a ParseProxies failure and publishing every survivor
-  #   UNFILTERED.
+  #   ONE tile carries all three, wedged between the funnel and the in-vs-kept panel:
+  #   "Gemini gate: unverified share" (panel 17), which on 2026-08-09 absorbed the separate
+  #   state and verified-vs-unverified panels that used to flank it -- one signal did not
+  #   need a whole row of its own in prime position. Its query ORs the ratio with
+  #   `stable_gemini_gate_enabled - 2`, a fallback Prometheus takes ONLY when the ratio is
+  #   empty, and maps the two sentinels back to words: -2 reads OFF -- no usable key, -1
+  #   reads NO CLASSIFIED RESPONSES (the gate ran, no proxy answered). While this entry
+  #   stays commented out neither operand exists, so the fallback is empty too and the tile
+  #   reads NOT RUNNING. It goes red IMMEDIATELY: the target sets instant: true, so the
+  #   query returns an empty vector the moment the series stop being exported, whatever the
+  #   dashboard time range still holds, and Grafana paints a no-value display from the BASE
+  #   threshold step, which is red. (Until 2026-08-08 the state panel set neither instant
+  #   nor range, which Grafana runs as a RANGE query reduced with lastNotNull: while the
+  #   window still held a pre-disable sample it rendered the last exported 1 -- VERIFYING,
+  #   in GREEN, for a gate that is off -- for roughly the first day on the default now-24h.
+  #   That lag is gone. This tile's own base step was green until then, and its noValue read
+  #   "gate classified nothing", so "no gate" used to render green.)
+  #   NOT RUNNING still cannot tell this deliberate disable from filterAndMeasureEgress
+  #   bailing on a ParseProxies failure and publishing every survivor UNFILTERED. Nothing is
+  #   exported in either case, so no tile can: that distinction was never on the dashboard
+  #   and is not lost with the two panels.
   #
   #   Re-enabling: those series exist only while this entry is live, so there is no cycle
   #   to watch first. Confirm the credential out of band -- a keyed GET to
