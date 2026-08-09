@@ -30,8 +30,8 @@ filters:
     # It becomes 141664 singletons covering 0.39% of the addresses, and nothing
     # catches that at BUILD -- newCIDRStore refuses only an EMPTY set. A
     # background reload would be refused (swapRefusalSize sees failed>0, then
-    # the coverage collapse), so the exposure is a restart while
-    # cidrwhitelist.txt is down.
+    # the coverage collapse), so the exposure is any cold build -- a restart, or
+    # a reload that edits this entry -- while cidrwhitelist.txt is down.
     urls:
       - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
     file_type: raw
