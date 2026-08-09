@@ -23,6 +23,18 @@
         "hide": 0,
         "current": {},
         "regex": ""
+      },
+      {
+        "name": "job",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(stable_cycles_total, job)",
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "current": {},
+        "sort": 1
       }
     ]
   },
@@ -83,7 +95,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_kept_nodes",
+          "expr": "stable_kept_nodes{job=\"$job\"}",
           "instant": true
         }
       ]
@@ -141,7 +153,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_sources_ok",
+          "expr": "stable_sources_ok{job=\"$job\"}",
           "legendFormat": "ok",
           "instant": true
         },
@@ -151,7 +163,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_sources_total",
+          "expr": "stable_sources_total{job=\"$job\"}",
           "legendFormat": "total",
           "instant": true
         }
@@ -218,7 +230,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "time() - stable_last_success_timestamp_seconds",
+          "expr": "time() - stable_last_success_timestamp_seconds{job=\"$job\"}",
           "instant": true
         }
       ],
@@ -265,7 +277,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_merged_nodes",
+          "expr": "stable_merged_nodes{job=\"$job\"}",
           "legendFormat": "merged"
         },
         {
@@ -274,7 +286,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_probed_nodes",
+          "expr": "stable_probed_nodes{job=\"$job\"}",
           "legendFormat": "probed"
         },
         {
@@ -283,7 +295,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_dead_skipped_nodes",
+          "expr": "stable_dead_skipped_nodes{job=\"$job\"}",
           "legendFormat": "dead-skipped"
         },
         {
@@ -292,7 +304,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_kept_nodes",
+          "expr": "stable_kept_nodes{job=\"$job\"}",
           "legendFormat": "kept"
         }
       ],
@@ -338,7 +350,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_in_nodes",
+          "expr": "stable_filter_in_nodes{job=\"$job\"}",
           "legendFormat": "{{filter}} in"
         },
         {
@@ -347,7 +359,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_kept_nodes",
+          "expr": "stable_filter_kept_nodes{job=\"$job\"}",
           "legendFormat": "{{filter}} kept"
         }
       ]
@@ -399,7 +411,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_dropped_nodes",
+          "expr": "stable_filter_dropped_nodes{job=\"$job\"}",
           "legendFormat": "{{filter}}/{{reason}}"
         }
       ]
@@ -438,7 +450,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "topk(25, stable_source_kept_nodes)",
+          "expr": "topk(25, stable_source_kept_nodes{job=\"$job\"})",
           "legendFormat": "{{source}}",
           "instant": true,
           "format": "table"
@@ -518,7 +530,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_trace_answered_nodes",
+          "expr": "stable_trace_answered_nodes{job=\"$job\"}",
           "legendFormat": "answered"
         },
         {
@@ -527,7 +539,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_trace_unanswered_nodes",
+          "expr": "stable_trace_unanswered_nodes{job=\"$job\"}",
           "legendFormat": "unanswered"
         },
         {
@@ -536,7 +548,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_trace_moved_nodes",
+          "expr": "stable_trace_moved_nodes{job=\"$job\"}",
           "legendFormat": "moved (offline chain was wrong)"
         }
       ]
@@ -582,7 +594,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_speed_mbps_bucket))",
+          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
           "legendFormat": "p50"
         },
         {
@@ -591,7 +603,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_speed_mbps_bucket))",
+          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
           "legendFormat": "p90"
         },
         {
@@ -600,7 +612,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_kept_speed_max_mbps",
+          "expr": "stable_kept_speed_max_mbps{job=\"$job\"}",
           "legendFormat": "max"
         },
         {
@@ -609,7 +621,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_kept_speed_mbps_sum / clamp_min(stable_kept_speed_mbps_count, 1)",
+          "expr": "stable_kept_speed_mbps_sum{job=\"$job\"} / clamp_min(stable_kept_speed_mbps_count{job=\"$job\"}, 1)",
           "legendFormat": "avg"
         }
       ]
@@ -687,7 +699,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_cycle_duration_seconds",
+          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
           "legendFormat": "duration"
         },
         {
@@ -696,7 +708,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(stable_cycle_failures_total[1h])",
+          "expr": "increase(stable_cycle_failures_total{job=\"$job\"}[1h])",
           "legendFormat": "failures/h"
         },
         {
@@ -705,7 +717,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(stable_cycles_total[1h])",
+          "expr": "increase(stable_cycles_total{job=\"$job\"}[1h])",
           "legendFormat": "cycles/h"
         }
       ],
@@ -768,7 +780,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_geo_unknown_nodes",
+          "expr": "stable_geo_unknown_nodes{job=\"$job\"}",
           "legendFormat": "unresolved nodes"
         },
         {
@@ -777,7 +789,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "100 * stable_geo_unknown_nodes / clamp_min(stable_kept_nodes, 1)",
+          "expr": "100 * stable_geo_unknown_nodes{job=\"$job\"} / clamp_min(stable_kept_nodes{job=\"$job\"}, 1)",
           "legendFormat": "% of kept"
         }
       ],
@@ -827,7 +839,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "topk(15, stable_kept_country_nodes)",
+          "expr": "topk(15, stable_kept_country_nodes{job=\"$job\"})",
           "legendFormat": "{{country}}",
           "instant": true
         }
@@ -838,7 +850,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "IP-stage drops by reason",
-      "description": "Nodes the per-node filters dropped in preprocess, summed over every source and split by reason. dns = the server name resolved to nothing; ipv6 = the server is an IPv6 literal, which this pipeline refuses before any lookup; geo = the country allow-list; asn = the ASN deny-patterns; geoblock = the host is in the geoblock store the through-node gemini/claude/chatgpt checks populate. unsupported is the odd one out and is not a filter drop at all: it counts input lines containing \"://\" that did not parse as a node — a truncated body, a corrupt vmess payload, an HTML error page — so it is a source going bad, and it is deliberately outside the fetched total on the yield panel. ALL SIX ARE EMITTED EVERY CYCLE whether or not a filter behind them is configured: writeSources builds a fixed six-entry table per source and never consults the filter list. But only geo and asn are GATED by `filters:` — geo needs a `- type: country` with a non-empty exclude set (GeofeedFilter returns early when the allow set is full and the deny set empty) or a `- type: asn` whose ASN-resolved country the policy rejects; asn needs that same entry's name-deny patterns. So a zero is ambiguous on those two only, between filter-absent, filter-configured-with-an-empty-exclude-list and filter-configured-and-broken, and config/config.yaml is the authority on which: over the 15d window ending 2026-08-08 19:30Z max_over_time of both was 0, because no `- type: asn` filter is configured and the country filter's exclude_groups is commented out. The other four are unconditional pipeline behaviour that no `filters:` entry can switch off — geoblock fires whenever the geoblock store is open (the separate `geoblock:` block), ipv6 and dns fire inside processNode straight off resolveNode, and unsupported is counted by the parser before any filter exists — so on those four a zero does mean the pipeline looked and found nothing. All six every cycle holds for the CURRENT build, not for every sample behind it: reason=\"ipv6\" was only added on 2026-07-29, and its first sample is 2026-07-29T19:08:03Z — the first cycle published after that day's 18:20Z restart — so a range starting before that instant plots five series, not six. Worker cycle only: the on-demand GET / path runs the same IP-stage chain but reports no metrics.",
+      "description": "Nodes the per-node filters dropped in preprocess, summed over every source and split by reason. dns = the server name resolved to nothing; ipv6 = the server is an IPv6 literal, which this pipeline refuses before any lookup; geo = the country allow-list; asn = the ASN deny-patterns; cidr = the CIDR allow-list, the resolved IP falling outside every configured range, dropped in preprocess before any probe; geoblock = the host is in the geoblock store the through-node gemini/claude/chatgpt checks populate. unsupported is the odd one out and is not a filter drop at all: it counts input lines containing \"://\" that did not parse as a node — a truncated body, a corrupt vmess payload, an HTML error page — so it is a source going bad, and it is deliberately outside the fetched total on the yield panel. ALL SEVEN ARE EMITTED EVERY CYCLE whether or not a filter behind them is configured: writeSources builds a fixed seven-entry table per source and never consults the filter list. But only geo, asn and cidr are GATED by `filters:` — geo needs a `- type: country` with a non-empty exclude set (GeofeedFilter returns early when the allow set is full and the deny set empty) or a `- type: asn` whose ASN-resolved country the policy rejects; asn needs that same entry's name-deny patterns; cidr needs a `- type: cidr` entry with a non-empty `urls:`, the only thing IPFilterSpecs turns into a CIDR spec. So a zero is ambiguous on those three only, between filter-absent, filter-configured-with-an-empty-exclude-list and filter-configured-and-broken, and the authority on which is the config THE SELECTED JOB'S INSTANCE LOADS — `config/config.yaml` for job=\"sub-preprocessor\", `config-vassago/config.yaml` for job=\"sub-preprocessor-vassago\", each bind-mounted at /config by docker-compose. Read that file's `filters:` list, because the two instances run DIFFERENT chains: a reason that is a flat zero under one job can be the dominant series under the other, and neither instance answers for the other. The other four are unconditional pipeline behaviour that no `filters:` entry can switch off — geoblock fires whenever the geoblock store is open (the separate `geoblock:` block), ipv6 and dns fire inside processNode straight off resolveNode, and unsupported is counted by the parser before any filter exists — so on those four a zero does mean the pipeline looked and found nothing. All seven every cycle holds for the CURRENT build, not for every sample behind it: reason=\"ipv6\" was only added to that table on 2026-07-29 and reason=\"cidr\" is newer still, landing with this branch, and each series begins at the selected job's first published cycle on a build carrying it — not the same instant on both jobs — so a range reaching back past that point plots fewer series over its early span: five before ipv6, six before cidr, seven only after both. Worker cycle only: the on-demand GET / path runs the same IP-stage chain but reports no metrics.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -881,7 +893,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (reason) (stable_source_dropped_nodes)",
+          "expr": "sum by (reason) (stable_source_dropped_nodes{job=\"$job\"})",
           "legendFormat": "{{reason}}"
         }
       ]
@@ -944,7 +956,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(stable_source_nodes_total)",
+          "expr": "sum(stable_source_nodes_total{job=\"$job\"})",
           "legendFormat": "fetched"
         },
         {
@@ -953,7 +965,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(stable_source_kept_nodes)",
+          "expr": "sum(stable_source_kept_nodes{job=\"$job\"})",
           "legendFormat": "survived IP-stage"
         },
         {
@@ -962,7 +974,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "100 * sum(stable_source_kept_nodes) / clamp_min(sum(stable_source_nodes_total), 1)",
+          "expr": "100 * sum(stable_source_kept_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
           "legendFormat": "% survived"
         }
       ]

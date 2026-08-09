@@ -509,6 +509,7 @@ func (c *Checker) fetchSources(
 			Kept:         r.stats.Kept,
 			DNSDrop:      r.stats.DNSDrop,
 			GeoDrop:      r.stats.GeoDrop,
+			CIDRDrop:     r.stats.CIDRDrop,
 			ASNDrop:      r.stats.ASNDrop,
 			GeoBlockDrop: r.stats.GeoBlockDrop,
 			IPv6Drop:     r.stats.IPv6Drop,

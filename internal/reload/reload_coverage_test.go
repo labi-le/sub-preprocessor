@@ -79,12 +79,15 @@ var reloadClassification = map[string]string{
 	"resolver.cache_ttl":          liveProcessor,
 	"resolver.cache_negative_ttl": liveProcessor,
 
-	// Only type/provider/deny_patterns reach the IP-stage chain. The remaining
-	// filter keys configure through-node gates the processor never builds, so
-	// they are worker-only however much they sit in the same list.
+	// IP-stage keys: type/provider/deny_patterns and the three that point the
+	// cidr allow-list at its download. The rest configure through-node gates
+	// the processor never builds, however much they sit in the same list.
 	"filters[].type":              liveBoth,
 	"filters[].provider":          liveBoth,
 	"filters[].deny_patterns":     liveBoth,
+	"filters[].urls":              liveBoth,
+	"filters[].file_type":         liveBoth,
+	"filters[].refresh_interval":  liveBoth,
 	"filters[].exclude_groups":    liveWorker,
 	"filters[].exclude_countries": liveWorker,
 	"filters[].min_mbps":          liveWorker,
@@ -154,7 +157,7 @@ var reloadClassification = map[string]string{
 // coverageBase is the config every behavioural mutation starts from. Every field
 // a mutator touches holds a value the mutation actually changes, and the filters
 // list carries one entry per shape the keys address (country, asn, bandwidth,
-// gemini, claude) so a per-entry key can be mutated in isolation.
+// gemini, claude, cidr) so a per-entry key can be mutated in isolation.
 func coverageBase() config.Config {
 	cfg := config.Config{
 		Log: config.LogConfig{Level: "info"},
@@ -189,6 +192,10 @@ func coverageBase() config.Config {
 				Endpoint: "https://gemini.example.com", APIKey: "key", KeyFile: "/run/key", KeyVar: "KEY",
 			},
 			{Type: config.FilterClaude, Version: "2023-06-01"},
+			{
+				Type: config.FilterCIDR, FileType: "raw", RefreshInterval: new(24 * time.Hour),
+				URLs: []string{"https://whitelist.example.com/cidrwhitelist.txt"},
+			},
 		},
 		Annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
 		Groups:   config.Groups{"blocked": {"RU"}},
@@ -225,7 +232,7 @@ func coverageBase() config.Config {
 
 // keyMutators changes exactly one yaml key per entry, so the reload path it
 // trips is attributable to that key alone. Filter indices follow coverageBase:
-// 0 country, 1 asn, 2 bandwidth, 3 gemini, 4 claude.
+// 0 country, 1 asn, 2 bandwidth, 3 gemini, 4 claude, 5 cidr.
 var keyMutators = map[string]func(*config.Config){
 	"log.level": func(c *config.Config) { c.Log.Level = "debug" },
 
@@ -273,6 +280,11 @@ var keyMutators = map[string]func(*config.Config){
 	"filters[].key_file":    func(c *config.Config) { c.Filters[3].KeyFile = "/run/other" },
 	"filters[].key_var":     func(c *config.Config) { c.Filters[3].KeyVar = "OTHER" },
 	"filters[].version":     func(c *config.Config) { c.Filters[4].Version = "2024-01-01" },
+	"filters[].urls": func(c *config.Config) {
+		c.Filters[5].URLs = []string{"https://other.example.com/cidrwhitelist.txt"}
+	},
+	"filters[].file_type":        func(c *config.Config) { c.Filters[5].FileType = "gzip" },
+	"filters[].refresh_interval": func(c *config.Config) { c.Filters[5].RefreshInterval = new(time.Hour) },
 
 	// GEO is the only tag validateAnnotate accepts, so no LOADABLE config
 	// differs in this field alone; the row still has to be exercised, and with

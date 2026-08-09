@@ -32,7 +32,7 @@ func TestMetricsObserveRender(t *testing.T) {
 		Merged: 21000, DeadSkipped: 20000, Probed: 966, Kept: 165,
 		Duration: 90 * time.Second,
 		Sources: []stable.SourceReport{
-			{Name: "mifa", Total: 100, Kept: 20, DNSDrop: 5, GeoDrop: 71, GeoBlockDrop: 4},
+			{Name: "mifa", Total: 133, Kept: 20, DNSDrop: 5, GeoDrop: 71, CIDRDrop: 33, GeoBlockDrop: 4},
 		},
 		Filters: []stable.FilterReport{
 			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}},
@@ -66,6 +66,7 @@ func TestMetricsObserveRender(t *testing.T) {
 		"stable_trace_moved_nodes 47",
 		`stable_source_kept_nodes{source="mifa"} 20`,
 		`stable_source_dropped_nodes{reason="geo",source="mifa"} 71`,
+		`stable_source_dropped_nodes{reason="cidr",source="mifa"} 33`,
 		`stable_kept_speed_mbps_bucket{le="5"} 1`,
 		`stable_kept_speed_mbps_bucket{le="10"} 2`,
 		`stable_kept_speed_mbps_bucket{le="+Inf"} 4`,

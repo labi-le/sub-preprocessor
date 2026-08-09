@@ -2,11 +2,13 @@ package preprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 )
@@ -105,11 +107,47 @@ func (f *ASNFilter) Process(ctx context.Context, ips []netip.Addr, pctx *Pipelin
 	return ips[:n]
 }
 
+// CIDRFilter keeps the IPs inside a downloaded allow-list and drops a node
+// that has none left. It reads nothing from the request: membership of the
+// node's own address is the whole policy, so every caller gets one verdict.
+type CIDRFilter struct {
+	// set is a getter so the filter follows background refreshes of the list,
+	// the same reason geo.NewLookupProvider takes one.
+	set func() cidrset.Set
+}
+
+func NewCIDRFilter(set func() cidrset.Set) *CIDRFilter {
+	return &CIDRFilter{set: set}
+}
+
+func (f *CIDRFilter) Process(_ context.Context, ips []netip.Addr, pctx *PipelineContext) []netip.Addr {
+	set := f.set()
+	n := 0
+	for _, ip := range ips {
+		if set.Contains(ip) {
+			ips[n] = ip
+			n++
+		}
+	}
+	if n == 0 {
+		pctx.Stats.CIDRDrop++
+	}
+	return ips[:n]
+}
+
+// errNoCIDRSet is structural insurance, unreachable from buildFilters' single
+// caller: that one passes a non-nil set exactly when a cidr spec exists, which
+// is exactly when this case fires. It exists so a SECOND caller getting the
+// wiring wrong fails NewProcessor instead of panicking on a nil getter once
+// per request.
+var errNoCIDRSet = errors.New("cidr filter configured without a loaded allow-list")
+
 // buildFilters constructs the IP-stage filter chain from the parsed spec list,
 // in config order. A country filter uses the geofeed provider by default or the
 // ASN resolver when provider is "asn"; an asn filter applies its compiled
-// name-deny patterns plus ASN-country filtering.
-func buildFilters(specs []config.IPFilterSpec, asnR *asn.Resolver) ([]Filter, error) {
+// name-deny patterns plus ASN-country filtering; a cidr filter reads the
+// allow-list through cidrSet.
+func buildFilters(specs []config.IPFilterSpec, asnR *asn.Resolver, cidrSet func() cidrset.Set) ([]Filter, error) {
 	filters := make([]Filter, 0, len(specs))
 	for _, spec := range specs {
 		switch spec.Type {
@@ -125,6 +163,11 @@ func buildFilters(specs []config.IPFilterSpec, asnR *asn.Resolver) ([]Filter, er
 				return nil, err
 			}
 			filters = append(filters, NewASNFilter(asnR, patterns))
+		case config.FilterCIDR:
+			if cidrSet == nil {
+				return nil, errNoCIDRSet
+			}
+			filters = append(filters, NewCIDRFilter(cidrSet))
 		}
 	}
 	return filters, nil

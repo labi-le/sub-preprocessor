@@ -61,7 +61,16 @@ expected — revert the fix, confirm the new test fails, restore. The restore is
 until an empty `git diff` against the pre-mutation tree says so, and that check MUST run
 before the round is reported: the mutation deliberately leaves production code wrong, and
 agents here work in worktrees off a parent whose `./config` is bind-mounted read-write into
-a running container (`docker-compose.yaml:14`). Mutation has repeatedly found tests here
+a running container (`docker-compose.yaml:14`). **Mutate in a `git archive` export under
+`/tmp`, never in the shared worktree.** A mutation is a deliberately wrong tree and
+concurrent agents are the normal mode here, so a peer reading the shared checkout
+mid-round sees a defect that does not exist — this round one reviewer's harness showed
+another a red they could not reproduce. Isolation makes the empty-diff check vacuous
+rather than optional: it still binds anything mutated in place, and in place is what you
+must avoid — and an untracked package (`internal/cidrset` on this branch) has no `git
+diff` to be empty at all, so there the check is `cmp` against a pre-mutation copy.
+Figures measured in an export tree describe that tree, which is why none of this round's
+mutation numbers reached a document. Mutation has repeatedly found tests here
 that could not fail at all: the mieru outcome fold shipped with three tests that looked like
 coverage while neutering both production fold conditions left the package green, and
 replacing `betterTraceOutcome`'s body with `return a.name < b.name` also left it green
@@ -170,7 +179,7 @@ It exposes two modes.
 
 **Stable subscriptions worker (`GET /stable.txt`)** — a background worker keeps
 one curated list built from all `subscriptions.sources`. Each cycle fetches every
-source, runs it through the same geo/ASN filter, merges and dedupes by
+source, runs it through the same IP-stage filter chain (geo/ASN/cidr), merges and dedupes by
 `server:port` (first source wins), relabels kept nodes to `<source>-NNN`, probes
 every node with an embedded Mihomo URL test, keeps only those that pass all
 rounds under the latency threshold, then runs the configured through-node
@@ -181,6 +190,22 @@ the egress each survivor reports about itself through `cdn-cgi/trace` when the
 swapped in atomically; the last good list is kept if a cycle fails, and with
 `subscriptions.snapshot_path` set it is also written to disk and reloaded at
 startup, so `503` is left for a genuinely cold start rather than every restart.
+
+**Two instances of this binary run from the one image** (`docker-compose.yaml`):
+`sub-preprocessor` on `:7008` reading `./config`, and `sub-preprocessor-vassago`
+on `:7009` reading `./config-vassago`. Same code, same two modes, different
+`filters:`. The vassago instance gates on the ENTRY address — a `cidr` allow-list
+holding the Russian mobile-operator whitelist — then `country`, then `bandwidth`.
+The `country` entry carries no `exclude_*`, so it is inert on `/stable.txt`
+(`GeofeedFilter` early-returns on a full allow set with an empty deny set) and is
+there for `GET /`: without an entry of that type `buildFilters` builds nothing,
+and the server goes on demanding a `countries`/`groups`/`exclude_*` parameter that
+no filter then reads. It arms no through-node geo gate and no `cloudflare`
+provider: its nodes are meant to be used UNDER that whitelist, so an egress-geo
+gate answers a question nobody asked and each one costs a request per survivor to
+do it. Only the first instance runs the crawler and holds the Gemini key; the
+second's source list is curated by hand. A change to "the shipped config" now
+has to be checked against BOTH directories.
 
 ## Important current design decisions
 
@@ -200,6 +225,9 @@ startup, so `503` is left for a genuinely cold start rather than every restart.
 - File type is explicit only: `raw` or `gzip`. There is no auto-detection/legacy mode.
 - Geofeed data is cached in memory and reloaded by `geofeed.refresh_interval` (unset → 24h; explicit `0` disables the refresh).
 - A config reload NEVER restarts the `/stable.txt` worker. `stable.Controller.Apply` swaps a `CheckerSpec` the next cycle reads, so the crawler's hourly `private.yaml` rewrite cannot cancel a 20–55 min cycle in flight and burn a full probe pass. Nor does it stop the worker: a reload whose merged source list came out EMPTY is refused with a warning and the previous spec stays live, because every source comes from an overlay and an empty list is nearly always a missing file. Only shutdown calls `Stop`.
+- The `cidr` allow-list **fails closed at BUILD**, unlike every downloadable database beside it. Two gates, both fatal to `NewProcessor`: `cidrset.Load` errors when no URL yielded a range, and `newCIDRStore` refuses an empty set (`errEmptyCIDRSet`) even where a load reported success. A warning would be wrong here, because an allow-list that failed to download is not a degraded filter but the INVERTED one — it drops every node while every counter reads healthy, and the instance publishes an empty subscription. Verified against the real config: pointing `filters[].urls` at a 404 exits 1 with `no cidr ranges loaded (1 source(s) failed)`. A hot reload hitting the same error keeps the previous processor, so the running list survives a typo.
+- **The allow-list's swap guard counts COVERED ADDRESSES, never merged ranges.** `swapRefusalSize` is shared with the geo databases, whose unit is ranges, and the cidr store hands it `Set.Covered()` instead. The two quantities move in opposite directions, and the upstream itself is the proof: `cidrwhitelist.txt` is 30228 lines -> 15649 merged ranges -> 36265984 addresses, while the SAME repo's `ipwhitelist.txt` publishes that identical space as 141664 lines — every one of them the `.1` of a /24 already covered, 0 outside. Configure both URLs and lose the CIDR file, and a range-count guard reads 15649 -> 141664 (+805%) as healthy growth while swapping in a set covering 0.39% of the space, whose only survivors are nodes resolving to a literal `.1`. Coverage refuses that swap; `Len()` applauds it. That is why `cidrset.Len`'s doc comment says what it must not be used for.
+- **At most ONE `cidr` entry per config**, rejected at load rather than merged. `urls:` already expresses the union, so a second entry could only mean intersection — a shape nothing here wants — and one entry means one live store, which is what lets the reload carry-over stay a single `CIDRState` instead of a keyed collection.
 
 ## Important security / correctness notes
 
@@ -238,7 +266,8 @@ Important keys:
 - `resolver.timeout`
 - `resolver.address` — upstream DNS server, passed verbatim to the dialer, so it MUST be `host:port` (`1.1.1.1:53`); a portless value is rejected at load, because it dials nothing and would drop every node as a DNS failure. Empty keeps the system resolver
 - `resolver.cache_ttl` / `resolver.cache_negative_ttl` (DNS TTL cache)
-- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn`; `type: asn` with `deny_patterns`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) run post-probe in the stable worker only, and every one of them is a gate that drops. `exclude_groups`/`exclude_countries` on a `country` entry are **worker-only** — their single consumer is `config.Config.DeniedCountries()`, which feeds the `/stable.txt` worker; on `/` the country constraint comes from the query params alone.
+- `filters` — ONE ordered list for both stages. IP-stage entries (`type: country` with `provider: geofeed|asn`; `type: asn` with `deny_patterns`; `type: cidr` with `urls` + `file_type` + `refresh_interval`) run per node in preprocess on both `/` and the worker; through-node entries (`type: gemini`/`claude`/`chatgpt`/`tidal`/`bandwidth`) run post-probe in the stable worker only, and every one of them is a gate that drops. `exclude_groups`/`exclude_countries` on a `country` entry are **worker-only** — their single consumer is `config.Config.DeniedCountries()`, which feeds the `/stable.txt` worker; on `/` the country constraint comes from the query params alone, and only when a `country` entry exists at all: `buildFilters` builds nothing for an absent type, so a list without one leaves `GET /` demanding a `countries`/`groups`/`exclude_*` parameter (`server.go` answers `400` without one) that nothing then consults. A `cidr` entry is an ALLOW-list of IPv4 ranges downloaded from `urls` and unioned (`file_type` `raw`|`gzip`, default `raw`; `refresh_interval` unset or an explicit `0` means 24h, as for `geo.dbip`, negative rejected); it reads nothing from the request, so it is the one IP-stage entry whose verdict is identical on `/` and the worker. Its drops book `Stats.CIDRDrop` / `cidr_drop=` / `stable_source_dropped_nodes{reason="cidr"}`
+- **The IP-stage order is load-bearing, not cosmetic, and nothing validates it.** `buildFilters` appends in written order and `processNode` returns at the first filter that empties the IP slice, so a cheap local gate belongs ahead of one that makes a network call per IP. The case that matters is `cidr` before `asn` (and before `{type: country, provider: asn}`): written the other way round, `ASNFilter.Process` spends a Cymru round trip per IP on nodes the allow-list discards one step later — 54535 of the measured pool's 59558 nodes. `config-vassago/config.yaml`, the only shipped config carrying a `cidr` entry, puts it first. This stays a documented rule rather than a validator, because a validator would have to encode a cost model it has no business owning
 - `annotate` — ordered tag list (`tag: GEO` is the only accepted tag; it takes `providers:`, an ordered chain of `cloudflare|geofeed|dbip|registry|asn` — first provider that resolves wins, all-miss renders `??`) prepended to node names on both `/` and `/stable.txt`; empty list disables annotation. One accepted tag does not make the LIST redundant: entries render in order and may repeat, so two `GEO` entries with different chains publish two tags (`preprocess.annotator` reports the leftmost that resolved as the node's country), and the empty list is a distinct mode rather than a milder one. **Repetition reaches BOTH stages.** `preprocess.countryChainOrder` builds the country FILTER's provider order by concatenating EVERY `GEO` entry's chain in written order, de-duplicated by first occurrence, so the filter's provider set is the union of what the entries name and repetition changes only what is RENDERED. Measured on an IP the geofeed cannot place and DB-IP puts in DE, one entry chaining `[geofeed, dbip]` and two entries (`[geofeed]` then `[dbip]`) now reach the same verdict — kept under `countries=DE`, dropped under `exclude_countries=DE` — and differ only in the tag, `[GEO:DE]` against `[GEO:??][GEO:DE]`. Reading the first entry alone inverted BOTH verdicts for the split config, the deny-list one silently: it published `[GEO:??][GEO:DE]` for a node the operator excluded DE for, and `select.go` then wrote `DE` into `Entry.Country` and `stable_kept_country_nodes{country="DE"}`. `cloudflare` is the only provider that is not consulted offline: it is a geo-IP database like the rest, but it is asked about the egress the node reported for itself, which exists only in the worker's post-probe stage, so on `/` it always misses and the chain falls through. `config.Config.AnnotateUsesProvider(config.ProviderCloudflare)` is what arms that probe — an offline-only chain never spends a request on it. The retired singular `provider:` key is rejected as an unknown key by the strict decode. The `IP` and `ASN` tags are retired — both removed outright, since nothing consumed them and no shipped config selected them, so `- tag: IP` and `- tag: ASN` now fail the load as unknown tags; `rewrite.isKnownTag` still recognises `[IP:…]` and `[ASN:…]` on the STRIP side, deliberately, so an upstream-authored address or AS attribution is removed instead of riding along. Note that `asn` the PROVIDER and `{type: asn}` the FILTER are untouched and load-bearing — only the tag went.
 - `geoblock.db_path` / `geoblock.ttl` (SQLite per-host geo-block list; default TTL 720h)
 - `geoblock.gemini.*` / `geoblock.claude.*` / `geoblock.chatgpt.*` / `geoblock.tidal.*` (`endpoint`, `timeout`, `concurrency`; plus `marker` for gemini/claude/chatgpt, `model` + `api_key`/`key_file`/`key_var` for gemini, `version` for claude) — base params for the `gemini`/`claude`/`chatgpt`/`tidal` node-filters; enabled by listing `{type: gemini}` / `{type: claude}` / `{type: chatgpt}` / `{type: tidal}` in `filters` (a filter entry may override these per-field). The `tidal` gate is the odd one out twice over. It has no refusal marker: where Tidal refuses an egress the request dies at the CDN (403 + HTML, measured from a RU egress), so the gate is **fail-closed on the status alone** — kept only on 2xx, and since redirects are not followed a 3xx interstitial is a refusal too. The body is deliberately not read (the country it reports gates where a subscription can be bought, not where an existing subscriber streams), so the gate answers only "did the request get through" and a 2xx from an ISP block page or captive portal counts as passed. It also never writes to the geoblock store (a bare status code is too weak a signal to persist host-wide for the store's TTL).
@@ -249,7 +278,7 @@ Important keys:
 - `subscriptions.interval` and every `subscriptions.check.*` param are validated on every load, even with no sources configured (they all arrive from the overlays here, and a list-gated check let a bad value boot clean and then fail every later reload)
 - `subscriptions.sources[].name` + `url` *or* inline `body` (base64/raw node URIs; used by the crawler's `tg-inline` harvest)
 - `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `expected_status`, `concurrency`, `source_timeout`) — URL-test (latency) prober params ONLY; through-node filters and exclusions live in the top-level `filters` list
-- `subscriptions.snapshot_path` — where the worker persists the list it just published, reloaded at startup so `/stable.txt` serves the last good list instead of `503` while the first cycle runs (measured 58 minutes on a 68266-node pool). Empty disables. The shipped value is `/config/.stable-snapshot.json`: `./config` (`docker-compose.yaml:14`) is the only WRITABLE host bind mount — the service's other one, the agenix secret at line 16, is a read-only file — and uid 1000 already writes `.geoblock.db` into it — `.crawler-state.json` sits there too, but the crawler container writes that one as root (`docker-compose.yaml:26`) — so persistence adds no volume and no host-side provisioning. It is absolute because every OTHER path key the SHIPPED file sets is (`geoblock.db_path`, `geoblock.gemini.key_file`), and the runtime image is `WORKDIR /`. A path under `/tmp` would land in the container's OWN writable layer, which `docker compose up -d` recreates after a build — it would survive `docker restart` but not the redeploy those 58 minutes came from. The accepted cost is that the snapshot now outlives a host reboot too, the same guarantee its two neighbours already have. Writing it into the watched directory does NOT self-trigger a reload: `reload.Watcher` adds that directory to fsnotify, but `matches` compares each event against the three exact overlay paths, so the per-cycle temp-create + rename is ignored. There is no TTL, deliberately — the in-memory rule already keeps the last good list through failing cycles, and the age stays visible in `X-Stable-Stats updated=`. It takes no validator beyond the strict decoder, exactly like the three other path keys in the SCHEMA (`geoblock.db_path`, `geoblock.gemini.key_file`, `filters[].key_file`) — a wider population than the two the shipped file sets, and `routes.md` enumerates that one. **Startup-only:** it is in `config.StoresChanged` and EXCLUDED from `config.SubscriptionsChanged`, so a reload warns instead of re-applying the worker — the only key in the block that behaves that way
+- `subscriptions.snapshot_path` — where the worker persists the list it just published, reloaded at startup so `/stable.txt` serves the last good list instead of `503` while the first cycle runs (measured 58 minutes on a 68266-node pool). Empty disables. The shipped value is `/config/.stable-snapshot.json`: `./config` (`docker-compose.yaml:14`) is that service's only WRITABLE host bind mount — its other one, the agenix secret at line 16, is a read-only file — and uid 1000 already writes `.geoblock.db` into it — `.crawler-state.json` sits there too, but the crawler container writes that one as root (`docker-compose.yaml:42`) — so persistence adds no volume and no host-side provisioning. `config-vassago/config.yaml` sets the same key against that instance's own `./config-vassago` mount, and that snapshot is the only file the instance writes there: it ships no `geoblock` block, so `app.Run` opens no store for it. It is absolute because every OTHER path key the SHIPPED file sets is (`geoblock.db_path`, `geoblock.gemini.key_file`), and the runtime image is `WORKDIR /`. A path under `/tmp` would land in the container's OWN writable layer, which `docker compose up -d` recreates after a build — it would survive `docker restart` but not the redeploy those 58 minutes came from. The accepted cost is that the snapshot now outlives a host reboot too, the same guarantee its two neighbours already have. Writing it into the watched directory does NOT self-trigger a reload: `reload.Watcher` adds that directory to fsnotify, but `matches` compares each event against the three exact overlay paths, so the per-cycle temp-create + rename is ignored. There is no TTL, deliberately — the in-memory rule already keeps the last good list through failing cycles, and the age stays visible in `X-Stable-Stats updated=`. It takes no validator beyond the strict decoder, exactly like the three other path keys in the SCHEMA (`geoblock.db_path`, `geoblock.gemini.key_file`, `filters[].key_file`) — a wider population than the two the shipped file sets, and `routes.md` enumerates that one. **Startup-only:** it is in `config.StoresChanged` and EXCLUDED from `config.SubscriptionsChanged`, so a reload warns instead of re-applying the worker — the only key in the block that behaves that way
 - `fetch.timeout` — per-subscription fetch deadline (default 3s)
 - `log.level` — zerolog level, hot-reloadable
 
@@ -260,6 +289,7 @@ Important keys:
 - `internal/config` — YAML config parsing/validation
 - `internal/fetch` — safe HTTP fetching, file-type decoding, SSRF protections
 - `internal/geofeed` — geofeed download/parse/lookup
+- `internal/cidrset` — IPv4 allow-list: fetch/parse a CIDR (or bare-address) list into merged sorted ranges, membership by binary search
 - `internal/resolver` — DNS resolution with an in-memory TTL cache
 - `internal/asn` — ASN lookup (Team Cymru) for the ASN name/country filter
 - `internal/filter` — country allow/deny bitset
@@ -303,7 +333,8 @@ vendor the dashboard into the nixos repo.
   exposition (deliberately no `client_golang` — the `google.golang.org/protobuf =>
   metacubex/protobuf-go` replace in `go.mod` makes it risky). Served on an internal
   listener (`server.metrics_listen`, default `:9090`); `docker-compose.yaml` publishes
-  it loopback-only (`127.0.0.1:9091:9090`) — keep it non-public.
+  it loopback-only once per instance — `127.0.0.1:9091:9090` for `sub-preprocessor`,
+  `127.0.0.1:9092:9090` for `sub-preprocessor-vassago` — keep both non-public.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport`
   (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds, cycle
   aggregate + duration) to `metrics.Metrics.Observe` on a published cycle, and
@@ -325,10 +356,19 @@ vendor the dashboard into the nixos repo.
   survivor UNFILTERED). Metric names are a wire format from the moment they ship, exactly like the
   drop-reason strings.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
-  Prometheus scrape job (`127.0.0.1:9091`) + the Grafana dashboard provider
+  Prometheus scrape jobs + the Grafana dashboard provider
   (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
   variable, so no fixed uid). `nixosModules.default` is the separate systemd-service
   module — leave it.
+- **Two instances, two scrape JOBS — not two targets in one job.** `sub-preprocessor`
+  (`127.0.0.1:9091`) and `sub-preprocessor-vassago` (`127.0.0.1:9092`) each carry their
+  own `job_name`, because the dashboard's Instance picker is
+  `label_values(stable_cycles_total, job)` and every panel expression is scoped
+  `{job="$job"}`. Sharing a job leaves the two deployments unselectable AND silently
+  sums their funnels. Two consequences bind any dashboard edit: a panel added later
+  MUST carry that selector, and a panel description MUST NOT name one config file as
+  the authority for what ran — which filters exist depends on which instance `$job`
+  selects.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway
@@ -413,7 +453,8 @@ nix flake update sub-preprocessor && make switch
 ## Project layout
 
 - `main.go` — entry point
-- `config.yaml` — application configuration
+- `config/` — the first instance's config directory (`config.yaml` + the `sources.yaml` / `private.yaml` overlays)
+- `config-vassago/` — the second instance's (`config.yaml` + `sources.yaml`; no crawler writes here)
 - `Makefile` — common targets (`run`, `test`, `fmt`, `race`, `bench`)
 - `.golangci.yml` — linter configuration
 - `internal/` — internal packages

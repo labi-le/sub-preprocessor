@@ -105,6 +105,7 @@ type SourceReport struct {
 	Kept         int
 	DNSDrop      int
 	GeoDrop      int
+	CIDRDrop     int
 	ASNDrop      int
 	GeoBlockDrop int
 	IPv6Drop     int

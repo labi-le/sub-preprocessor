@@ -3,11 +3,12 @@
 An HTTP preprocessor for Mihomo / Clash.Meta proxy subscriptions.
 
 It takes raw proxy subscription lists (public collectors, Telegram channels,
-your own sources), filters nodes by the country their IP resolves to, probes
-them for liveness, latency, bandwidth, and real-world reachability of
-geo-fenced services, and serves clean Mihomo-compatible output. The goal is to
-feed a router's Mihomo instance a subscription that only contains nodes worth
-routing through — dead, slow, and geo-blocked nodes removed.
+your own sources), filters nodes by the country their IP resolves to or by
+membership of an operator IP allow-list, probes them for liveness, latency,
+bandwidth, and real-world reachability of geo-fenced services, and serves
+clean Mihomo-compatible output. The goal is to feed a router's Mihomo instance
+a subscription that only contains nodes worth routing through — dead, slow,
+and geo-blocked nodes removed.
 
 ## Why
 
@@ -42,6 +43,10 @@ proxy is `host:port` by definition and mihomo refuses it, so a bare
 portful form is still a node — which is why the crawler's classifier keeps its
 own fixed proxy-scheme list, to reject pages full of ordinary `https://` links.
 
+Two instances of the service run side by side (see [Deployment](#deployment)),
+so every endpoint above exists twice, on a different port and against a
+different config directory.
+
 ### 1. On-demand filter — `GET /`
 
 Filter a single subscription URL at request time by exit country:
@@ -74,7 +79,7 @@ liveness probing — only IP-stage filtering (see below).
 
 One request is bounded on purpose. fasthttp cannot cancel a handler when the
 client disconnects, so the pipeline runs under an explicit 60 s deadline
-(`504` when it expires), and a body of more than 20 000 parseable nodes is
+(`504` when it expires), and a body of more than 50 000 parseable nodes is
 refused with `413` before a single DNS lookup — resolution is serial, so an
 unbounded node list would otherwise occupy a goroutine for hours after the
 caller left. A panic in the request path is recovered as a `500` (logged with
@@ -148,9 +153,57 @@ after DNS resolution, before any probing:
   allow-list can drop it. `exclude_groups` / `exclude_countries` are
   **worker-only**: they build the `/stable.txt` deny-set and never reach the
   `/` chain, where the allowed and denied sets come from the query params
-  alone.
+  alone — and only when a `country` entry is present at all. Nothing is built
+  for a filter type the list does not name, so a config without one leaves
+  `GET /` still requiring a `countries` / `groups` / `exclude_*` parameter
+  (the server answers `400` without one) that no filter then reads.
 - `asn` — drop nodes whose AS name matches `deny_patterns` (regexps), and
   nodes whose Cymru-resolved country is not allowed.
+- `cidr` — an IPv4 **allow-list** downloaded from `urls`: a node survives only
+  when at least one of its resolved addresses falls inside one of the ranges.
+  Unlike `country` it reads nothing from the request, so `/` and the worker
+  reach the same verdict and no query param can widen it. The lists are merged
+  into sorted, disjoint ranges once per refresh, so the per-node cost is one
+  binary search — which is why this entry belongs first in `filters:`, ahead of
+  anything that makes a network call. Drops are counted as `cidr_drop=` in
+  `X-Preprocessor-Stats` and as `stable_source_dropped_nodes{reason="cidr"}`.
+
+  ```yaml
+  filters:
+    - type: cidr
+      urls:
+        - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
+      file_type: raw        # raw | gzip, default raw
+      refresh_interval: 24h # unset or an explicit 0 => 24h; negative is rejected
+  ```
+
+  Several `urls` are unioned into one list, and exactly one `cidr` entry is
+  allowed per config: the union is what `urls:` already expresses, so a second
+  entry could only mean intersection. **The startup load is fail-closed.** If
+  no source yields a range the service refuses to start — a URL answering 404
+  exits 1 with `no cidr ranges loaded (1 source(s) failed)`, and a body that
+  parses to an empty set is refused by the same rule — because an allow-list
+  that failed to download is not a milder filter but the opposite one: it
+  would drop every node and publish an empty subscription. A background
+  refresh keeps the last good list on failure, and its shrink guard compares
+  **addresses covered**, not the number of merged ranges: the same upstream
+  also publishes `ipwhitelist.txt`, which renders the identical space as 141664
+  single addresses, so a range count can grow ninefold while real coverage
+  collapses to 0.39%.
+
+  Worked example, measured 2026-08-09 against that whitelist: the file's 30228
+  lines merge into 15649 ranges covering 36265984 addresses. Across the 51
+  sources in `config/sources.yaml` — 59558 nodes on 19330 distinct servers —
+  5023 nodes (8.43%) sit on a server that resolves into it, which is what the
+  second compose instance is configured from (37 of the 51 sources kept; 12
+  measured zero whitelisted nodes and 2 were dead links answering 404). A live
+  run of that instance loaded the same 15649 ranges and moved the counter on a
+  real source: `shatak` came back with 586 nodes, of which 25 were kept, 533
+  booked `cidr_drop` and 28 `geo_drop` under `countries=RU`. Those counts will
+  not reproduce — the sources are live and churn between runs, and this one had
+  already shed nodes since the measurement above. What reproduces is the
+  identity: `total` equals `kept` plus every drop reason, here 586 = 25 + 533 +
+  28.
 
 Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
@@ -199,8 +252,16 @@ are gates that drop:
   rendered later, with every other tag, at publication.
   Results are never cached — measured fresh each cycle.
 
-Filter order is honoured; putting the expensive one (`bandwidth`) last means it
-runs on the fewest nodes. `cloudflare` is not in this list — it is an annotate
+Filter order is honoured, and it is load-bearing rather than cosmetic in both
+stages. The chain stops at the first filter that leaves a node with no
+addresses, so a cheap local gate belongs ahead of one that makes a network call
+per IP: put `cidr` before `asn` (and before `{type: country, provider: asn}`),
+or a Team Cymru round trip is spent on every IP the allow-list was going to
+discard one step later — 54535 of the 59558 nodes measured across the shipped
+sources. In the through-node stage the same reasoning puts the expensive one
+(`bandwidth`) last, so it runs on the fewest nodes. Nothing validates the
+order: a validator would have to encode a cost model that does not belong in
+the config loader. `cloudflare` is not in this list at all — it is an annotate
 provider, not a gate: see [Annotation](#annotation).
 
 ### Annotation
@@ -334,15 +395,21 @@ attribution).
 | geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
 | dbip (`geo.dbip.refresh_interval`, default 24h) | in-memory range index (~700k ranges), refreshed in background | DB-IP Country Lite IP→country database for the `dbip` annotate provider |
 | registry (`geo.registry.refresh_interval`, default 24h) | in-memory range index (~330k ranges), refreshed in background | RIR delegated-extended registration countries for the `registry` annotate provider |
+| cidr allow-list (`filters[].refresh_interval`, default 24h) | in-memory merged range list, refreshed in background | the IPv4 ranges a `cidr` filter admits; built only when such a filter is configured |
 
-The two downloadable databases are built only when an `annotate` chain
+The two downloadable geo databases are built only when an `annotate` chain
 references them. A failed startup download logs a warning and starts empty —
 the provider chain degrades to the next provider and the next
 request-triggered refresh retries; a failed background refresh keeps the
 stale data. Loaded databases are carried across hot reloads when their config
 block is unchanged, together with the retry schedule of a download that is
 currently failing, so a reload neither re-downloads a healthy database nor
-resets a failing one's backoff.
+resets a failing one's backoff. The cidr allow-list rides that same machinery
+with three deliberate differences: it is built when a `cidr` filter is
+configured rather than when a provider is named, an empty startup load is
+fatal rather than a warning, and its refresh guard measures the swap in
+covered ADDRESSES where the geo databases count ranges — the last two are
+spelled out with the filter above.
 
 ## Telegram crawler
 
@@ -438,6 +505,15 @@ reload that comes out with **zero** subscription sources is refused rather than
 obeyed — the running worker keeps its previous sources and logs a warning,
 since an empty list is nearly always a missing overlay file.
 
+The repo ships **two** config directories, one per compose instance:
+`config/` for `sub-preprocessor` and `config-vassago/` for
+`sub-preprocessor-vassago`. Each is bind-mounted at `/config` inside its own
+container, so everything below is relative to whichever directory an instance
+runs on, and the strict-decode, overlay and hot-reload rules are identical for
+both. `config-vassago/` ships `config.yaml` + `sources.yaml` and no
+`private.yaml`: the crawler writes into `config/` only, so that instance's
+source list is curated by hand.
+
 Key sections:
 
 - `log.level` — zerolog level, hot-reloadable.
@@ -459,7 +535,12 @@ Key sections:
 - `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`, and `resolver.address`
   — the upstream DNS server as `host:port` (a portless value is rejected at
   load: it dials nothing, so every node would be dropped as a DNS failure).
-- `filters` — the ordered filter list described above.
+- `filters` — the ordered filter list described above. The `cidr` entry's
+  `urls` / `file_type` / `refresh_interval` hot-reload like everything else in
+  the list: editing one of them re-downloads the allow-list (and refuses the
+  reload, keeping the running processor, if the new one comes back empty),
+  while an edit anywhere else in the file carries the loaded list over instead
+  of paying for it again.
 - `annotate` — the ordered tag list described above; every entry is a `GEO`
   entry and takes a `providers:` chain. The retired singular `provider:` key is
   rejected as an unknown key by the strict decode instead of being silently
@@ -498,7 +579,13 @@ cycle funnel (`stable_merged_nodes`, `stable_probed_nodes`,
 `stable_kept_nodes`, `stable_dead_skipped_nodes` — the last counts every node
 skipped before probing, all of them dead-cached, so the funnel closes),
 per-source and per-filter in/kept/dropped-by-reason counters, kept-node speed
-histogram, cycle duration, success timestamp, and cycle/failure totals.
+histogram, cycle duration, success timestamp, and cycle/failure totals. The
+IP-stage drop reasons are `dns`, `geo`, `cidr`, `asn`, `geoblock`, `ipv6` and
+`unsupported`; adding `cidr` cost no new metric name and no panel or query
+change, because the reasons are label values on `stable_source_dropped_nodes`
+and the panel sums by `reason` instead of enumerating them. The dashboard was
+still edited: the "IP-stage drops by reason" panel's DESCRIPTION enumerates the
+reasons in prose, so it names `cidr` and says what gates it.
 
 A gate that verified nothing is reported separately from a gate that dropped
 nothing. The gemini check needs a working credential to see a location verdict
@@ -526,6 +613,13 @@ dashboard provisioning) for the NixOS host to import, and
 repo so it tracks the metric names — change a metric, update the dashboard in
 the same commit.
 
+Both compose instances are scraped, each under its own Prometheus job name
+(`sub-preprocessor`, `sub-preprocessor-vassago`), and the dashboard picks
+between them with an **Instance** variable —
+`label_values(stable_cycles_total, job)`, with every panel expression scoped
+`{job="$job"}`. Two jobs rather than two targets in one job is what makes them
+selectable at all: the picker's values come from the `job` label.
+
 ## Running
 
 The toolchain is pinned in `shell.nix`; run everything through `nix-shell`:
@@ -541,18 +635,37 @@ nix-shell --run "make bench" # saves output to ./benchmarks/
 
 ## Deployment
 
-Docker Compose runs the service plus the crawler sidecar from one image:
+Docker Compose runs two instances of the service plus the crawler sidecar, all
+from one image:
 
 ```bash
 docker compose up -d --build   # or: make dc-up
 ```
 
-- `sub-preprocessor` — the HTTP service (published on `:7008`) and the stable
-  worker. Metrics are published loopback-only (`127.0.0.1:9091:9090`) for the
-  host Prometheus — keep them non-public. The Gemini API key is read from an
-  agenix-decrypted secret mounted at `/run/agenix/litellm-env`.
+- `sub-preprocessor` — the general instance on `./config`: the HTTP service
+  (published on `:7008`) and the stable worker. Metrics are published
+  loopback-only (`127.0.0.1:9091:9090`) for the host Prometheus — keep them
+  non-public. The Gemini API key is read from an agenix-decrypted secret
+  mounted at `/run/agenix/litellm-env`.
+- `sub-preprocessor-vassago` — the same image on a second config
+  (`./config-vassago`), published on `:7009` with metrics on
+  `127.0.0.1:9092:9090`. Its `filters:` are `cidr`, `country` and `bandwidth`: a
+  node is kept only when its entry IP is inside the Russian mobile-operator
+  whitelist. The `country` entry carries no `exclude_*`, so it is inert on
+  `/stable.txt` — a full allow set with an empty deny set makes `GeofeedFilter` a
+  no-op — and exists for `GET /`, where it is what makes the `countries=` /
+  `groups=` parameters actually gate: without an entry of that type the server
+  still demands one of those parameters and then no filter reads it. No
+  through-node geo gate runs at all — these nodes are meant to be used UNDER that
+  whitelist, so an egress-geo gate answers a question nobody asked and would cost
+  a request per survivor to do it. It mounts no agenix secret
+  (there is no Gemini key to read) and carries no `build:` section, so
+  `sub-preprocessor` is what produces the shared image — hence the
+  `depends_on`.
 - `tg-sub-crawler` — the crawler (`command: ["crawl"]`), sharing the
-  `./config` volume so its `private.yaml` writes hot-reload the service.
+  `./config` volume so its `private.yaml` writes hot-reload the service. It
+  feeds the first instance only; `./config-vassago` has no crawler and is
+  curated by hand.
 - Shutdown is graceful and bounded: the server drains for 15 s (long enough for
   the 5 s DNS/ASN lookup an in-flight request may be blocked in) and the stable
   worker is joined for another 5 s, hence `stop_grace_period: 30s`. Expiring

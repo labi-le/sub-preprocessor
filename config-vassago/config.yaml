@@ -1,0 +1,67 @@
+log:
+  level: info # hot-reloadable; debug is per-node/DNS/probe verbose
+server:
+  listen: :8080
+  metrics_listen: :9090 # loopback-only on the host (docker-compose publishes 127.0.0.1:9092)
+geo:
+  # dbip:/registry: omitted -- their built-in defaults are what the annotate
+  # chain wants; geo.asn omitted -- unreferenced, so no Cymru resolver is built.
+  geofeed:
+    refresh_interval: 24h # unset => 24h; an explicit 0 loads once at startup and never refreshes
+    sources:
+      - url: https://github.com/ipanalytics/GeoFeed-Harvester/releases/latest/download/geofeed.csv.gz
+        type: gzip
+      - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
+        type: raw
+resolver:
+  timeout: 5s
+  cache_ttl: 1h
+  cache_negative_ttl: 10m
+# These nodes are used while a mobile operator's whitelist is active, so an
+# egress-geo gate answers a question nobody asked: nothing here excludes a
+# country, and every gate dropped is a round trip saved per survivor.
+filters:
+  - type: cidr # IP-stage ALLOW-list: a node whose resolved IP is outside every range dies before any probe
+    # The repo also publishes ipwhitelist.txt, the pre-CIDR format. Adding it
+    # here would be a REGRESSION, not redundancy: measured 2026-08-09 it is the
+    # ".1" of every /24 in the CIDR file, so it adds no range (the union merges
+    # to the same 15649) and costs 1.76 MB per refresh -- but urls: is a UNION,
+    # so with two sources a failed cidrwhitelist.txt no longer empties the set.
+    # It becomes 141664 singletons covering 0.39% of the addresses, and nothing
+    # catches that at BUILD -- newCIDRStore refuses only an EMPTY set. A
+    # background reload would be refused (swapRefusalSize sees failed>0, then
+    # the coverage collapse), so the exposure is any cold build -- a restart, or
+    # a reload that edits this entry -- while cidrwhitelist.txt is down.
+    urls:
+      - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
+    file_type: raw
+    refresh_interval: 24h
+  - type: country # without it / validates countries= and then ignores it
+    provider: geofeed # inert on /stable.txt: no exclude_* here, so the worker's full allow-set early-returns
+  - type: bandwidth # drop nodes slower than min_mbps (last GATE: runs on the fewest nodes)
+    test_url: "https://speed.cloudflare.com/__down?bytes=2000000" # Cloudflare speed generator; egresses through the node
+    min_mbps: 5 # drop nodes below this; 0 = no floor (annotate only). Raise test_url ?bytes= for higher thresholds
+    timeout: 20s # per-node download deadline
+    concurrency: 4 # parallel downloads; higher shares the host uplink and can under-report fast nodes
+annotate:
+  - tag: GEO # [GEO:xx], [GEO:??] when every provider misses
+    # No cloudflare: it costs one cdn-cgi/trace request through every survivor
+    # to place the EXIT address, and the gate here is on the ENTRY address.
+    providers: [geofeed, dbip, registry]
+deadcache:
+  ttl: 3h # decouple from subscriptions.interval: a per-cycle TTL would make the dead-node cache a no-op. Set 0s to disable.
+fetch:
+  # Governs the worker's per-source download too, not only / -- filterInto nests
+  # it inside subscriptions.check.source_timeout. Measured: 36 of 37 sources pass
+  # 5/5 at 3s (slowest median 484ms); rostunnel-mega answers in ~300ms or hangs.
+  timeout: 3s
+subscriptions:
+  interval: 1h
+  snapshot_path: /config/.stable-snapshot.json # this instance's own /config mount (./config-vassago), so no collision with instance 1
+  check:
+    rounds: 2
+    timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
+    max_fail: 1
+    max_avg_ms: 800
+    concurrency: 16 # measured knee; 8 gained no yield and grew cycles 39->51min, 64+ inflates measured latency
+    source_timeout: 5m

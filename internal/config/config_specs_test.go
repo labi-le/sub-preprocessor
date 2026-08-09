@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 )
 
@@ -184,6 +185,45 @@ func TestLoadFiltersCountryClaudeBandwidth(t *testing.T) {
 	}
 }
 
+const cidrURL = "https://example.com/cidrwhitelist.txt"
+
+func cidrItem(u string) string {
+	return "  - type: cidr\n    urls: [\"" + u + "\"]\n"
+}
+
+func cidrFilters(items ...string) string {
+	return "filters:\n" + strings.Join(items, "")
+}
+
+// TestLoadCIDRFilter pins the two defaults a cidr entry is unusable without,
+// including the asymmetry an explicit 0 carries: like its dbip/registry
+// siblings it means the 24h default, never "load once and never refresh".
+func TestLoadCIDRFilter(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+cidrFilters(cidrItem(cidrURL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []config.IPFilterSpec{{
+		Type:            config.FilterCIDR,
+		URLs:            []string{cidrURL},
+		FileType:        fetch.FileTypeRaw,
+		RefreshInterval: 24 * time.Hour,
+	}}
+	if got := cfg.IPFilterSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("IPFilterSpecs() = %+v, want %+v", got, want)
+	}
+
+	zero, err := loadYAML(t, geoBase+cidrFilters(cidrItem(cidrURL)+"    refresh_interval: 0s\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := zero.IPFilterSpecs()[0].RefreshInterval; got != 24*time.Hour {
+		t.Fatalf("explicit 0 refresh_interval = %v, want 24h", got)
+	}
+}
+
 // TestLoadRejectsBadFilters covers filter type/field validation at load time.
 func TestLoadRejectsBadFilters(t *testing.T) {
 	t.Parallel()
@@ -202,6 +242,13 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"bandwidth bad url":     {geoBase + "filters:\n  - type: bandwidth\n    test_url: ftp://x/y\n", "test_url"},
 		"tidal neg concurrency": {geoBase + "filters:\n  - type: tidal\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
 		"tidal neg timeout":     {geoBase + "filters:\n  - type: tidal\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
+		"unknown type list":     {geoBase + "filters:\n  - type: bogus\n", "country, asn, cidr, gemini"},
+		"cidr no urls":          {geoBase + cidrFilters("  - type: cidr\n"), "filters[0].urls must contain at least one url"},
+		"cidr http url":         {geoBase + cidrFilters(cidrItem("http://example.com/w.txt")), `filters[0].urls "http://example.com/w.txt": only https`},
+		"cidr private url":      {geoBase + cidrFilters(cidrItem("https://127.0.0.1/w.txt")), `filters[0].urls "https://127.0.0.1/w.txt": non-public target`},
+		"cidr bad file_type":    {geoBase + cidrFilters(cidrItem(cidrURL)+"    file_type: bzip2\n"), `filters[0].file_type: unsupported file type: "bzip2"`},
+		"cidr neg refresh":      {geoBase + cidrFilters(cidrItem(cidrURL)+"    refresh_interval: -1s\n"), "filters[0].refresh_interval must not be negative"},
+		"two cidr filters":      {geoBase + cidrFilters(cidrItem(cidrURL), cidrItem("https://example.com/x.txt")), "filters[1]: only one cidr filter is supported"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -604,5 +651,74 @@ func TestFiltersChanged(t *testing.T) {
 	b.Filters = append(b.Filters, config.FilterConfig{Type: config.FilterClaude})
 	if !config.FiltersChanged(a, b) {
 		t.Fatal("appended filter must be detected")
+	}
+}
+
+// TestCIDRFiltersChanged proves the reloader's carry-over key tracks the cidr
+// entry alone. Both directions cost: a missed change serves a stale
+// allow-list, and a false one re-downloads ~500 KB of prefixes on a reload
+// that did not touch them -- hourly, since the crawler rewrites private.yaml
+// that often. Hence the neighbour rows: an edit to another filters[] entry is
+// exactly what a helper reading the whole IP-stage list would get wrong.
+func TestCIDRFiltersChanged(t *testing.T) {
+	t.Parallel()
+
+	entry := config.FilterConfig{
+		Type:            config.FilterCIDR,
+		URLs:            []string{cidrURL},
+		FileType:        string(fetch.FileTypeRaw),
+		RefreshInterval: new(24 * time.Hour),
+	}
+	country := config.FilterConfig{Type: config.FilterCountry, Provider: config.ProviderGeofeed}
+	asn := config.FilterConfig{Type: config.FilterASN, DenyPatterns: []string{"spammy"}}
+	cfgOf := func(filters ...config.FilterConfig) config.Config {
+		return config.Config{Filters: filters}
+	}
+
+	changedURL := entry
+	changedURL.URLs = []string{"https://example.com/other.txt"}
+	changedType := entry
+	changedType.FileType = string(fetch.FileTypeGzip)
+	changedInterval := entry
+	changedInterval.RefreshInterval = new(time.Hour)
+	otherProvider := country
+	otherProvider.Provider = config.ProviderASN
+	otherPatterns := asn
+	otherPatterns.DenyPatterns = []string{"other"}
+	unrelatedKey := cfgOf(country, entry)
+	unrelatedKey.Fetch.Timeout = 9 * time.Second
+
+	cases := map[string]struct {
+		old, newCfg config.Config
+		want        bool
+	}{
+		"identical":               {cfgOf(country, entry), cfgOf(country, entry), false},
+		"urls":                    {cfgOf(country, entry), cfgOf(country, changedURL), true},
+		"file_type":               {cfgOf(country, entry), cfgOf(country, changedType), true},
+		"refresh_interval":        {cfgOf(country, entry), cfgOf(country, changedInterval), true},
+		"unrelated key":           {cfgOf(country, entry), unrelatedKey, false},
+		"neighbour provider":      {cfgOf(country, entry), cfgOf(otherProvider, entry), false},
+		"neighbour deny_patterns": {cfgOf(asn, entry), cfgOf(otherPatterns, entry), false},
+		"added":                   {cfgOf(country), cfgOf(country, entry), true},
+		"removed":                 {cfgOf(country, entry), cfgOf(country), true},
+		"no cidr either side":     {cfgOf(country), cfgOf(country, asn), false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := config.CIDRFiltersChanged(tc.old, tc.newCfg); got != tc.want {
+				t.Fatalf("CIDRFiltersChanged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// Position states what the two helpers each mean: the list changed, the
+	// allow-list inputs did not.
+	before, after := cfgOf(entry, country, asn), cfgOf(country, asn, entry)
+	if config.CIDRFiltersChanged(before, after) {
+		t.Error("moving the cidr entry must not invalidate the carried allow-list")
+	}
+	if !config.FiltersChanged(before, after) {
+		t.Error("FiltersChanged must still see the reordered list")
 	}
 }
