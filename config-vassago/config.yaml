@@ -26,10 +26,12 @@ filters:
     # here would be a REGRESSION, not redundancy: measured 2026-08-09 it is the
     # ".1" of every /24 in the CIDR file, so it adds no range (the union merges
     # to the same 15649) and costs 1.76 MB per refresh -- but urls: is a UNION,
-    # so with two sources a failed cidrwhitelist.txt no longer empties the set
-    # and the fail-closed startup never fires. The set becomes 141664 singletons
-    # covering 0.39% of the addresses while Len() GROWS 15649 -> 141664, which
-    # the shrink guard reads as healthy and swaps in.
+    # so with two sources a failed cidrwhitelist.txt no longer empties the set.
+    # It becomes 141664 singletons covering 0.39% of the addresses, and nothing
+    # catches that at BUILD -- newCIDRStore refuses only an EMPTY set. A
+    # background reload would be refused (swapRefusalSize sees failed>0, then
+    # the coverage collapse), so the exposure is a restart while
+    # cidrwhitelist.txt is down.
     urls:
       - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
     file_type: raw
