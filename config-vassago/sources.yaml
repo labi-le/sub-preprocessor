@@ -1,0 +1,122 @@
+# Subscription sources for the vassago instance: the measured subset of
+# config/sources.yaml that actually carries nodes inside the Russian
+# mobile-internet CIDR whitelist. Sources are NOT shared with instance 1 and
+# the Telegram crawler does not write here -- config.Load only merges the
+# sources.yaml and private.yaml sitting beside the config.yaml it was given.
+#
+# Measured 2026-08-09 against cidrwhitelist.txt (30228 lines, 15649 merged
+# ranges, sha256 149d27a8...): the 51 configured sources yielded 59558 nodes on
+# 19330 distinct servers, of which 5023 nodes on 1469 servers resolve into the
+# whitelist. The 37 below are every source with a non-zero count, ordered by it
+# -- which is also the dedupe order stable.Merge applies (first source wins a
+# duplicate server:port), so the heaviest contributor keeps its label.
+#
+# EVERY FIGURE ABOVE IS PRE-PROBE, and the gap to what gets published is the
+# number to size a deployment on. Two full cycles from these files: merged 1792,
+# probed 1792, 9 reached the bandwidth gate, 8 published -- 0.45% of the
+# whitelisted pool, against instance 1's ~335-361. The latency gate is not the
+# cause: a 5x-relaxed control (timeout 5000ms, max_avg_ms 4000) reached 15
+# survivors for 4x the cycle time, so ~99% of whitelisted nodes simply never
+# answer a URL test. Measured from ONE vantage point outside the networks this
+# whitelist belongs to, so the production number will differ -- but expect a
+# two-digit list, not a four-digit one.
+#
+# Dropped as measured zero: fastnodes-se, rabbitson, genlib, zhuhaiuk, bocchi2b,
+# abikus, obwl-wwh, lime, mifa, wepogp-1, wepogp-4, wepogp-5. Dropped as dead:
+# wepogp-2 and wepogp-3 both 404. Four of those are expired subscriptions rather
+# than geographically wrong ones (mifa, obwl-wwh and lime serve placeholder
+# nodes, abikus serves HTML), so they are dead weight for instance 1 too.
+#
+# The tail is kept deliberately: after the cidr filter a non-whitelisted node
+# costs one cached DNS lookup and dies pre-probe. The lookup is the cost that
+# is NOT free, and this list already outruns the cache: the 37 sources resolve
+# 16551 distinct hosts per cycle measured WITHOUT rostunnel-mega, which alone
+# adds 7705, against internal/resolver's 16384-entry ceiling. Nothing expires
+# inside a cycle, so each overflow takes the arbitrary-drop path and loses
+# 2048 live entries in map order -- a slice of the cycle re-resolves what its
+# own head just looked up. That is not new -- instance 1's own 51 sources reach
+# 19330 hosts against the same ceiling -- so it is recorded, not fixed here:
+# raising the ceiling changes both instances and wants its own measurement.
+#
+# rostunnel-mega is flaky rather than unlucky: at the shipped 3s fetch.timeout
+# it passed 3 of 5 attempts (3001, 3001, 447, 334, 282 ms), and 1 of 4 at 45s.
+# A longer budget buys nothing -- it either answers in ~300ms or hangs until the
+# deadline, whatever the deadline is. It is kept because ~13% of the whitelisted
+# pool rides on it when it does answer; a cycle that misses it is a smaller
+# list, not a broken one.
+subscriptions:
+  sources:
+    - name: bywarm-merged
+      url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt
+    - name: goida
+      url: https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/26.txt
+    - name: rostunnel-mega
+      url: https://rostunnel.vercel.app/mega.txt
+    - name: whitelist-sanuyyq
+      url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
+    - name: fifthidea
+      url: https://raw.githubusercontent.com/fifthidea/sub/main/sub/sub-full-plaintxt.txt
+    - name: etoneyaproject
+      url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
+    - name: zxcursed
+      url: https://raw.githubusercontent.com/zxcursedzxc0721/vless-subscriptions/main/all/vless.txt
+    - name: rostunnel-gen
+      url: https://subrostunnel.vercel.app/gen.txt
+    - name: vify
+      url: https://raw.githubusercontent.com/Mr-Meshky/vify/main/configs/alive.txt
+    - name: yafeisun
+      url: https://raw.githubusercontent.com/yafeisun/v2raynode/refs/heads/main/result/karing.txt
+    - name: fastnodes-fi
+      url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/countries/FI.txt
+    - name: kasesm
+      url: https://raw.githubusercontent.com/kasesm/Free-Config/main/all_raw.txt
+    - name: shatak
+      url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
+    - name: ishalumi
+      url: https://raw.githubusercontent.com/ishalumi/proxy-node-collector/main/output/nodes.txt
+    - name: niqonopin
+      url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
+    - name: bahemmat
+      url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt
+    - name: bijandi
+      url: https://raw.githubusercontent.com/amir-reza-bijandi/v2ray-configs/main/configs.txt
+    - name: mhditaheri
+      url: https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vless
+    - name: wind7077
+      url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
+    - name: ninjanexus
+      url: https://raw.githubusercontent.com/ninjastrikers/nexus-nodes/main/configs/vless.txt
+    - name: tepo80
+      url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
+    - name: prominbro
+      url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
+    - name: 3inker
+      url: https://raw.githubusercontent.com/3inker/v2ray-subscription/main/subs/all_not_ru.txt
+    - name: mehrtat
+      url: https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt
+    - name: aetris
+      url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
+    - name: avia
+      url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
+    - name: theavel
+      url: https://raw.githubusercontent.com/theavel/free-vless-proxy/main/all.txt
+    - name: igareck-white
+      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+    - name: reality
+      url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
+    - name: purple
+      url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
+    - name: iboxz
+      url: https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/vless
+    - name: vova
+      url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
+    - name: darmioniks
+      url: https://raw.githubusercontent.com/Darmioniks/proxy-and-vless-collector/main/vless_filtered.txt
+    - name: prince
+      url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
+    - name: flat447
+      url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
+    - name: yuanxiawan
+      url: https://raw.githubusercontent.com/yuanxiawan/freevless/main/results/valid_vless_configs.txt
+    - name: obhodwl
+      url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL

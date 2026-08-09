@@ -82,13 +82,14 @@ const (
 )
 
 // Unified filter types, provider names, and annotation tags. The single
-// filters list selects IP-stage (country/asn, run per-node in preprocess) and
-// through-node filters (gemini/claude/chatgpt/tidal/bandwidth, run post-probe
-// in stable); which physical stage a type lands in is an implementation
-// detail, not config.
+// filters list selects IP-stage (country/asn/cidr, run per-node in
+// preprocess) and through-node filters (gemini/claude/chatgpt/tidal/bandwidth,
+// run post-probe in stable); which physical stage a type lands in is an
+// implementation detail, not config.
 const (
 	FilterCountry   = "country"
 	FilterASN       = "asn"
+	FilterCIDR      = "cidr"
 	FilterGemini    = "gemini"
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
@@ -230,6 +231,7 @@ func (g *GeoConfig) applyDefaults() {
 //   - country: Provider (geofeed|asn); ExcludeGroups/ExcludeCountries, which
 //     are worker-only (see below)
 //   - asn:     DenyPatterns
+//   - cidr:    URLs, FileType, RefreshInterval
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
 //   - gemini/claude/chatgpt/tidal: selectors; prober params come from
 //     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden
@@ -253,6 +255,15 @@ type FilterConfig struct {
 	ExcludeGroups    []string `yaml:"exclude_groups"`
 	ExcludeCountries []string `yaml:"exclude_countries"`
 	DenyPatterns     []string `yaml:"deny_patterns"`
+
+	// cidr (IP-stage). URLs are unioned into one allow-list. RefreshInterval
+	// carries DBIPConfig.RefreshInterval's semantics, explicit 0 included: a
+	// frozen allow-list mirror is never what an operator wants, and a
+	// non-positive interval would also strand the retry a failed initial load
+	// arms.
+	URLs            []string       `yaml:"urls"`
+	FileType        string         `yaml:"file_type"`
+	RefreshInterval *time.Duration `yaml:"refresh_interval"`
 
 	// bandwidth (through-node, stable). MinMbps is a pointer so an unset value
 	// defaults to defaultBandwidthMinMbps while an explicit 0 means "no floor".
@@ -313,6 +324,12 @@ type IPFilterSpec struct {
 	Type         string
 	Provider     string
 	DenyPatterns []string
+
+	// cidr. RefreshInterval is the defaulted duration; a Config built in code
+	// skips applyFilterDefaults and projects 0 here.
+	URLs            []string
+	FileType        fetch.FileType
+	RefreshInterval time.Duration
 }
 
 // NodeFilterSpec is a parsed through-node (post-probe, stable) filter derived
@@ -327,7 +344,8 @@ type NodeFilterSpec struct {
 	Tidal     TidalConfig
 }
 
-// IPFilterSpecs returns the IP-stage filters (country/asn) in config order.
+// IPFilterSpecs returns the IP-stage filters (country/asn/cidr) in config
+// order.
 func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 	var specs []IPFilterSpec
 	for _, f := range cfg.Filters {
@@ -342,6 +360,13 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 				Type:         FilterASN,
 				Provider:     ProviderASN,
 				DenyPatterns: f.DenyPatterns,
+			})
+		case FilterCIDR:
+			specs = append(specs, IPFilterSpec{
+				Type:            FilterCIDR,
+				URLs:            f.URLs,
+				FileType:        fetch.FileType(f.FileType),
+				RefreshInterval: f.refreshInterval(),
 			})
 		}
 	}
@@ -491,6 +516,13 @@ func (f FilterConfig) bandwidthConfig() BandwidthConfig {
 		Timeout:     f.Timeout,
 		Concurrency: f.Concurrency,
 	}
+}
+
+func (f FilterConfig) refreshInterval() time.Duration {
+	if f.RefreshInterval == nil {
+		return 0
+	}
+	return *f.RefreshInterval
 }
 
 type SubscriptionsConfig struct {
@@ -1009,12 +1041,25 @@ func (cfg *Config) applyFilterDefaults() {
 			if f.Provider == "" {
 				f.Provider = ProviderGeofeed
 			}
+		case FilterCIDR:
+			applyCIDRDefaults(f)
 		case FilterBandwidth:
 			applyBandwidthDefaults(f)
 		}
 	}
 	for i := range cfg.Annotate {
 		applyAnnotateDefaults(&cfg.Annotate[i])
+	}
+}
+
+// applyCIDRDefaults leaves a negative refresh_interval alone so validateFilter
+// still sees the typo.
+func applyCIDRDefaults(f *FilterConfig) {
+	if f.FileType == "" {
+		f.FileType = string(fetch.FileTypeRaw)
+	}
+	if f.RefreshInterval == nil || *f.RefreshInterval == 0 {
+		f.RefreshInterval = new(defaultGeoDBRefresh)
 	}
 }
 
@@ -1148,7 +1193,15 @@ func validateResolverAddress(addr string) error {
 
 // validateFilters rejects unknown filter types and type-specific bad values.
 func (cfg *Config) validateFilters() error {
+	seenCIDR := false
 	for i, f := range cfg.Filters {
+		if f.Type == FilterCIDR {
+			// urls: is already the union; a second entry could only mean intersection.
+			if seenCIDR {
+				return fmt.Errorf("filters[%d]: only one cidr filter is supported", i)
+			}
+			seenCIDR = true
+		}
 		if err := cfg.validateFilter(i, f); err != nil {
 			return err
 		}
@@ -1162,6 +1215,8 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return cfg.validateCountryFilter(i, f)
 	case FilterASN:
 		return validateASNFilter(i, f)
+	case FilterCIDR:
+		return validateCIDRFilter(i, f)
 	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
@@ -1169,8 +1224,8 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 	default:
 		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
 			strings.Join([]string{
-				FilterCountry, FilterASN, FilterGemini, FilterClaude,
-				FilterChatGPT, FilterTidal, FilterBandwidth,
+				FilterCountry, FilterASN, FilterCIDR, FilterGemini,
+				FilterClaude, FilterChatGPT, FilterTidal, FilterBandwidth,
 			}, ", "))
 	}
 }
@@ -1195,6 +1250,24 @@ func validateASNFilter(i int, f FilterConfig) error {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("filters[%d].deny_patterns: invalid regexp %q: %w", i, p, err)
 		}
+	}
+	return nil
+}
+
+func validateCIDRFilter(i int, f FilterConfig) error {
+	if len(f.URLs) == 0 {
+		return fmt.Errorf("filters[%d].urls must contain at least one url", i)
+	}
+	for _, u := range f.URLs {
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err != nil {
+			return fmt.Errorf("filters[%d].urls %q: %w", i, u, err)
+		}
+	}
+	if err := fetch.ValidateFileType(fetch.FileType(f.FileType)); err != nil {
+		return fmt.Errorf("filters[%d].file_type: %w", i, err)
+	}
+	if f.RefreshInterval != nil && *f.RefreshInterval < 0 {
+		return fmt.Errorf("filters[%d].refresh_interval must not be negative", i)
 	}
 	return nil
 }
@@ -1435,6 +1508,23 @@ func GroupsChanged(old, newCfg Config) bool {
 // rebuilds/re-applies when it changes.
 func FiltersChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Filters, newCfg.Filters)
+}
+
+// CIDRFiltersChanged reports whether the cidr allow-list settings differ. The
+// reloader carries the loaded set across a reload when they don't, so an edit
+// elsewhere in the file does not re-download the whole list.
+func CIDRFiltersChanged(old, newCfg Config) bool {
+	return !reflect.DeepEqual(cidrSpecs(&old), cidrSpecs(&newCfg))
+}
+
+func cidrSpecs(cfg *Config) []IPFilterSpec {
+	var specs []IPFilterSpec
+	for _, s := range cfg.IPFilterSpecs() {
+		if s.Type == FilterCIDR {
+			specs = append(specs, s)
+		}
+	}
+	return specs
 }
 
 // ProberChanged reports whether the through-node prober settings

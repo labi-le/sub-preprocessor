@@ -11,9 +11,9 @@ import (
 // identically.
 //
 // The Preloaded* fields are intentionally left unset: callers (the reloader)
-// decide whether to carry over geofeed/dbip/registry state and the DNS/ASN
-// resolvers, while the startup path leaves them zero so NewProcessor performs
-// the initial fetches and builds cold caches.
+// decide whether to carry over geofeed/dbip/registry state, the cidr
+// allow-list and the DNS/ASN resolvers, while the startup path leaves them
+// zero so NewProcessor performs the initial fetches and builds cold caches.
 func OptionsFromConfig(cfg config.Config) preprocess.Options {
 	return preprocess.Options{
 		GeofeedSources:      cfg.Geo.Geofeed.Sources,

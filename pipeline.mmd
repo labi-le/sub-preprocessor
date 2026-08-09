@@ -1,6 +1,6 @@
 %% sub-preprocessor - processing pipeline
 %% ONE ordered `filters:` list feeds two stages:
-%%   IP-stage      = country/asn, per node by IP, on / and the worker
+%%   IP-stage      = cidr/country/asn, per node by IP, on / and the worker
 %%   through-node  = gemini/claude/chatgpt/tidal/bandwidth, worker only
 flowchart TD
   %% ================= Crawler =================
@@ -29,7 +29,7 @@ flowchart TD
     direction TB
     GBH["geoblock skip - node host in blocklist? (pre-DNS)"]
     RES["DNS resolve host to IPs - TTL cached"]
-    IPF["filters: country (provider geofeed|asn) / asn (deny_patterns)"]
+    IPF["filters: cidr (urls allow-list) / country (provider geofeed|asn) / asn (deny_patterns)"]
     ANN["annotate: - prepend GEO tags to the node name"]
     GBH --> RES --> IPF --> ANN
   end

@@ -185,7 +185,7 @@ func writeSources(w io.Writer, sources []stable.SourceReport) {
 			reason string
 			n      int
 		}{
-			{"dns", s.DNSDrop}, {"geo", s.GeoDrop}, {"asn", s.ASNDrop},
+			{"dns", s.DNSDrop}, {"geo", s.GeoDrop}, {"cidr", s.CIDRDrop}, {"asn", s.ASNDrop},
 			{"geoblock", s.GeoBlockDrop}, {"ipv6", s.IPv6Drop},
 			{"unsupported", s.Unsupported},
 		}

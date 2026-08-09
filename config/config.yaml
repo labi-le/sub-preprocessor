@@ -30,9 +30,11 @@ resolver:
   timeout: 5s
   cache_ttl: 1h
   cache_negative_ttl: 10m
-# Unified, ordered filter list. IP-stage filters (country/asn) run per-node in
-# preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
-# post-probe in the stable worker. Order is honoured within each stage.
+# Unified, ordered filter list. IP-stage filters (country/asn/cidr) run per-node
+# in preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
+# post-probe in the stable worker. Order is honoured within each stage, and it
+# is not cosmetic: a cheap local gate belongs ahead of one that makes a network
+# call per IP, so a cidr allow-list goes before asn, never after it.
 filters:
   - type: country
     provider: geofeed

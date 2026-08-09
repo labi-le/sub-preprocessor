@@ -61,12 +61,45 @@ func NewReloader(
 	}
 }
 
+// carryLoadedState hands the outgoing processor's downloads and warm caches to
+// its replacement, each guarded by its own diff. Every guard reads
+// currentProcCfg rather than currentCfg: after a failed ctl.Apply the two
+// diverge, and carrying data across the wrong source set would serve stale
+// answers. A zero state -- the provider or the cidr filter absent from the
+// current processor -- leaves the preload unset.
+//
+// The DNS and Cymru caches are the only carried state whose value is the cache
+// itself rather than a download: dropping them re-resolves every host and node
+// IP on the next cycle, so their configured TTLs would never be reached under
+// the crawler's hourly private.yaml rewrite.
+func (r *Reloader) carryLoadedState(opts *preprocess.Options, newCfg config.Config) {
+	if !config.GeofeedSourcesChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedGeofeed = r.currentProc.GeofeedState()
+	}
+	if !config.DBIPChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedDBIP = r.currentProc.DBIPState()
+	}
+	if !config.RegistryChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedRegistry = r.currentProc.RegistryState()
+	}
+	if !config.CIDRFiltersChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedCIDR = r.currentProc.CIDRState()
+	}
+	if !config.ResolverChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedResolver = r.currentProc.ResolverState()
+	}
+	if !config.ASNChanged(r.currentProcCfg, newCfg) {
+		opts.PreloadedASN = r.currentProc.ASNState()
+	}
+}
+
 // Reload loads the config from disk and, if it changed and is valid, builds a
 // new Processor and atomically swaps it into the holder. Geofeed state (the
 // lookup, its load time and the retry schedule in flight) is carried over when
 // geofeed.sources are unchanged, avoiding a re-download; dbip/registry state is
-// carried the same way when its config block is unchanged, as are the DNS and
-// ASN resolvers (with their caches) when resolver.*/geo.asn.* are unchanged.
+// carried the same way when its config block is unchanged, as is the cidr
+// allow-list when its filter entry is unchanged, as are the DNS and ASN
+// resolvers (with their caches) when resolver.*/geo.asn.* are unchanged.
 // Any error keeps the previously applied settings.
 func (r *Reloader) Reload(ctx context.Context) {
 	newCfg, err := config.Load(r.path)
@@ -89,30 +122,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 
 	opts := OptionsFromConfig(newCfg)
 	opts.Blocklist = r.blocklist
-	// Diff against the config that built currentProc (not currentCfg): after a
-	// failed Apply the two diverge, and carrying geofeed data across the wrong
-	// source set would serve stale countries.
-	if !config.GeofeedSourcesChanged(r.currentProcCfg, newCfg) {
-		opts.PreloadedGeofeed = r.currentProc.GeofeedState()
-	}
-	// Same discipline for the downloaded geo databases; a zero state (provider
-	// not built in the current processor) simply leaves the preload unset.
-	if !config.DBIPChanged(r.currentProcCfg, newCfg) {
-		opts.PreloadedDBIP = r.currentProc.DBIPState()
-	}
-	if !config.RegistryChanged(r.currentProcCfg, newCfg) {
-		opts.PreloadedRegistry = r.currentProc.RegistryState()
-	}
-	// The DNS and Cymru caches are the only carried state whose value is the
-	// cache itself rather than a download: dropping them re-resolves every
-	// host and node IP on the next cycle, so their configured TTLs would never
-	// be reached under the crawler's hourly private.yaml rewrite.
-	if !config.ResolverChanged(r.currentProcCfg, newCfg) {
-		opts.PreloadedResolver = r.currentProc.ResolverState()
-	}
-	if !config.ASNChanged(r.currentProcCfg, newCfg) {
-		opts.PreloadedASN = r.currentProc.ASNState()
-	}
+	r.carryLoadedState(&opts, newCfg)
 
 	newProc, err := preprocess.NewProcessor(ctx, r.logger, opts)
 	if err != nil {

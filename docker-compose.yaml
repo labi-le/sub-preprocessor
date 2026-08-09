@@ -19,6 +19,22 @@ services:
     stop_grace_period: 30s
     restart: always
 
+  # Same image, second config: nodes are kept only when their resolved IP is in
+  # the Russian mobile-operator whitelist, and no geo-block gate runs.
+  sub-preprocessor-vassago:
+    image: sub-preprocessor:latest
+    container_name: sub-preprocessor-vassago
+    user: "1000:1000" # config owner: write /config/.stable-snapshot.json
+    depends_on:
+      - sub-preprocessor # no build: section here, so that service is what produces the image
+    ports:
+      - "7009:8080"
+      - "127.0.0.1:9092:9090"
+    volumes:
+      - ./config-vassago:/config:rw
+    stop_grace_period: 30s
+    restart: always
+
   tg-sub-crawler:
     image: sub-preprocessor:latest
     container_name: tg-sub-crawler

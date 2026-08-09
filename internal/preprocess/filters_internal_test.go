@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/netip"
 	"regexp"
+	"strings"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 )
@@ -185,5 +187,81 @@ func TestGeofeedFilterAllowListDropsUnknownCountry(t *testing.T) {
 	}
 	if pctx.Stats.GeoDrop != 1 {
 		t.Fatalf("expected GeoDrop=1, got %d", pctx.Stats.GeoDrop)
+	}
+}
+
+// mustCIDRSet parses an allow-list the way the loader does, so the tests judge
+// nodes against the merged ranges production holds. Fixtures must not overlap:
+// the range count is asserted to catch a fixture that silently merged.
+func mustCIDRSet(t *testing.T, prefixes ...string) cidrset.Set {
+	t.Helper()
+	set, skipped := cidrset.Parse([]byte(strings.Join(prefixes, "\n") + "\n"))
+	if skipped != 0 || set.Len() != len(prefixes) {
+		t.Fatalf("fixture %v parsed to %d ranges, %d lines skipped", prefixes, set.Len(), skipped)
+	}
+	return set
+}
+
+func staticCIDR(set cidrset.Set) func() cidrset.Set {
+	return func() cidrset.Set { return set }
+}
+
+// TestCIDRFilterKeepsANodeWithOneListedIP: the allow-list gates NODES, and a
+// node is reachable at any of its addresses, so one listed IP is enough.
+func TestCIDRFilterKeepsANodeWithOneListedIP(t *testing.T) {
+	t.Parallel()
+
+	f := NewCIDRFilter(staticCIDR(mustCIDRSet(t, "198.51.100.0/24")))
+	pctx := &PipelineContext{Stats: &Stats{}}
+	ips := []netip.Addr{
+		netip.MustParseAddr("203.0.113.5"),
+		netip.MustParseAddr("198.51.100.10"),
+		netip.MustParseAddr("192.0.2.1"),
+	}
+
+	got := f.Process(t.Context(), ips, pctx)
+	if len(got) != 1 || got[0] != netip.MustParseAddr("198.51.100.10") {
+		t.Fatalf("only the listed IP may survive, got %v", got)
+	}
+	if pctx.Stats.CIDRDrop != 0 {
+		t.Fatalf("the node kept an IP, so no CIDRDrop may be booked, got %d", pctx.Stats.CIDRDrop)
+	}
+}
+
+func TestCIDRFilterDropsANodeWithNoListedIP(t *testing.T) {
+	t.Parallel()
+
+	f := NewCIDRFilter(staticCIDR(mustCIDRSet(t, "198.51.100.0/24")))
+	pctx := &PipelineContext{Stats: &Stats{}}
+	ips := []netip.Addr{
+		netip.MustParseAddr("203.0.113.5"),
+		netip.MustParseAddr("192.0.2.1"),
+	}
+
+	if got := f.Process(t.Context(), ips, pctx); len(got) != 0 {
+		t.Fatalf("no IP is in the list, kept %v", got)
+	}
+	if pctx.Stats.CIDRDrop != 1 {
+		t.Fatalf("CIDRDrop = %d, want 1: the drop is booked per node, never per address", pctx.Stats.CIDRDrop)
+	}
+}
+
+// TestCIDRFilterFollowsTheGetter: the chain is built once per processor while
+// the list keeps refreshing underneath it, so a set swapped behind the getter
+// must change the verdict without a rebuild.
+func TestCIDRFilterFollowsTheGetter(t *testing.T) {
+	t.Parallel()
+
+	live := mustCIDRSet(t, "198.51.100.0/24")
+	f := NewCIDRFilter(func() cidrset.Set { return live })
+	ip := netip.MustParseAddr("203.0.113.5")
+	pctx := &PipelineContext{Stats: &Stats{}}
+
+	if got := f.Process(t.Context(), []netip.Addr{ip}, pctx); len(got) != 0 {
+		t.Fatalf("%s is outside the live list, kept %v", ip, got)
+	}
+	live = mustCIDRSet(t, "203.0.113.0/24")
+	if got := f.Process(t.Context(), []netip.Addr{ip}, pctx); len(got) != 1 {
+		t.Fatalf("the refreshed list admits %s, kept %v", ip, got)
 	}
 }

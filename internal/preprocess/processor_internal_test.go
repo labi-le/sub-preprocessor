@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -467,6 +469,72 @@ func TestGeoDBDoReloadPartialLoadKeepsExistingLookup(t *testing.T) {
 	}
 	if !db.staleLocked(now.Add(reloadRetryInterval + time.Minute)) {
 		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+const (
+	refusalPartial = "partial load"
+	refusalShrink  = "catastrophic shrink"
+)
+
+// TestSwapRefusalSize pins the guard both the geo databases and the allow-list
+// swap through. Every caller reaches it after its own successful load, so
+// neutering a condition here is invisible to the reload tests: measured,
+// turning `failed > 0` into `failed > 99999` left the whole package green.
+func TestSwapRefusalSize(t *testing.T) {
+	t.Parallel()
+
+	const live = 1000
+	// wholeSpace is what 0.0.0.0/0 covers — the size an int cannot hold on a
+	// 32-bit build, and the reason the parameters are uint64.
+	const wholeSpace uint64 = 1 << 32
+
+	for _, tc := range []struct {
+		name    string
+		current uint64
+		loaded  uint64
+		failed  int
+		want    string
+	}{
+		{"a partial load is refused however healthy the sizes look", live, 10 * live, 1, refusalPartial},
+		{"a load under the ratio is refused", live, live/2 - 1, 0, refusalShrink},
+		{"an empty load is refused", live, 0, 0, refusalShrink},
+		{"growth is allowed", live, 10 * live, 0, ""},
+		{"a shrink above the ratio is allowed", live, live * 3 / 4, 0, ""},
+		{"an unknown current size allows anything", 0, 0, 1, ""},
+		{"the whole address space still refuses a collapse", wholeSpace, wholeSpace / 4, 0, refusalShrink},
+		{"the whole address space still allows a healthy load", wholeSpace, wholeSpace, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := swapRefusalSize(tc.current, tc.loaded, tc.failed); got != tc.want {
+				t.Fatalf("swapRefusalSize(%d, %d, %d) = %q, want %q",
+					tc.current, tc.loaded, tc.failed, got, tc.want)
+			}
+		})
+	}
+}
+
+// unsizedLookup is a CountryLookup the type system permits and no production
+// path builds: the shape lookupLen answers -1 for.
+type unsizedLookup struct{}
+
+func (unsizedLookup) LookupCountry(netip.Addr) geofeed.CountryCode { return geofeed.CountryCode{} }
+
+// TestSwapRefusalUnsizedLookups pins both -1 conversions, which TestSwapRefusalSize
+// cannot reach because it calls the size-only half directly. Dropping either
+// one wraps -1 to 1.8e19 unsigned, which refuses EVERY later swap and freezes
+// the database for the process lifetime while the retry keeps rearming.
+func TestSwapRefusalUnsizedLookups(t *testing.T) {
+	t.Parallel()
+
+	sized := geofeed.NewRangeLookup(geoRanges(1000))
+	if got := swapRefusal(unsizedLookup{}, sized, 0); got != "" {
+		t.Fatalf("an unsized current lookup is no baseline to protect, got refusal %q", got)
+	}
+	if got := swapRefusal(sized, unsizedLookup{}, 0); got != refusalShrink {
+		t.Fatalf("a replacement that cannot report a size must be refused, got %q", got)
 	}
 }
 
@@ -1350,5 +1418,325 @@ func TestASNFilterFormsStillBuild(t *testing.T) {
 		if r != p.ASNState() {
 			t.Fatalf("filters[%d] holds a different resolver than ASNState()", i)
 		}
+	}
+}
+
+// cidrRanges builds n non-adjacent /32 entries, one covered address each:
+// consecutive addresses would merge and the swap guard compares sizes.
+func cidrRanges(t *testing.T, n int) cidrset.Set {
+	t.Helper()
+	var sb strings.Builder
+	for i := range n {
+		fmt.Fprintf(&sb, "10.%d.%d.1/32\n", i>>8, i&0xff)
+	}
+	set, skipped := cidrset.Parse([]byte(sb.String()))
+	if skipped != 0 || set.Len() != n {
+		t.Fatalf("fixture parsed to %d ranges, %d lines skipped, want %d ranges", set.Len(), skipped, n)
+	}
+	return set
+}
+
+// offlineCIDROptions is the minimum an allow-list test needs from NewProcessor:
+// a geofeed that never downloads and a single configured cidr filter.
+func offlineCIDROptions() Options {
+	return Options{
+		PreloadedGeofeed: GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()},
+		IPFilters:        []config.IPFilterSpec{{Type: config.FilterCIDR, RefreshInterval: 24 * time.Hour}},
+	}
+}
+
+// TestNewProcessorRefusesAnEmptyCIDRAllowList: an allow-list that came back
+// empty is not a milder filter but the opposite one — it admits nobody — so the
+// build fails where an empty geo database only warns.
+func TestNewProcessorRefusesAnEmptyCIDRAllowList(t *testing.T) {
+	t.Parallel()
+
+	opts := offlineCIDROptions()
+	opts.cidrLoad = func(context.Context) (cidrset.Set, int, error) { return cidrset.Set{}, 0, nil }
+
+	_, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err == nil {
+		t.Fatal("a cidr source that loaded empty must fail the build, not publish nothing")
+	}
+	if !errors.Is(err, errEmptyCIDRSet) || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("the error must say the allow-list came back empty, got %v", err)
+	}
+}
+
+// TestNewProcessorPreloadedCIDRSkipsTheDownload: the crawler rewrites
+// private.yaml hourly, so a carried list that re-downloads is an hourly fetch
+// of a 30k-line file nothing asked for.
+func TestNewProcessorPreloadedCIDRSkipsTheDownload(t *testing.T) {
+	t.Parallel()
+
+	carried := CIDRState{Set: mustCIDRSet(t, "198.51.100.0/24"), LoadedAt: time.Now()}
+	downloaded := false
+	opts := offlineCIDROptions()
+	opts.PreloadedCIDR = carried
+	opts.cidrLoad = func(context.Context) (cidrset.Set, int, error) {
+		downloaded = true
+		return cidrset.Set{}, 0, nil
+	}
+
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("NewProcessor from carried state: %v", err)
+	}
+	if downloaded {
+		t.Fatal("a carried allow-list must not be re-downloaded on every config reload")
+	}
+	if got := p.CIDRState().Set.Covered(); got != carried.Set.Covered() {
+		t.Fatalf("carried coverage = %d, want %d", got, carried.Set.Covered())
+	}
+	if len(p.filters) != 1 {
+		t.Fatalf("built %d filters, want the one configured cidr filter", len(p.filters))
+	}
+	if _, ok := p.filters[0].(*CIDRFilter); !ok {
+		t.Fatalf("filters[0] = %T, want *CIDRFilter: the configured filter must run", p.filters[0])
+	}
+}
+
+// TestNewProcessorWiresTheStoreIntoTheFilter pins the only path by which the
+// live list reaches CIDRFilter. A getter handing back an empty set drops every
+// node, so the instance publishes an EMPTY subscription while cidr_drop and
+// every gate read healthy. The type assertion above cannot see that; only
+// running a body through the processor NewProcessor built can.
+func TestNewProcessorWiresTheStoreIntoTheFilter(t *testing.T) {
+	t.Parallel()
+
+	opts := offlineCIDROptions()
+	listed := mustCIDRSet(t, "198.51.100.0/24")
+	opts.cidrLoad = func(context.Context) (cidrset.Set, int, error) { return listed, 0, nil }
+
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+		Body: []byte("vless://a@198.51.100.10:443#listed\n" +
+			"vless://b@203.0.113.5:443#unlisted\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.Kept != 1 || stats.CIDRDrop != 1 {
+		t.Fatalf("stats = %+v, want kept=1 cidr_drop=1: the filter must judge against the store's own set", stats)
+	}
+	if body := buf.String(); !strings.Contains(body, "198.51.100.10") || strings.Contains(body, "203.0.113.5") {
+		t.Fatalf("published %q, want the listed node alone", body)
+	}
+}
+
+// TestReloadCarryKeepsCIDRBackoff is VP-02 on the allow-list: half a schedule
+// is no schedule. Carrying the set without RetryAt/Failures makes the first
+// request after every reload re-download a source that is already failing.
+func TestReloadCarryKeepsCIDRBackoff(t *testing.T) {
+	t.Parallel()
+
+	partial := func(context.Context) (cidrset.Set, int, error) {
+		return mustCIDRSet(t, "198.51.100.0/24"), 1, nil
+	}
+	store, err := newCIDRStore(t.Context(), zerolog.Nop(), 24*time.Hour, CIDRState{}, partial)
+	if err != nil {
+		t.Fatalf("a partial load that still yielded ranges must build: %v", err)
+	}
+	carried := store.state()
+	if carried.RetryAt.IsZero() || carried.Failures == 0 {
+		t.Fatalf("precondition: a partial initial load must arm the backoff, got %+v", carried)
+	}
+
+	opts := offlineCIDROptions()
+	opts.PreloadedCIDR = carried
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("NewProcessor from carried state: %v", err)
+	}
+
+	got := p.CIDRState()
+	if got.Set.Covered() != carried.Set.Covered() || !got.LoadedAt.Equal(carried.LoadedAt) ||
+		!got.RetryAt.Equal(carried.RetryAt) || got.Failures != carried.Failures {
+		t.Fatalf("CIDRState() = %+v, want the carried %+v", got, carried)
+	}
+	if p.cidr.staleLocked(time.Now()) {
+		t.Fatal("a config reload must not reset the backoff into an immediate re-download")
+	}
+	if !p.cidr.staleLocked(carried.RetryAt) {
+		t.Fatal("the carried retry must still come due at its own deadline")
+	}
+}
+
+// TestCIDRStoreRefusesACoverageCollapse is the swap guard on the shape the
+// upstream data actually takes: the prefix file and the singleton-/32 file
+// cover the same space with 15649 and 141664 ranges. Losing the prefixes GROWS
+// the range count while the addresses admitted collapse, so a guard reading
+// Len() would swap in a list that drops nearly every node.
+func TestCIDRStoreRefusesACoverageCollapse(t *testing.T) {
+	t.Parallel()
+
+	live := mustCIDRSet(t, "10.0.0.0/16")
+	singletons := cidrRanges(t, 100)
+	if singletons.Len() <= live.Len() {
+		t.Fatalf("precondition: the shrunk list must have MORE ranges (%d) than the live one (%d)",
+			singletons.Len(), live.Len())
+	}
+	s := &cidrStore{
+		set:      live,
+		loadedAt: time.Now().Add(-25 * time.Hour),
+		interval: 24 * time.Hour,
+		load:     func(context.Context) (cidrset.Set, int, error) { return singletons, 0, nil },
+	}
+
+	s.doReload(t.Context(), zerolog.Nop())
+
+	if s.set.Covered() != live.Covered() {
+		t.Fatalf("the live list must survive a refused swap, covers %d want %d", s.set.Covered(), live.Covered())
+	}
+	now := time.Now()
+	if s.staleLocked(now) {
+		t.Fatal("the retry must be throttled immediately after the refused swap")
+	}
+	if !s.staleLocked(now.Add(reloadRetryInterval + time.Minute)) {
+		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+// TestCIDRStoreCleanReloadSwaps proves the guard above does not block the
+// normal path, without which refusing everything would pass it.
+func TestCIDRStoreCleanReloadSwaps(t *testing.T) {
+	t.Parallel()
+
+	loaded := mustCIDRSet(t, "10.0.0.0/15")
+	s := &cidrStore{
+		set:      mustCIDRSet(t, "10.0.0.0/16"),
+		loadedAt: time.Now().Add(-25 * time.Hour),
+		retryAt:  time.Now().Add(reloadRetryInterval),
+		interval: 24 * time.Hour,
+		load:     func(context.Context) (cidrset.Set, int, error) { return loaded, 0, nil },
+	}
+	loadedAt := s.loadedAt
+
+	s.doReload(t.Context(), zerolog.Nop())
+
+	if s.set.Covered() != loaded.Covered() {
+		t.Fatalf("a clean reload must swap in the new list, covers %d want %d", s.set.Covered(), loaded.Covered())
+	}
+	if !s.loadedAt.After(loadedAt) {
+		t.Fatal("a clean reload must restamp loadedAt")
+	}
+	if !s.retryAt.IsZero() {
+		t.Fatal("a clean reload must clear the pending retry")
+	}
+}
+
+// TestFilterStatsIdentityHoldsWithCIDRDrop: Kept plus every drop reason must
+// still sum to Total, or a node the allow-list dropped is invisible in the
+// X-Preprocessor-Stats header and on the dashboard.
+func TestFilterStatsIdentityHoldsWithCIDRDrop(t *testing.T) {
+	t.Parallel()
+
+	p := newInlineProcessor()
+	p.filters = []Filter{NewCIDRFilter(staticCIDR(mustCIDRSet(t, "198.51.100.0/24")))}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+		Body: []byte("vless://a@198.51.100.10:443#in\n" +
+			"vless://b@203.0.113.5:443#out\n" +
+			"vless://c@[2001:db8::1]:8443#v6\n" +
+			"vless://d@198.51.100.11:443#in2\n" +
+			"vmess://!!!not-base64!!!\n"),
+		AllowedCountries: filter.All(),
+	})
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if stats.Kept != 2 || stats.CIDRDrop != 1 || stats.IPv6Drop != 1 {
+		t.Fatalf("stats = %+v, want kept=2 cidr_drop=1 ipv6_drop=1", stats)
+	}
+	drops := stats.DNSDrop + stats.GeoDrop + stats.ASNDrop + stats.CIDRDrop + stats.GeoBlockDrop + stats.IPv6Drop
+	if stats.Total != stats.Kept+drops {
+		t.Fatalf("total %d must equal kept+drops %d (%+v)", stats.Total, stats.Kept+drops, stats)
+	}
+	if stats.Unsupported != 1 {
+		t.Fatalf("unsupported = %d, want 1: a refused line never became a node", stats.Unsupported)
+	}
+}
+
+// TestMaybeRefreshDatabasesKicksStaleTablesOnly pins the three call sites that
+// are the ENTIRE mechanism by which a refresh_interval ever fires: each store's
+// maybeRefresh is reachable from nowhere else, so dropping one ships a table
+// frozen for the container's uptime with every gate green — and for the
+// allow-list, cidr_drop reading healthy while it admits nodes the operator
+// dropped a month ago. The negative half matters as much: this runs once per
+// source per cycle, so a gate that always fires is dozens of background
+// re-downloads an hour.
+func TestMaybeRefreshDatabasesKicksStaleTablesOnly(t *testing.T) {
+	t.Parallel()
+
+	const interval = 24 * time.Hour
+	stale := time.Now().Add(-25 * time.Hour)
+	loaded := mustCIDRSet(t, "10.0.0.0/16")
+	dbip, registry, cidr := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
+	// The signal is sent from the reload goroutine, so the loads must not touch
+	// t: they outlive the test body.
+	geoLoad := func(signal chan<- struct{}) func(context.Context) ([]geofeed.Range, int, error) {
+		return func(context.Context) ([]geofeed.Range, int, error) {
+			signal <- struct{}{}
+			return geoRanges(10), 0, nil
+		}
+	}
+	p := &Processor{
+		logger:   zerolog.Nop(),
+		dbip:     &geoDB{name: "dbip", loadedAt: stale, interval: interval, load: geoLoad(dbip)},
+		registry: &geoDB{name: "registry", loadedAt: stale, interval: interval, load: geoLoad(registry)},
+		cidr: &cidrStore{
+			set:      loaded,
+			loadedAt: stale,
+			interval: interval,
+			load: func(context.Context) (cidrset.Set, int, error) {
+				cidr <- struct{}{}
+				return loaded, 0, nil
+			},
+		},
+	}
+
+	p.maybeRefreshDatabases(t.Context())
+
+	for _, table := range []struct {
+		name     string
+		reloaded <-chan struct{}
+	}{{"dbip", dbip}, {"registry", registry}, {"cidr", cidr}} {
+		select {
+		case <-table.reloaded:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never reloaded: a stale table nothing refreshes is frozen for the process lifetime",
+				table.name)
+		}
+	}
+
+	// A skipped reload spawns no goroutine, and absence has no signal to wait
+	// on, so the fresh store is given a bounded window to misbehave in.
+	refetched := make(chan struct{}, 1)
+	freshStore := &Processor{
+		logger: zerolog.Nop(),
+		cidr: &cidrStore{
+			set:      loaded,
+			loadedAt: time.Now(),
+			interval: interval,
+			load: func(context.Context) (cidrset.Set, int, error) {
+				refetched <- struct{}{}
+				return loaded, 0, nil
+			},
+		},
+	}
+
+	freshStore.maybeRefreshDatabases(t.Context())
+
+	select {
+	case <-refetched:
+		t.Fatal("a list loaded seconds ago must not re-download: the staleness gate is all that stands between one fetch and one per source per cycle")
+	case <-time.After(500 * time.Millisecond):
 	}
 }

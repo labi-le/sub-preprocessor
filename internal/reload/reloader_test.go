@@ -15,6 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
@@ -787,5 +788,100 @@ func TestReloadCarriesResolverCaches(t *testing.T) {
 	r.Reload(ctx)
 	if last := reloadedProcessor(t, holder); last.ASNState() == asnR {
 		t.Error("geo.asn.timeout edit must rebuild the ASN resolver")
+	}
+}
+
+// cidrYAML adds a cidr allow-list whose url passes config validation yet can
+// never leave the machine: fetch.ValidatePublicHTTPSURL rejects only non-public
+// IP LITERALS, and the guarded dialer refuses "localhost" once it resolves.
+const cidrYAML = baseGeofeedYAML +
+	"filters:\n" +
+	"  - type: cidr\n" +
+	"    urls:\n" +
+	"      - https://localhost:1/cidrwhitelist.txt\n"
+
+// setupCIDRReloader mirrors setupGeoDBReloader for cidrYAML. The allow-list is
+// preloaded because an empty one is a build error, not a milder filter.
+func setupCIDRReloader(
+	t *testing.T,
+	logger zerolog.Logger,
+	cidrAt time.Time,
+) (*reload.Reloader, *server.Holder, string) {
+	t.Helper()
+	ctx := t.Context()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, cidrYAML)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+
+	set, skipped := cidrset.Parse([]byte("192.0.2.0/24\n"))
+	if set.Len() == 0 || skipped != 0 {
+		t.Fatalf("seed allow-list: %d ranges, %d lines skipped", set.Len(), skipped)
+	}
+
+	opts := reload.OptionsFromConfig(cfg)
+	opts.PreloadedGeofeed = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: time.Now().Add(-time.Hour)}
+	opts.PreloadedCIDR = preprocess.CIDRState{Set: set, LoadedAt: cidrAt}
+	proc, err := preprocess.NewProcessor(ctx, logger, opts)
+	if err != nil {
+		t.Fatalf("initial processor: %v", err)
+	}
+
+	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	return reload.NewReloader(path, holder, logger, cfg, proc, nil, nil), holder, path
+}
+
+// TestReloadCarriesCIDRAllowList: an edit outside the cidr filter entry must
+// hand the loaded allow-list to the new processor, or the crawler's hourly
+// private.yaml rewrite re-downloads ~30k prefixes every hour. The preserved
+// LoadedAt is what proves no re-download happened.
+func TestReloadCarriesCIDRAllowList(t *testing.T) {
+	cidrAt := time.Now().Add(-2 * time.Hour)
+	r, holder, path := setupCIDRReloader(t, zerolog.Nop(), cidrAt)
+
+	before := holder.Load()
+	writeConfig(t, path, cidrYAML+"resolver:\n  timeout: 10s\n")
+	r.Reload(t.Context())
+
+	after := holder.Load()
+	if after == before {
+		t.Fatal("valid reload must swap the holder snapshot")
+	}
+	newProc, ok := after.Svc.(*preprocess.Processor)
+	if !ok {
+		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
+	}
+	state := newProc.CIDRState()
+	if state.Set.Len() == 0 {
+		t.Fatal("the allow-list must be carried over, not rebuilt empty")
+	}
+	if !state.LoadedAt.Equal(cidrAt) {
+		t.Fatalf("allow-list LoadedAt must be carried over: got %v want %v", state.LoadedAt, cidrAt)
+	}
+}
+
+// TestReloadRefetchesCIDROnURLChange: a filters[].urls edit must NOT carry the
+// old allow-list. Its unfetchable replacement then yields an empty set, which
+// is the opposite filter rather than a milder one, so NewProcessor refuses and
+// the previous processor stays live — carrying the set would have swapped
+// cleanly instead, which is exactly the failure this pins.
+func TestReloadRefetchesCIDROnURLChange(t *testing.T) {
+	var logBuf bytes.Buffer
+	r, holder, path := setupCIDRReloader(t, zerolog.New(&logBuf), time.Now().Add(-2*time.Hour))
+
+	before := holder.Load()
+	writeConfig(t, path, strings.Replace(cidrYAML, "cidrwhitelist.txt", "ipwhitelist.txt", 1))
+	r.Reload(t.Context())
+
+	if holder.Load() != before {
+		t.Fatal("a re-downloaded allow-list that came back empty must keep the previous processor")
+	}
+	if logs := logBuf.String(); !strings.Contains(logs, "building processor from new config failed") {
+		t.Fatalf("expected the failed rebuild to be logged, got:\n%s", logs)
 	}
 }

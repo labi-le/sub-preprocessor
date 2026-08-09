@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/asn"
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
@@ -69,6 +70,12 @@ type Options struct {
 	// config.ASNChanged); otherwise the new knobs would be silently ignored.
 	PreloadedResolver *resolver.Resolver
 	PreloadedASN      *asn.Resolver
+	// PreloadedCIDR carries the loaded allow-list across a reload, like
+	// PreloadedDBIP; used only when a cidr filter is configured.
+	PreloadedCIDR CIDRState
+	// cidrLoad replaces the download in tests: the initial allow-list load
+	// runs inline in NewProcessor, which no test may take to the network.
+	cidrLoad cidrLoader
 }
 
 // GeoState is everything one processor hands its replacement about a single
@@ -91,6 +98,15 @@ type GeoState struct {
 	// RetryAt, when non-zero, is the next-attempt deadline armed by a reload
 	// that failed or was refused; Failures counts the consecutive ones that
 	// drove its backoff. See retryDelay.
+	RetryAt  time.Time
+	Failures int
+}
+
+// CIDRState is the cidr allow-list's carry-over across a config reload. Its
+// four fields travel together for the reason GeoState's doc gives.
+type CIDRState struct {
+	Set      cidrset.Set
+	LoadedAt time.Time
 	RetryAt  time.Time
 	Failures int
 }
@@ -148,6 +164,8 @@ type Processor struct {
 	// annotate entry references them (no download, no refresh goroutine).
 	dbip     *geoDB
 	registry *geoDB
+	// cidr is nil unless a cidr filter is configured.
+	cidr *cidrStore
 	// countryOrder is the provider order countryChain walks, derived from the
 	// configured GEO annotate chain; empty means "the geofeed alone". Written
 	// once in NewProcessor before the processor is published, read-only after.
@@ -171,6 +189,25 @@ type geoDB struct {
 	load           func(ctx context.Context) (ranges []geofeed.Range, failed int, err error)
 }
 
+// cidrLoader reports how many sources failed alongside the merged set, so a
+// partial download can arm a retry instead of passing as fresh.
+type cidrLoader func(ctx context.Context) (set cidrset.Set, failed int, err error)
+
+// cidrStore holds the downloaded IP allow-list under geoDB's mutex discipline:
+// mu guards set/loadedAt/retryAt, reloadMu serializes background refreshes.
+type cidrStore struct {
+	mu       sync.RWMutex
+	reloadMu sync.Mutex
+	set      cidrset.Set
+	loadedAt time.Time
+	// retryAt mirrors geoDB.retryAt: the next-attempt gate after a failed or
+	// refused reload, with reloadFailures driving its backoff.
+	retryAt        time.Time
+	reloadFailures int
+	interval       time.Duration
+	load           cidrLoader
+}
+
 // Stats counts one Filter call. Total is the nodes the parser produced, and
 // Kept plus every Drop reason sums back to it. Unsupported sits outside that
 // identity on purpose: it counts URI-shaped input lines the parser refused, so
@@ -181,6 +218,7 @@ type Stats struct {
 	DNSDrop      int
 	GeoDrop      int
 	ASNDrop      int
+	CIDRDrop     int
 	GeoBlockDrop int
 	// IPv6Drop counts nodes whose server is an IP literal this pipeline cannot
 	// use. Resolution, filtering and annotation are IPv4-only, so a v6 literal
@@ -294,31 +332,38 @@ func providerNeeds(opts Options) (needsASN, wantDBIP, wantRegistry bool) {
 	return needsASN, wantDBIP, wantRegistry
 }
 
-func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
-	initLog := log.Op(logger, "processor.New")
-
-	var geoState GeoState
+func initialGeofeedState(ctx context.Context, initLog zerolog.Logger, opts Options) (GeoState, error) {
 	if opts.PreloadedGeofeed.Lookup != nil {
 		initLog.Info().Msg("using preloaded geofeed lookup")
 		// Adopted whole, retry schedule included: see GeoState.
-		geoState = opts.PreloadedGeofeed
-	} else {
-		initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
-		entries, failed, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
-		if err != nil {
-			return nil, fmt.Errorf("load geofeed: %w", err)
-		}
-		if failed > 0 {
-			// Startup takes a partial feed because there is nothing better to
-			// keep, but must not wait a whole refresh interval to complete it.
-			delay := retryDelay(0, opts.RefreshInterval)
-			geoState.RetryAt = time.Now().Add(delay)
-			initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
-				Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
-		}
-		initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
-		geoState.Lookup = geofeed.NewLookup(entries)
-		geoState.LoadedAt = time.Now()
+		return opts.PreloadedGeofeed, nil
+	}
+	initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
+	entries, failed, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
+	if err != nil {
+		return GeoState{}, fmt.Errorf("load geofeed: %w", err)
+	}
+	var state GeoState
+	if failed > 0 {
+		// Startup takes a partial feed because there is nothing better to
+		// keep, but must not wait a whole refresh interval to complete it.
+		delay := retryDelay(0, opts.RefreshInterval)
+		state.RetryAt = time.Now().Add(delay)
+		initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
+			Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
+	}
+	initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
+	state.Lookup = geofeed.NewLookup(entries)
+	state.LoadedAt = time.Now()
+	return state, nil
+}
+
+func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Processor, error) {
+	initLog := log.Op(logger, "processor.New")
+
+	geoState, errGeo := initialGeofeedState(ctx, initLog, opts)
+	if errGeo != nil {
+		return nil, errGeo
 	}
 	needsASN, wantDBIP, wantRegistry := providerNeeds(opts)
 
@@ -338,7 +383,18 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		dnsR = resolver.New(opts.DNSTimeout, opts.DNSAddress, opts.DNSCacheTTL, opts.DNSCacheNegativeTTL)
 	}
 
-	filters, errBuild := buildFilters(opts.IPFilters, asnR)
+	var cidrs *cidrStore
+	var cidrSet func() cidrset.Set
+	if spec, ok := cidrSpec(opts.IPFilters); ok {
+		store, errCIDR := newCIDRStore(ctx, initLog, spec.RefreshInterval,
+			opts.PreloadedCIDR, cidrLoadFor(spec, logger, opts.cidrLoad))
+		if errCIDR != nil {
+			return nil, errCIDR
+		}
+		cidrs, cidrSet = store, store.snapshot
+	}
+
+	filters, errBuild := buildFilters(opts.IPFilters, asnR, cidrSet)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -356,6 +412,7 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 		fetchTimeout:    opts.FetchTimeout,
 		filters:         filters,
 		asnResolver:     asnR,
+		cidr:            cidrs,
 		loadEntries: func(ctx context.Context) ([]geofeed.Entry, int, error) {
 			return geofeed.LoadAll(ctx, sources, logger)
 		},
@@ -429,7 +486,7 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	requestLog := p.logger.With().Str("url", label).Logger()
 	start := time.Now()
 
-	p.maybeRefreshGeoDBs(ctx)
+	p.maybeRefreshDatabases(ctx)
 	lookup := p.countryChain(ctx)
 
 	allowed := req.AllowedCountries
@@ -484,6 +541,7 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 		Int("dns_drop", stats.DNSDrop).
 		Int("geo_drop", stats.GeoDrop).
 		Int("asn_drop", stats.ASNDrop).
+		Int("cidr_drop", stats.CIDRDrop).
 		Int("geoblock_drop", stats.GeoBlockDrop).
 		Int("ipv6_drop", stats.IPv6Drop).
 		Int("unsupported", stats.Unsupported).
@@ -849,25 +907,45 @@ func (c chainLookup) LookupCountry(ip netip.Addr) geofeed.CountryCode {
 }
 
 // swapRefusal reports why a freshly loaded geo database must not replace the
-// live one, or "" when the swap is safe. It protects only a database worth
-// protecting: an empty lookup, or one whose size is unknown (a carried-over
-// stub that does not implement geofeed.SizedLookup), is always replaced.
+// live one, or "" when the swap is safe: an empty current lookup, or one whose
+// size is unknown, is always replaced. Only the type system permits an unsized
+// lookup — no production path holds one — but lookupLen's -1 wraps to 1.8e19
+// unsigned, so both conversions below are pinned by test, not by inspection.
 func swapRefusal(current, loaded geofeed.CountryLookup, failed int) string {
 	currentLen := lookupLen(current)
-	if currentLen <= 0 {
+	if currentLen < 0 {
+		return ""
+	}
+	// A replacement that cannot report a size cannot be shown to be healthy,
+	// so the shrink guard refuses it exactly as it refuses an empty one.
+	return swapRefusalSize(uint64(currentLen), uint64(max(lookupLen(loaded), 0)), failed)
+}
+
+// swapRefusalSize is the size-only half, shared with the cidr allow-list, which
+// has no CountryLookup to measure. The unit is the caller's: ranges for the geo
+// databases, COVERED ADDRESSES for the allow-list, whose merged range count
+// moves independently of how much address space it admits. That second unit is
+// why the sizes are uint64: 0.0.0.0/0 covers 2^32 addresses, which an int does
+// not hold on a 32-bit build, and narrowing it to 0 there would silently
+// disable this guard for the widest possible list. The geo callers widen their
+// int range counts instead. The two zeroes are not symmetric: a zero
+// currentSize is "nothing to protect" and allows, a zero loadedSize is a
+// replacement that cannot be shown healthy and is refused as the collapse it is.
+func swapRefusalSize(currentSize, loadedSize uint64, failed int) string {
+	if currentSize == 0 {
 		return ""
 	}
 	if failed > 0 {
 		return "partial load"
 	}
-	if float64(lookupLen(loaded)) < float64(currentLen)*minSwapRatio {
+	if float64(loadedSize) < float64(currentSize)*minSwapRatio {
 		return "catastrophic shrink"
 	}
 	return ""
 }
 
 // lookupLen reports how many ranges a lookup indexes, or -1 when it does not
-// report a size. An unknown size disables the swap guards: there is no
+// report a size. An unknown CURRENT size disables the swap guards: there is no
 // baseline to compare against.
 func lookupLen(lookup geofeed.CountryLookup) int {
 	if sized, ok := lookup.(geofeed.SizedLookup); ok {
@@ -949,7 +1027,7 @@ func (p *Processor) shouldReloadGeofeedLocked(now time.Time) bool {
 }
 
 // GeofeedState hands this processor's geofeed database to its replacement
-// across a config reload; DBIPState and RegistryState do the same for theirs.
+// across a config reload; DBIPState, RegistryState and CIDRState do the same.
 // Each snapshot is taken under the read lock and returned whole, so a retry
 // schedule can never travel without the data it throttles. A zero GeoState
 // means the provider was not built in this processor.
@@ -978,6 +1056,13 @@ func (p *Processor) RegistryState() GeoState {
 	return p.registry.state()
 }
 
+func (p *Processor) CIDRState() CIDRState {
+	if p.cidr == nil {
+		return CIDRState{}
+	}
+	return p.cidr.state()
+}
+
 // ResolverState and ASNState expose the live DNS and Cymru resolvers so a
 // reload can hand their warm caches to the replacement processor. Both caches
 // are internally locked, so the returned resolver stays safe to share with the
@@ -987,15 +1072,18 @@ func (p *Processor) ResolverState() *resolver.Resolver { return p.resolver }
 // ASNState returns nil when no filter or annotate chain needed ASN data.
 func (p *Processor) ASNState() *asn.Resolver { return p.asnResolver }
 
-// maybeRefreshGeoDBs opportunistically refreshes the built geo databases on
-// the request path, the same trigger point as the geofeed refresh in
-// currentEntries.
-func (p *Processor) maybeRefreshGeoDBs(ctx context.Context) {
+// maybeRefreshDatabases opportunistically refreshes every downloaded table on
+// the request path — the geo databases and the cidr allow-list — at the same
+// trigger point as the geofeed refresh in currentEntries.
+func (p *Processor) maybeRefreshDatabases(ctx context.Context) {
 	if p.dbip != nil {
 		p.dbip.maybeRefresh(ctx, p.logger)
 	}
 	if p.registry != nil {
 		p.registry.maybeRefresh(ctx, p.logger)
+	}
+	if p.cidr != nil {
+		p.cidr.maybeRefresh(ctx, p.logger)
 	}
 }
 
@@ -1144,7 +1232,171 @@ func (db *geoDB) doReload(ctx context.Context, logger zerolog.Logger) {
 	logger.Info().Str("db", db.name).Int("ranges", len(ranges)).Msg("geo database reloaded in background")
 }
 
+// cidrSpec returns the configured cidr filter's spec; config rejects a second
+// one, so the first match is the only one.
+func cidrSpec(specs []config.IPFilterSpec) (config.IPFilterSpec, bool) {
+	for _, spec := range specs {
+		if spec.Type == config.FilterCIDR {
+			return spec, true
+		}
+	}
+	return config.IPFilterSpec{}, false
+}
+
+// cidrLoadFor returns the downloader for spec, or override when a test set one.
+func cidrLoadFor(spec config.IPFilterSpec, logger zerolog.Logger, override cidrLoader) cidrLoader {
+	if override != nil {
+		return override
+	}
+	urls, fileType := slices.Clone(spec.URLs), spec.FileType
+	return func(ctx context.Context) (cidrset.Set, int, error) {
+		return cidrset.Load(ctx, urls, fileType, logger)
+	}
+}
+
+// errEmptyCIDRSet fails the build where an empty geo database only warns: an
+// allow-list nobody is inside is not a milder filter but the opposite one, and
+// the instance would publish nothing at all.
+var errEmptyCIDRSet = errors.New("cidr allow-list loaded empty: every node would be dropped")
+
+// newCIDRStore builds the allow-list behind a configured cidr filter. A
+// preloaded state is adopted whole, exactly as newGeoDB adopts one; otherwise
+// the initial load runs inline and a failed or empty one is fatal, per
+// errEmptyCIDRSet.
+func newCIDRStore(
+	ctx context.Context,
+	initLog zerolog.Logger,
+	interval time.Duration,
+	preloaded CIDRState,
+	load cidrLoader,
+) (*cidrStore, error) {
+	store := &cidrStore{interval: interval, load: load}
+	// No live processor can hold an empty set, so a non-empty one is exactly
+	// "a reload carried its state over".
+	if preloaded.Set.Len() > 0 {
+		initLog.Info().Int("ranges", preloaded.Set.Len()).Msg("using preloaded cidr allow-list")
+		store.set = preloaded.Set
+		store.loadedAt = preloaded.LoadedAt
+		store.retryAt = preloaded.RetryAt
+		store.reloadFailures = preloaded.Failures
+		return store, nil
+	}
+	initLog.Info().Msg("loading cidr allow-list")
+	set, failed, err := load(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load cidr allow-list: %w", err)
+	}
+	if set.Len() == 0 {
+		return nil, errEmptyCIDRSet
+	}
+	if failed > 0 {
+		// Same rule as the geofeed startup load: take what there is, but do
+		// not call it fresh for a whole interval.
+		initLog.Warn().Int("sources_failed", failed).Int("ranges", set.Len()).
+			Dur("retry_in", store.scheduleRetryLocked()).
+			Msg("initial cidr allow-list load is partial; retrying shortly")
+	}
+	store.set = set
+	store.loadedAt = time.Now()
+	initLog.Info().Int("ranges", set.Len()).Msg("cidr allow-list loaded")
+	return store, nil
+}
+
+// snapshot backs the filter's getter, so a node is judged against the list the
+// last background refresh left behind. Taken per NODE, unlike the sibling
+// tables that snapshot once per request into pctx.Lookup: the extra RLock pair
+// is free on the single-goroutine / path and, measured against that
+// alternative, costs a real but immaterial fraction of a concurrent worker
+// cycle — and a list that swaps mid-request is still one the operator
+// published, so either verdict is valid.
+func (s *cidrStore) snapshot() cidrset.Set {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.set
+}
+
+// state returns the carry-over snapshot: the data and the retry schedule that
+// belongs to it, read together under the lock.
+func (s *cidrStore) state() CIDRState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return CIDRState{
+		Set:      s.set,
+		LoadedAt: s.loadedAt,
+		RetryAt:  s.retryAt,
+		Failures: s.reloadFailures,
+	}
+}
+
+func (s *cidrStore) maybeRefresh(ctx context.Context, logger zerolog.Logger) {
+	s.mu.RLock()
+	stale := s.staleLocked(time.Now())
+	s.mu.RUnlock()
+	if !stale {
+		return
+	}
+	if s.reloadMu.TryLock() {
+		bgCtx := context.WithoutCancel(ctx)
+		go func() {
+			defer s.reloadMu.Unlock()
+			s.doReload(bgCtx, logger)
+		}()
+	}
+}
+
+// staleLocked reports whether the allow-list needs a reload. Callers must hold
+// s.mu (read or write); a pending retryAt gates the next attempt.
+func (s *cidrStore) staleLocked(now time.Time) bool {
+	if s.interval <= 0 {
+		return false
+	}
+	if !s.retryAt.IsZero() {
+		return !now.Before(s.retryAt)
+	}
+	if s.loadedAt.IsZero() {
+		return true
+	}
+	return now.Sub(s.loadedAt) >= s.interval
+}
+
+// scheduleRetryLocked arms the next attempt and returns the delay it picked.
+// Callers must hold s.mu (newCIDRStore runs before the store is reachable).
+func (s *cidrStore) scheduleRetryLocked() time.Duration {
+	delay := retryDelay(s.reloadFailures, s.interval)
+	s.reloadFailures++
+	s.retryAt = time.Now().Add(delay)
+	return delay
+}
+
+func (s *cidrStore) doReload(ctx context.Context, logger zerolog.Logger) {
+	next, failed, err := s.load(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err != nil {
+		logger.Error().Err(err).Dur("retry_in", s.scheduleRetryLocked()).
+			Msg("background cidr allow-list reload failed, keeping stale data")
+		return
+	}
+
+	if reason := swapRefusalSize(s.set.Covered(), next.Covered(), failed); reason != "" {
+		logger.Error().Str("reason", reason).Int("sources_failed", failed).
+			Int("loaded", next.Len()).Int("current", s.set.Len()).
+			Uint64("loaded_covered", next.Covered()).Uint64("current_covered", s.set.Covered()).
+			Dur("retry_in", s.scheduleRetryLocked()).
+			Msg("background cidr allow-list reload refused, keeping existing data")
+		return
+	}
+
+	s.set = next
+	s.loadedAt = time.Now()
+	s.retryAt = time.Time{}
+	s.reloadFailures = 0
+	logger.Info().Int("ranges", next.Len()).Msg("cidr allow-list reloaded in background")
+}
+
 func FormatStats(stats Stats) string {
-	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d geoblock_drop=%d ipv6_drop=%d unsupported=%d",
-		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.GeoBlockDrop, stats.IPv6Drop, stats.Unsupported)
+	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d cidr_drop=%d geoblock_drop=%d ipv6_drop=%d unsupported=%d",
+		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.CIDRDrop, stats.GeoBlockDrop, stats.IPv6Drop, stats.Unsupported)
 }
