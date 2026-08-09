@@ -234,7 +234,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 4
       },
@@ -297,6 +297,98 @@
         }
       ],
       "description": "Four counts from the last cycle, listed here in pipeline order (the legend runs in target order: merged, probed, dead-skipped, kept). merged = unique nodes after dedupe; dead-skipped = nodes never probed because a recent probe found them dead; probed = nodes latency-probed; kept = nodes published. merged = dead-skipped + probed, so the gap between the merged and probed lines is entirely the dead cache and is not loss. The drop from probed to kept is the latency probe plus the through-node gates."
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Gemini gate: unverified share",
+      "description": "Of the Gemini API responses the gate classified last cycle, the share that told it nothing about the egress location — the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID: a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified, so this is gate health, not a drop rate, and it is the one axis the two filter panels around it cannot show: a gate that verified nothing looks there exactly like one that found nobody to drop. The denominator is the gate's own classified-response count, not stable_filter_in_nodes: only a proxy that ANSWERED reaches the classifier, so a proxy that never answered is in neither term — and it reaches reason=\"unreachable\" on the drops panel below only when EVERY proxy of its node was unreachable, since that reason is counted per surviving NODE off an outcome already folded best-of-ports: one live port keeps the node and its dead siblings are counted nowhere. This tile carries the gate STATE too, which until 2026-08-09 had a panel of its own: the ratio is ORed with stable_gemini_gate_enabled - 2, a fallback Prometheus takes ONLY when the ratio is empty, so each exported state reads differently — -2 (enabled 0) renders OFF — no usable key, meaning the gate checked NOTHING and every survivor passed through unverified; -1 (enabled 1, no proxy answered) renders NO CLASSIFIED RESPONSES; a real ratio means it ran and classified. Read as an INSTANT query and painted from the BASE threshold step, which is RED: the moment the series stop being exported this reads NOT RUNNING on red, whatever the dashboard time range still holds, rather than freezing green on a pre-disable sample. What no single tile can separate is WHY nothing is exported, because the exporter is silent in all four cases: nothing scraped yet, no cycle published yet, no gemini filter in the filters list, or one configured that never reached its check (buildNodeFilters skipped it with only a WARN for want of Gemini support, or ParseProxies failed and the whole through-node chain was skipped, publishing every survivor UNFILTERED). Only the first two are benign.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 8,
+        "y": 4
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "noValue": "NOT RUNNING",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 0.001
+              },
+              {
+                "color": "red",
+                "value": 0.02
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-2": {
+                  "text": "OFF — no usable key",
+                  "index": 0
+                },
+                "-1": {
+                  "text": "NO CLASSIFIED RESPONSES",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "NOT RUNNING",
+                  "index": 2
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_unverified_checks / (stable_gemini_gate_checks > 0) or (stable_gemini_gate_enabled - 2)",
+          "instant": true
+        }
+      ]
     },
     {
       "id": 6,
@@ -472,248 +564,6 @@
       "description": "Each source's contribution after the IP-stage filters, top 25 by count, from the last cycle. This is NOT the published list: it is counted in preprocess, per source, before merge/dedupe and before any probing. Two unmeasured stages sit in between and their product is the whole gap — dedupe, where sum(stable_source_kept_nodes) / scalar(stable_merged_nodes) ran 1.00–4.93 (avg 3.37) over the 15d window ending 2026-08-08 19:30Z, and then the latency probe plus the through-node gates, which is the merged→kept collapse on the funnel panel. One cycle, published 2026-08-08 17:29Z: the top row here was 15034 nodes from a single source against 130 nodes in the entire published list — 15034/130 = 116x, one source's pre-dedupe yield over the whole post-probe result — while the full metric summed to 119159 across 228 sources, of which this table shows the top 25. Use it to spot a source that has stopped yielding or started yielding junk, not to attribute published nodes to a source — nothing on this dashboard does that."
     },
     {
-      "id": 16,
-      "type": "stat",
-      "title": "Gemini gate state",
-      "description": "Whether the gemini gate ran at all last cycle. OFF means it is configured as a filter but has no usable API key, so it checked NOTHING and passed every survivor through unverified — on the two filter panels above that gate then looks like one that simply found nobody to drop, which is the failure this panel exists to expose. No data does NOT mean “not configured” on its own — it has four causes: nothing scraped yet, no cycle published yet, no gemini filter in the filters list, or one configured that never reached its check (the prober has no Gemini support and buildNodeFilters skipped it with only a WARN, or ParseProxies failed and the whole through-node chain was skipped, publishing every survivor UNFILTERED). Only the first two are benign. The gate's verdict is invisible without a working credential: the API answers caller identity, then key validity, and only then the location precondition this gate reads. Read as an INSTANT query, so it shows the CURRENT state with no lag: the moment stable_gemini_gate_enabled stops being exported this reads NOT RUNNING on red, whatever the dashboard time range still holds.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 20
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "NOT RUNNING",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "OFF — no usable key",
-                  "index": 0
-                },
-                "1": {
-                  "text": "VERIFYING",
-                  "index": 1
-                }
-              }
-            },
-            {
-              "type": "special",
-              "options": {
-                "match": "null",
-                "result": {
-                  "text": "NOT RUNNING",
-                  "index": 2
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_enabled",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 17,
-      "type": "stat",
-      "title": "Gemini gate: unverified share",
-      "description": "Of the Gemini API responses the gate classified last cycle, the share that told it nothing about the egress location — the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID: a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified, so this is gate health, not a drop rate. The denominator is the gate's own classified-response count, not stable_filter_in_nodes: only a proxy that ANSWERED reaches the classifier, so a proxy that never answered is in neither term — and it reaches reason=\"unreachable\" on the drops panel only when EVERY proxy of its node was unreachable, since that reason is counted per surviving NODE off an outcome already folded best-of-ports: one live port keeps the node and its dead siblings are counted nowhere. Read as an INSTANT query and painted from the BASE threshold step, which is RED: an empty result reads NO CLASSIFIED RESPONSES on red, so this tile agrees with the gate-state panel to the left about an absent gate instead of sitting green beside its NOT RUNNING. Three things produce that empty result and this tile cannot separate them — the gate did not run at all (nothing exported), it is configured without a usable key (checks is 0, so the `> 0` guard drops the sample), or it ran and no proxy answered. The panel to the left tells them apart.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 20
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "noValue": "NO CLASSIFIED RESPONSES",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "yellow",
-                "value": 0.001
-              },
-              {
-                "color": "red",
-                "value": 0.02
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_unverified_checks / (stable_gemini_gate_checks > 0)",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 18,
-      "type": "timeseries",
-      "title": "Gemini gate: verified vs unverified",
-      "description": "The gate's classified responses split by whether a location verdict came back. The unverified series is never a drop — those nodes are published exactly like one the gate cleared, which is why it cannot ride the drops panel above. The verified series is NOT all kept: a verified response carrying the geo-block marker drops its node, and that one does show up above as reason=\"blocked\". The two series sum to stable_gemini_gate_checks. One response per proxy that ANSWERED, so a mierus:// node contributes one per answering port — not one per configured port, and not one per node.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 20
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 60,
-            "stacking": {
-              "mode": "normal"
-            }
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "unverified (kept, gate learned nothing)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "verified (a location verdict came back)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "last"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_checks - stable_gemini_gate_unverified_checks",
-          "legendFormat": "verified (a location verdict came back)"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_unverified_checks",
-          "legendFormat": "unverified (kept, gate learned nothing)"
-        }
-      ]
-    },
-    {
       "id": 15,
       "type": "timeseries",
       "title": "Cloudflare egress trace",
@@ -726,7 +576,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -796,7 +646,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -868,7 +718,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -965,7 +815,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -1037,7 +887,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -1089,7 +939,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -1141,7 +991,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
