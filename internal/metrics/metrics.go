@@ -25,6 +25,20 @@ import (
 // histogram.
 var speedBuckets = []float64{5, 10, 25, 50, 100, 250, 500}
 
+// latencyBuckets are the cumulative upper bounds (ms) for the kept-node
+// latency histogram.
+//
+// Invariant: this ladder carries a bound equal to EVERY instance's shipped
+// check.max_avg_ms, and changing one ships its bucket in the same commit.
+// Instances share a Prometheus and differ only by job, so a gate that falls
+// between two bounds is invisible on the panel — which is the one question
+// the metric exists to answer; TestLatencyBucketsCoverShippedGates checks it
+// against the shipped config files. 1000 is defaultCheckMaxAvgMs, the gate a
+// config omitting the key runs on. The tail runs past every gate only so that
+// raising a max_avg_ms into it stays a one-file edit -- SelectSurvivors drops
+// everything above the gate, so those bounds always equal +Inf.
+var latencyBuckets = []float64{100, 250, 500, 800, 1000, 1500, 3000, 4000, 6000, 12000}
+
 const (
 	labelFilter = "filter"
 	labelSource = "source"
@@ -104,10 +118,15 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 
 	writeFilters(w, r.Filters)
 	writeSources(w, r.Sources)
-	writeHistogram(w, "stable_kept_speed_mbps", "Download speed (Mbps) of kept nodes.", r.KeptSpeeds)
+	writeHistogram(w, "stable_kept_speed_mbps", "Download speed (Mbps) of kept nodes.", r.KeptSpeeds, speedBuckets)
 	if len(r.KeptSpeeds) > 0 {
 		gauge(w, "stable_kept_speed_min_mbps", "Slowest kept node's measured speed last cycle.", float64(slices.Min(r.KeptSpeeds)))
 		gauge(w, "stable_kept_speed_max_mbps", "Fastest kept node's measured speed last cycle.", float64(slices.Max(r.KeptSpeeds)))
+	}
+	writeHistogram(w, "stable_kept_latency_ms", "Mean probe delay (ms) of kept nodes.", r.KeptLatenciesMs, latencyBuckets)
+	if len(r.KeptLatenciesMs) > 0 {
+		gauge(w, "stable_kept_latency_min_ms", "Fastest kept node's mean probe delay last cycle.", float64(slices.Min(r.KeptLatenciesMs)))
+		gauge(w, "stable_kept_latency_max_ms", "Slowest kept node's mean probe delay last cycle: how close the published list runs to max_avg_ms.", float64(slices.Max(r.KeptLatenciesMs)))
 	}
 }
 
@@ -195,19 +214,19 @@ func writeSources(w io.Writer, sources []stable.SourceReport) {
 	}
 }
 
-func writeHistogram(w io.Writer, name, helpText string, values []int) {
+func writeHistogram(w io.Writer, name, helpText string, values []int, buckets []float64) {
 	help(w, name, "histogram", helpText)
-	counts := make([]int, len(speedBuckets))
+	counts := make([]int, len(buckets))
 	var sum float64
 	for _, v := range values {
 		sum += float64(v)
-		for i, ub := range speedBuckets {
+		for i, ub := range buckets {
 			if float64(v) <= ub {
 				counts[i]++ // le buckets are cumulative: a value counts in every bound it is under
 			}
 		}
 	}
-	for i, ub := range speedBuckets {
+	for i, ub := range buckets {
 		fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, formatFloat(ub), counts[i])
 	}
 	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", name, len(values))

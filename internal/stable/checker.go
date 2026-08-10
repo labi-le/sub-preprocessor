@@ -245,20 +245,21 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Msg("stable list updated")
 
 	c.observe(CycleReport{
-		SourcesOK:     len(bodies),
-		SourcesTotal:  len(spec.Sources),
-		Merged:        len(entries),
-		DeadSkipped:   skipped,
-		Probed:        len(probe),
-		Kept:          len(survivors),
-		GeoUnknown:    geoUnknownCount(survivors),
-		KeptCountries: keptCountries(survivors),
-		Duration:      time.Since(start),
-		Sources:       sourceReports,
-		Filters:       filterReports,
-		KeptSpeeds:    keptSpeeds(survivors),
-		Trace:         trace,
-		Gemini:        gemini,
+		SourcesOK:       len(bodies),
+		SourcesTotal:    len(spec.Sources),
+		Merged:          len(entries),
+		DeadSkipped:     skipped,
+		Probed:          len(probe),
+		Kept:            len(survivors),
+		GeoUnknown:      geoUnknownCount(survivors),
+		KeptCountries:   keptCountries(survivors),
+		Duration:        time.Since(start),
+		Sources:         sourceReports,
+		Filters:         filterReports,
+		KeptSpeeds:      keptSpeeds(survivors),
+		KeptLatenciesMs: keptLatencies(survivors),
+		Trace:           trace,
+		Gemini:          gemini,
 	})
 
 	return nil
@@ -289,6 +290,17 @@ func keptSpeeds(survivors []Survivor) []int {
 		}
 	}
 	return speeds
+}
+
+// keptLatencies collects the mean probe delay of kept nodes for the latency
+// histogram: the value SelectSurvivors filtered and sorted on, which until now
+// reached no log and no metric.
+func keptLatencies(survivors []Survivor) []int {
+	latencies := make([]int, 0, len(survivors))
+	for _, s := range survivors {
+		latencies = append(latencies, s.MeanMs)
+	}
+	return latencies
 }
 
 // geoUnknownCount counts published nodes whose annotation resolved no country

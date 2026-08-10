@@ -195,7 +195,7 @@ startup, so `503` is left for a genuinely cold start rather than every restart.
 `sub-preprocessor` on `:7008` reading `./config`, and `sub-preprocessor-vassago`
 on `:7009` reading `./config-vassago`. Same code, same two modes, different
 `filters:`. The vassago instance gates on the ENTRY address — a `cidr` allow-list
-holding the Russian mobile-operator whitelist — then `country`, then `bandwidth`.
+holding `hxehex/russia-mobile-internet-whitelist` — then `country`, then `bandwidth`.
 The `country` entry carries no `exclude_*`, so it is inert on `/stable.txt`
 (`GeofeedFilter` early-returns on a full allow set with an empty deny set) and is
 there for `GET /`: without an entry of that type `buildFilters` builds nothing,
@@ -204,8 +204,16 @@ no filter then reads. It arms no through-node geo gate and no `cloudflare`
 provider: its nodes are meant to be used UNDER that whitelist, so an egress-geo
 gate answers a question nobody asked and each one costs a request per survivor to
 do it. Only the first instance runs the crawler and holds the Gemini key; the
-second's source list is curated by hand. A change to "the shipped config" now
+second's 54 sources are curated by hand, against a measurement its
+`config-vassago/sources.yaml` header records. A change to "the shipped config" now
 has to be checked against BOTH directories.
+
+**Do not read that upstream repository name as a description of the data.** Measured
+2026-08-10 over the whitelist's 15649 intervals: AS749 DNIC (US DoD) is 20.97% of the
+covered addresses, AS0 (unrouted) a further 6.52%, and by country it is 28.32% US against
+10.60% RU — a worldwide `0.0.0.0/0` scan artifact, not an operator ACL. Nothing is kept
+falsely by this, since no node is hosted in DoD space, but list size is NOT useful size:
+no deployment may be sized off the 15649, only off a measured node count.
 
 ## Important current design decisions
 
@@ -227,7 +235,78 @@ has to be checked against BOTH directories.
 - A config reload NEVER restarts the `/stable.txt` worker. `stable.Controller.Apply` swaps a `CheckerSpec` the next cycle reads, so the crawler's hourly `private.yaml` rewrite cannot cancel a 20–55 min cycle in flight and burn a full probe pass. Nor does it stop the worker: a reload whose merged source list came out EMPTY is refused with a warning and the previous spec stays live, because every source comes from an overlay and an empty list is nearly always a missing file. Only shutdown calls `Stop`.
 - The `cidr` allow-list **fails closed at BUILD**, unlike every downloadable database beside it. Two gates, both fatal to `NewProcessor`: `cidrset.Load` errors when no URL yielded a range, and `newCIDRStore` refuses an empty set (`errEmptyCIDRSet`) even where a load reported success. A warning would be wrong here, because an allow-list that failed to download is not a degraded filter but the INVERTED one — it drops every node while every counter reads healthy, and the instance publishes an empty subscription. Verified against the real config: pointing `filters[].urls` at a 404 exits 1 with `no cidr ranges loaded (1 source(s) failed)`. A hot reload hitting the same error keeps the previous processor, so the running list survives a typo.
 - **The allow-list's swap guard counts COVERED ADDRESSES, never merged ranges.** `swapRefusalSize` is shared with the geo databases, whose unit is ranges, and the cidr store hands it `Set.Covered()` instead. The two quantities move in opposite directions, and the upstream itself is the proof: `cidrwhitelist.txt` is 30228 lines -> 15649 merged ranges -> 36265984 addresses, while the SAME repo's `ipwhitelist.txt` publishes that identical space as 141664 lines — every one of them the `.1` of a /24 already covered, 0 outside. Configure both URLs and lose the CIDR file, and a range-count guard reads 15649 -> 141664 (+805%) as healthy growth while swapping in a set covering 0.39% of the space, whose only survivors are nodes resolving to a literal `.1`. Coverage refuses that swap; `Len()` applauds it. That is why `cidrset.Len`'s doc comment says what it must not be used for.
+- **That 15649 is an INTERVAL count and no CIDR tool reproduces it.** `cidrset.newSet` coalesces any two ranges that TOUCH (`next.lo <= ranges[last].hi+1`), where `ipaddress.collapse_addresses()` merges only ALIGNED prefix pairs and answers 30222 CIDRs over the same `cidrwhitelist.txt`. Both are right about different things. This is written down because a reviewer filed the repo's own 15649 as stale over exactly that disagreement and retracted: check a range count against the merge rule that produced it, never against a tool with a different one.
 - **At most ONE `cidr` entry per config**, rejected at load rather than merged. `urls:` already expresses the union, so a second entry could only mean intersection — a shape nothing here wants — and one entry means one live store, which is what lets the reload carry-over stay a single `CIDRState` instead of a keyed collection.
+
+## Curating a subscription source list
+
+`config-vassago/sources.yaml` is curated entirely by hand — no crawler writes into that
+directory — and one measured round of it (2026-08-10) produced four findings that cost hours
+to obtain. That file's header carries the round's numbers; what follows is the part that
+outlives them, and it applies to `config/sources.yaml` just as well.
+
+- **The biggest names marketed FOR whitelist bypass contribute nothing; the bulk comes from
+  undifferentiated aggregators.** Measured across ten independent search channels:
+  `github.com/zieng2/wl` and all 15 files of `igareck/vpn-configs-for-russia` (7992 stars)
+  scored ZERO new whitelisted `server:port` against the configured pool. That is a statement
+  about the famous ones, NOT about the class. Counting by the boundary that needs no
+  judgement — whitelist marketing in the FILENAME — six of the 33 added qualify and carry
+  377 of the 2247 marginal gains, 17%. State which boundary you used or the next reader
+  derives a different answer: the configured `name:` happens to select the same six here,
+  while whitelist marketing ANYWHERE in the URL selects eight and 519, 23%. The bulk
+  came from aggregators making no such claim under every one of those readings, and the
+  mechanism was measured on `zieng2/vless_universal.txt`, 325 nodes: 88 hold an IP genuinely
+  inside the whitelist, 29 present a whitelisted SNI from a non-whitelisted IP, and 208 are
+  ordinary foreign nodes. Those 29 are SNI spoofing — a different bypass from CIDR
+  membership, and one this pipeline deliberately does not implement. Marketing predicts
+  nothing and a star count predicts nothing; measuring against the CURRENT pool is the only
+  signal.
+- **A count is not a coverage, and a sum is not a union.** Ten agents each reported a sum of
+  per-source `wl_new` that overstated their slice's true union by 2.2x to 3.3x — these
+  sources overlap heavily. Worse, a marginal gain measured greedily against the sources
+  accepted BEFORE it is a lower bound that cannot be added, subtracted or reordered: this
+  round's 33 additions have gains summing to 2247, the 36 they were picked from showed a
+  union of +2368, and the shipped list re-measures at 4006 against the 1709 baseline.
+  Three separate measurements over three different sets; none is derivable from the
+  others, and the last supersedes the rest. Union the sets. Never total the counts, and
+  never derive a new figure by taking one source's number out of an old one.
+  **And re-check every COMPARISON when you re-measure its operands.** A "staler than", a
+  "more than half", a "2.3x" is a derived quantity that keeps its old truth value while the
+  numbers around it move, so it survives exactly the sweep that fixes everything else. Two
+  shipped here — three sources called "all staler than the 94-day reject" when two were
+  fresher than it, and two survivors called "both worse than" a bar one of them sat inside —
+  with every individual figure correct in both.
+- **Yield alone is not selection. Three gates are, and a candidate must pass all of them.**
+  1. FRESH. A frozen fork scores well ONCE, as an archive of servers the live upstream has
+     since rotated out, then decays while still costing a DNS resolve every cycle. The
+     signal used was the repository's commits atom feed — and that feed is this gate's hole:
+     two `storage.yandexcloud.net` candidates publish none, sailed through untouched at 94
+     and 122 days stale, and were caught by hand on `Last-Modified`. A candidate with no feed
+     needs that manual check or the gate is not applied to it at all — and the hole is not
+     caught at candidate time. It survives into the SHIPPED list: three no-feed sources were
+     accepted and shipped at 52-104 days before the by-hand check reached them, so audit the
+     entries you already have, not only the ones you are adding.
+  2. FETCHABLE inside `fetch.timeout`, shipped at 3s, AND under the worker's 10 MiB body
+     cap (`subscription.maxSubscriptionSize`), which rejects an oversized source with
+     `response too large` so it loads NOTHING. Both halves bit this round: the
+     best-yielding candidate found — 409969 nodes — takes 9s, and
+     `gitverse.ru/LimonTH/proxy-list` `output/live` (forge-native; 404 on GitHub)
+     downloads in 1.4s for +445 but is 10.4 MiB. Neither contributes a
+     single node however good its content is, and the second was shipped for one cycle
+     before the log said so. Measure best-of-3: the failure mode here is bimodal, not
+     slow. A selection script that times the fetch but never weighs the body credits
+     candidates production cannot use.
+  3. MARGINAL, and worth its DNS. It must contribute whitelisted `server:port` that no
+     ALREADY-ACCEPTED source carries — a source that only re-carries an accepted source's
+     nodes is rejected however large it is, and that test alone condemned all sixteen
+     removals — and the whole ADDED BLOCK must fit a per-cycle budget of resolved hosts.
+     The cost unit of that budget is DISTINCT HOSTS per cycle, never node lines: past the
+     `cidr` filter a non-whitelisted node is one cached lookup and dies pre-probe, so a large
+     source's tail is not free and the budget a candidate is charged against is a host budget.
+- **One sample is not evidence for removal.** These lists rotate within the hour. Six audit
+  samples over 1.5h backed dropping 16 redundant sources, and four more (`aetris bijandi
+  flat447 prominbro`) were deliberately KEPT because they were redundant in some samples and
+  unique in others. A single sample showing a source adds nothing shows only that.
 
 ## Important security / correctness notes
 
@@ -301,6 +380,11 @@ Important keys:
 - `internal/reload` — config file watcher + hot-reload
 - `internal/server` — Fiber HTTP layer
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
+- `internal/geo` — the provider adapters (`geofeed`/`dbip`/`registry`/`asn`) the country filter and the annotator share, each named after the data source it queries
+- `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate
+- `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay (instance 1 only)
+- `internal/log` — zerolog setup, runtime level changes, the `ctxlog.Op` child-logger helper
+- `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `geofeed`, `subscription` and `stable`
 
 ## API behavior to remember
 
@@ -336,10 +420,27 @@ vendor the dashboard into the nixos repo.
   it loopback-only once per instance — `127.0.0.1:9091:9090` for `sub-preprocessor`,
   `127.0.0.1:9092:9090` for `sub-preprocessor-vassago` — keep both non-public.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport`
-  (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds, cycle
-  aggregate + duration) to `metrics.Metrics.Observe` on a published cycle, and
+  (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds AND kept
+  mean latencies, cycle aggregate + duration) to `metrics.Metrics.Observe` on a
+  published cycle, and
   `ObserveError()` on any abort. **Adding/renaming a metric? Update
   `deploy/grafana/sub-preprocessor.json` in the same commit.**
+- **A histogram bound that marks a gate is a CONTRACT with the config, not a default.**
+  `latencyBuckets` MUST carry a bound equal to every `check.max_avg_ms` that any shipped
+  config sets, because `SelectSurvivors` admits on exactly that value and a threshold
+  landing between two bounds hides the one edge `stable_kept_latency_ms` was added to make
+  visible. So moving a `max_avg_ms` ONTO a bound the ladder already carries is a one-file
+  edit — that is what the tail past every gate is for — and moving it anywhere else adds
+  its bound in the same commit. Never append a bound the ladder already has:
+  `writeHistogram` emits one line per element with no dedupe, so a duplicate renders two
+  identical `le=` series and Prometheus rejects the whole scrape.
+  The two instances scrape this metric name under different jobs and may disagree on the
+  threshold, so the ladder carries EVERY shipped value, not one of them. All three halves
+  are enforced rather than merely written here: `TestLatencyBucketsCoverShippedGates`
+  reads both shipped configs through `config.Load`,
+  `TestLatencyBucketsCoverTheDefaultGate` covers the gate neither of them exercises by
+  loading a shipped config with the key stripped, and
+  `TestLatencyBucketsAreStrictlyIncreasing` catches the duplicate.
 - **A count of nodes the pipeline KEPT never rides `FilterReport.Dropped`.** That map renders as
   `stable_filter_dropped_nodes{filter,reason}`, which the dashboard titles "drops by reason"; the trace's
   `corrected`/`unanswered` shipped through it for a filter that drops nothing — shipped by `b545d0a`,

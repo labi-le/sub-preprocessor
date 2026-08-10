@@ -20,7 +20,9 @@ services:
     restart: always
 
   # Same image, second config: nodes are kept only when their resolved IP is in
-  # the Russian mobile-operator whitelist, and no geo-block gate runs.
+  # the `hxehex/russia-mobile-internet-whitelist` allow-list -- despite the name a
+  # worldwide scan artifact rather than a Russian ACL, see README -- and no
+  # geo-block gate runs.
   sub-preprocessor-vassago:
     image: sub-preprocessor:latest
     container_name: sub-preprocessor-vassago

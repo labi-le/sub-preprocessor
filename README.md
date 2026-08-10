@@ -4,7 +4,7 @@ An HTTP preprocessor for Mihomo / Clash.Meta proxy subscriptions.
 
 It takes raw proxy subscription lists (public collectors, Telegram channels,
 your own sources), filters nodes by the country their IP resolves to or by
-membership of an operator IP allow-list, probes them for liveness, latency,
+membership of a downloaded IP allow-list, probes them for liveness, latency,
 bandwidth, and real-world reachability of geo-fenced services, and serves
 clean Mihomo-compatible output. The goal is to feed a router's Mihomo instance
 a subscription that only contains nodes worth routing through — dead, slow,
@@ -192,18 +192,36 @@ after DNS resolution, before any probing:
   collapses to 0.39%.
 
   Worked example, measured 2026-08-09 against that whitelist: the file's 30228
-  lines merge into 15649 ranges covering 36265984 addresses. Across the 51
-  sources in `config/sources.yaml` — 59558 nodes on 19330 distinct servers —
-  5023 nodes (8.43%) sit on a server that resolves into it, which is what the
-  second compose instance is configured from (37 of the 51 sources kept; 12
-  measured zero whitelisted nodes and 2 were dead links answering 404). A live
-  run of that instance loaded the same 15649 ranges and moved the counter on a
-  real source: `shatak` came back with 586 nodes, of which 25 were kept, 533
-  booked `cidr_drop` and 28 `geo_drop` under `countries=RU`. Those counts will
-  not reproduce — the sources are live and churn between runs, and this one had
-  already shed nodes since the measurement above. What reproduces is the
-  identity: `total` equals `kept` plus every drop reason, here 586 = 25 + 533 +
-  28.
+  lines merge into 15649 ranges covering 36265984 addresses. Do not "correct"
+  that range count against a CIDR tool. Python's
+  `ipaddress.collapse_addresses()` reports 30222 CIDRs over the identical file
+  because it merges only ALIGNED prefix pairs, where `cidrset` merges any two
+  ranges that TOUCH and so counts contiguous intervals. Both numbers are right
+  about different things; the 15649 has been filed as stale over that gap once
+  already, and the finding was retracted.
+
+  **This list is not a Russian ACL, whatever its upstream repository is
+  named.** Measured 2026-08-10 across the same 15649 intervals: AS749 DNIC (US
+  Department of Defense) holds 20.97% of the covered addresses and AS0 —
+  unrouted, rentable from nobody — a further 6.52%, so roughly 27% of the
+  allow-list is space no node can sit in. By country it is 28.32% US against
+  10.60% RU. It behaves like a worldwide `0.0.0.0/0` scan artifact, not an
+  operator ACL. Correctness is untouched by this — nothing is hosted in DoD
+  space, so no node is falsely kept — but **list size is not useful size**:
+  anyone sizing a deployment from 15649 ranges will be wrong, and the only
+  figure that means anything is a measured node count.
+
+  Across the 51 sources in `config/sources.yaml` — 59558 nodes on 19330
+  distinct servers — 5023 nodes (8.43%) sat on a server that resolves into it.
+  That measurement seeded the second compose instance and no longer describes
+  it: `config-vassago/sources.yaml` now carries 54 sources selected against the
+  whitelist directly, most of them not in `config/sources.yaml` at all, and its
+  header records their own measurement. What survives from a live run of that
+  instance is not a count but an identity — `total` equals `kept` plus every
+  drop reason, e.g. a source answering with 586 nodes booking 25 kept, 533
+  `cidr_drop` and 28 `geo_drop` under `countries=RU`, which is 586 = 25 + 533 +
+  28. Counts themselves never reproduce: these sources are live and rotate
+  within the hour.
 
 Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
@@ -511,8 +529,14 @@ The repo ships **two** config directories, one per compose instance:
 container, so everything below is relative to whichever directory an instance
 runs on, and the strict-decode, overlay and hot-reload rules are identical for
 both. `config-vassago/` ships `config.yaml` + `sources.yaml` and no
-`private.yaml`: the crawler writes into `config/` only, so that instance's
-source list is curated by hand.
+`private.yaml`: the crawler writes into `config/` only, so that instance's 54
+sources are curated by hand. Read that file's header before editing it — it
+carries the measurement the list was selected on, and the three gates a
+candidate has to pass: the repo is FRESH, the body is FETCHABLE inside
+`fetch.timeout` AND fits under the worker's 10 MiB body cap, and its
+contribution is MARGINAL — `server:port` no already-accepted source carries,
+while the whole ADDED BLOCK stays under a per-cycle budget of resolved hosts.
+Cost here is distinct hosts, not node lines.
 
 Key sections:
 
@@ -578,8 +602,19 @@ hand-rolled Prometheus text exposition (no `client_golang` — the
 cycle funnel (`stable_merged_nodes`, `stable_probed_nodes`,
 `stable_kept_nodes`, `stable_dead_skipped_nodes` — the last counts every node
 skipped before probing, all of them dead-cached, so the funnel closes),
-per-source and per-filter in/kept/dropped-by-reason counters, kept-node speed
-histogram, cycle duration, success timestamp, and cycle/failure totals. The
+per-source and per-filter in/kept/dropped-by-reason counters, two kept-node
+histograms — `stable_kept_speed_mbps` and `stable_kept_latency_ms`, each with
+`_min`/`_max` gauges beside it — cycle duration, success timestamp, and
+cycle/failure totals. The latency histogram is the one that closes a loop:
+`check.max_avg_ms` both admits a node and orders the published list, so
+without it the single threshold deciding how long that list is had no
+observable to tune against. That only works while the gate is visible on the
+axis, so **`latencyBuckets` must carry a bound equal to every
+`check.max_avg_ms` any shipped config sets.** A threshold landing between two
+bounds hides the very edge the panel exists to show. Both instances publish
+this metric name under different Prometheus jobs and their thresholds are free
+to differ, so the ladder carries all of them and moving any one of them adds
+its bucket in the same commit. The
 IP-stage drop reasons are `dns`, `geo`, `cidr`, `asn`, `geoblock`, `ipv6` and
 `unsupported`; adding `cidr` cost no new metric name and no panel or query
 change, because the reasons are label values on `stable_source_dropped_nodes`
@@ -650,8 +685,11 @@ docker compose up -d --build   # or: make dc-up
 - `sub-preprocessor-vassago` — the same image on a second config
   (`./config-vassago`), published on `:7009` with metrics on
   `127.0.0.1:9092:9090`. Its `filters:` are `cidr`, `country` and `bandwidth`: a
-  node is kept only when its entry IP is inside the Russian mobile-operator
-  whitelist. The `country` entry carries no `exclude_*`, so it is inert on
+  node is kept only when its entry IP is inside the allow-list that `cidr`
+  entry downloads — upstream `hxehex/russia-mobile-internet-whitelist`, which
+  despite the name is a worldwide scan artifact rather than a Russian ACL (see
+  the `cidr` filter above; ~27% of it is US DoD and unrouted space). The
+  `country` entry carries no `exclude_*`, so it is inert on
   `/stable.txt` — a full allow set with an empty deny set makes `GeofeedFilter` a
   no-op — and exists for `GET /`, where it is what makes the `countries=` /
   `groups=` parameters actually gate: without an entry of that type the server

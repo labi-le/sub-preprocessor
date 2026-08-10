@@ -4,7 +4,8 @@ import "time"
 
 // CycleReport is the full accounting of one completed check cycle, handed to a
 // Reporter for metrics. RunOnce assembles it from data that is otherwise only
-// logged: per-source drops, per-filter counts, and the kept nodes' speeds.
+// logged: per-source drops, per-filter counts, and the kept nodes' speeds and
+// probe latencies.
 type CycleReport struct {
 	SourcesOK    int
 	SourcesTotal int
@@ -31,8 +32,12 @@ type CycleReport struct {
 	Sources       []SourceReport
 	Filters       []FilterReport
 	KeptSpeeds    []int
-	Trace         TraceReport
-	Gemini        GeminiReport
+	// KeptLatenciesMs is unfiltered where KeptSpeeds skips zeros: every
+	// survivor was probed by definition, so a zero here is a real sub-1ms
+	// mean and not the "no bandwidth filter ran" hole.
+	KeptLatenciesMs []int
+	Trace           TraceReport
+	Gemini          GeminiReport
 }
 
 // GeminiGateState is what the gemini gate did in a cycle. The zero value is
