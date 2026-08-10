@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -571,6 +572,53 @@ func TestCheckerReportsPublishedCycle(t *testing.T) {
 	}
 	if rep.last.SourcesTotal != len(testSources()) {
 		t.Errorf("report SourcesTotal = %d, want %d", rep.last.SourcesTotal, len(testSources()))
+	}
+}
+
+// TestKeptLatenciesReachTheCycleReport pins the hand-off SelectSurvivors' mean
+// delay had never made: it gated and sorted the published list, then died
+// inside the Survivor slice. Nothing downstream fails when it is dropped --
+// the field is simply nil and the histogram renders an empty, plausible zero
+// -- so the assertion has to be on what a Reporter receives.
+//
+// The zero-latency node is load-bearing, not filler. keptSpeeds skips zeros
+// because a zero Mbps means the bandwidth filter never ran; every survivor was
+// probed by definition, so a zero here is a real sub-millisecond mean and
+// dropping it would bias the histogram's low end. Without this entry, giving
+// keptLatencies its sibling's zero-skip passes.
+func TestKeptLatenciesReachTheCycleReport(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		"https://gamma.example/sub": "vless://u@3.3.3.3:443#c\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 420},
+		"beta-001":  {Successes: 5, MeanMs: 130},
+		"gamma-001": {Successes: 5, MeanMs: 0},
+	}}
+	rep := &fakeReporter{}
+	spec := testCheckerSpec(prober)
+	// Local, not testSources(): a third source would shift SourcesTotal for
+	// every other test that shares the fixture.
+	spec.Sources = append(spec.Sources, config.SubscriptionSource{
+		Name: "gamma", URL: "https://gamma.example/sub",
+	})
+	c := stable.NewChecker(
+		spec,
+		func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep,
+	)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	// Ascending, because the report carries them in published order.
+	if want := []int{0, 130, 420}; !slices.Equal(rep.last.KeptLatenciesMs, want) {
+		t.Errorf("report KeptLatenciesMs = %v, want %v", rep.last.KeptLatenciesMs, want)
 	}
 }
 

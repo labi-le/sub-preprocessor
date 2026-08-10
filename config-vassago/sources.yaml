@@ -1,49 +1,154 @@
-# Subscription sources for the vassago instance: the measured subset of
-# config/sources.yaml that actually carries nodes inside the Russian
-# mobile-internet CIDR whitelist. Sources are NOT shared with instance 1 and
-# the Telegram crawler does not write here -- config.Load only merges the
-# sources.yaml and private.yaml sitting beside the config.yaml it was given.
+# Subscription sources for the vassago instance: every source measured to carry
+# nodes inside the cidrwhitelist.txt address space, wherever it came from. 21
+# are what survives of the config/sources.yaml subset this file started as; the
+# other 33 were found by search and exist only here. Sources are NOT shared
+# with instance 1 and the Telegram crawler does not write here -- config.Load
+# only merges the sources.yaml and private.yaml sitting beside the config.yaml
+# it was given.
 #
-# Measured 2026-08-09 against cidrwhitelist.txt (30228 lines, 15649 merged
-# ranges, sha256 149d27a8...): the 51 configured sources yielded 59558 nodes on
-# 19330 distinct servers, of which 5023 nodes on 1469 servers resolve into the
-# whitelist. The 37 below are every source with a non-zero count, ordered by it
-# -- which is also the dedupe order stable.Merge applies (first source wins a
-# duplicate server:port), so the heaviest contributor keeps its label.
+# That address space is not a Russian ACL, whatever the upstream repo's framing
+# suggests -- it is a worldwide 0.0.0.0/0 scan artifact. AS749 DNIC (US DoD) is
+# 20.97% of the covered addresses and unrouted AS0 a further 6.52%; by country
+# it is 28.32% US against 10.60% RU. "Whitelisted" below means membership in
+# that set and asserts nothing about where a node sits.
 #
-# EVERY FIGURE ABOVE IS PRE-PROBE, and the gap to what gets published is the
-# number to size a deployment on. Two full cycles from these files: merged 1792,
-# probed 1792, 9 reached the bandwidth gate, 8 published -- 0.45% of the
-# whitelisted pool, against instance 1's ~335-361. The latency gate is not the
-# cause: a 5x-relaxed control (timeout 5000ms, max_avg_ms 4000) reached 15
-# survivors for 4x the cycle time, so ~99% of whitelisted nodes simply never
-# answer a URL test. Measured from ONE vantage point outside the networks this
-# whitelist belongs to, so the production number will differ -- but expect a
-# two-digit list, not a four-digit one.
+# Curated 2026-08-10 against cidrwhitelist.txt (30228 lines, 15649 merged
+# ranges, 36265984 addresses, sha256 149d27a8...), superseding the 51-source
+# measurement this header used to record. 16 sources were removed and 33 added;
+# 21 of the previous 37 remain. The 16 were redundant in all six audit samples
+# taken over 1.5h -- they do carry whitelisted nodes, but every one of those
+# nodes arrives on another configured source too -- so dropping them frees
+# 5412 node lines per cycle and costs no server:port.
 #
-# Dropped as measured zero: fastnodes-se, rabbitson, genlib, zhuhaiuk, bocchi2b,
-# abikus, obwl-wwh, lime, mifa, wepogp-1, wepogp-4, wepogp-5. Dropped as dead:
-# wepogp-2 and wepogp-3 both 404. Four of those are expired subscriptions rather
-# than geographically wrong ones (mifa, obwl-wwh and lime serve placeholder
-# nodes, abikus serves HTML), so they are dead weight for instance 1 too.
+# Every added source had to pass three gates:
+#   1. FRESH -- its repository shows a push within the last 7 days, read from
+#      the commits atom feed. A whitelist subscription that stopped updating is
+#      a list of nodes that stopped existing. The feed is the hole in this
+#      gate, and it bit twice. Two candidates on storage.yandexcloud.net
+#      publish no feed and passed untouched at 94 and 122 days stale, caught by
+#      hand on Last-Modified. Then three ACCEPTED sources turned out to sit on
+#      the same kind of host with the by-hand check never applied -- gv-cid-white
+#      104 days, gist-pidarasuebisov-afk 69, gv-wl 52, all far past the 7-day
+#      gate and the first past even the 94-day reject. Removed rather than
+#      waived: a gate that admits what it
+#      rejects elsewhere is not a gate. Query the branch tip by hand for every
+#      no-feed candidate. Of the 54 shipped entries 52 are GitHub-hosted and
+#      were re-checked by feed; every ADDED one is 0-5.4 days old. The other
+#      two are survivors and no-feed: bywarm-merged on gitverse, fresh by its
+#      branch API, and rostunnel-mega on vercel, whose freshness no signal
+#      this gate names can obtain -- it sends no Last-Modified at all.
+#      Gate 1 never applied to the 21 survivors, and two of them are stale by
+#      it: whitelist-sanuyyq at 132 days, worse than the 104-day source removed
+#      above, and obhodwl at 90, which is inside that bar but far outside the
+#      7-day gate. They stay because a survivor was
+#      condemned or kept on gate 3, not on freshness -- but do not read this
+#      list as uniformly fresh, and audit them the next time gate 3 runs.
+#   2. FETCHABLE -- the full body downloads inside the shipped fetch.timeout of
+#      3s, best of 3 attempts, AND comes in under the worker's 10 MiB body cap
+#      -- internal/subscription's maxSubscriptionSize (subscription.go:13),
+#      reached through the one subscription.Load call and therefore SHARED
+#      with instance 1; internal/fetch takes the limit as a parameter and
+#      holds no cap of its own, and classify.go:20 keeps a synced copy, so
+#      raising it is a three-file edit. The cap is the gate a script forgets,
+#      because a candidate that violates it fetches fine outside the pipeline
+#      and then fails every cycle: gitverse.ru/LimonTH/proxy-list output/live
+#      -- forge-native, and 404 on GitHub, which is why no keyword search finds
+#      it -- measured +445
+#      new and downloads in 1.4s, but at 10.4 MiB the worker logs "response too
+#      large" and loads NOTHING. Its sibling output/raw fails the other half at
+#      30.0 MiB and 4.7-5.0s. Both rejected; no accepted source exceeds 7 MiB.
+#      Best of 3 rather than one shot because the failure mode here is bimodal,
+#      not slow -- see rostunnel-mega below.
+#   3. MARGINAL -- it contributes whitelisted server:port that no
+#      already-accepted source carries, and the whole added block fits a budget
+#      of 30000 resolved hosts per cycle. A source that only re-carries an
+#      accepted source's nodes was rejected however large it is.
 #
-# The tail is kept deliberately: after the cidr filter a non-whitelisted node
-# costs one cached DNS lookup and dies pre-probe. The lookup is the cost that
-# is NOT free, and this list already outruns the cache: the 37 sources resolve
-# 16551 distinct hosts per cycle measured WITHOUT rostunnel-mega, which alone
-# adds 7705, against internal/resolver's 16384-entry ceiling. Nothing expires
-# inside a cycle, so each overflow takes the arbitrary-drop path and loses
-# 2048 live entries in map order -- a slice of the cycle re-resolves what its
-# own head just looked up. That is not new -- instance 1's own 51 sources reach
-# 19330 hosts against the same ceiling -- so it is recorded, not fixed here:
-# raising the ceiling changes both instances and wants its own measurement.
+# Result: 1709 -> 4006 distinct whitelisted server:port, measured directly on
+# the shipped list rather than derived. Neither that nor the +2368 union the
+# additions showed at pick time is the sum of the individual gains. Those
+# gains sum to 2247, and that sum is a lower bound and nothing else: each was
+# measured greedily against the coverage of the sources accepted before it, so
+# it can neither be added up nor subtracted from when the set changes. Measure
+# the union again after touching this list -- every attempt today to shortcut
+# that with a sum got a different, wrong number.
+#
+# EVERY FIGURE HERE IS PRE-PROBE, and the gap to what gets published is the
+# number to size a deployment on. Measured on the shipped pair of files, cold
+# cache, on the deployment host: merged 4214, probed 4214, published 16, in a
+# 923-second cycle. Three earlier points on the same gates, all on the one
+# 1807-node pool this list carried before curation: max_avg_ms 800 published
+# 10, 8000 published 14, 12000 published 22. Expect a two-digit list out
+# of a four-digit pool, and expect production to differ -- every figure here
+# was measured from ONE vantage point outside the networks the whitelist's
+# addresses belong to.
+#
+# The cost of all this is DNS, which is why gate 3 carries a host budget and
+# not just a contribution test. After the CIDR filter a non-whitelisted node
+# costs one cached DNS lookup and dies pre-probe, so the bill is distinct
+# hosts, not nodes, and the tail of a source is never free. Measured as a
+# UNION, because per-source host counts cannot be added -- the same host
+# appears in many lists, and what collapses the repeats is pctx.Resolved
+# within one source plus internal/resolver's global cache across them, both
+# BEFORE stable.Merge, which keys on server:port and never sees a host: all 54
+# sources resolve 31313 distinct hosts per cycle where their per-source counts
+# sum to 64324, so 51.3% of what they list is a cross-source duplicate. The 21
+# survivors alone resolve 18516, putting the marginal cost of the 33 added at
+# +12797 -- against the 28244 their own counts sum to, a discount of more than
+# half. 31313 is 1.9x internal/resolver's 16384-entry ceiling, so the
+# cache is overwritten roughly twice per cycle and eviction picks by Go map
+# order, which carries no recency: a cross-source duplicate that used to hit
+# now misses. The eviction itself is cheap and does NOT thrash -- dropping
+# 2048 entries amortises the expiry scan to ~8 steps per insert, single-digit
+# milliseconds per cycle. The cost is the miss, because a miss is a serial DNS
+# round trip on the per-source path. Note the cycle now outlives
+# resolver.cache_negative_ttl (10m against a measured 923s), so a dead host
+# cached early expires before the cycle ends and is looked up AGAIN inside it;
+# that also means the expiry scan frees real entries, and the arbitrary-drop
+# branch fires less often than every overflow. Recorded, not fixed here: the
+# ceiling is shared with instance 1, whose own sources reach 19330 hosts
+# against it, so raising it changes both and wants its own measurement.
+#
+# Order is the dedupe order stable.Merge applies -- first source wins a
+# duplicate server:port, keeping its label on it. The surviving originals lead
+# because they are the measured heavy contributors; the added block follows in
+# descending marginal contribution.
+#
+# aetris, bijandi, flat447 and prominbro look like removal candidates and are
+# deliberately not removed. Across those same six samples each was redundant in
+# some and unique in others. These lists rotate hourly, so one sample finding a
+# source's nodes elsewhere is not evidence that it never carries its own; it
+# takes a run of samples, which is what condemned the 16.
+#
+# The 16, named because they are the expensive category to re-derive: avia,
+# bahemmat, darmioniks, igareck-white, mehrtat, mhditaheri, ninjanexus, purple,
+# reality, rostunnel-gen, shatak, theavel, vova, wind7077, yuanxiawan and
+# zxcursed. None is dead and none is a zero -- each carries whitelisted nodes,
+# so all sixteen clear gate 2 and were condemned on gate 3 alone. That
+# says nothing about gate 1: freshness was never measured for them, and for
+# reality (gitflic), purple (hub.mos.ru) and rostunnel-gen (vercel) no signal
+# the gate names can obtain it at all. Re-adding one costs another run of
+# samples to condemn it again AND a gate-1 check it has never had.
+#
+# kreemchek-26 is a fork of the same githubmirror/26.txt that goida already
+# serves from AvenCores, and it sits behind goida in the order, so its measured
+# +210 is by construction that fork's divergence from the copy already
+# configured. Kept on the measurement, but expect it to decay: a fork earns its
+# place only while it keeps diverging.
 #
 # rostunnel-mega is flaky rather than unlucky: at the shipped 3s fetch.timeout
 # it passed 3 of 5 attempts (3001, 3001, 447, 334, 282 ms), and 1 of 4 at 45s.
-# A longer budget buys nothing -- it either answers in ~300ms or hangs until the
-# deadline, whatever the deadline is. It is kept because ~13% of the whitelisted
-# pool rides on it when it does answer; a cycle that misses it is a smaller
+# A longer budget buys nothing -- it either answers in ~300ms or hangs until
+# the deadline, whatever the deadline is. It is kept because ~13% of the old
+# 1709 pool rode on it when it did answer; a cycle that misses it is a smaller
 # list, not a broken one.
+#
+# Do not re-add: wepogp-2 and wepogp-3 are both 404, and fastnodes-se,
+# rabbitson, genlib, zhuhaiuk, bocchi2b, abikus, obwl-wwh, lime, mifa, wepogp-1,
+# wepogp-4 and wepogp-5 measured zero whitelisted nodes. Four of those are
+# expired rather than geographically wrong -- mifa, obwl-wwh and lime serve
+# placeholder nodes, abikus serves HTML -- so they are dead weight for
+# instance 1 too.
 subscriptions:
   sources:
     - name: bywarm-merged
@@ -58,10 +163,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/fifthidea/sub/main/sub/sub-full-plaintxt.txt
     - name: etoneyaproject
       url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
-    - name: zxcursed
-      url: https://raw.githubusercontent.com/zxcursedzxc0721/vless-subscriptions/main/all/vless.txt
-    - name: rostunnel-gen
-      url: https://subrostunnel.vercel.app/gen.txt
     - name: vify
       url: https://raw.githubusercontent.com/Mr-Meshky/vify/main/configs/alive.txt
     - name: yafeisun
@@ -70,53 +171,94 @@ subscriptions:
       url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/countries/FI.txt
     - name: kasesm
       url: https://raw.githubusercontent.com/kasesm/Free-Config/main/all_raw.txt
-    - name: shatak
-      url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
     - name: ishalumi
       url: https://raw.githubusercontent.com/ishalumi/proxy-node-collector/main/output/nodes.txt
     - name: niqonopin
       url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
-    - name: bahemmat
-      url: https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt
     - name: bijandi
       url: https://raw.githubusercontent.com/amir-reza-bijandi/v2ray-configs/main/configs.txt
-    - name: mhditaheri
-      url: https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vless
-    - name: wind7077
-      url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
-    - name: ninjanexus
-      url: https://raw.githubusercontent.com/ninjastrikers/nexus-nodes/main/configs/vless.txt
     - name: tepo80
       url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
     - name: prominbro
       url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
     - name: 3inker
       url: https://raw.githubusercontent.com/3inker/v2ray-subscription/main/subs/all_not_ru.txt
-    - name: mehrtat
-      url: https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt
     - name: aetris
       url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
-    - name: avia
-      url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
-    - name: theavel
-      url: https://raw.githubusercontent.com/theavel/free-vless-proxy/main/all.txt
-    - name: igareck-white
-      url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-    - name: reality
-      url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
-    - name: purple
-      url: https://hub.mos.ru/panosenk/sukasubs/-/raw/main/purple.txt
     - name: iboxz
       url: https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/vless
-    - name: vova
-      url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
-    - name: darmioniks
-      url: https://raw.githubusercontent.com/Darmioniks/proxy-and-vless-collector/main/vless_filtered.txt
     - name: prince
       url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
     - name: flat447
       url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
-    - name: yuanxiawan
-      url: https://raw.githubusercontent.com/yuanxiawan/freevless/main/results/valid_vless_configs.txt
     - name: obhodwl
       url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL
+    - name: rtwo2-vless-part58
+      url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/protocols/vless_part58.txt
+    - name: kreemchek-26
+      url: https://raw.githubusercontent.com/Kreemchek/goida-vpn-configs/main/githubmirror/26.txt
+    - name: ndsphonemy-ru-arch
+      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru-arch.txt
+    - name: dxfh-ru
+      url: https://raw.githubusercontent.com/DXFH/clash-free-cleaner/main/sub/countries/RU.txt
+    - name: heops6767-whitefiltredhy2vlesstroj
+      url: https://raw.githubusercontent.com/heops6767/PypsCFG/main/output/WhiteFiltredHy2VlessTrojan.txt
+    - name: elanski-collected-raw
+      url: https://raw.githubusercontent.com/elanski/proxy-preflight/main/configs/collected_raw
+    - name: qubertuwu-tgk-raw
+      url: https://raw.githubusercontent.com/qubertuwu/Gh0st_WhiteList/main/configs/tgk/tgk_raw.txt
+    - name: recrumptor-vless-sorted
+      url: https://raw.githubusercontent.com/recrumptor/csub/main/vless_sorted.txt
+    - name: ndsphonemy-ru
+      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru.txt
+    - name: xxx3-lab-ru-white-all-part1
+      url: https://raw.githubusercontent.com/xxx3-lab/ahiteo-vpn/main/ru_white_all_part1.txt
+    - name: mgentel1309-vless-lite
+      url: https://raw.githubusercontent.com/mGentel1309/Vpn/main/vless_lite.txt
+    - name: plsn1337-filtered-vless-keys-2
+      url: https://raw.githubusercontent.com/plsn1337/white-vless/main/filtered_vless_keys_2.txt
+    - name: flexiy0-russia-whitelist-base64
+      url: https://raw.githubusercontent.com/FLEXIY0/matryoshka-vpn/main/configs/russia_whitelist_base64.txt
+    - name: vpnineh-yandex-cloud-llc
+      url: https://raw.githubusercontent.com/vpnineh/config/main/sub/datacenters/Yandex.Cloud_LLC.txt
+    - name: tankist939-afk-configs
+      url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WBL/main/configs.txt
+    - name: terik21-wltest
+      url: https://raw.githubusercontent.com/terik21/HiddifySubs-VlessKeys/main/WLTest
+    - name: matrixstar2000-kz
+      url: https://raw.githubusercontent.com/Matrixstar2000/FastNodes/main/sub/countries/KZ.txt
+    - name: rtwo2-asia-part5
+      url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/continents/Asia_part5.txt
+    - name: rudolfdiesel1488-dot-whitelist-con
+      url: https://raw.githubusercontent.com/rudolfdiesel1488-dot/my-vpn-sub/main/whitelist_configs.txt
+    # Name hand-trimmed: the generator cut at 34 chars mid-octet and left a
+    # trailing hyphen, which sourceNameRe permits and Merge would publish as
+    # a doubled separator in every node label this source contributes.
+    - name: hafanupdadas-namiranet
+      url: https://raw.githubusercontent.com/hafanupdadas/effective-fiesta/main/countries/%E2%9C%A8_namiranet_%7C_%F0%9F%94%92_%7C_%F0%9F%8C%90_173.244.56.6.txt
+    - name: rtwo2-ru
+      url: https://raw.githubusercontent.com/rtwo2/Temp/main/sub/countries/RU.txt
+    - name: holms2012-shj1
+      url: https://raw.githubusercontent.com/holms2012/vtor/main/shj1.txt
+    - name: kryyyyyyyyyyyyyyyyyyy-blacklist
+      url: https://raw.githubusercontent.com/KRYYYYYYYYYYYYYYYYYYY/local/main/test1/blacklist.txt
+    - name: hidashimora-vpn
+      url: https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/vpn.txt
+    - name: hidashimora-1-26
+      url: https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/1.26.txt
+    - name: flat447-white-full
+      url: https://raw.githubusercontent.com/FLAT447/v2ray-lists/main/WHITE_FULL.txt
+    - name: kort0881-vless-042
+      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_042.txt
+    - name: kort0881-all-posts
+      url: https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/vpn-files/all_posts.txt
+    - name: adop1344-bot-configs
+      url: https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/main/configs.txt
+    - name: hamedcode-ss
+      url: https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt
+    - name: kort0881-vless-041
+      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_041.txt
+    - name: adop1344-bot-ru
+      url: https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/main/ru.txt
+    - name: iseeyoou26-wq-vless-sub-3
+      url: https://raw.githubusercontent.com/iseeyoou26-wq/CryNet-SysTems-VPN-vless/main/subscriptions/vless_sub_3.txt

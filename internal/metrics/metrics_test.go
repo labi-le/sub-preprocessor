@@ -218,6 +218,73 @@ func TestMetricsEmptyRender(t *testing.T) {
 	}
 }
 
+// TestMetricsKeptLatencyRender pins the whole ladder, not just the samples, so
+// that dropping a bound is caught here. The threshold half of the invariant --
+// that every shipped max_avg_ms has a bound -- is enforced by
+// TestLatencyBucketsCoverShippedGates, which reads the config files this test
+// never touches. The 5700 sample exercises the tail; no shipped config sets a
+// gate that high, so a survivor cannot carry it in production.
+func TestMetricsKeptLatencyRender(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{Kept: 5, KeptLatenciesMs: []int{80, 250, 640, 900, 5700}})
+
+	out := render(t, m)
+	want := `# HELP stable_kept_latency_ms Mean probe delay (ms) of kept nodes.
+# TYPE stable_kept_latency_ms histogram
+stable_kept_latency_ms_bucket{le="100"} 1
+stable_kept_latency_ms_bucket{le="250"} 2
+stable_kept_latency_ms_bucket{le="500"} 2
+stable_kept_latency_ms_bucket{le="800"} 3
+stable_kept_latency_ms_bucket{le="1000"} 4
+stable_kept_latency_ms_bucket{le="1500"} 4
+stable_kept_latency_ms_bucket{le="3000"} 4
+stable_kept_latency_ms_bucket{le="4000"} 4
+stable_kept_latency_ms_bucket{le="6000"} 5
+stable_kept_latency_ms_bucket{le="12000"} 5
+stable_kept_latency_ms_bucket{le="+Inf"} 5
+stable_kept_latency_ms_sum 7570
+stable_kept_latency_ms_count 5
+`
+	if !strings.Contains(out, want) {
+		t.Errorf("latency histogram:\ngot:\n%s\nwant it to contain:\n%s", out, want)
+	}
+	for _, w := range []string{
+		"stable_kept_latency_min_ms 80",
+		"stable_kept_latency_max_ms 5700",
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q in:\n%s", w, out)
+		}
+	}
+	// The speed buckets must not have been reused: 5 and 10 Mbps are not
+	// latency bounds, and every kept node would land in the bottom bucket.
+	if strings.Contains(out, `stable_kept_latency_ms_bucket{le="5"}`) {
+		t.Errorf("latency histogram is using the speed buckets:\n%s", out)
+	}
+}
+
+// TestMetricsKeptLatencyGaugesGuarded mirrors the speed pair: with no kept
+// nodes the min/max gauges must be absent rather than render 0, which would
+// read as a cycle that published instantaneous nodes.
+func TestMetricsKeptLatencyGaugesGuarded(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{})
+
+	out := render(t, m)
+	for _, deny := range []string{"stable_kept_latency_min_ms", "stable_kept_latency_max_ms"} {
+		if strings.Contains(out, deny) {
+			t.Errorf("%s must not render for an empty cycle:\n%s", deny, out)
+		}
+	}
+	if !strings.Contains(out, "stable_kept_latency_ms_count 0") {
+		t.Errorf("the histogram itself renders unconditionally:\n%s", out)
+	}
+}
+
 // TestMetricsLabelValuesStayParseable pins RUNTIME-7. A label value can reach
 // the exposition from outside this service: with annotate disabled the pipeline
 // republishes upstream node names verbatim and stable derives the country label

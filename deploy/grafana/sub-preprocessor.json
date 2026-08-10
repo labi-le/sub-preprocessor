@@ -28,7 +28,10 @@
         "name": "job",
         "label": "Instance",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(stable_cycles_total, job)",
         "refresh": 1,
         "includeAll": false,
@@ -627,6 +630,79 @@
       ]
     },
     {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Kept-node latency",
+      "description": "Mean probe delay of the nodes published last cycle: the value SelectSurvivors gates on with max_avg_ms and then sorts the published list by. p50/p90 are interpolated from a fixed bucket ladder that is maintained to carry a bound equal to every instance's shipped max_avg_ms — this panel is per-job, instances disagree on the threshold, and a gate falling between two bounds is exactly what the ladder exists to prevent. The tail runs past every gate only so that raising a max_avg_ms into it stays a one-file edit: SelectSurvivors drops everything above the gate, so on any job every bound at or above its threshold carries the same count as +Inf. Read p90 and max AGAINST this job's max_avg_ms: both well under it means the threshold is not the binding constraint, whereas max pressed up against it means the cut is sitting inside live population and raising it would publish more nodes. Unlike the speed panel beside it this one has no flat-zero trap: keptLatencies is unfiltered, so _count always equals stable_kept_nodes and clamp_min never binds. A cycle that publishes nothing routes to ObserveError and leaves the previous cycle's values standing; before the first published cycle the whole series is absent.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
+          "legendFormat": "p90"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_kept_latency_max_ms{job=\"$job\"}",
+          "legendFormat": "max"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_kept_latency_ms_sum{job=\"$job\"} / clamp_min(stable_kept_latency_ms_count{job=\"$job\"}, 1)",
+          "legendFormat": "avg"
+        }
+      ]
+    },
+    {
       "id": 10,
       "type": "timeseries",
       "title": "Cycle duration, rate & failures",
@@ -637,8 +713,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 28
+        "x": 0,
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -734,7 +810,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 36
       },
       "fieldConfig": {
@@ -806,8 +882,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 36
+        "x": 0,
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -858,7 +934,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 44
       },
       "fieldConfig": {
@@ -910,8 +986,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 44
+        "x": 0,
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {

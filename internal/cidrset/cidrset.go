@@ -1,4 +1,4 @@
-// Package cidrset answers IPv4 membership against an operator allow-list — a
+// Package cidrset answers IPv4 membership against a downloaded IPv4 allow-list — a
 // ~30k-line CIDR file — merged so a lookup costs one binary search.
 package cidrset
 
