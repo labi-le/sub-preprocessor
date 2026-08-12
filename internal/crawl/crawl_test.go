@@ -827,6 +827,101 @@ func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 	}
 }
 
+// TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage pins both halves
+// of the harvest asymmetry across one channel's two pages: the older page's
+// inline node is dropped because a server:port decays with the message carrying
+// it, while that same page's subscription link still becomes a managed source.
+func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	const (
+		newest = "vless://a@1.1.1.1:443#newest"
+		older  = "vless://b@2.2.2.2:443#older"
+		subURL = "https://older.example/sub"
+	)
+	// data-post is what pageCursor reads, so page one hands scrapeChannel the
+	// ?before= key of the second, older page.
+	page1 := `<div data-post="chan/100"></div><pre>` + newest + `</pre>`
+	page2 := `<pre>` + older + `</pre><a href="` + subURL + `">sub</a>`
+
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         2,
+			MaxDepth:      0,
+			InlineEnabled: true,
+			InlineMax:     5, // above both nodes: the cap must not be what drops one
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan":            page1,
+			"https://t.me/s/chan?before=100": page2,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) == subURL {
+				return classify.Result{Nodes: 1}, nil
+			}
+			return classify.Result{}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	var pf privateFile
+	b, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+
+	var inline, managed *source
+	for i := range pf.Subscriptions.Sources {
+		s := &pf.Subscriptions.Sources[i]
+		switch {
+		case s.Name == managedPrefix+"inline":
+			inline = s
+		case strings.HasPrefix(s.Name, managedPrefix):
+			if managed != nil {
+				t.Fatalf("want exactly one managed url source, got %+v", pf.Subscriptions.Sources)
+			}
+			managed = s
+		}
+	}
+	if inline == nil {
+		t.Fatalf("no tg-inline source written: %+v", pf.Subscriptions.Sources)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(inline.Body)
+	if err != nil {
+		t.Fatalf("tg-inline Body is not valid base64: %v", err)
+	}
+	body := string(decoded)
+	if !strings.Contains(body, newest) {
+		t.Errorf("tg-inline Body = %q, want it to carry the newest page's node %q", body, newest)
+	}
+	if strings.Contains(body, older) {
+		t.Errorf("tg-inline Body = %q, must not carry the older page's node %q", body, older)
+	}
+
+	if managed == nil {
+		t.Fatalf("the older page's link %q reached no managed source: %+v", subURL, pf.Subscriptions.Sources)
+	}
+	if managed.URL != subURL {
+		t.Errorf("managed source URL = %q, want the older page's link %q", managed.URL, subURL)
+	}
+	if nameRe := regexp.MustCompile(`^tg-chan-[0-9a-f]{6}$`); !nameRe.MatchString(managed.Name) {
+		t.Errorf("managed source name = %q, want the tg-<slug>-<sha6> form sourceName produces", managed.Name)
+	}
+}
+
 // hasInlineSource reports whether a tg-inline source exists in private.yaml.
 func hasInlineSource(t *testing.T, priv string) bool {
 	t.Helper()

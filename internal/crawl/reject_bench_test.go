@@ -57,6 +57,11 @@ const (
 	// benchPageCount*(benchLinkRepeats-1) clones. That is arithmetic; the
 	// benchmark only prices it.
 	benchLinkRepeats = 20
+	// benchInlineNodes is how many pasted proxy URIs one inline fixture page
+	// carries. Real pages run from zero to a few hundred (measured: 203 on the
+	// densest of 24 channels' first pages, 0 on nine of them); this sits in the
+	// working middle, where the regex scan and the match slice both count.
+	benchInlineNodes = 20
 
 	// benchPrivateIPLink takes candidate's validate gate: ValidatePublicHTTPSURL
 	// parses it and refuses a non-public target with a static string, so the
@@ -78,9 +83,11 @@ func benchLink(i int) string {
 
 // benchPages builds benchPageCount pages of exactly benchPageBytes, each
 // carrying ONE distinct link reposted benchLinkRepeats times among filler that
-// contains no URL and no HTML entity — html.UnescapeString copies only when it
-// finds an '&', and a page that made it copy would price the unescape instead
-// of the harvest.
+// contains no URL and no HTML entity. The entity matters more than it looks:
+// html.UnescapeString copies only when it finds an '&', so this fixture prices
+// the scan with the copy designed out of it — measured 0 B/op here against
+// 114714 B/op (2 allocs) for the same 52 KiB carrying entities. Pricing the
+// unescape is benchInlinePages' job, not this one's.
 func benchPages() []string {
 	pages := make([]string, benchPageCount)
 	for i := range pages {
@@ -93,6 +100,27 @@ func benchPages() []string {
 			sb.WriteByte(' ')
 			sb.WriteString(link)
 			sb.WriteByte(' ')
+		}
+		sb.WriteString(strings.Repeat("x", benchPageBytes-sb.Len()))
+		pages[i] = sb.String()
+	}
+	return pages
+}
+
+// benchInlinePages mirrors benchPages for the inline harvest, which is the
+// other half of what a scraped page costs and the half no fixture priced until
+// the harvest was restricted to page 1: with the scan now off pages 2..N, a
+// regression in it moves nothing unless something benchmarks it. Entities are
+// deliberate — they are what makes html.UnescapeString copy a page. Watch
+// ns/op, not B/op: extractURLs unescapes all six pages, so the node scan is
+// 14% of the case's bytes but 90% of its time.
+func benchInlinePages() []string {
+	pages := make([]string, benchPageCount)
+	for i := range pages {
+		var sb strings.Builder
+		sb.Grow(benchPageBytes)
+		for j := range benchInlineNodes {
+			fmt.Fprintf(&sb, "<pre>vless://%016x@10.0.%d.%d:443?type=tcp&amp;security=tls#n</pre> ", i, i, j)
 		}
 		sb.WriteString(strings.Repeat("x", benchPageBytes-sb.Len()))
 		pages[i] = sb.String()
@@ -139,7 +167,7 @@ func candidatePreReason(raw string) bool {
 // parameter deliberately — this is not a method the package ships.
 func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
-	for _, p := range pages {
+	for i, p := range pages {
 		for _, raw := range extractURLs(p) {
 			ok, reason, err := candidate(raw)
 			if !ok {
@@ -148,7 +176,7 @@ func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *reject
 			}
 			cand[strings.Clone(raw)] = struct{}{}
 		}
-		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
+		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
 			*inline = append(*inline, extractInlineNodes(p)...)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
@@ -266,6 +294,13 @@ func BenchmarkCandidatePreReason(b *testing.B) {
 // occurrence. The clone itself is not optional — extractURLs returns sub-slices,
 // so an uncloned key holds its whole page for the cycle — and the guard is what
 // keeps its cost per DISTINCT url instead of per repost.
+//
+// The inline case runs the shipped harvest over pages carrying pasted nodes and
+// HTML entities, which is what a real page costs: both extractors then pay
+// html.UnescapeString's copy, and the node scan runs on page 1 alone. Putting
+// that scan back on every page shows up here as six copies instead of one. It
+// is a regression watch on its own fixture, not a third point on the
+// guarded/blind comparison.
 func BenchmarkHarvestPages(b *testing.B) {
 	pages := benchPages()
 	for _, p := range pages {
@@ -288,19 +323,27 @@ func BenchmarkHarvestPages(b *testing.B) {
 		}
 	}
 
+	inlinePages := benchInlinePages()
+	if got := len(extractInlineNodes(inlinePages[0])); got != benchInlineNodes {
+		b.Fatalf("inline page yields %d nodes, want benchInlineNodes = %d", got, benchInlineNodes)
+	}
+
 	for _, tc := range []struct {
 		name    string
+		crawler *Crawler
+		pages   []string
 		harvest func(*Crawler, []string, *[]string, *rejects, string) map[string]struct{}
 	}{
-		{"guarded", (*Crawler).harvestPages},
-		{"blind", harvestPagesBlind},
+		{"guarded", &Crawler{}, pages, (*Crawler).harvestPages},
+		{"blind", &Crawler{}, pages, harvestPagesBlind},
+		{"inline", &Crawler{opts: Options{InlineEnabled: true}}, inlinePages, (*Crawler).harvestPages},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
 				var inline []string
-				benchCandSink = tc.harvest(&Crawler{}, pages, &inline, nil, "benchchannel")
+				benchCandSink = tc.harvest(tc.crawler, tc.pages, &inline, nil, "benchchannel")
 			}
 		})
 	}

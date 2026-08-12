@@ -308,6 +308,34 @@ outlives them, and it applies to `config/sources.yaml` just as well.
   flat447 prominbro`) were deliberately KEPT because they were redundant in some samples and
   unique in others. A single sample showing a source adds nothing shows only that.
 
+## What the Telegram crawler may harvest
+
+Measured 2026-08-12. Pass rates below are at this instance's own gate
+(`config/config.yaml` `subscriptions.check`: `rounds: 2`, `timeout: 1000ms`, `max_avg_ms: 800`);
+the decay fit is on reachability at the looser 8000 ms gate, which is the arm large enough to fit.
+
+- **A harvested `server:port` is a frozen snapshot; a harvested subscription URL is an
+  annuity — never trade the second for the first.** Inline nodes decay with a fitted
+  half-life of 10.34 d (95% CI [5.47, 16.58], n=1089; a floor parameter is rejected, so
+  there is no immortal subpopulation to mine) and they start nearly dead: 12 of 162
+  same-day nodes pass (7.4%). The crawler's managed URLs are 216 of 233 live (92.7%),
+  none definitively dead, median in-service age 28.1 d over the 165 that carry a date.
+- **The difference is the ASSET, not the quality — so "chat nodes are junk" is the wrong
+  premise for a change here.** A ≤1 d chat node and a node a live `tg-*` subscription is
+  serving right now are indistinguishable at that gate: 12/162 = 7.4% vs 17/200 = 8.5%,
+  z=-0.38, p=0.70. What ages is the node, not the venue — which is why inline harvesting
+  is restricted to each channel's NEWEST page instead of being switched off.
+- **Do NOT build a forum/thread harvester.** All three seams work and were verified
+  (`?embed=1&discussion=1&comments_limit=N` renders comments server-side, `&comment=<id>`
+  is a deep cursor, `POST t.me/api/method` `loadComments` answers unauthenticated), and one
+  topic holds 6036 distinct nodes over 46.5 d — more than 15 channels and 192 pages
+  combined (5280). Struck anyway: its day-zero nodes pass at 3 of 112 (2.7%), WORSE than
+  channels, so depth buys volume of DEAD nodes (~3 prod-gate nodes/day in steady state). A
+  new endpoint re-opens nothing here; only a measurement beating 2.7% would.
+- **Do NOT move the harvest to the vassago instance.** Chat/forum nodes are 3.0x LESS
+  whitelist-fit than what it already subscribes to — 21 of 675 resolved keys (3.1%)
+  against 1838 of 20049 (9.2%) — and 0 of the novel ones were alive.
+
 ## Important security / correctness notes
 
 - `subscription_url` is user input and must stay protected against SSRF.

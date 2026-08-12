@@ -97,13 +97,13 @@ const redactedError = "redacted: error names the candidate url"
 const redactedPathError = "redacted: error names the candidate url path or query"
 
 // maxRejectTracked bounds the dedupe set. It deliberately mirrors
-// maxInlineAccum, which bounds the OTHER accumulator fed by the same regex pass
-// over the same pages in the same loop, for the same reason: a single page can
-// carry a huge list, and unlike live there is no network brake here — a URL
-// that fails a candidate gate is rejected by local string work alone, so one
-// 8 MiB page of `https://t.me/a`-shaped links yields hundreds of thousands of
-// distinct keys. maxRejectLines does not bound this: it caps lines, and counting
-// is deliberately not capped.
+// maxInlineAccum, the bound on the OTHER accumulator harvestPages fills — over
+// the newest page only, where this one spans every page. Same reason, too: a
+// single page can carry a huge list, and unlike live there is no network brake
+// here — a URL that fails a candidate gate is rejected by local string work
+// alone, so one 8 MiB page of `https://t.me/a`-shaped links yields hundreds of
+// thousands of distinct keys. maxRejectLines does not bound this: it caps
+// lines, and counting is deliberately not capped.
 const maxRejectTracked = maxInlineAccum
 
 // rejects accumulates, over one cycle, why each discovered candidate failed to

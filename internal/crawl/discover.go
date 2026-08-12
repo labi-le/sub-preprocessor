@@ -198,9 +198,16 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 }
 
 // harvestPages pulls the subscription candidates out of a channel's scraped
-// pages and, in the same pass, accumulates its inline nodes. The inline
-// accumulator is cycle-wide and capped: one prolific channel must not spend the
-// whole budget, and a single page can overshoot the cap in one append.
+// pages. Candidates come from every page, inline nodes only from the newest:
+// a pasted node decays with the age of its message (12 of 162 alive at <=1d
+// against 5 of 178 by 1-3d, at prod's own check gate) while a subscription
+// link does not. Page position only proxies that age — a page is ~20 messages,
+// so a slow channel's first page already spans a week, and a dormant one
+// re-seeded from the 30-day state memory contributes a page of >30d nodes.
+//
+// The inline accumulator is cycle-wide and bounded twice: the guard stops a
+// channel once the budget is spent, the truncation catches the single append
+// that overshoots it, because one page can carry more URIs than the whole cap.
 //
 // Every URL the candidate gates turn down is recorded against channel, so a link
 // dropped before it was ever fetched is as visible as one that failed to
@@ -208,7 +215,7 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 // posts and pages.
 func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
-	for _, p := range pages {
+	for i, p := range pages {
 		for _, raw := range extractURLs(p) {
 			ok, reason, err := candidate(raw)
 			if !ok {
@@ -236,7 +243,7 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 				cand[strings.Clone(raw)] = struct{}{}
 			}
 		}
-		if c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
+		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
 			*inline = append(*inline, extractInlineNodes(p)...)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
@@ -249,6 +256,9 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
 // channel, walking backward via the ?before= cursor. Fetches are sequential,
 // which naturally rate-limits the crawler against t.me.
+//
+// out is newest-first on every return path, and harvestPages takes its inline
+// nodes from out[0] alone: reordering here silently ages that harvest.
 //
 // cursorLost reports that the walk stopped only because a fetched page carried
 // no cursor while the page budget still had room — the one outcome that is

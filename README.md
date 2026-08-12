@@ -448,14 +448,34 @@ compose sidecar) that discovers new sources automatically:
   error keeps it — and a cycle that would delete a large share of the list at
   once refuses to write until a later cycle confirms the loss,
 - additionally harvests **raw proxy URIs pasted directly in messages**
-  (`vless://…` etc.), dedupes them, and packs them into a single inline
-  `tg-inline` source with a base64 `body`,
+  (`vless://…` etc.) from each channel's **newest page only**, dedupes them,
+  and packs them into a single inline `tg-inline` source with a base64 `body`,
 - writes results to `config/private.yaml` as `tg-<channel>-<sha6>` sources
   (the discovering channel's slug plus a short URL hash, so the origin of
   every subscription is visible — including in `/stable.txt` node labels;
   pre-attribution `tg-<sha10>` names upgrade on the next rediscovery) — an
   overlay the service merges into `subscriptions.sources` and **hot-reloads**
   on change.
+
+The inline harvest reads the newest page alone because a pasted node is a
+frozen `server:port` whose worth is the age of the message carrying it:
+against this instance's own probe gate (`rounds: 2`, `timeout: 1000ms`,
+`max_avg_ms: 800`), 7.4% of the nodes from messages ≤1 day old passed
+(12 of 162) against 2.8% at 1–3 days (5 of 178), and `?before=` pagination
+walks backward, so pages 2..N are older by construction. Page position is a
+proxy for message age, not a measurement of it: a page holds ~20 messages, so
+it is a day for a channel posting ~20/day and a week for one posting three,
+and a dormant channel still re-seeded from the 30-day state memory
+contributes a page of >30d nodes, which passed at 1 of 249. Subscription **links** are
+still taken from every page — a URL keeps serving fresh nodes, a `server:port`
+cannot refresh itself. What the older pages were worth is bounded above by
+what the whole source is worth: 25 to 40 of `tg-inline`'s 499 distinct
+`server:port` were absent from the sources that merge ahead of it, so ~93% of
+what it contributed was already in the list. A kept node's residency in the
+source also drops from ~6 pages of message scroll to ~1, which is the intended
+trade against a 10.34 d half-life (95% CI [5.47, 16.58], n=1089 — fitted on
+reachability at a looser 8000 ms arm, not the gate above, which kills a node
+on latency before unreachability does).
 
 Every candidate that fails a gate or does not classify live gets one log line
 saying which channel it came from, which `tg-<slug>-<sha6>` source it would have
