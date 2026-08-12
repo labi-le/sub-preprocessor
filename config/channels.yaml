@@ -18,6 +18,8 @@ channels:
   - whitelistbypass
   - surfboardv2ray   # research find: Type-A https sub (sub.suffusion.workers.dev), 134 nodes verified
   - DailyV2RY   # research find: daily rotating bin.mudfish.net pastes, 42% novelty measured; isolated in the repost graph so BFS cannot reach it
+  - Holost_VPN   # measured 2026-08-12: one cycle yielded 22 of the 23 managed sources added that day
+  - FreeCFGHub   # measured 2026-08-12: 1 live sub of its own, plus 12 inline nodes on page 1; it is the CHANNEL behind chat FreeCFGHubMIX, whose /s/ 302s (chats have no web preview)
 
 # Subscription URLs the crawler must never manage. Deleting a tg-* source from
 # private.yaml by hand does not stick: the next cycle rediscovers the URL in a
