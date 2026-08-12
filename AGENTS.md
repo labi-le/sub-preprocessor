@@ -335,6 +335,13 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
 - **Do NOT move the harvest to the vassago instance.** Chat/forum nodes are 3.0x LESS
   whitelist-fit than what it already subscribes to — 21 of 675 resolved keys (3.1%)
   against 1838 of 20049 (9.2%) — and 0 of the novel ones were alive.
+- **`InlineMax` still binds after that restriction, so raising it buys more of the same.**
+  The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
+  alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
+  yield. What the number cannot tell you is which 500: seeds are walked in Go map order
+  (`discover.go:78`), so the truncation point is arbitrary within one cycle's fresh pool.
+  Raising the cap admits nodes from the same distribution — ~93% of which the earlier
+  sources already carry — at one DNS resolve and one probe slot each.
 
 ## Important security / correctness notes
 
