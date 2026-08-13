@@ -36,6 +36,18 @@ const (
 	errOnlyHTTPS       = "only https URLs are allowed"
 	errURLHostRequired = "url host is required"
 	errURLUserinfo     = "url userinfo is not allowed"
+	// errNonCanonicalIPHost covers an IPv4 literal written the way inet_aton
+	// accepts and netip.ParseAddr does not, which would otherwise pass the IP
+	// gate as a domain name.
+	errNonCanonicalIPHost = "non-canonical ip literal host is not allowed"
+)
+
+const (
+	maxIPv4Parts   = 4
+	baseOctal      = 8
+	baseDecimal    = 10
+	baseHex        = 16
+	firstHexLetter = 10
 )
 
 const (
@@ -133,6 +145,21 @@ func ValidateFileType(fileType FileType) error {
 	}
 }
 
+// checkHTTPSURL is parseHTTPSURL's verdict on an already-parsed URL. The three
+// rejections and their order are the only copy of them.
+func checkHTTPSURL(u *url.URL) error {
+	if !strings.EqualFold(u.Scheme, "https") {
+		return errors.New(errOnlyHTTPS)
+	}
+	if u.Hostname() == "" {
+		return errors.New(errURLHostRequired)
+	}
+	if u.User != nil {
+		return errors.New(errURLUserinfo)
+	}
+	return nil
+}
+
 // parseHTTPSURL validates and parses a well-formed https URL with a host and no
 // userinfo. It does not restrict the target IP.
 func parseHTTPSURL(rawURL SubscriptionURL) (*url.URL, error) {
@@ -140,14 +167,8 @@ func parseHTTPSURL(rawURL SubscriptionURL) (*url.URL, error) {
 	if errURL != nil {
 		return nil, fmt.Errorf("invalid url: %w", errURL)
 	}
-	if !strings.EqualFold(u.Scheme, "https") {
-		return nil, errors.New(errOnlyHTTPS)
-	}
-	if u.Hostname() == "" {
-		return nil, errors.New(errURLHostRequired)
-	}
-	if u.User != nil {
-		return nil, errors.New(errURLUserinfo)
+	if err := checkHTTPSURL(u); err != nil {
+		return nil, err
 	}
 	return u, nil
 }
@@ -164,14 +185,100 @@ func ValidateHTTPSURL(rawURL SubscriptionURL) error {
 // host in a non-public range is rejected. Domain hosts pass here and are
 // re-checked against their resolved IPs at dial time by the guarded client.
 func ValidatePublicHTTPSURL(rawURL SubscriptionURL) error {
-	u, err := parseHTTPSURL(rawURL)
+	u, err := url.Parse(string(rawURL))
 	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	return ValidatePublicParsedHTTPSURL(u)
+}
+
+// ValidatePublicParsedHTTPSURL is ValidatePublicHTTPSURL for a caller holding
+// the parsed URL, so the string is not parsed a second time. Same gates, same
+// order, same error values; the one verdict it cannot return is the parse
+// failure, which belongs to whoever parsed.
+func ValidatePublicParsedHTTPSURL(u *url.URL) error {
+	if err := checkHTTPSURL(u); err != nil {
 		return err
 	}
-	if addr, errAddr := netip.ParseAddr(u.Hostname()); errAddr == nil && !isPublicIP(addr) {
-		return errors.New(errNonPublicTarget)
+	host := u.Hostname()
+	if addr, errAddr := netip.ParseAddr(host); errAddr == nil {
+		if !isPublicIP(addr) {
+			return errors.New(errNonPublicTarget)
+		}
+		return nil
+	}
+	// netip.ParseAddr answers only for the canonical forms, so 2130706433,
+	// 0x7f000001, 127.1 and 0177.0.0.1 reach here as if they were domain names —
+	// and getaddrinfo's inet_aton resolves every one of them to 127.0.0.1
+	// (measured under CGO_ENABLED=1; the pure-Go resolver says "no such host",
+	// so today only the build flag stands between this gate and a loopback
+	// fetch). The crawler's client has no dial-time guard, so this gate is the
+	// only one a channel-supplied URL passes.
+	if numericIPHost(host) {
+		return errors.New(errNonCanonicalIPHost)
 	}
 	return nil
+}
+
+// numericIPHost reports whether host is an IPv4 address written in one of the
+// forms inet_aton accepts and netip.ParseAddr does not. A canonical literal is
+// not this function's business: netip.ParseAddr has already claimed it.
+func numericIPHost(host string) bool {
+	for parts := 1; ; parts++ {
+		dot := strings.IndexByte(host, '.')
+		part := host
+		if dot >= 0 {
+			part = host[:dot]
+		}
+		if parts > maxIPv4Parts || !inetAtonPart(part) {
+			return false
+		}
+		if dot < 0 {
+			return true
+		}
+		host = host[dot+1:]
+	}
+}
+
+// inetAtonPart reports whether s is one of inet_aton's number forms: 0x-prefixed
+// hex, 0-prefixed octal, or decimal. The value range is deliberately unchecked —
+// a part out of range makes inet_aton fail, so the host is then a name, and
+// refusing it costs a garbage hostname nobody serves subscriptions from.
+func inetAtonPart(s string) bool {
+	if s == "" {
+		return false
+	}
+	digits, base := s, baseDecimal
+	if s[0] == '0' {
+		if len(s) > 1 && (s[1] == 'x' || s[1] == 'X') {
+			digits, base = s[2:], baseHex
+			if digits == "" {
+				return false
+			}
+		} else {
+			digits, base = s[1:], baseOctal
+		}
+	}
+	for i := range len(digits) {
+		if hexDigitValue(digits[i]) >= base {
+			return false
+		}
+	}
+	return true
+}
+
+// hexDigitValue returns c's value as a hex digit, or baseHex when c is not one,
+// which is out of range for every base and so rejects.
+func hexDigitValue(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + firstHexLetter
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + firstHexLetter
+	}
+	return baseHex
 }
 
 // NewSafeHTTPClient returns a client with the full SSRF guard: https-only, no

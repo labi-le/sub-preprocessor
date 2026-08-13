@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -227,10 +228,15 @@ func TestValidateHTTPSURLAllowsAnyIP(t *testing.T) {
 	}
 }
 
-func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
-	t.Parallel()
-
-	for _, u := range []string{
+// The three corpora below are shared by every validator test here, so a case
+// added for one is checked by all of them.
+var (
+	// validateNonPublicCorpus is the SSRF reject set. The first group is
+	// canonical literals netip.ParseAddr answers for; the second is the same
+	// targets in the encodings it does NOT answer for, which inet_aton does
+	// (measured: getaddrinfo resolves all four to 127.0.0.1 under
+	// CGO_ENABLED=1, where the pure-Go resolver reports no such host).
+	validateNonPublicCorpus = []string{
 		"https://10.0.0.1/sub",     // private
 		"https://127.0.0.1/sub",    // loopback
 		"https://198.18.1.15/sub",  // reserved (mihomo fake-ip range)
@@ -248,17 +254,96 @@ func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
 		"https://[100::1]/",
 		"https://[fec0::1]/",
 		"https://[fd00::1]/",
-	} {
+		// 127.0.0.1 as one 32-bit decimal, as hex, as the two-part short form,
+		// and with an octal first part; then 192.168.0.1 all-octal, which is here
+		// because the reach is not only loopback and because the docs name it.
+		"https://2130706433/sub",
+		"https://0x7f000001/sub",
+		"https://127.1/sub",
+		"https://0177.0.0.1/sub",
+		"https://0300.0250.0.1/sub",
+		// A public address in the same non-canonical forms is refused too: the
+		// gate answers the question it can answer (this is not a canonical
+		// literal) rather than re-implementing inet_aton's arithmetic.
+		"https://16843009/sub",
+		"https://0x01010101/sub",
+	}
+	// validateAcceptCorpus passes every gate, and the numeric-looking hostnames
+	// are the point of the last three: a host is only refused when inet_aton
+	// would read the WHOLE of it as a number.
+	validateAcceptCorpus = []string{
+		"https://1.1.1.1/sub",
+		"https://[2606:4700::1111]/sub",
+		"https://sub.example.com/api/v1/client/subscribe?token=abc",
+		"https://12345.example.com/sub",
+		"https://cafe.beef/sub",
+		"https://0x7f000001.example.com/sub",
+	}
+	// validateMalformedCorpus fails a gate other than the IP one: scheme, host,
+	// userinfo, and a control byte url.Parse itself refuses.
+	validateMalformedCorpus = []string{
+		"http://example.com/test",
+		"HTTPS://example.com/ok",
+		"https://user@example.com/",
+		"https://user:pw@example.com/",
+		"https:///sub",
+		"/relative/only",
+		"https://ex\x7fample.com/sub",
+	}
+)
+
+func TestValidatePublicHTTPSURLRejectsNonPublicIP(t *testing.T) {
+	t.Parallel()
+
+	for _, u := range validateNonPublicCorpus {
 		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err == nil {
-			t.Errorf("%s: non-public IP host must be rejected", u)
+			t.Errorf("%s: non-public or non-canonical IP host must be rejected", u)
 		}
 	}
-	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://1.1.1.1/sub")); err != nil {
-		t.Fatalf("public IP host should pass, got: %v", err)
+	for _, u := range validateAcceptCorpus {
+		if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(u)); err != nil {
+			t.Errorf("%s: should pass, got: %v", u, err)
+		}
 	}
-	if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL("https://[2606:4700::1111]/sub")); err != nil {
-		t.Fatalf("public IPv6 host should pass, got: %v", err)
+}
+
+// TestValidatePublicParsedHTTPSURLMatchesTheStringForm is the differential test
+// the parsed entry point needs: crawl.candidate reaches the SSRF gate through it
+// instead of through the string form, so a verdict that moved between the two
+// would move a gate that stands in front of content-supplied URLs. The error
+// TEXT is compared, not the pass/fail bit, because the reject line embeds it.
+func TestValidatePublicParsedHTTPSURLMatchesTheStringForm(t *testing.T) {
+	t.Parallel()
+
+	corpus := make([]string, 0,
+		len(validateNonPublicCorpus)+len(validateAcceptCorpus)+len(validateMalformedCorpus))
+	corpus = append(corpus, validateNonPublicCorpus...)
+	corpus = append(corpus, validateAcceptCorpus...)
+	corpus = append(corpus, validateMalformedCorpus...)
+
+	for _, raw := range corpus {
+		fromString := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw))
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			// url.Parse owns this verdict: the parsed form is unreachable for
+			// input that does not parse, which is why candidate keeps its own
+			// parse error.
+			if fromString == nil {
+				t.Errorf("%q: url.Parse rejected it but the string form accepted it", raw)
+			}
+			continue
+		}
+		if got, want := errText(fetch.ValidatePublicParsedHTTPSURL(u)), errText(fromString); got != want {
+			t.Errorf("%q: parsed form = %q, string form = %q", raw, got, want)
+		}
 	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func TestNewUnrestrictedHTTPClientDisablesProxy(t *testing.T) {
