@@ -3,6 +3,7 @@ package crawl //nolint:testpackage // benchmarks unexported crawl internals (can
 import (
 	"errors"
 	"fmt"
+	"html"
 	"net/url"
 	"strings"
 	"testing"
@@ -63,10 +64,10 @@ const (
 	// working middle, where the regex scan and the match slice both count.
 	benchInlineNodes = 20
 
-	// benchPrivateIPLink takes candidate's validate gate: ValidatePublicHTTPSURL
-	// parses it and refuses a non-public target with a static string, so the
-	// returned error is wrapped by the second fmt.Errorf and is NOT a
-	// *url.Error. benchCandidateCase.check asserts that gate; this comment no
+	// benchPrivateIPLink takes candidate's validate gate:
+	// ValidatePublicParsedHTTPSURL refuses a non-public target with a static
+	// string, so the returned error is wrapped by the second fmt.Errorf and is
+	// NOT a *url.Error. benchCandidateCase.check asserts that gate; this comment no
 	// longer has to be believed.
 	benchPrivateIPLink = "https://10.0.0.1/sub"
 	// benchUnparseableLink takes candidate's parse gate: a DEL byte is a control
@@ -111,9 +112,9 @@ func benchPages() []string {
 // other half of what a scraped page costs and the half no fixture priced until
 // the harvest was restricted to page 1: with the scan now off pages 2..N, a
 // regression in it moves nothing unless something benchmarks it. Entities are
-// deliberate — they are what makes html.UnescapeString copy a page. Watch
-// ns/op, not B/op: extractURLs unescapes all six pages, so the node scan is
-// 14% of the case's bytes but 90% of its time.
+// deliberate — they are what makes html.UnescapeString copy a page. harvestPages
+// unescapes each page once and the node scan runs on page 1 alone, so this
+// fixture prices six copies plus one node scan, not seven copies.
 func benchInlinePages() []string {
 	pages := make([]string, benchPageCount)
 	for i := range pages {
@@ -134,7 +135,9 @@ func benchInlinePages() []string {
 // BenchmarkCandidate and BenchmarkCandidateUnwrapped on the invalid-url cases —
 // against a wrapcheck suppression on a bare fetch/net-url error. Both wraps are
 // on the invalid-url path only, and the wrap's cost is not one number: it scales
-// with the text of the message %w re-renders.
+// with the text of the message %w re-renders. It tracks candidate's other
+// changes — the single parse below is candidate's — so the pair keeps differing
+// in the wraps alone; candidatePreReason is the frozen body, not this one.
 func candidateUnwrapped(raw string) (bool, rejectReason, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -143,7 +146,7 @@ func candidateUnwrapped(raw string) (bool, rejectReason, error) {
 	if isNoiseHost(u.Hostname()) {
 		return false, rejectNoiseHost, nil
 	}
-	if err = fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)); err != nil {
+	if err = fetch.ValidatePublicParsedHTTPSURL(u); err != nil {
 		return false, rejectInvalidURL, err
 	}
 	return true, "", nil
@@ -168,7 +171,8 @@ func candidatePreReason(raw string) bool {
 func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
 	for i, p := range pages {
-		for _, raw := range extractURLs(p) {
+		text := html.UnescapeString(p)
+		for _, raw := range extractURLs(text) {
 			ok, reason, err := candidate(raw)
 			if !ok {
 				rej.record(channel, raw, reason, 0, err)
@@ -177,7 +181,7 @@ func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *reject
 			cand[strings.Clone(raw)] = struct{}{}
 		}
 		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = append(*inline, extractInlineNodes(p)...)
+			*inline = append(*inline, extractInlineNodes(text)...)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
 			}
@@ -203,11 +207,10 @@ type benchCandidateCase struct {
 	wantOK     bool
 	wantReason rejectReason
 	// wantParse is whether the link must fail at candidate's url.Parse gate
-	// rather than at its ValidatePublicHTTPSURL one. wantReason cannot tell the
-	// two apart — both report rejectInvalidURL — and a *url.Error is what does:
-	// url.Parse always returns one, while the validator's reachable returns on
-	// this path are static strings (its single "invalid url: %w" branch cannot
-	// fire from candidate, which parsed the same URL a line above).
+	// rather than at its ValidatePublicParsedHTTPSURL one. wantReason cannot tell
+	// the two apart — both report rejectInvalidURL — and a *url.Error is what
+	// does: url.Parse always returns one, while the validator's returns are all
+	// static strings, since the parsed entry point has no parse of its own.
 	wantParse bool
 }
 
@@ -296,9 +299,9 @@ func BenchmarkCandidatePreReason(b *testing.B) {
 // keeps its cost per DISTINCT url instead of per repost.
 //
 // The inline case runs the shipped harvest over pages carrying pasted nodes and
-// HTML entities, which is what a real page costs: both extractors then pay
-// html.UnescapeString's copy, and the node scan runs on page 1 alone. Putting
-// that scan back on every page shows up here as six copies instead of one. It
+// HTML entities, which is what a real page costs: html.UnescapeString then
+// copies each page, and the node scan runs on page 1 alone. Putting that scan
+// back on every page shows up here as six copies instead of one. It
 // is a regression watch on its own fixture, not a third point on the
 // guarded/blind comparison.
 func BenchmarkHarvestPages(b *testing.B) {
@@ -312,7 +315,7 @@ func BenchmarkHarvestPages(b *testing.B) {
 	// so the key ITSELF is checked, not merely how many came back: filler that
 	// stopped being separated from a link, or a urlRe that started keeping the
 	// trailing text, would leave the count right and reprice every B/op here.
-	links := extractURLs(pages[0])
+	links := extractURLs(html.UnescapeString(pages[0]))
 	if len(links) != benchLinkRepeats {
 		b.Fatalf("page yields %d urls, want benchLinkRepeats = %d", len(links), benchLinkRepeats)
 	}
@@ -324,7 +327,7 @@ func BenchmarkHarvestPages(b *testing.B) {
 	}
 
 	inlinePages := benchInlinePages()
-	if got := len(extractInlineNodes(inlinePages[0])); got != benchInlineNodes {
+	if got := len(extractInlineNodes(html.UnescapeString(inlinePages[0]))); got != benchInlineNodes {
 		b.Fatalf("inline page yields %d nodes, want benchInlineNodes = %d", got, benchInlineNodes)
 	}
 

@@ -734,9 +734,9 @@ func TestRecheckDoesNotEnterTheDiscoverySummary(t *testing.T) {
 	}
 }
 
-// TestRejectKeyDoesNotPinThePage: extractURLs hands out sub-slices of the
-// scraped page (html.UnescapeString then urlRe.FindAllString, and
-// strings.TrimRight narrows without copying), so a key kept for the whole cycle
+// TestRejectKeyDoesNotPinThePage: extractURLs hands out sub-slices of the page
+// it scanned (urlRe.FindAllString, and strings.TrimRight narrows without
+// copying), so a key kept for the whole cycle
 // would hold its entire page — up to maxPageBytes, 8 MiB — alive until scan
 // returns. The dedupe set needs the bytes of the URL, not of the page.
 func TestRejectKeyDoesNotPinThePage(t *testing.T) {
@@ -762,10 +762,10 @@ func TestRejectKeyDoesNotPinThePage(t *testing.T) {
 	if key != target {
 		t.Fatalf("recorded key = %q, want %q", key, target)
 	}
-	// html.UnescapeString returns its argument unchanged when there is no '&' —
-	// and this page has none — so the sub-slice points into page itself. Compare
-	// against the slice we were given rather than against target, which is a
-	// separate constant.
+	// The fixture carries no '&', so harvestPages' html.UnescapeString would
+	// return the page itself: the sub-slice points into page either way.
+	// Compare against the slice we were given rather than against target, which
+	// is a separate constant.
 	base := uintptr(unsafe.Pointer(unsafe.StringData(urls[0])))
 	got := uintptr(unsafe.Pointer(unsafe.StringData(key)))
 	if got == base {

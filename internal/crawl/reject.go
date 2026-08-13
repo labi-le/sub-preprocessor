@@ -147,9 +147,9 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 		r.untracked++
 		return
 	}
-	// Clone: rawURL is a sub-slice of the scraped page. extractURLs runs
-	// html.UnescapeString then urlRe.FindAllString, regexp returns s[a:b], and
-	// strings.TrimRight narrows without copying — so a 40-byte key kept for the
+	// Clone: rawURL is a sub-slice of the unescaped page harvestPages scanned.
+	// urlRe.FindAllString returns s[a:b] and strings.TrimRight narrows without
+	// copying — so a 40-byte key kept for the
 	// whole cycle would keep its entire page reachable (up to maxPageBytes,
 	// 8 MiB) until scan returns. A cloned key costs its own length and nothing
 	// else, whatever the page size.
@@ -284,12 +284,13 @@ func logHost(u *url.URL) string {
 // logHost). Nothing on the reject path returns that shape today, but not for one
 // reason. candidate's parse wrap carries a *url.Error, %q-quoted with its scheme
 // intact; its validate wrap carries no part of the URL at all, since the
-// reachable returns of fetch.ValidatePublicHTTPSURL are the four static strings
-// at internal/fetch/fetch.go:35-38 and the one branch that would quote a URL
-// (`invalid url: %w`) cannot fire from candidate, which ran the same url.Parse
-// one line above. Do NOT read that as "internal/fetch quotes its URLs" — nothing
-// in that package quotes anything, so an %s of URL detail appended to one of
-// those four strings is precisely the leak this guard exists for. classify.URL's
+// reachable returns of fetch.ValidatePublicParsedHTTPSURL are the five static
+// strings in internal/fetch/fetch.go's first const block — that entry point has
+// no parse branch to quote a URL from, because candidate parses raw itself one
+// line above and hands over the *url.URL. Do NOT read that as "internal/fetch
+// quotes its URLs" — nothing in that package quotes anything, so an %s of URL
+// detail appended to one of those five strings is precisely the leak this guard
+// exists for. classify.URL's
 // are `validate url`, `do request` (*url.Error, %q-quoted, scheme intact),
 // `read response` and `response too large` — its `create request` wrap is
 // unreachable, since http.NewRequestWithContext re-parses a URL ValidateHTTPSURL

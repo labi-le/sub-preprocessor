@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -682,11 +681,10 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 	return live, unknown
 }
 
-// extractURLs returns every https URL in an HTML page, HTML-unescaped and
+// extractURLs returns every https URL in an already-unescaped HTML page,
 // stripped of trailing punctuation. Links appear both in href attributes and as
 // plain text inside <pre> blocks, so it scans the whole page.
 func extractURLs(page string) []string {
-	page = html.UnescapeString(page)
 	matches := urlRe.FindAllString(page, -1)
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
@@ -697,11 +695,10 @@ func extractURLs(page string) []string {
 
 // extractInlineNodes returns every raw proxy URI (vless://, vmess://, ss://,
 // ssr://, trojan://, tuic://, hysteria://, hysteria2://, hy2://, anytls://,
-// mierus://) pasted directly in a channel page, HTML-unescaped and stripped of
-// trailing punctuation. Unlike extractURLs these are node URIs, not
-// subscription links.
+// mierus://) pasted directly in a channel page, stripped of trailing
+// punctuation. Unlike extractURLs these are node URIs, not subscription links,
+// and the caller has already HTML-unescaped page.
 func extractInlineNodes(page string) []string {
-	page = html.UnescapeString(page)
 	matches := inlineRe.FindAllString(page, -1)
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
@@ -769,18 +766,19 @@ func pageCursor(page string) string {
 // without them: not one number, since %w re-renders the wrapped message and the
 // cost scales with its text.
 //
-// The accept path is ALLOCATION-identical to 26c8fe2's — which is what was
+// The accept path was ALLOCATION-identical to 26c8fe2's — which is what was
 // measured and all that argument needs — as BenchmarkCandidate/accept against
-// BenchmarkCandidatePreReason, whose body is that commit's. It is NOT
-// instruction-identical: the review round that this branch's feature commit
-// squashed declined this finding with that word, and the word was wrong, since
-// an allocation counter cannot establish it. (That round's own sha is gone —
-// the squash rewrote it — which is why it is named by position here.)
-// go tool nm on the test binary puts candidate at 421 B against
-// candidatePreReason's 124 B; walking the accept path it executes 25
-// instructions before and 30 after (alignment NOPs excluded); the frame grows
-// SUBQ $0x10 -> SUBQ $0x48; and the tail TESTQ AX, AX; SETE AL becomes a branch
-// into a block that materialises the three-value return.
+// BenchmarkCandidatePreReason, whose body is that commit's. It is now cheaper
+// than both: raw is parsed once here and the *url.URL handed to the validator,
+// where every earlier shape had the validator parse the same string again. That
+// second parse is gone, not moved: go tool objdump finds one CALL net/url.Parse
+// in fetch.ValidatePublicHTTPSURL and none in the parsed entry point this calls.
+// It is NOT instruction-identical either — go tool nm -size puts candidate at
+// 413 B against candidatePreReason's 124 B, and its frame is SUBQ $0x50 against
+// that body's SUBQ $0x10 — which is the word the review round that this branch's
+// feature commit squashed declined the wrap finding with, and the word was
+// wrong, since an allocation counter cannot establish it. (That round's own sha
+// is gone — the squash rewrote it — which is why it is named by position here.)
 func candidate(raw string) (bool, rejectReason, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -789,7 +787,7 @@ func candidate(raw string) (bool, rejectReason, error) {
 	if isNoiseHost(u.Hostname()) {
 		return false, rejectNoiseHost, nil
 	}
-	if err = fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)); err != nil {
+	if err = fetch.ValidatePublicParsedHTTPSURL(u); err != nil {
 		return false, rejectInvalidURL, fmt.Errorf("validate candidate url: %w", err)
 	}
 	return true, "", nil

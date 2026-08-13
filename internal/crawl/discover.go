@@ -2,6 +2,7 @@ package crawl
 
 import (
 	"context"
+	"html"
 	"regexp"
 	"strings"
 	"time"
@@ -216,7 +217,10 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
 	for i, p := range pages {
-		for _, raw := range extractURLs(p) {
+		// Once per page, not once per extractor: page 0 feeds both scans, and
+		// UnescapeString copies the whole page whenever it finds an '&'.
+		text := html.UnescapeString(p)
+		for _, raw := range extractURLs(text) {
 			ok, reason, err := candidate(raw)
 			if !ok {
 				rej.record(channel, raw, reason, 0, err)
@@ -226,10 +230,10 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 			// key is the longer-lived of the two: keys(cand) feeds classifyAll,
 			// which puts every live URL in the cycle-wide live map scanChannel
 			// returns to RunOnce for mergeManaged, so an accepted key outlives
-			// this page by the whole cycle. extractURLs hands out sub-slices
-			// (html.UnescapeString, then urlRe.FindAllString returns s[a:b],
-			// then strings.TrimRight narrows without copying), so an uncloned
-			// 40-byte key keeps its entire page reachable — up to maxPageBytes,
+			// this page by the whole cycle. extractURLs hands out sub-slices of
+			// text (urlRe.FindAllString returns s[a:b], then strings.TrimRight
+			// narrows without copying), so an uncloned 40-byte key keeps its
+			// entire page reachable — up to maxPageBytes,
 			// 8 MiB. That is what a string sub-slice IS, not a measurement. The
 			// pin predates the reject map and is not what that fix removed.
 			//
@@ -244,7 +248,7 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 			}
 		}
 		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = append(*inline, extractInlineNodes(p)...)
+			*inline = append(*inline, extractInlineNodes(text)...)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
 			}

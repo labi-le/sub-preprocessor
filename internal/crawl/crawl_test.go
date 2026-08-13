@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestExtractURLs(t *testing.T) {
 		`text https://host.example/api/filter?code=RU&amp;type=white, end` +
 		` nbsp https://nb.example/sub&nbsp;tail`
 
-	got := extractURLs(page)
+	got := extractURLs(html.UnescapeString(page))
 	want := map[string]bool{
 		"https://t.me/somechan":                              true,
 		"https://is.wepogp.gay/bypass?payload=AbC%2Bd/e=":    true,
@@ -47,6 +48,36 @@ func TestExtractURLs(t *testing.T) {
 		if !want[u] {
 			t.Errorf("unexpected url %q", u)
 		}
+	}
+}
+
+// TestExtractorsTakeAnUnescapedPage pins the contract that let the
+// html.UnescapeString move out of the scans and into harvestPages: page 0 feeds
+// both of them, so a scan that unescapes for itself copies that page twice.
+func TestExtractorsTakeAnUnescapedPage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		page     = `link https://sub.example/a?x=1&amp;y=2 <pre>vless://u@1.2.3.4:443?a=1&amp;b=2#n</pre>`
+		wantURL  = `https://sub.example/a?x=1&amp;y=2`
+		wantNode = `vless://u@1.2.3.4:443?a=1&amp;b=2#n`
+	)
+
+	if got := extractURLs(page); len(got) != 1 || got[0] != wantURL {
+		t.Fatalf("extractURLs = %q, want [%q] with the entity left alone", got, wantURL)
+	}
+	if got := extractInlineNodes(page); len(got) != 1 || got[0] != wantNode {
+		t.Fatalf("extractInlineNodes = %q, want [%q] with the entity left alone", got, wantNode)
+	}
+
+	var inline []string
+	c := &Crawler{opts: Options{InlineEnabled: true}}
+	cand := (*Crawler).harvestPages(c, []string{page}, &inline, nil, "chan")
+	if _, ok := cand[`https://sub.example/a?x=1&y=2`]; !ok || len(cand) != 1 {
+		t.Fatalf("harvested %v, want the decoded url alone", cand)
+	}
+	if len(inline) != 1 || inline[0] != `vless://u@1.2.3.4:443?a=1&b=2#n` {
+		t.Fatalf("harvested inline %q, want the decoded node", inline)
 	}
 }
 
@@ -377,6 +408,17 @@ func TestCandidate(t *testing.T) {
 		// Literal private ip and non-https: config.Load would reject the source.
 		"https://192.168.1.1/sub": {reason: rejectInvalidURL},
 		"http://host.example/sub": {reason: rejectInvalidURL},
+		// 127.0.0.1 in the encodings netip.ParseAddr does not answer for and
+		// getaddrinfo does. candidate is the ONLY gate in front of a
+		// channel-supplied URL — the crawler's client has no dial-time guard —
+		// so a host that reads as a name here is fetched.
+		"https://2130706433/sub": {reason: rejectInvalidURL},
+		"https://0x7f000001/sub": {reason: rejectInvalidURL},
+		"https://127.1/sub":      {reason: rejectInvalidURL},
+		"https://0177.0.0.1/sub": {reason: rejectInvalidURL},
+		// A numeric-looking hostname is not a numeric host: only a host
+		// inet_aton would read WHOLE as a number is refused.
+		"https://12345.example.com/sub": {ok: true},
 	}
 	for u, want := range cases {
 		got, reason, err := candidate(u)
@@ -728,7 +770,7 @@ func TestExtractInlineNodes(t *testing.T) {
 		// scheme-substring tokens must NOT be captured (boundary guard).
 		`pass://foo access://bar class://baz`
 
-	got := extractInlineNodes(page)
+	got := extractInlineNodes(html.UnescapeString(page))
 	want := map[string]bool{
 		"vless://uuid@1.2.3.4:443?security=tls#fast":         true,
 		"vmess://eyJhZGQiOiIxLjEuMS4xIn0=":                   true, // trailing comma trimmed
