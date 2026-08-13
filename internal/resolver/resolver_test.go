@@ -2,7 +2,10 @@ package resolver_test
 
 import (
 	"context"
+	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,5 +150,109 @@ func TestResolve_NegativeCacheDisabledRetries(t *testing.T) {
 
 	if got := queries.Load(); got <= after {
 		t.Fatalf("dns queries = %d, want > %d (negative caching disabled)", got, after)
+	}
+}
+
+// TestResolve_ConcurrentSameHostSharesOneQuery pins the in-flight dedup a
+// per-call net.Resolver cannot do: the singleflight group that collapses
+// concurrent identical lookups lives on the Resolver instance, so building one
+// per Resolve gives every caller an empty group and its own wire query. Both
+// TTL caches are off here, so the group is the only thing that can collapse
+// them.
+func TestResolve_ConcurrentSameHostSharesOneQuery(t *testing.T) {
+	const (
+		callers = 16
+		// settle covers the window between the barrier and the last caller
+		// registering with the group; the server answers nothing before it.
+		settle = 200 * time.Millisecond
+	)
+
+	release := make(chan struct{})
+	addr, queries, cleanup := heldCountingDNS(t, release)
+	defer cleanup()
+
+	r := resolver.New(5*time.Second, addr, 0, 0)
+
+	var barrier, done sync.WaitGroup
+	barrier.Add(callers)
+	done.Add(callers)
+	got := make([][]netip.Addr, callers)
+	errs := make([]error, callers)
+	for i := range callers {
+		go func() {
+			defer done.Done()
+			barrier.Done()
+			barrier.Wait()
+			got[i], errs[i] = r.Resolve(context.Background(), "example.com")
+		}()
+	}
+	barrier.Wait()
+	time.Sleep(settle)
+	close(release)
+	done.Wait()
+
+	want := netip.MustParseAddr("93.184.216.34")
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("resolve #%d: %v", i, errs[i])
+		}
+		if len(got[i]) != 1 || got[i][0] != want {
+			t.Fatalf("resolve #%d: got %v, want [%v]", i, got[i], want)
+		}
+	}
+
+	// Not an exact 1: a caller descheduled between the barrier and the group
+	// registration still issues its own query, and the resolv.conf search list
+	// can turn one lookup into several queries. Both scale every caller
+	// equally, so a shared group stays an order below callers while a per-call
+	// resolver sits at or above it.
+	if q := queries.Load(); q > callers/2 {
+		t.Fatalf("dns queries = %d for %d concurrent lookups of one host, want <= %d", q, callers, callers/2)
+	}
+}
+
+// heldCountingDNS is countingDNS with every answer withheld until release
+// closes, so all callers are still in flight when the count is taken. Answers
+// go out off the read loop: a query arriving while an earlier one is
+// unanswered must still be read, or the socket buffer would hide it from the
+// count and the test would pass on its own blocking.
+func heldCountingDNS(tb testing.TB, release <-chan struct{}) (addr string, queries *atomic.Int64, cleanup func()) {
+	tb.Helper()
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatalf("heldCountingDNS ListenPacket: %v", err)
+	}
+
+	queries = new(atomic.Int64)
+	closed := make(chan struct{})
+	var answers sync.WaitGroup
+	go func() {
+		defer close(closed)
+		buf := make([]byte, 512)
+		for {
+			n, peer, readErr := conn.ReadFrom(buf)
+			if readErr != nil {
+				return
+			}
+			if n < 12 {
+				continue
+			}
+			queries.Add(1)
+			query := append([]byte(nil), buf[:n]...)
+			answers.Go(func() {
+				select {
+				case <-release:
+				case <-closed:
+				}
+				conn.WriteTo(answeringResponder(query), peer)
+			})
+		}
+	}()
+
+	return conn.LocalAddr().String(), queries, func() {
+		conn.Close()
+		<-closed
+		answers.Wait()
 	}
 }

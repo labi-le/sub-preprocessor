@@ -32,7 +32,7 @@ type Resolver struct {
 	cacheTTL     time.Duration
 	negativeTTL  time.Duration
 	resolvedPool sync.Pool
-	dialer       func(ctx context.Context, network, address string) (net.Conn, error)
+	lookup       *net.Resolver
 	cacheMu      sync.RWMutex
 	cache        map[string]cacheEntry
 }
@@ -40,11 +40,17 @@ type Resolver struct {
 // New builds a Resolver. cacheTTL / negativeTTL control process-wide caching
 // of successful / failed lookups; zero disables the respective cache.
 func New(timeout time.Duration, address string, cacheTTL, negativeTTL time.Duration) *Resolver {
-	var dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// One instance for the process, not one per call: net.Resolver's internal
+	// singleflight group is what collapses N concurrent lookups of the same
+	// host into one wire query, and a fresh instance has an empty group.
+	lookup := net.DefaultResolver
 	if address != "" {
 		d := net.Dialer{Timeout: timeout}
-		dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return d.DialContext(ctx, network, address)
+		lookup = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return d.DialContext(ctx, network, address)
+			},
 		}
 	}
 	var cache map[string]cacheEntry
@@ -55,7 +61,7 @@ func New(timeout time.Duration, address string, cacheTTL, negativeTTL time.Durat
 		timeout:     timeout,
 		cacheTTL:    cacheTTL,
 		negativeTTL: negativeTTL,
-		dialer:      dial,
+		lookup:      lookup,
 		cache:       cache,
 		resolvedPool: sync.Pool{
 			New: func() any { return make(map[string][]netip.Addr, mapInitSize) },
@@ -94,12 +100,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, erro
 	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	resolver := net.DefaultResolver
-	if r.dialer != nil {
-		resolver = &net.Resolver{PreferGo: true, Dial: r.dialer}
-	}
-
-	ips, err := resolver.LookupNetIP(resolveCtx, "ip4", host)
+	ips, err := r.lookup.LookupNetIP(resolveCtx, "ip4", host)
 	if err != nil {
 		r.storeCache(host, nil, r.negativeTTL)
 		return nil, fmt.Errorf("dns lookup: %w", err)
