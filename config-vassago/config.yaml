@@ -65,7 +65,7 @@ subscriptions:
   snapshot_path: /config/.stable-snapshot.json # this instance's own /config mount (./config-vassago), so no collision with instance 1
   check:
     rounds: 2
-    timeout: 5000ms # per-attempt cap; must exceed max_avg_ms or a node at the gate fails on its own budget
+    timeout: 5000ms # per-attempt cap; must exceed max_avg_ms or a node at the gate fails on its own budget. It also sets the pre-check's dial budget (halved per attempt), which is why that budget is derived here and not a constant: a hardcoded 500ms was 8x tighter than this instance's max_avg_ms and deleted nodes it is tuned to keep
     max_fail: 1
     # Measured on this host, cold, one variable moved, all three on the SAME
     # 1807-node pool this list carried before curation: 800 -> 10 published,

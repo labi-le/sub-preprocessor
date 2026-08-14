@@ -224,9 +224,13 @@ subscriptions:
   # Changing it needs a restart, not a reload.
   snapshot_path: /config/.stable-snapshot.json
   check:
-    # URL-test (latency) prober params only; through-node filters live in `filters`.
+    # Probe params; through-node filters live in `filters`. Mostly URL-test
+    # params, with one exception: `timeout` ALSO sets the reachability
+    # pre-check's dial budget (timeout / precheckAttempts per attempt), so
+    # lowering it here widens the condemned set -- and condemnation is
+    # terminal plus dead-cached, not one failed round.
     rounds: 2
-    timeout: 1000ms # per-attempt cap; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
+    timeout: 1000ms # per-attempt cap for the URL test AND, halved, for each of the pre-check's two dial attempts; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1
     max_avg_ms: 800
     concurrency: 16 # in-flight URL tests. URLTest measures wall-clock (time.Since incl. dial+crypto+TLS), so probing many at once inflates measured latency and false-fails live nodes (test on 126 nodes: conc<=16 == serial baseline, conc=64 +107ms, conc=256 +166ms). conc=8 tried in prod for a day: no yield gain (avg kept 335 vs 361 at 16 -- 16 is already below the contention knee) but cycles grew 39->51min, eating the sub-1h margin (a reload no longer cancels a cycle, but a cycle longer than the interval still delays every publication). 16 is the sweet spot; do not lower
