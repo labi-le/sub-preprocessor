@@ -806,13 +806,19 @@ func TestExtractInlineNodes(t *testing.T) {
 
 // pageFetcher is a network-free fetchClient returning canned HTML per URL, or a
 // canned error for a URL in errs: the crawler must not report a page it read and
-// found nothing in the same way as one it never reached.
+// found nothing in the same way as one it never reached. A non-nil hits counts
+// requests per URL, for the tests whose subject is a fetch that must or must not
+// happen at all.
 type pageFetcher struct {
 	pages map[string]string
 	errs  map[string]error
+	hits  map[string]int
 }
 
 func (f pageFetcher) page(_ context.Context, u string) (string, error) {
+	if f.hits != nil {
+		f.hits[u]++
+	}
 	if err := f.errs[u]; err != nil {
 		return "", err
 	}
@@ -1387,6 +1393,319 @@ func TestRunOnceDarkCycleWritesNothing(t *testing.T) {
 	}
 }
 
+// retireFixture is a managed corpus wired to a stub classify: every URL in
+// nodeless answers 200 with no node (the panel placeholder finding 16 is about),
+// every other one serves a node, and the state file starts with the given
+// liveness streaks.
+type retireFixture struct {
+	c         *Crawler
+	priv      string
+	statePath string
+	log       *bytes.Buffer
+}
+
+func newRetireFixture(t *testing.T, urls []string, nodeless map[string]bool, seeded map[string]managedState) retireFixture {
+	t.Helper()
+
+	var pf privateFile
+	for _, u := range urls {
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+	}
+	dir := t.TempDir()
+	f := retireFixture{
+		priv:      filepath.Join(dir, "private.yaml"),
+		statePath: filepath.Join(dir, ".crawler-state.json"),
+		log:       &bytes.Buffer{},
+	}
+	if err := writePrivate(f.priv, pf); err != nil {
+		t.Fatalf("seed private.yaml: %v", err)
+	}
+	if err := saveState(f.statePath, state{Managed: seeded}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	f.c = &Crawler{
+		opts:   Options{PrivatePath: f.priv, StatePath: f.statePath, StateTTL: 30 * oneDay, Prune: true},
+		client: pageFetcher{},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if nodeless[string(u)] {
+				return classify.Result{}, nil
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(f.log),
+	}
+	return f
+}
+
+func (f retireFixture) kept(t *testing.T) map[string]bool {
+	t.Helper()
+
+	pf, err := loadPrivate(f.priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	out := make(map[string]bool, len(pf.Subscriptions.Sources))
+	for _, s := range pf.Subscriptions.Sources {
+		out[s.URL] = true
+	}
+	return out
+}
+
+func (f retireFixture) streaks(t *testing.T) map[string]managedState {
+	t.Helper()
+
+	return loadState(f.statePath, zerolog.Nop()).Managed
+}
+
+// TestRunOnceRetiresASourceNotLiveForTheWholeWindow is the acceptance contract for
+// finding 16's accrual leak: a harvested 24h-rotating link whose body becomes the
+// panel's placeholder classifies nodeless-2xx, which is undetermined and so kept
+// forever — at two classify fetches per cycle, one as a rediscovered candidate and
+// one in recheckManaged. The staleRetireCycles-th consecutive not-live cycle, once
+// staleRetireAfter of wall clock has also passed, is what finally retires it.
+func TestRunOnceRetiresASourceNotLiveForTheWholeWindow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlStale = "https://rotating.example/saber"
+		urlLive  = "https://live.example/sub"
+	)
+	now := time.Now()
+	f := newRetireFixture(t,
+		[]string{urlStale, urlLive},
+		map[string]bool{urlStale: true},
+		map[string]managedState{urlStale: {
+			LastLiveAt:    now.Add(-staleRetireAfter - 2*time.Hour),
+			NotLiveSince:  now.Add(-staleRetireAfter - time.Hour),
+			NotLiveCycles: staleRetireCycles - 1,
+		}})
+
+	f.c.RunOnce(context.Background())
+
+	kept := f.kept(t)
+	if kept[urlStale] {
+		t.Errorf("a source not live for %d cycles and %s must be retired, got %v", staleRetireCycles, staleRetireAfter, kept)
+	}
+	if !kept[urlLive] {
+		t.Error("the source still serving nodes must survive")
+	}
+	if !strings.Contains(f.log.String(), "was live, then not live") {
+		t.Errorf("a source with a recorded live answer must be logged as such, got %q", f.log.String())
+	}
+}
+
+// TestRunOnceKeepsASourceShortOfTheRetirementWindow pins both halves of the
+// window, because either alone is defeatable: wall clock alone lets a crawler
+// resuming after days of downtime retire on a single bad answer, and a cycle count
+// alone is burned through in minutes by the CRAWL_HTTP trigger running cycles back
+// to back.
+func TestRunOnceKeepsASourceShortOfTheRetirementWindow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlStale = "https://rotating.example/saber"
+		urlLive  = "https://live.example/sub"
+	)
+	now := time.Now()
+	for name, seeded := range map[string]managedState{
+		"one cycle short": {
+			NotLiveSince:  now.Add(-staleRetireAfter - time.Hour),
+			NotLiveCycles: staleRetireCycles - 2,
+		},
+		"a day short": {
+			NotLiveSince:  now.Add(-time.Hour),
+			NotLiveCycles: staleRetireCycles,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newRetireFixture(t,
+				[]string{urlStale, urlLive},
+				map[string]bool{urlStale: true},
+				map[string]managedState{urlStale: seeded})
+
+			f.c.RunOnce(context.Background())
+
+			if !f.kept(t)[urlStale] {
+				t.Errorf("%s of the window, the source must be kept: %+v", name, f.streaks(t)[urlStale])
+			}
+		})
+	}
+}
+
+// TestRunOnceLiveAnswerResetsTheRetirementClock: the window measures a CONTINUOUS
+// not-live run, so one live answer clears both the count and the anchor. Without
+// the reset a source that goes quiet for a day, comes back, and then has one bad
+// cycle is retired on the strength of that old anchor.
+func TestRunOnceLiveAnswerResetsTheRetirementClock(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlTarget = "https://recovering.example/sub"
+		urlLive   = "https://live.example/sub"
+	)
+	now := time.Now()
+	nodeless := map[string]bool{}
+	f := newRetireFixture(t,
+		[]string{urlTarget, urlLive},
+		nodeless,
+		map[string]managedState{urlTarget: {
+			NotLiveSince:  now.Add(-staleRetireAfter - time.Hour),
+			NotLiveCycles: staleRetireCycles - 1,
+		}})
+
+	f.c.RunOnce(context.Background())
+
+	after := f.streaks(t)[urlTarget]
+	if !after.NotLiveSince.IsZero() || after.NotLiveCycles != 0 {
+		t.Fatalf("a live answer must clear the streak, got %+v", after)
+	}
+	if after.LastLiveAt.IsZero() {
+		t.Error("a live answer must be recorded, so the retirement log can tell it from a source with no history")
+	}
+
+	nodeless[urlTarget] = true
+	f.c.RunOnce(context.Background())
+
+	if !f.kept(t)[urlTarget] {
+		t.Error("one not-live cycle after a live one must not retire: the clock restarted")
+	}
+	if got := f.streaks(t)[urlTarget].NotLiveCycles; got != 1 {
+		t.Errorf("not_live_cycles = %d after the reset, want 1", got)
+	}
+}
+
+// TestRunOnceGrandfathersManagedSourcesWithNoStreakRecord is the corpus guard. The
+// state file has never held per-URL liveness, so on the first cycle after this
+// ships every managed source (261 on the live instance) has no record. Reading a
+// missing record as "stale since the zero time" condemns all of them at once, and
+// the bulk-prune floor does not save the corpus: it refuses the proposal once, then
+// honours the same proposal past bulkPruneConfirmAfter — and the corpus is
+// unrecoverable. A streak must therefore be anchored at the observation that opens
+// it, so the first not-live cycle only starts the clock.
+func TestRunOnceGrandfathersManagedSourcesWithNoStreakRecord(t *testing.T) {
+	t.Parallel()
+
+	const total = 12
+	urls := make([]string, 0, total)
+	nodeless := map[string]bool{}
+	for i := range total {
+		u := fmt.Sprintf("https://g%02d.example/sub", i)
+		urls = append(urls, u)
+		if i > 0 { // urls[0] keeps serving nodes, so no cycle here is a dark one
+			nodeless[u] = true
+		}
+	}
+	f := newRetireFixture(t, urls, nodeless, nil)
+
+	for range staleRetireCycles + 2 {
+		f.c.RunOnce(context.Background())
+	}
+
+	if kept := f.kept(t); len(kept) != total {
+		t.Fatalf("corpus is %d of %d after %d cycles; a missing record was read as ancient staleness",
+			len(kept), total, staleRetireCycles+2)
+	}
+	if strings.Contains(f.log.String(), "condemning managed source") {
+		t.Errorf("no source may be condemned on its first cycles of history, got %q", f.log.String())
+	}
+	for u, m := range f.streaks(t) {
+		if nodeless[u] && m.NotLiveSince.IsZero() {
+			t.Errorf("%s: not_live_since is zero, which reads as stale since the zero time", u)
+		}
+	}
+}
+
+// TestRunOnceStaleRetirementObeysTheBulkPruneFloor: retirement is a deletion like
+// any other, so a cycle whose streaks run out on a third of the corpus at once
+// still has to be confirmed by a later cycle.
+func TestRunOnceStaleRetirementObeysTheBulkPruneFloor(t *testing.T) {
+	t.Parallel()
+
+	const (
+		total  = 40
+		doomed = 15
+	)
+	now := time.Now()
+	urls := make([]string, 0, total)
+	nodeless := map[string]bool{}
+	seeded := map[string]managedState{}
+	for i := range total {
+		u := fmt.Sprintf("https://b%02d.example/sub", i)
+		urls = append(urls, u)
+		if i < doomed {
+			nodeless[u] = true
+			seeded[u] = managedState{
+				NotLiveSince:  now.Add(-staleRetireAfter - time.Hour),
+				NotLiveCycles: staleRetireCycles - 1,
+			}
+		}
+	}
+	f := newRetireFixture(t, urls, nodeless, seeded)
+
+	f.c.RunOnce(context.Background())
+
+	if kept := f.kept(t); len(kept) != total {
+		t.Fatalf("corpus is %d of %d; %d retirements at once must be refused pending confirmation", len(kept), total, doomed)
+	}
+	if !strings.Contains(f.log.String(), "bulk prune floor tripped") {
+		t.Errorf("the refusal must be logged at error level, got %q", f.log.String())
+	}
+	if got := len(loadState(f.statePath, zerolog.Nop()).BulkPruneURLs); got != doomed {
+		t.Errorf("recorded proposal holds %d URLs, want the %d retirements", got, doomed)
+	}
+}
+
+// TestRunOnceDarkCycleAdvancesNoStreak: a cycle that learned nothing is a
+// crawler-side fault (egress down, DNS interception, a proxy answering every
+// request itself), so its not-live answers are not evidence about any source and
+// must not push a streak towards retirement — otherwise a night of failed cycles
+// spends the whole window on faults, and the first cycle that recovers enough to
+// prune deletes everything that has not come back yet.
+func TestRunOnceDarkCycleAdvancesNoStreak(t *testing.T) {
+	t.Parallel()
+
+	const url = "https://quiet.example/sub"
+	now := time.Now()
+	seeded := managedState{
+		NotLiveSince:  now.Add(-staleRetireAfter - time.Hour),
+		NotLiveCycles: staleRetireCycles - 1,
+	}
+	f := newRetireFixture(t, []string{url}, map[string]bool{url: true}, map[string]managedState{url: seeded})
+
+	f.c.RunOnce(context.Background())
+
+	if !f.kept(t)[url] {
+		t.Error("a dark cycle must prune nothing")
+	}
+	if got := f.streaks(t)[url].NotLiveCycles; got != seeded.NotLiveCycles {
+		t.Errorf("not_live_cycles = %d, want the seeded %d: a dark cycle is not evidence", got, seeded.NotLiveCycles)
+	}
+}
+
+// TestAgeManagedDropsRecordsTheCorpusNoLongerHolds: private.yaml is the authority
+// on which sources exist, so the streak map is bounded by it — a retired, blocked
+// or hand-deleted URL leaves no record behind to grow the state file forever.
+func TestAgeManagedDropsRecordsTheCorpusNoLongerHolds(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	st := state{Managed: map[string]managedState{
+		"https://gone.example/sub": {NotLiveCycles: 3, NotLiveSince: now.Add(-time.Hour)},
+		"https://here.example/sub": {NotLiveCycles: 3, NotLiveSince: now.Add(-time.Hour)},
+	}}
+
+	st.ageManaged(map[string]bool{"https://here.example/sub": true}, nil, now)
+
+	if _, ok := st.Managed["https://gone.example/sub"]; ok {
+		t.Errorf("record for a URL outside the corpus survived: %+v", st.Managed)
+	}
+	if got := st.Managed["https://here.example/sub"].NotLiveCycles; got != 4 {
+		t.Errorf("not_live_cycles = %d, want 4", got)
+	}
+}
+
 // TestConfirmBulkPruneRequiresLaterCycle: the first proposal to delete a large
 // slice of the corpus is refused and remembered, only a cycle at least
 // bulkPruneConfirmAfter later carries it out, and doing so consumes the record so
@@ -1533,6 +1852,29 @@ func TestStatePruneCapsProductive(t *testing.T) {
 	last := fmt.Sprintf("chan%04d", maxProductive+extra-1)
 	if _, ok := st.Productive[last]; ok {
 		t.Errorf("%s is the least recently productive channel; it must be dropped", last)
+	}
+}
+
+// TestBuildSeedsMergesEntriesNamingOneChat: a chat is one crawl target, so the
+// three seed sources cannot contribute competing entries for it. Which of them
+// won used to decide whether the chat was read through its topic or through the
+// t.me/s/ listing a group answers with no message — off the productive memory's
+// map order, so a forum seed died on an unpredictable subset of cycles.
+func TestBuildSeedsMergesEntriesNamingOneChat(t *testing.T) {
+	t.Parallel()
+
+	c := &Crawler{opts: Options{Channels: []string{"forumchat", "elsewhere"}}, logger: zerolog.Nop()}
+	st := state{Productive: map[string]channelState{"forumchat/1310": {}, "remembered": {}}}
+
+	seeds := c.buildSeeds(&st)
+	if len(seeds) != 3 {
+		t.Fatalf("seeds = %+v, want 3 chats", seeds)
+	}
+	if got := seeds["forumchat"]; got.topic != "1310" || !got.configured {
+		t.Errorf("forumchat = %+v, want the remembered topic kept and the configured budget", got)
+	}
+	if got := seeds["remembered"]; got.configured {
+		t.Errorf("remembered = %+v, want the shallower discovered budget", got)
 	}
 }
 
@@ -1846,6 +2188,150 @@ func assertTopicLog(t *testing.T, logged, wantLog, wantNotLog string) {
 	}
 	if !strings.Contains(logged, `"channel":"forumchat/1310"`) {
 		t.Errorf("log %s must name the seed as the operator wrote it", logged)
+	}
+}
+
+// TestScrapeChannelPermalinkSeedWalksTheListing pins the other half of the seed
+// form channels.yaml and routes.md advertise: a plain channel permalink,
+// t.me/<chan>/<msgid>, is byte-for-byte the shape of <chat>/<topic>, so the
+// topic id parsed out of one must cost the seed nothing. The discussion embed
+// cannot be the probe that separates them — measured 2026-08-14, a channel
+// post's embed answers 200 with ONE message wrap, so reading it first passes and
+// silently replaces a 20-messages-per-page listing walk with a single message.
+// The /s/ answer is the probe: 20 wraps for a channel, none for a group.
+func TestScrapeChannelPermalinkSeedWalksTheListing(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entry    = "https://t.me/dailyv2ry/1234"
+		topicURL = "https://t.me/dailyv2ry/1234" + topicQuery
+		listURL  = "https://t.me/s/dailyv2ry"
+	)
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		client: pageFetcher{
+			hits: hits,
+			pages: map[string]string{
+				topicURL:                 `<div class="tgme_widget_message_wrap">the permalinked post, alone</div>`,
+				listURL:                  `<div class="tgme_widget_message_wrap"></div><div data-post="dailyv2ry/3631"></div>`,
+				listURL + "?before=3631": `<div class="tgme_widget_message_wrap"></div>`,
+			},
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	pages, lost := c.scrapeChannel(context.Background(), parseSeed(entry), 6)
+	logged := logBuf.String()
+	if len(pages) != 2 {
+		t.Fatalf("pages = %d, want the 2 the listing walk yields (log: %s)", len(pages), logged)
+	}
+	if got := hits[topicURL]; got != 0 {
+		t.Errorf("the discussion embed was fetched %d time(s); a channel with a listing must never be read through it", got)
+	}
+	if got := hits[listURL]; got != 1 {
+		t.Errorf("t.me/s/dailyv2ry requested %d times, want 1", got)
+	}
+	if !lost {
+		t.Error("cursorLost = false; the last listing page carried no cursor with budget left, which is a real loss and this seed's vote is as good as any channel's")
+	}
+	if logged != "" {
+		t.Errorf("a seed read through its listing must stay quiet, logged: %s", logged)
+	}
+}
+
+// TestScrapeChannelGroupSeedFallsBackToItsTopic pins the inversion from the
+// other side, the case the whole feature exists for: a group answers t.me/s/
+// with 200 and zero message wraps (measured 2026-08-14 on the shipped seed's
+// chat), which is not a page to harvest and not an error to log. That empty
+// listing must not be counted as a page, must not vote in cursorStats — it has
+// no cursor either, so a group seed would otherwise report a 100% loss every
+// cycle — and the topic has to be read instead.
+func TestScrapeChannelGroupSeedFallsBackToItsTopic(t *testing.T) {
+	t.Parallel()
+
+	const (
+		topicURL = "https://t.me/forumchat/1310" + topicQuery
+		listURL  = "https://t.me/s/forumchat"
+		subURL   = "https://sub.example/today"
+	)
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		client: pageFetcher{
+			hits: hits,
+			pages: map[string]string{
+				listURL:  `<html><body>a group has a page, just no message on it</body></html>`,
+				topicURL: `<div class="tgme_widget_message_wrap"><a href="` + subURL + `">x</a></div>`,
+			},
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	pages, lost := c.scrapeChannel(context.Background(), parseSeed("forumchat/1310"), 6)
+	logged := logBuf.String()
+	if len(pages) != 1 || !strings.Contains(pages[0], subURL) {
+		t.Fatalf("pages = %v, want exactly the topic listing (log: %s)", pages, logged)
+	}
+	if got := hits[listURL]; got != 1 {
+		t.Errorf("t.me/s/forumchat requested %d times, want the 1 probe", got)
+	}
+	if got := hits[topicURL]; got != 1 {
+		t.Errorf("topic listing requested %d times, want 1", got)
+	}
+	if lost {
+		t.Error("cursorLost = true; a group's message-less listing is not a channel that lost its cursor")
+	}
+	if logged != "" {
+		t.Errorf("a group seed read through its topic is routine, logged: %s", logged)
+	}
+}
+
+// TestScanCrawlsAChatOnceWhateverItsSeedShape pins the crawl identity: the slug.
+// A chat seeded with a forum topic and reposted bare by another channel is one
+// target, so t.me/s/<chat> is fetched exactly once — the probe that tells a
+// group from a channel. The second, bare visit is the damaging one: it keeps the
+// group's message-less listing as a page, and a page with no cursor and budget
+// left is a cursor loss, so a chat already read through its topic would report
+// a 100% loss into cursorStats. A visit never made is a vote never cast.
+func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
+	t.Parallel()
+
+	const (
+		topicURL = "https://t.me/forumchat/1310" + topicQuery
+		listURL  = "https://t.me/s/forumchat"
+		otherURL = "https://t.me/s/otherchan"
+		subURL   = "https://sub.example/x"
+	)
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{Channels: []string{"forumchat/1310", "otherchan"}, Pages: 6, MaxDepth: 2},
+		client: pageFetcher{
+			hits: hits,
+			pages: map[string]string{
+				topicURL: `<div class="tgme_widget_message_wrap"><a href="` + subURL + `">today</a></div>`,
+				otherURL: `<div class="tgme_widget_message_wrap"><a href="https://t.me/forumchat/9">repost</a></div>`,
+				listURL:  `<html><body>a group listing carries no message and no cursor</body></html>`,
+			},
+		},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	st := state{Productive: map[string]channelState{}}
+
+	live, _ := c.scan(context.Background(), &st)
+	logged := logBuf.String()
+	if got := hits[listURL]; got != 1 {
+		t.Errorf("t.me/s/forumchat fetched %d time(s), want the 1 group probe; a second visit would vote a false cursor loss", got)
+	}
+	if got := strings.Count(logged, `"channel":"forumchat`); got != 1 {
+		t.Errorf("forumchat scanned %d times, want 1 (log: %s)", got, logged)
+	}
+	if live[subURL] != "forumchat" {
+		t.Errorf("live = %v, want %s attributed to the bare chat", live, subURL)
 	}
 }
 

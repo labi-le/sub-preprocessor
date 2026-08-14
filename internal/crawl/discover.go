@@ -1,6 +1,7 @@
 package crawl
 
 import (
+	"cmp"
 	"context"
 	"html"
 	"regexp"
@@ -78,7 +79,6 @@ type scanNode struct {
 func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []string) {
 	live := map[string]string{}
 	var inline []string
-	visited := map[chanRef]bool{}
 	discovered := 0
 	var cursors cursorStats
 	rej := newRejects(c.logger)
@@ -93,15 +93,20 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 	if maxDiscovered <= 0 {
 		maxDiscovered = defaultMaxDiscovered
 	}
+	// A chat's identity is its slug alone: a chat seeded with a forum topic and
+	// reposted without one is one target, and scraping it twice would also feed
+	// cursorStats a page-cursor loss the group's message-less t.me/s/ listing
+	// cannot help producing.
+	visited := make(map[string]bool, len(seeds))
 	queue := make([]scanNode, 0, len(seeds))
-	for ref, configured := range seeds {
-		queue = append(queue, scanNode{ref: ref, configured: configured})
+	for slug, s := range seeds {
+		queue = append(queue, scanNode{ref: chanRef{slug: slug, topic: s.topic}, configured: s.configured})
 	}
 
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		if n.ref.slug == "" || visited[n.ref] {
+		if visited[n.ref.slug] {
 			continue
 		}
 		if n.depth > 0 {
@@ -110,12 +115,11 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 			}
 			discovered++
 		}
-		visited[n.ref] = true
+		visited[n.ref.slug] = true
 
 		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors, rej) {
-			ref := chanRef{slug: ch}
-			if !visited[ref] {
-				queue = append(queue, scanNode{ref: ref, depth: n.depth + 1})
+			if !visited[ch] {
+				queue = append(queue, scanNode{ref: chanRef{slug: ch}, depth: n.depth + 1})
 			}
 		}
 	}
@@ -124,29 +128,44 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 	return live, inline
 }
 
-// buildSeeds collects the depth-0 seed channels mapped to whether the operator
-// configured them (CRAWL_CHANNELS or the channels file). Remembered productive
-// channels are seeds too — always expanded — but not configured: they pay the
-// shallower discovered page budget, because they accumulate across cycles and
-// paying full Pages for each is what makes a cycle cost more than the last.
-func (c *Crawler) buildSeeds(st *state) map[chanRef]bool {
-	seeds := map[chanRef]bool{}
-	addSeed := func(s string) {
-		if ref := parseSeed(s); ref.slug != "" {
-			seeds[ref] = true
+// seedSpec is a depth-0 crawl target: the forum topic to read the chat through if a
+// seed entry named one, and whether the operator configured it (which buys the
+// full page budget; a remembered productive channel pays the shallower
+// discovered budget, because those accumulate across cycles and paying full
+// Pages for each is what makes a cycle cost more than the last).
+type seedSpec struct {
+	topic      string
+	configured bool
+}
+
+// buildSeeds collects the depth-0 seeds by slug. Several entries can name one
+// chat — CRAWL_CHANNELS, the channels file and the productive memory are merged
+// — and a chat is one crawl target, so the fields merge rather than the entries
+// competing: configured wins, and the first topic named wins over none, because
+// a group's t.me/s/ listing carries no message at all while a topic that turns
+// out to be a permalink falls back to that listing.
+func (c *Crawler) buildSeeds(st *state) map[string]seedSpec {
+	file := loadChannels(c.opts.ChannelsPath, c.logger).Channels
+	seeds := make(map[string]seedSpec, len(c.opts.Channels)+len(file)+len(st.Productive))
+	addSeed := func(s string, configured bool) {
+		ref := parseSeed(s)
+		if ref.slug == "" {
+			return
+		}
+		prev := seeds[ref.slug]
+		seeds[ref.slug] = seedSpec{
+			topic:      cmp.Or(prev.topic, ref.topic),
+			configured: prev.configured || configured,
 		}
 	}
 	for _, s := range c.opts.Channels {
-		addSeed(s)
+		addSeed(s, true)
 	}
-	for _, s := range loadChannels(c.opts.ChannelsPath, c.logger).Channels {
-		addSeed(s)
+	for _, s := range file {
+		addSeed(s, true)
 	}
 	for _, s := range st.seeds() {
-		ref := parseSeed(s)
-		if _, ok := seeds[ref]; !ok && ref.slug != "" {
-			seeds[ref] = false
-		}
+		addSeed(s, false)
 	}
 	return seeds
 }
@@ -281,8 +300,17 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
 // channel, walking backward via the ?before= cursor. Fetches are sequential,
-// which naturally rate-limits the crawler against t.me. A ref carrying a forum
-// topic takes the single-page topic shape instead; t.me/s/ has nothing for it.
+// which naturally rate-limits the crawler against t.me.
+//
+// The listing walk comes first even for a ref carrying a topic, because
+// <chan>/<msgid> and <chat>/<topic> are the same shape and only the /s/ answer
+// separates them: measured 2026-08-14, t.me/s/<channel> returns 20 message
+// wraps and 20 cursors per page while t.me/s/<group> returns none, and a
+// channel post's discussion embed returns one wrap — so the topic shape cannot
+// be the probe, it succeeds for both. A topic-carrying ref whose listing
+// carries no message is the group case: that empty listing and its cursor
+// outcome are dropped and the topic is read instead, which costs a genuine
+// forum seed one wasted fetch per cycle and a channel seed nothing.
 //
 // out is newest-first on every return path, and harvestPages takes its inline
 // nodes from out[0] alone: reordering here silently ages that harvest.
@@ -292,18 +320,25 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 // indistinguishable from a short channel per-channel but diagnostic in
 // aggregate; see cursorStats.
 func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
-	if ref.topic != "" {
-		return c.scrapeTopic(ctx, ref), false
+	out, cursorLost = c.walkListing(ctx, ref.slug, pages)
+	if ref.topic == "" || (len(out) > 0 && strings.Contains(out[0], messageWrap)) {
+		return out, cursorLost
 	}
+	return c.scrapeTopic(ctx, ref), false
+}
+
+// walkListing pages backward through a channel's t.me/s listing; see
+// scrapeChannel for what cursorLost means.
+func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out []string, cursorLost bool) {
 	before := ""
 	for range pages {
-		u := "https://t.me/s/" + ref.slug
+		u := "https://t.me/s/" + slug
 		if before != "" {
 			u += "?before=" + before
 		}
 		page, err := c.client.page(ctx, u)
 		if err != nil {
-			c.logger.Warn().Err(err).Str("channel", ref.slug).Msg("channel page fetch failed")
+			c.logger.Warn().Err(err).Str("channel", slug).Msg("channel page fetch failed")
 			return out, false
 		}
 		if page == "" {
@@ -331,17 +366,20 @@ func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (ou
 const topicQuery = "?embed=1&discussion=1&comments_limit=50"
 
 // messageWrap is t.me's per-message container class in both the /s/ listing and
-// the discussion widget.
+// the discussion widget. Its presence in a /s/ page is also what separates a
+// channel from a group, and so which of the two shapes a seed is read through.
 const messageWrap = "tgme_widget_message_wrap"
 
-// scrapeTopic fetches a forum topic's newest messages as one page. The
-// discussion widget carries no ?before= cursor, so a topic is always one page
-// and never enters cursorStats — a false cursor loss per forum seed would drag
-// the fleet-wide ratio toward reportCursors' markup alarm.
+// scrapeTopic fetches a forum topic's newest messages as one page, which is the
+// only way to reach a group's messages at all. The discussion widget carries no
+// ?before= cursor, so a topic is always one page and never enters cursorStats —
+// a false cursor loss per forum seed would drag the fleet-wide ratio toward
+// reportCursors' markup alarm.
 //
-// A body with no message wrap is reachable but message-less, which is what a
-// seed that is not a forum topic answers: logged apart from a failed fetch so
-// a topic yielding nothing is never read as one that was never reachable.
+// Getting here means the /s/ listing carried no message either, so a reachable
+// body with no message wrap means this seed yields nothing at all: logged apart
+// from a failed fetch, so a topic that went empty is never read as one that was
+// never reachable.
 func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
 	u := "https://t.me/" + ref.slug + "/" + ref.topic + topicQuery
 	page, err := c.client.page(ctx, u)
@@ -351,7 +389,7 @@ func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
 	}
 	if !strings.Contains(page, messageWrap) {
 		c.logger.Warn().Str("channel", ref.String()).Int("bytes", len(page)).
-			Msg("topic listing carried no message; seed is probably not a forum topic")
+			Msg("topic listing carried no message; the seed's topic is gone or was never one")
 		return nil
 	}
 	return []string{page}
@@ -369,9 +407,10 @@ func (c *Crawler) pagesFor(n scanNode) int {
 
 // extractChannels returns the distinct channel slugs referenced across pages,
 // excluding the channel itself, reserved paths, and bot deep links (?start=).
-// Discoveries are bare slugs by design: nothing in a t.me/<chat>/<n> link tells
-// a forum topic from a message permalink, so a topic is only ever crawled
-// because an operator seeded it.
+// Discoveries are bare because identity here is the slug: the three-segment
+// t.me/<chat>/<topic>/<msg> form does say which topic it belongs to, but a
+// reposted link names one topic of a chat arbitrarily, and which topic of a
+// group is worth reading is a judgement only the operator's seed carries.
 func extractChannels(pages []string, self string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -392,9 +431,12 @@ func extractChannels(pages []string, self string) []string {
 }
 
 // parseSeed turns a seed entry (bare slug, @handle, "<slug>/<topic>", or a t.me
-// URL of either) into a chanRef. A numeric second segment is the forum topic;
-// a permalink's trailing message id, and any non-numeric segment, is dropped.
-// A reserved path is no channel, so it yields an empty ref the caller skips.
+// URL of either) into a chanRef. A numeric second segment is kept as a forum
+// topic although a channel permalink is the same shape: the ambiguity is not
+// resolvable here and scrapeChannel settles it on the /s/ answer instead, so a
+// topic costs a channel seed nothing. A third segment (a permalink's message
+// id) and any non-numeric segment are dropped, and a reserved path yields an
+// empty ref the caller skips.
 func parseSeed(s string) chanRef {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.TrimPrefix(s, "@")
