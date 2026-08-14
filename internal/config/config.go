@@ -537,9 +537,11 @@ type SubscriptionsConfig struct {
 	SnapshotPath string `yaml:"snapshot_path"`
 }
 
-// CheckConfig holds the URL-test (latency) prober params only. The through-node
-// filters (gemini/claude/chatgpt/tidal/bandwidth) and their params
-// live in the top-level filters list, not here.
+// CheckConfig holds the probe params. The through-node filters
+// (gemini/claude/chatgpt/tidal/bandwidth) and their params live in the
+// top-level filters list, not here. Mostly URL-test params, with one
+// exception: Timeout also sets the reachability pre-check's dial budget
+// (halved per attempt), so lowering it widens the condemned set.
 type CheckConfig struct {
 	Rounds         int           `yaml:"rounds"`
 	Timeout        time.Duration `yaml:"timeout"`

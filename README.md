@@ -737,4 +737,6 @@ docker compose up -d --build   # or: make dc-up
 ## Package map
 
 See [`routes.md`](./routes.md) for a per-package reference (types, functions,
-dependency graph). Agent-facing conventions live in [`AGENTS.md`](./AGENTS.md).
+dependency graph). Agent-facing conventions live in [`AGENTS.md`](./AGENTS.md),
+which holds only what applies to every task and points at the on-demand guides in
+[`docs/guides/`](./docs/guides/).
