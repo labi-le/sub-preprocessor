@@ -61,7 +61,7 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
-          base: main
+          base: master
           commit-message: "chore: update flake.nix to v${{ env.VERSION }}"
           title: "chore: update flake.nix to v${{ env.VERSION }}"
           body: |
