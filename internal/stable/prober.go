@@ -76,8 +76,12 @@ func NewMihomoProber(
 }
 
 type delayAcc struct {
-	succ  int
-	sum   int
+	// int32, not int: one of these per parsed proxy lives in a single slice for
+	// the whole probe. succ is bounded by check.rounds and sum by rounds x a
+	// uint16 delay, and the element is 12 bytes where two ints beside a
+	// ProbeStage pad to 24 in every field order.
+	succ  int32
+	sum   int32
 	stage ProbeStage
 }
 
@@ -102,7 +106,7 @@ func betterProbe(a, b ProbeResult) bool {
 // that reached the prober, failures included: Successes == 0 is what marks a
 // node dead, never absence.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
-	proxies, err := m.parseProxies(payload)
+	proxies, tcpServer, err := m.parseProxies(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -113,14 +117,16 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	}()
 
 	opLog := log.Op(m.logger, "stable.Probe")
-	live, condemned := m.filterReachable(ctx, opLog, proxies)
+	live, condemned := m.filterReachable(ctx, opLog, proxies, tcpServer)
 	prog := newProgress(opLog, "url-test progress", m.cfg.Rounds*len(live))
 
-	accs := make(map[string]*delayAcc, len(proxies))
+	// Indexed by proxy position, so a node's state is one slice element rather
+	// than a map entry plus its own heap allocation.
+	accs := make([]delayAcc, len(proxies))
 	// Seeded before any round starts, which is the only time accs is safe to
 	// touch without mu.
-	for _, px := range condemned {
-		accs[px.Name()] = &delayAcc{stage: StageCondemned}
+	for _, i := range condemned {
+		accs[i].stage = StageCondemned
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -131,7 +137,7 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	sem := fanoutSem(m.cfg.Concurrency)
 	for range m.cfg.Rounds {
 		wg.Go(func() {
-			m.runRound(ctx, opLog, prog, live, sem, &mu, accs)
+			m.runRound(ctx, opLog, prog, proxies, live, sem, &mu, accs)
 		})
 	}
 	wg.Wait()
@@ -153,18 +159,15 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 // together would let Successes exceed check.rounds and walk straight through
 // SelectSurvivors' maxFail gate.
 //
-// Iterating proxies rather than accs is what makes a tie resolve in payload
-// order instead of by map-iteration chance.
-func foldProbeResults(proxies []mihomo.Proxy, accs map[string]*delayAcc) map[string]ProbeResult {
-	res := make(map[string]ProbeResult, len(accs))
-	for _, px := range proxies {
-		a := accs[px.Name()]
-		if a == nil {
-			continue
-		}
-		r := ProbeResult{Successes: a.succ, Stage: a.stage}
+// Payload order is load-bearing: it is what resolves a tie between two ports
+// deterministically.
+func foldProbeResults(proxies []mihomo.Proxy, accs []delayAcc) map[string]ProbeResult {
+	res := make(map[string]ProbeResult, len(proxies))
+	for i, px := range proxies {
+		a := &accs[i]
+		r := ProbeResult{Successes: int(a.succ), Stage: a.stage}
 		if a.succ > 0 {
-			r.MeanMs = a.sum / a.succ
+			r.MeanMs = int(a.sum / a.succ)
 		}
 		label := entryLabel(px)
 		if prev, ok := res[label]; !ok || betterProbe(r, prev) {
@@ -179,16 +182,24 @@ func foldProbeResults(proxies []mihomo.Proxy, accs map[string]*delayAcc) map[str
 // parse the survivor set once and share the proxies across the node-filter
 // chain. The caller owns closing every returned proxy exactly once.
 func (m *MihomoProber) ParseProxies(payload []byte) ([]mihomo.Proxy, error) {
-	return m.parseProxies(payload)
+	proxies, _, err := m.parseProxies(payload)
+
+	return proxies, err
 }
 
-func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, error) {
+// parseProxies returns the parsed proxies and, index-aligned with them, whether
+// each one's server is reachable by a plain TCP connect to Addr(). That verdict
+// has to be taken here: adapter.ParseProxy consumes the raw mapping and the
+// mihomo.Proxy it hands back exposes no transport, so below this loop the
+// QUIC-only vless shape is indistinguishable from the TCP one.
+func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, []bool, error) {
 	mappings, err := convert.ConvertsV2Ray(payload)
 	if err != nil {
-		return nil, fmt.Errorf("convert payload: %w", err)
+		return nil, nil, fmt.Errorf("convert payload: %w", err)
 	}
 
 	proxies := make([]mihomo.Proxy, 0, len(mappings))
+	tcpServer := make([]bool, 0, len(mappings))
 	parseFailures := 0
 	for _, mapping := range mappings {
 		px, parseErr := adapter.ParseProxy(mapping)
@@ -198,63 +209,136 @@ func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, error) {
 			continue
 		}
 		proxies = append(proxies, px)
+		tcpServer = append(tcpServer, dialsServerOverTCP(px.Type(), mapping))
 	}
 	if parseFailures > 0 {
 		m.logger.Warn().Int("count", parseFailures).Msg("skipped unparsable proxies")
 	}
 	if len(proxies) == 0 {
-		return nil, errors.New("no parsable proxies in payload")
+		return nil, nil, errors.New("no parsable proxies in payload")
 	}
 
-	return proxies, nil
+	return proxies, tcpServer, nil
 }
 
 // A node that cannot answer still burns check.timeout on every round, and the
-// overwhelming majority of probed nodes fail, so one TCP connect ahead of the
-// URL test is the cheapest way to stop paying that twice.
+// overwhelming majority of probed nodes fail, so pre-checking the TCP connect
+// is the cheapest way to stop paying that twice.
 const (
-	precheckTimeout = 500 * time.Millisecond
-	// Retried once, because a single dropped SYN must not cost a live node its
-	// dead-cache TTL.
+	// Retried once: neither a single dropped SYN nor one DNS hiccup may cost a
+	// live node its dead-cache TTL, and each attempt resolves again.
 	precheckAttempts = 2
-	// Deliberately not check.concurrency: that 16 is pinned because URLTest
-	// reports the wall-clock latency max_avg_ms gates on, and this yields one
-	// bit no gate reads.
+	// Deliberately not check.concurrency, which is per-instance and pinned per
+	// instance by its own latency measurement — config ships 16 against
+	// max_avg_ms 800, config-vassago 32 against 4000 — because URLTest reports
+	// the wall clock max_avg_ms gates on. This dial yields no bit any gate
+	// reads, so it is bounded on its own.
 	precheckConcurrency = 128
+	// Above this share of refused endpoints the pre-check is judged unreliable
+	// rather than believed. A healthy egress measured 58.9% condemned on the
+	// raw merged pool, while the faults this guards — a local egress outage,
+	// DNS down, a degenerate check.timeout — refuse essentially EVERY
+	// endpoint, so their signature is ~100% and the 36-point margin costs no
+	// real verdict.
+	precheckBreakerPercent = 95
+	// A share over a handful of endpoints carries no signal; production cycles
+	// dial thousands.
+	precheckBreakerMin = 100
 )
 
-// dialsServerOverTCP reports whether mihomo reaches this adapter's server with
-// a plain TCP connect to Addr() — verified against mihomo v1.19.27, where each
-// listed adapter dials dialer.DialContext(ctx, "tcp", Base.addr) and Addr()
-// returns that same addr (vless.go:305 and :452 for the pair).
+// precheckDialBudget is the per-attempt dial deadline. Derived, never a
+// constant: 500ms was 8x tighter than config-vassago's max_avg_ms of 4000, an
+// instance deliberately tuned to admit slow nodes, so it deleted what that
+// instance exists to keep.
 //
-// The default is fail-open, not a guess: hysteria2, tuic and mieru reach their
-// server with ListenPacket over UDP, so a TCP verdict would delete those
-// protocols wholesale. An unknown type must lose the speedup, never the node.
-func dialsServerOverTCP(t mihomo.AdapterType) bool {
+// All precheckAttempts attempts share exactly ONE url-test round's budget,
+// which is what makes the verdict safe by construction: a node that cannot
+// finish a bare TCP handshake inside check.timeout cannot finish TCP, TLS,
+// tunnel and GET inside it either. The budget binds only on a black-holed
+// endpoint — a refused SYN returns in microseconds.
+func (m *MihomoProber) precheckDialBudget() time.Duration {
+	return m.cfg.Timeout / precheckAttempts
+}
+
+// dialsServerOverTCP reports whether mihomo reaches this node's server with a
+// plain TCP connect to Addr() — verified against mihomo v1.19.27, where each
+// listed adapter dials dialer.DialContext(ctx, "tcp", Base.addr) and Addr()
+// returns that same addr (vless.go:305 and :452 for the pair; anytls goes
+// through transport/anytls/client.go:67, whose server anytls.go:108 builds from
+// the same host and port as the Addr() of anytls.go:87).
+//
+// The list holds only types convert.ConvertsV2Ray can emit, so every entry
+// checks against a scheme case in common/convert/converter.go. Ssh (ssh.go:63)
+// and Snell (snell.go:97) TCP-dial Addr() too but have no scheme there, so an
+// entry for either could never fire.
+//
+// Fail open, and not a guess: hysteria2, tuic and mieru reach their server with
+// ListenPacket over UDP, and an unlisted type must lose the speedup rather than
+// the node.
+func dialsServerOverTCP(t mihomo.AdapterType, mapping map[string]any) bool {
 	switch t { //nolint:exhaustive // the default is the point: every unlisted type, including one a future mihomo adds, keeps the URL test
 	case mihomo.Vless, mihomo.Vmess, mihomo.Trojan, mihomo.Shadowsocks,
-		mihomo.ShadowsocksR, mihomo.Socks5, mihomo.Http, mihomo.Snell:
-		return true
+		mihomo.ShadowsocksR, mihomo.Socks5, mihomo.Http, mihomo.AnyTLS:
+		return !dialsServerOverQUIC(mapping)
 	default:
 		return false
 	}
 }
 
-// filterReachable splits the proxies on whether their server endpoint accepts
-// a TCP connection. It is its own phase so that none of its dials overlaps a
-// measured URL test, which is also what frees it from check.concurrency.
+// dialsServerOverQUIC reports whether the raw share-link mapping selects
+// mihomo's xhttp-over-QUIC mode, whose only dial is ListenPacket over UDP:
+// xhttp.NewTransport answers an *http3.Transport when len(alpn) == 1 &&
+// alpn[0] == "h3" (transport/xhttp/client.go:160-168), and the TCP closure
+// vless.go:585 hands it as dialRaw is then never invoked. Both keys come off
+// the link itself (common/convert/v.go:71 sets network from ?type=, :36 sets
+// alpn from ?alpn=).
+//
+// Of 14384 sampled vless nodes 1112 carry type=xhttp, 238 an alpn containing
+// h3, and 5 an alpn of exactly [h3] — rare, not impossible, and the price of
+// missing those 5 is not a lost speedup but a live node condemned unprobed and
+// dead-cached for deadcache.ttl. So an alpn of an unexpected type answers yes:
+// a mapping we cannot read is one we cannot prove dials TCP.
+func dialsServerOverQUIC(mapping map[string]any) bool {
+	if network, _ := mapping["network"].(string); network != "xhttp" {
+		return false
+	}
+	alpn, present := mapping["alpn"]
+	if !present {
+		// An absent alpn is len 0, which fails mihomo's h3 test.
+		return false
+	}
+	list, ok := alpn.([]string)
+	if !ok {
+		return true
+	}
+
+	return len(list) == 1 && list[0] == "h3"
+}
+
+// filterReachable splits the proxies on whether their server endpoint accepts a
+// TCP connection, returning positions into proxies. It is its own phase so that
+// none of its dials overlaps a measured URL test, which is also what frees it
+// from check.concurrency.
+//
+// The bare net.Dialer is deliberate — warming mihomo's own DNS cache would
+// shave the delay max_avg_ms gates on — and it costs a THIRD resolver in one
+// cycle beside internal/resolver (TTL-cached, resolver.address-configurable)
+// and mihomo's SystemResolver, neither of which this path honours. A failed
+// lookup is also indistinguishable here from a refused SYN, so a resolver
+// hiccup condemns and dead-caches; precheckAttempts resolving again, and the
+// breaker below, are what bound that.
 func (m *MihomoProber) filterReachable(
 	ctx context.Context,
 	opLog zerolog.Logger,
 	proxies []mihomo.Proxy,
-) (live, condemned []mihomo.Proxy) {
+	tcpServer []bool,
+) (live, condemned []int) {
 	// One dial per distinct endpoint: a multi-port mierus:// link is several
 	// proxies, but two proxies on one address ask one question.
 	addrs := make([]string, 0, len(proxies))
 	index := make(map[string]int, len(proxies))
-	for _, px := range proxies {
-		if !dialsServerOverTCP(px.Type()) {
+	for i, px := range proxies {
+		if !tcpServer[i] {
 			continue
 		}
 		if _, ok := index[px.Addr()]; !ok {
@@ -263,11 +347,12 @@ func (m *MihomoProber) filterReachable(
 		}
 	}
 	if len(addrs) == 0 {
-		return proxies, nil
+		return allPositions(len(proxies)), nil
 	}
 
 	reachable := make([]bool, len(addrs))
 	sem := fanoutSem(precheckConcurrency)
+	budget := m.precheckDialBudget()
 	var wg sync.WaitGroup
 	for i, addr := range addrs {
 		wg.Add(1)
@@ -276,22 +361,40 @@ func (m *MihomoProber) filterReachable(
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			reachable[i] = reachableTCP(ctx, addr)
+			reachable[i] = reachableTCP(ctx, addr, budget)
 		}()
 	}
 	wg.Wait()
 
-	live = make([]mihomo.Proxy, 0, len(proxies))
-	for _, px := range proxies {
-		// Re-tested rather than looked up by address alone: a UDP-dialling
-		// proxy may share server:port with a TCP one, and Merge's dedupe key
-		// does not rule that out for a mierus:// port list.
-		if !dialsServerOverTCP(px.Type()) || reachable[index[px.Addr()]] {
-			live = append(live, px)
+	refused := 0
+	for _, ok := range reachable {
+		if !ok {
+			refused++
+		}
+	}
+	// Condemning the pool writes the whole probed set into the dead cache for
+	// deadcache.ttl — three cycles at the shipped 3h against a 1h interval —
+	// and the pre-check now reaches that verdict in ~75s where a full probe
+	// pass took ~20min, so an implausible verdict must fail open.
+	if len(addrs) >= precheckBreakerMin && refused*100 >= len(addrs)*precheckBreakerPercent {
+		opLog.Warn().Int("refused", refused).Int("dialled", len(addrs)).
+			Int("threshold_pct", precheckBreakerPercent).
+			Msg("tcp pre-check refused nearly every endpoint; treating it as unreliable and probing everything")
+
+		return allPositions(len(proxies)), nil
+	}
+
+	live = make([]int, 0, len(proxies))
+	for i, px := range proxies {
+		// Re-tested rather than looked up by address alone: a proxy the
+		// pre-check excludes may share server:port with one it dialled, and
+		// Merge's dedupe key does not rule that out for a mierus:// port list.
+		if !tcpServer[i] || reachable[index[px.Addr()]] {
+			live = append(live, i)
 
 			continue
 		}
-		condemned = append(condemned, px)
+		condemned = append(condemned, i)
 	}
 	if len(condemned) > 0 {
 		opLog.Info().Int("condemned", len(condemned)).Int("dialled", len(addrs)).
@@ -301,10 +404,19 @@ func (m *MihomoProber) filterReachable(
 	return live, condemned
 }
 
-func reachableTCP(ctx context.Context, addr string) bool {
+func allPositions(n int) []int {
+	all := make([]int, n)
+	for i := range all {
+		all[i] = i
+	}
+
+	return all
+}
+
+func reachableTCP(ctx context.Context, addr string, budget time.Duration) bool {
 	var d net.Dialer
 	for range precheckAttempts {
-		dctx, cancel := context.WithTimeout(ctx, precheckTimeout)
+		dctx, cancel := context.WithTimeout(ctx, budget)
 		conn, err := d.DialContext(dctx, "tcp", addr)
 		cancel()
 		if err == nil {
@@ -342,12 +454,14 @@ func (m *MihomoProber) runRound(
 	opLog zerolog.Logger,
 	prog *progress,
 	proxies []mihomo.Proxy,
+	live []int,
 	sem chan struct{},
 	mu *sync.Mutex,
-	accs map[string]*delayAcc,
+	accs []delayAcc,
 ) {
 	var wg sync.WaitGroup
-	for _, px := range proxies {
+	for _, i := range live {
+		px := proxies[i]
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -370,11 +484,7 @@ func (m *MihomoProber) runRound(
 
 			mu.Lock()
 			defer mu.Unlock()
-			a := accs[px.Name()]
-			if a == nil {
-				a = &delayAcc{}
-				accs[px.Name()] = a
-			}
+			a := &accs[i]
 			if stage > a.stage {
 				a.stage = stage
 			}
@@ -382,7 +492,7 @@ func (m *MihomoProber) runRound(
 				return
 			}
 			a.succ++
-			a.sum += int(delay)
+			a.sum += int32(delay)
 		}()
 	}
 	wg.Wait()

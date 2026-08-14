@@ -24,6 +24,7 @@ var (
 	benchSurvSink    []Survivor
 	benchBytesSink   []byte
 	benchProxSink    []mihomo.Proxy
+	benchProbeSink   map[string]ProbeResult
 )
 
 const benchUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
@@ -210,7 +211,7 @@ func BenchmarkParseProxies(b *testing.B) {
 	payload := benchParsePayload()
 
 	// Sanity check + fail loud if the payload isn't parseable.
-	warm, err := prober.parseProxies(payload)
+	warm, _, err := prober.parseProxies(payload)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -220,7 +221,7 @@ func BenchmarkParseProxies(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		proxies, perr := prober.parseProxies(payload)
+		proxies, _, perr := prober.parseProxies(payload)
 		if perr != nil {
 			b.Fatal(perr)
 		}
@@ -228,5 +229,35 @@ func BenchmarkParseProxies(b *testing.B) {
 		for _, px := range proxies {
 			_ = px.Close()
 		}
+	}
+}
+
+// foldProxy carries the two methods entryLabel reads, so this prices the
+// probe's bookkeeping instead of mihomo's parser.
+type foldProxy struct {
+	mihomo.Proxy
+	name string
+}
+
+func (p *foldProxy) Name() string             { return p.name }
+func (p *foldProxy) Type() mihomo.AdapterType { return mihomo.Vless }
+
+// BenchmarkFoldProbeResults prices the probe's per-node bookkeeping at the
+// production pool size: the accumulators every round writes into, plus the
+// result map the cycle carries from Probe into SelectSurvivors.
+func BenchmarkFoldProbeResults(b *testing.B) {
+	const n = 8817
+	pxs := make([]mihomo.Proxy, n)
+	for i := range pxs {
+		pxs[i] = &foldProxy{name: fmt.Sprintf("alpha-%05d", i)}
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		accs := make([]delayAcc, len(pxs))
+		for i := range accs {
+			accs[i] = delayAcc{succ: 2, sum: 300, stage: StagePassed}
+		}
+		benchProbeSink = foldProbeResults(pxs, accs)
 	}
 }

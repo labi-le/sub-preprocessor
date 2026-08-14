@@ -49,8 +49,10 @@ type CycleReport struct {
 
 // CyclePhases is where one cycle's wall time went, timed by RunOnce at the
 // boundaries between its stages. Probe and Egress are separate because both do
-// per-node network work: Probe is bounded by check.timeout, Egress by each
-// filter's own timeout.
+// per-node network work, bounded differently: each Egress filter by its own
+// timeout, Probe by check.timeout per round PLUS the reachability pre-check,
+// whose per-endpoint budget is one round's timeout again
+// (MihomoProber.precheckDialBudget) and is NOT part of any round.
 //
 // The fields sum to slightly LESS than CycleReport.Duration: the steps between
 // phases (dead-cache write, SelectSurvivors, pruneCaches, report assembly) are
@@ -62,7 +64,12 @@ type CyclePhases struct {
 	Fetch      time.Duration
 	Merge      time.Duration
 	DeadFilter time.Duration
-	Probe      time.Duration
+	// Probe covers Prober.Probe whole: parsing the payload into live mihomo
+	// adapters, the TCP pre-check, and every URL-test round. Splitting the
+	// pre-check out is DEFERRED — it would need a per-cycle plumbing path back
+	// through Probe, which the third return value was already refused for — so
+	// its share is inferred from the stage="condemned" count instead.
+	Probe time.Duration
 	// Egress covers filterAndMeasureEgress: the through-node filters and the
 	// cdn-cgi/trace measurement.
 	Egress time.Duration
