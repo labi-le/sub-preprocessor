@@ -266,3 +266,48 @@ func TestPlaceholderNodeAgreesWithNetip(t *testing.T) {
 		t.Fatal("no zoned address was reached: the space no longer covers the documented boundary")
 	}
 }
+
+// maxWorkRatio bounds how much more a long dotless server may cost than a short
+// name. Measured margin between the bounded and unbounded forms is about 12x, so
+// 4x sits clear of noise and still catches a return to scanning.
+const maxWorkRatio = 4
+
+// TestLoopbackNameWorkIsBounded defends the one property no other test can see.
+// The suffix form of the name test is verdict-identical to the last-label form it
+// replaced -- differentially confirmed over 26 million strings -- and it costs
+// zero allocations either way, so neither the verdict tables nor the two
+// AllocsPerRun gates notice if someone simplifies it back. What separates them is
+// only WORK: the old form scanned backwards to the last dot, or the whole string
+// when there is none, which cost +1139% on a dotless 253-byte server and pushed
+// the function one unit past the inline budget.
+//
+// The assertion is a RATIO, not a duration: a long dotless name must not cost
+// meaningfully more than a short one, since the suffix compare reads a fixed nine
+// bytes in both cases. A ratio cancels machine speed and load, the way the loose
+// per-node threshold in classify's allocation gate already does for allocations.
+// The measured margin is wide -- about 12x between the two forms -- so the bound
+// is set where only a return to unbounded scanning can trip it.
+func TestLoopbackNameWorkIsBounded(t *testing.T) {
+	// 253 is the longest a DNS name may be, and no dot means the old form
+	// scanned every byte of it.
+	const shortName = "x.localhost"
+	long := strings.Repeat("a", 253)
+
+	cost := func(server string) float64 {
+		r := testing.Benchmark(func(b *testing.B) {
+			for b.Loop() {
+				subscription.PlaceholderNode(plainCredential, server)
+			}
+		})
+		return float64(r.T.Nanoseconds()) / float64(r.N)
+	}
+	shortCost, longCost := cost(shortName), cost(long)
+	if shortCost <= 0 {
+		t.Skip("timer resolution too coarse to measure the predicate")
+	}
+	if ratio := longCost / shortCost; ratio > maxWorkRatio {
+		t.Errorf("a 253-byte dotless server costs %.2fx a short one (%.2f ns vs %.2f ns), "+
+			"want under %.0fx: the name test is scanning the string again",
+			ratio, longCost, shortCost, float64(maxWorkRatio))
+	}
+}
