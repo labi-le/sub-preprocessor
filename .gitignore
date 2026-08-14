@@ -50,3 +50,7 @@ benchmarks
 # Worktrees (agent scratch workspaces)
 .worktrees/
 .superpowers/
+
+# Per-machine agent settings. .omp/mcp.json IS tracked -- it is the shared
+# server list -- so this ignores the local file beside it, not the directory.
+.omp/config.yml
