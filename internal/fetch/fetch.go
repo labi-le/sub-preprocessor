@@ -70,6 +70,14 @@ const (
 	// The flate reader pulls its input in fixed blocks, so the start of any
 	// stream is legitimately far ahead of the wire bytes consumed so far.
 	expansionFloor = 1 << 20
+	// maxEagerBody caps what an announced Content-Length may allocate before a
+	// single byte has arrived. On GET / the URL is user input, so the
+	// announcement is hostile input: sized straight off it, a peer that
+	// announces the cap and then sends nothing costs limit bytes per request.
+	// 256 KiB is the first power of two past the corpus p90 (184626 B) and
+	// covers 133 of the 145 configured sources that announce a length; the 12
+	// above it reach their size in at most four growth steps.
+	maxEagerBody = 256 << 10
 )
 
 var (
@@ -144,38 +152,60 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 // that overruns the cap from one that just fills it.
 //
 // hint is the announced body length, 0 or negative when the response did not
-// state one. Announced and inside the cap, it buys an exact single allocation
-// where io.ReadAll grows through a chain of chunks it keeps ALL of, then copies
-// them into a final right-sized slice: measured on a 3.06 MB body (the largest
-// configured source), 6.95 MB allocated across 30 allocations against 3.06 MB
-// across 1. Since the transport is built with DisableCompression, a raw fetch
-// gets identity encoding and Content-Length survives to resp.ContentLength —
-// measured 145 of the 147 configured sources answering 200 state one.
+// state one. Announced and at or under maxEagerBody it buys ONE exact
+// allocation where io.ReadAll starts at 512 bytes and grows geometrically,
+// spending ~2.3x the body across ~30 allocations on a 3 MB one; a larger
+// announcement is worth less, since the doubling below spends a chain of its
+// own. DisableCompression is what makes the header usable at all — a raw fetch
+// gets identity encoding, so ContentLength counts exactly the bytes read;
+// measured over the configured sources, 145 of the 147 answering 200 state one
+// and none of them disagreed with its own body; the 2 that state nothing frame
+// the response with HTTP/2 DATA frames instead.
 //
-// The header is a claim, not a bound: a body may run past it, so the sized read
-// keeps one spare byte to notice and grows for the remainder rather than
-// truncating. Only limit bounds what is read.
+// The header is only a claim, and on GET / it is a claim by whoever chose
+// subscription_url, so it is trusted for maxEagerBody up front and past that
+// only as far as the peer keeps delivering: the buffer never exceeds the ceiling
+// or twice what has arrived, whichever is larger. A body may also run past its
+// announcement, so the buffer keeps one spare byte to notice and grows for the
+// remainder rather than truncating. Only limit bounds what is read.
 func readBody(r io.Reader, limit, hint int64) ([]byte, error) {
 	if hint <= 0 || hint > limit {
 		return io.ReadAll(io.LimitReader(r, limit+1)) //nolint:wrapcheck // caller wraps
 	}
 
-	buf := make([]byte, hint+1)
-	n, err := io.ReadFull(r, buf)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, err //nolint:wrapcheck // caller wraps
+	buf := make([]byte, min(hint, maxEagerBody)+1)
+	n := int64(0)
+	for {
+		got, err := r.Read(buf[n:])
+		n += int64(got)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf[:n], nil
+			}
+			return nil, err //nolint:wrapcheck // caller wraps
+		}
+		if n < int64(len(buf)) {
+			continue
+		}
+		if n > limit {
+			return buf[:n], nil
+		}
+		buf = growBody(buf, hint, limit)
 	}
-	if int64(n) <= hint {
-		return buf[:n], nil
-	}
+}
 
-	rest, errRest := io.ReadAll(io.LimitReader(r, limit-hint))
-	if errRest != nil {
-		return nil, errRest //nolint:wrapcheck // caller wraps
+// growBody doubles buf, stopping at hint+1 so a peer that delivered everything
+// it announced ends up with an exactly sized buffer, and at limit+1 so the read
+// never runs past the cap plus its detection byte.
+func growBody(buf []byte, hint, limit int64) []byte {
+	size := int64(len(buf))
+	next := size + size
+	if size < hint+1 {
+		next = min(next, hint+1)
 	}
-	out := make([]byte, 0, len(buf)+len(rest))
-	out = append(out, buf...)
-	return append(out, rest...), nil
+	out := make([]byte, min(next, limit+1))
+	copy(out, buf)
+	return out
 }
 
 func ValidateFileType(fileType FileType) error {
