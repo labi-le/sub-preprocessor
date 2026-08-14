@@ -20,22 +20,35 @@ resolver:
 # These nodes are used while a mobile operator's whitelist is active, so an
 # egress-geo gate answers a question nobody asked: nothing here excludes a
 # country, and every gate dropped is a round trip saved per survivor.
+#
+# The cidr gate below is DISABLED, measured 2026-08-14. It was doing its job --
+# it admitted 3498 of 38663 endpoints (9.0%) -- but the pool behind it is dead
+# for a reason the gate cannot fix: of 80 admitted nodes whose server ACCEPTS
+# TCP, ZERO bring a tunnel up. 37 refuse the protocol, 14 time out, 16 fail on
+# credentials (REALITY auth, or a certificate for another name). Counts were
+# byte-identical from a second egress, so it is the configs that are stale, not
+# the network. The instance published 1 node per cycle for 43 cycles.
+#
+# Without the gate this becomes an ordinary geo instance on the same sources.
+# Re-enable by uncommenting if a mobile-whitelist pool is ever worth having
+# again; the entry is kept rather than deleted because the reasoning below it is
+# the expensive part, not the four keys.
 filters:
-  - type: cidr # IP-stage ALLOW-list: a node whose resolved IP is outside every range dies before any probe
-    # The repo also publishes ipwhitelist.txt, the pre-CIDR format. Adding it
-    # here would be a REGRESSION, not redundancy: measured 2026-08-09 it is the
-    # ".1" of every /24 in the CIDR file, so it adds no range (the union merges
-    # to the same 15649) and costs 1.76 MB per refresh -- but urls: is a UNION,
-    # so with two sources a failed cidrwhitelist.txt no longer empties the set.
-    # It becomes 141664 singletons covering 0.39% of the addresses, and nothing
-    # catches that at BUILD -- newCIDRStore refuses only an EMPTY set. A
-    # background reload would be refused (swapRefusalSize sees failed>0, then
-    # the coverage collapse), so the exposure is any cold build -- a restart, or
-    # a reload that edits this entry -- while cidrwhitelist.txt is down.
-    urls:
-      - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
-    file_type: raw
-    refresh_interval: 24h
+#  - type: cidr # IP-stage ALLOW-list: a node whose resolved IP is outside every range dies before any probe
+#    # The repo also publishes ipwhitelist.txt, the pre-CIDR format. Adding it
+#    # here would be a REGRESSION, not redundancy: measured 2026-08-09 it is the
+#    # ".1" of every /24 in the CIDR file, so it adds no range (the union merges
+#    # to the same 15649) and costs 1.76 MB per refresh -- but urls: is a UNION,
+#    # so with two sources a failed cidrwhitelist.txt no longer empties the set.
+#    # It becomes 141664 singletons covering 0.39% of the addresses, and nothing
+#    # catches that at BUILD -- newCIDRStore refuses only an EMPTY set. A
+#    # background reload would be refused (swapRefusalSize sees failed>0, then
+#    # the coverage collapse), so the exposure is any cold build -- a restart, or
+#    # a reload that edits this entry -- while cidrwhitelist.txt is down.
+#    urls:
+#      - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
+#    file_type: raw
+#    refresh_interval: 24h
   - type: country # without it / validates countries= and then ignores it
     provider: geofeed # inert on /stable.txt: no exclude_* here, so the worker's full allow-set early-returns
   - type: bandwidth # drop nodes slower than min_mbps (last GATE: runs on the fewest nodes)
