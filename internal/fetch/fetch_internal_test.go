@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"io"
+	"strconv"
 	"testing"
 )
 
@@ -141,6 +142,49 @@ func TestReadBodyDoesNotTrustAnAnnouncementPastTheCeiling(t *testing.T) {
 			}
 			if cap(got) != tc.wantCap {
 				t.Fatalf("cap = %d, want %d: the announcement was trusted for the wrong amount", cap(got), tc.wantCap)
+			}
+		})
+	}
+}
+
+// TestGrowBodyBoundsTheCopyOverlap pins the transient, not the result: a growth
+// step copies, so the old buffer and the new one are live at once, and a step
+// landing just under the ceiling costs ~2x the cap in simultaneous bytes (20.98
+// MB measured before this bound, where the growth chain is what an announcement
+// of limit-1 overrun by a byte produces). Each hint walks its whole chain to the
+// ceiling, the way an overrunning peer does.
+func TestGrowBodyBoundsTheCopyOverlap(t *testing.T) {
+	t.Parallel()
+
+	const (
+		limit    = int64(10 << 20)
+		ceiling  = limit + 1
+		half     = (ceiling + 1) / 2
+		wantPeak = ceiling + half
+	)
+
+	for _, hint := range []int64{limit, limit - 1, 5 << 20, 256 << 10} {
+		t.Run(strconv.FormatInt(hint, 10), func(t *testing.T) {
+			t.Parallel()
+
+			buf := make([]byte, min(hint, maxEagerBody)+1)
+			peak := int64(0)
+			for int64(len(buf)) < ceiling {
+				next := growBody(buf, hint, limit)
+				size, grown := int64(len(buf)), int64(len(next))
+				if grown <= size {
+					t.Fatalf("grew %d -> %d: no progress", size, grown)
+				}
+				if grown > size+size {
+					t.Fatalf("grew %d -> %d: past twice what has arrived", size, grown)
+				}
+				if size+grown > peak {
+					peak = size + grown
+				}
+				buf = next
+			}
+			if peak > wantPeak {
+				t.Fatalf("peak %d bytes live at once, want at most %d", peak, wantPeak)
 			}
 		})
 	}

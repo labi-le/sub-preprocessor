@@ -74,9 +74,14 @@ const (
 	// single byte has arrived. On GET / the URL is user input, so the
 	// announcement is hostile input: sized straight off it, a peer that
 	// announces the cap and then sends nothing costs limit bytes per request.
-	// 256 KiB is the first power of two past the corpus p90 (184626 B) and
+	// 256 KiB is the first power of two past the corpus p90 (198272 B) and
 	// covers 133 of the 145 configured sources that announce a length; the 12
-	// above it reach their size in at most four growth steps.
+	// above it reach their size in at most four growth steps. The vassago
+	// instance's 52 answering sources are a different distribution — measured
+	// 2026-08-14, median 283358 B, p90 1794886 B, 24 of 52 under this ceiling —
+	// and it stays one constant anyway: the ceiling bounds a HOSTILE
+	// announcement on GET /, which both instances serve, and a configured
+	// source above it pays only a bounded doubling chain per cycle.
 	maxEagerBody = 256 << 10
 )
 
@@ -197,13 +202,34 @@ func readBody(r io.Reader, limit, hint int64) ([]byte, error) {
 // growBody doubles buf, stopping at hint+1 so a peer that delivered everything
 // it announced ends up with an exactly sized buffer, and at limit+1 so the read
 // never runs past the cap plus its detection byte.
+//
+// Growth copies, so old and new are live at once, and only the LAST allocation
+// may exceed half of limit+1: an announcement just under the cap that then
+// overruns otherwise lands a buffer next to the ceiling and peaks at ~2x it —
+// measured 20.98 MB under a 10 MiB cap against 15.74 MB with this clamp, where
+// io.ReadAll (go1.26.5, still the unannounced path) peaks at 33.97 MB building
+// its chunk list and copying it into a right-sized slice. The exact hint
+// landing survives below that half, which every configured source body of both
+// instances is (largest 4.31 MB), and no step is more than twice what has
+// arrived: half is only reachable from a buffer already a quarter of the
+// ceiling.
 func growBody(buf []byte, hint, limit int64) []byte {
+	// Every step but the last is clamped to this share of the ceiling, which is
+	// what bounds the peak at 1.5x rather than 2x: the pair that is briefly live
+	// is one whole buffer plus one at most half that size.
+	const nonFinalStepDivisor = 2
+
+	ceiling := limit + 1
+	half := (ceiling + 1) / nonFinalStepDivisor
 	size := int64(len(buf))
-	next := size + size
-	if size < hint+1 {
+	next := min(size+size, ceiling)
+	switch {
+	case hint+1 <= half && size < hint+1:
 		next = min(next, hint+1)
+	case next < ceiling:
+		next = min(next, half)
 	}
-	out := make([]byte, min(next, limit+1))
+	out := make([]byte, next)
 	copy(out, buf)
 	return out
 }
