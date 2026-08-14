@@ -15,6 +15,14 @@ const (
 	unspecifiedV4    = "0.0.0.0"
 )
 
+// loopbackHostname is the name RFC 6761 §6.3 reserves for the loopback, and
+// asciiCaseBit lowercases an ASCII letter with an OR, which is how the name is
+// compared without allocating a lowercased copy per node.
+const (
+	loopbackHostname = "localhost"
+	asciiCaseBit     = 0x20
+)
+
 // v6Groups and maxV6GroupDigits are the IPv6 grammar netip accepts, shared by
 // the group walk and its caller.
 const (
@@ -113,7 +121,40 @@ func localServer(server string) bool {
 	case ':':
 		return localV6(server)
 	}
-	return false
+	// Not an address shape, so the only thing left that this rule may judge is
+	// the one reserved name. Reached for every hostname, which is why the test
+	// below rejects on a length compare before touching a byte.
+	return loopbackName(server)
+}
+
+// loopbackName reports whether server is the one NAME judgeable without a
+// resolver. RFC 6761 §6.3 reserves "localhost" AND every name under
+// ".localhost", and REQUIRES resolution to a loopback address, so this name is
+// loopback by definition rather than by lookup; no other hostname is, so this
+// is not a heuristic that could grow. It earns its place: measured 2026-08-14
+// over the 98 configured source URLs with the worker's UA, 15 published nodes
+// name it outright, so without this the rule is defeated by the most obvious
+// spelling of what it exists to catch.
+//
+// Matched over the LAST label so a ".localhost" subdomain counts, ASCII
+// case-insensitively as DNS names compare, and without lowercasing the string,
+// which would allocate once per node. A trailing dot ("localhost.") leaves an
+// empty last label and answers false: that is the absolute form, and treating
+// it as a miss costs one probe slot while a wrong accept would delete a node.
+func loopbackName(server string) bool {
+	name := server
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	if len(name) != len(loopbackHostname) {
+		return false
+	}
+	for i := range len(name) {
+		if name[i]|asciiCaseBit != loopbackHostname[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // localV4 reports whether s is the unspecified address or a dotted quad in the

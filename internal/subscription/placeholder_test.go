@@ -95,13 +95,29 @@ var serverCases = []struct {
 	{server: "::2", want: false},
 	{server: "::11", want: false},
 	// Hostnames, including the tunnel shape that once reached netip.ParseAddr
-	// and a wildcard name whose loopback prefix is not an address: nothing here
-	// resolves, so a name is never local.
+	// and a wildcard name whose loopback prefix is not an address. A name needs
+	// a resolver, so none of these is judged local -- with one exception below.
 	{server: "cdn.example.com", want: false},
 	{server: "0.tcp.example.com", want: false},
 	{server: "127.0.0.1.example.com", want: false},
 	{server: "127.0.0.256", want: false},
 	{server: "127.1", want: false},
+	// The exception: RFC 6761 §6.3 reserves this name and REQUIRES resolution to
+	// the loopback, so it is local by definition and needs no lookup. Measured
+	// 2026-08-14, 15 published nodes in the configured corpus name it outright.
+	{server: "localhost", want: true},
+	{server: "LOCALHOST", want: true},
+	{server: "LocalHost", want: true},
+	// The RFC reserves everything under ".localhost" too, so the last label
+	// decides.
+	{server: "foo.localhost", want: true},
+	{server: "a.b.LOCALHOST", want: true},
+	// Not the reserved name: a longer label, or a real domain that merely
+	// contains it. The absolute form is a deliberate miss (empty last label).
+	{server: "notlocalhost", want: false},
+	{server: "localhostx", want: false},
+	{server: "localhost.example.com", want: false},
+	{server: "localhost.", want: false},
 	// Out of scope by decision, documented on localV6: netip reads these as
 	// local, but no formatter emits them, and a miss only costs a probe slot.
 	{server: "::1%lo", want: false},
