@@ -215,3 +215,86 @@ func TestMergeMixedCaseHostsCollapse(t *testing.T) {
 		t.Errorf("Raw must keep original casing (first source wins), got %q", e.Raw)
 	}
 }
+
+// TestMergeDropsPlaceholderNodes: the worker never calls classify, so the pool
+// it probes is filtered here or nowhere. A Nil-UUID credential authenticates
+// nobody and a server naming the dialling machine reaches no remote, so both
+// cost a probe slot and can never be published. The real node beside them must
+// survive, and the labels must stay contiguous: a gap would mean a dropped node
+// still consumed a number.
+func TestMergeDropsPlaceholderNodes(t *testing.T) {
+	t.Parallel()
+
+	body := "vless://00000000-0000-0000-0000-000000000000@192.0.2.1:1111#notice\n" +
+		"vless://a1b2c3d4-1111-4000-8000-000000000009@0.0.0.0:8080#died\n" +
+		"vless://a1b2c3d4-1111-4000-8000-000000000009@[::]:443#limit\n" +
+		"vless://a1b2c3d4-0000-4000-8000-000000000001@198.51.100.2:443#real\n" +
+		"trojan://0@203.0.113.3:443#short zero password is a password\n"
+
+	entries := stable.Merge([]stable.SourceBody{sourceBody("src", body)})
+
+	want := []stable.Entry{
+		{Label: "src-001", Raw: "vless://a1b2c3d4-0000-4000-8000-000000000001@198.51.100.2:443#src-001", Addr: "198.51.100.2:443"},
+		{Label: "src-002", Raw: "trojan://0@203.0.113.3:443#src-002", Addr: "203.0.113.3:443"},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries, want %d: %+v", len(entries), len(want), entries)
+	}
+	for i, w := range want {
+		if entries[i] != w {
+			t.Errorf("entry %d: got %+v, want %+v", i, entries[i], w)
+		}
+	}
+}
+
+// TestMergeDropsLocalAddressNodes: the address rule stands on its own, so an
+// ordinary credential does not save a node that names the machine dialling it,
+// and the loopback spellings are the ones the pool actually carries — measured
+// over the 98 configured source URLs with the worker's UA on 2026-08-14, 24 of
+// the 100 local-address nodes were loopback and 4 of those sat on the shipped
+// listener's own :8080, where a probe reaches the service itself. A
+// documentation-range node with the SAME credential must survive: this is a
+// rule about which machine an address names, not a reserved-range filter.
+func TestMergeDropsLocalAddressNodes(t *testing.T) {
+	t.Parallel()
+
+	const cred = "vless://a1b2c3d4-1111-4000-8000-000000000009@"
+	body := cred + "127.0.0.1:8080#listener\n" +
+		cred + "0.0.0.0:8080#listener\n" +
+		cred + "127.0.0.53:80#resolver stub\n" +
+		cred + "[::1]:443#loopback6\n" +
+		cred + "192.0.2.10:8080#real\n"
+
+	entries := stable.Merge([]stable.SourceBody{sourceBody("src", body)})
+
+	want := []stable.Entry{
+		{Label: "src-001", Raw: cred + "192.0.2.10:8080#src-001", Addr: "192.0.2.10:8080"},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries, want %d: %+v", len(entries), len(want), entries)
+	}
+	for i, w := range want {
+		if entries[i] != w {
+			t.Errorf("entry %d: got %+v, want %+v", i, entries[i], w)
+		}
+	}
+}
+
+// TestMergePlaceholderDoesNotShadowRealNode: the drop happens before the dedupe
+// key is interned, so a placeholder cannot book a server:port a working node of
+// another source arrives on later — the shadowing hazard relabelNode's doc
+// describes for the ssr case.
+func TestMergePlaceholderDoesNotShadowRealNode(t *testing.T) {
+	t.Parallel()
+
+	entries := stable.Merge([]stable.SourceBody{
+		sourceBody("alpha", "vless://00000000-0000-0000-0000-000000000000@192.0.2.1:443#notice\n"),
+		sourceBody("beta", "vless://a1b2c3d4-0000-4000-8000-000000000001@192.0.2.1:443#real\n"),
+	})
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Label != "beta-001" || entries[0].Addr != "192.0.2.1:443" {
+		t.Errorf("got %+v, want the beta node on the shared server:port", entries[0])
+	}
+}

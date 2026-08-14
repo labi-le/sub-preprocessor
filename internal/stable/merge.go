@@ -40,14 +40,15 @@ type Entry struct {
 // mixed-case duplicates share one dead-cache entry; Raw keeps the original
 // casing.
 //
-// A placeholder node is dropped here rather than given a probe slot: its Nil
-// UUID cannot authenticate, and an unspecified server dials the worker's own
-// loopback, where a port collision with the service listener buys a full
-// URLTest round against itself. Measured on both shipped configs, 2026-08-14:
-// 8 such nodes in a 24554-entry pool, 9 in a 40277-entry one, every one of
-// them on 0.0.0.0 or 127.0.0.1, one per config on the listener's own port.
-// Dropping before the dedupe key is interned leaves a real node on the same
-// server:port still admittable.
+// A placeholder node is dropped here rather than given a probe slot: a Nil-UUID
+// credential authenticates nobody, and a server that names the dialling machine
+// reaches no remote however good its credential. The second is worse than a
+// dial failure — such a node on this service's own listener port passes the TCP
+// precheck and buys a URLTest round against the worker itself. The pool does
+// carry them: fetching the 98 configured source URLs with the worker's UA on
+// 2026-08-14 yielded 100 nodes on a local address, 24 of them loopback and 4 of
+// those on the shipped listener's own port. Dropping before the dedupe key is
+// interned leaves a real node on the same server:port still admittable.
 func Merge(bodies []SourceBody) []Entry {
 	total := 0
 	for _, src := range bodies {
