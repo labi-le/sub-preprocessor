@@ -581,6 +581,69 @@ func TestProcessBodyEnforcesNodeCeiling(t *testing.T) {
 	}
 }
 
+// TestNodeCeilingSurvivesEncodedBodies: the ceiling and the survivor-slice
+// reservation below share ONE quantity, the newline count of the body
+// processBody is handed, and it bounds the node count only because that body is
+// always subscription.Normalize's output. Both wrapped shapes would defeat a
+// count taken any earlier: a base64 payload carries every node on one line, and
+// an Xray JSON document can carry a whole node list with no newline at all.
+func TestNodeCeilingSurvivesEncodedBodies(t *testing.T) {
+	t.Parallel()
+
+	uriLines := func(n int) string {
+		var sb strings.Builder
+		for i := range n {
+			fmt.Fprintf(&sb, "vless://u@192.0.2.%d:443#n%d\n", i%254+1, i)
+		}
+		return sb.String()
+	}
+	const xrayJSON = `{"outbounds":[` +
+		`{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":8443,"users":[{"id":"u-1"}]}]},` +
+		`"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"a.example"}}},` +
+		`{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.5","port":8443,"users":[{"id":"u-2"}]}]},` +
+		`"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"b.example"}}},` +
+		`{"tag":"direct","protocol":"freedom"}]}`
+
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantNodes int
+	}{
+		{"uri lines", uriLines(3), 3},
+		{"base64 wrapper", base64.StdEncoding.EncodeToString([]byte(uriLines(3))), 3},
+		{"xray json", xrayJSON, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			normalized := subscription.Normalize([]byte(tc.body))
+			lines := bytes.Count(normalized, []byte{'\n'}) + 1
+			if got := countNodes(normalized, maxSubscriptionNodes); got != tc.wantNodes {
+				t.Fatalf("normalized body holds %d nodes, want %d", got, tc.wantNodes)
+			}
+			if lines < tc.wantNodes {
+				t.Fatalf("newline count %d does not bound %d nodes above", lines, tc.wantNodes)
+			}
+		})
+	}
+
+	t.Run("wrapped body over the ceiling", func(t *testing.T) {
+		t.Parallel()
+
+		wrapped := base64.StdEncoding.EncodeToString([]byte(uriLines(maxSubscriptionNodes + 1)))
+		if bytes.Contains([]byte(wrapped), []byte{'\n'}) {
+			t.Fatal("the wrapper must be a single line, or this proves nothing")
+		}
+		_, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+			Body:             []byte(wrapped),
+			AllowedCountries: filter.All(),
+		})
+		if !errors.Is(err, ErrTooManyNodes) {
+			t.Fatalf("a wrapper holding %d nodes must be rejected, got err=%v", maxSubscriptionNodes+1, err)
+		}
+	})
+}
+
 // TestProcessBodyReservesSurvivorSliceFromLineCount pins the sizing half of the
 // same newline count the ceiling above uses. The collecting sink is the
 // /stable.txt worker's, and it is handed one source body per source: growing its
@@ -624,6 +687,75 @@ func TestProcessBodyReservesSurvivorSliceFromLineCount(t *testing.T) {
 				t.Fatalf("survivor slice cap = %d, want %d", cap(sink.nodes), tc.wantCap)
 			}
 		})
+	}
+}
+
+// TestFilterNodesFitsTheSurvivorSlice pins the other half of that reservation.
+// The line count bounds the node count, so every line the IP stage drops is
+// capacity the worker holds until the merge — measured 2026-08-14 over every
+// configured source, 1.08x of the survivors on config/ (66495 of 71512 lines)
+// against 6.84x on config-vassago (15904 of 108742), 3.69 MB of it never
+// written. The fit is therefore GATED, not unconditional: the permissive
+// instance must get its own slice back, since copying it would cost more than
+// the tail it releases. IPv6 literals are the drop stage here because they are
+// refused without a lookup.
+func TestFilterNodesFitsTheSurvivorSlice(t *testing.T) {
+	t.Parallel()
+
+	body := func(kept, dropped int) []byte {
+		var sb strings.Builder
+		for i := range kept {
+			fmt.Fprintf(&sb, "vless://u@192.0.2.%d:443#k%d\n", i+1, i)
+		}
+		for i := range dropped {
+			fmt.Fprintf(&sb, "vless://u@[2001:db8::%x]:8443#d%d\n", i+1, i)
+		}
+		return []byte(sb.String())
+	}
+
+	for _, tc := range []struct {
+		name             string
+		kept, dropped    int
+		wantLen, wantCap int
+	}{
+		{"filtering instance shape", 20, 180, 20, 20},
+		{"permissive instance shape", 190, 10, 190, 200},
+		{"nothing survived", 0, 200, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			nodes, stats, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
+				Body:             body(tc.kept, tc.dropped),
+				AllowedCountries: filter.All(),
+			})
+			if err != nil {
+				t.Fatalf("FilterNodes failed: %v", err)
+			}
+			if stats.Total != tc.kept+tc.dropped || stats.Kept != tc.kept {
+				t.Fatalf("stats = %+v, want total=%d kept=%d", stats, tc.kept+tc.dropped, tc.kept)
+			}
+			if len(nodes) != tc.wantLen || cap(nodes) != tc.wantCap {
+				t.Fatalf("survivors len/cap = %d/%d, want %d/%d",
+					len(nodes), cap(nodes), tc.wantLen, tc.wantCap)
+			}
+			assertKeptSurvivorsInOrder(t, nodes)
+		})
+	}
+}
+
+// assertKeptSurvivorsInOrder pins what a right-sized slice is worth nothing
+// without: the copy must not lose or reorder what it holds, because the stable
+// worker relabels these by index.
+func assertKeptSurvivorsInOrder(t *testing.T, nodes []NodeResult) {
+	t.Helper()
+
+	for i, node := range nodes {
+		wantRaw := fmt.Sprintf("vless://u@192.0.2.%d:443#k%d", i+1, i)
+		wantIP := netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)})
+		if node.Raw != wantRaw || node.IP != wantIP {
+			t.Fatalf("survivor %d = %q/%s, want %q/%s", i, node.Raw, node.IP, wantRaw, wantIP)
+		}
 	}
 }
 

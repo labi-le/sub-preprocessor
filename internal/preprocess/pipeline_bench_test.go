@@ -7,7 +7,9 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	"unsafe"
 
+	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
@@ -200,4 +202,169 @@ func BenchmarkProcessBodySlice_ManySmallSources(b *testing.B) {
 		bodies[i] = benchIPBody(benchSmallNodes)
 	}
 	benchProcessBodySlice(b, bodies, benchSmallSources*benchSmallNodes)
+}
+
+// The benchmarks below drive the /stable.txt worker's sink at the two shapes
+// the shipped instances have, measured live 2026-08-14 over every configured
+// source of each (config/sources.yaml + the crawler's private.yaml, and
+// config-vassago/sources.yaml):
+//
+//	instance          answering   lines    nodes   IP-stage survivors
+//	config/             148/161    71512    69163    66495  (1.08x)
+//	config-vassago/      52/54    108742   100664    15904  (6.84x)
+//
+// The multiplier is lines/survivors: what reserve() asks for against what
+// lands in the slice. Both fixtures carry the measured share of lines that
+// parse to no node at all (3.3% and 7.4%) — the reservation is per LINE, so a
+// junk line inflates it exactly as a surviving one does.
+//
+// The drop stage is the cidr allow-list at both shapes, so the two differ ONLY
+// in the survival ratio. Production's permissive instance configures no cidr
+// filter and loses its 3.9% to DNS failures instead, which the sink cannot
+// distinguish: a node dropped at any IP stage never reaches emit. Servers are
+// bare IPv4 throughout, so no DNS and no network is touched.
+const (
+	benchPermissiveSources = 148
+	benchPermissiveLines   = 483 // 71512/148
+	benchPermissiveJunk    = 33  // per 1000 lines
+	benchPermissiveKept    = 961 // per 1000 node lines
+	benchFilteringSources  = 52
+	benchFilteringLines    = 2091 // 108742/52
+	benchFilteringJunk     = 74
+	benchFilteringKept     = 158
+	// bywarm-merged, the largest body either instance fetches (2.88 MB) and one
+	// both configure: 9519 lines, 9487 nodes, 8964 survivors on config/ against
+	// 1524 on config-vassago. One body, two instances, 5.9x apart.
+	benchLargestLines          = 9519
+	benchLargestJunk           = 3
+	benchLargestKeptPermissive = 945
+	benchLargestKeptFiltering  = 161
+)
+
+// benchCIDRProcessor builds the processor the sink benchmarks share: one
+// offline cidr allow-list covering 198.51.100.0/24, the block benchShapeBody
+// puts surviving nodes in.
+func benchCIDRProcessor(b *testing.B) *Processor {
+	b.Helper()
+	set, skipped := cidrset.Parse([]byte("198.51.100.0/24\n"))
+	if skipped != 0 || set.Len() != 1 {
+		b.Fatalf("fixture allow-list parsed to %d ranges, %d lines skipped", set.Len(), skipped)
+	}
+	p, err := NewProcessor(context.Background(), zerolog.Nop(), Options{
+		PreloadedGeofeed: GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()},
+		IPFilters: []config.IPFilterSpec{
+			{Type: config.FilterCIDR, RefreshInterval: 24 * time.Hour},
+			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
+		},
+		cidrLoad: func(context.Context) (cidrset.Set, int, error) { return set, 0, nil },
+	})
+	if err != nil {
+		b.Fatalf("NewProcessor: %v", err)
+	}
+	return p
+}
+
+// benchShapeBody builds one source body: junkPerMille of every 1000 lines
+// carry no URI at all, and keptPerMille of every 1000 nodes sit inside the
+// allow-list block while the rest sit in 203.0.113.0/24, outside it.
+func benchShapeBody(lines, junkPerMille, keptPerMille int) (body []byte, kept int) {
+	var buf bytes.Buffer
+	buf.Grow(lines * 300)
+	node := 0
+	for i := range lines {
+		if i > 0 {
+			buf.WriteByte('\n')
+		}
+		if i%1000 < junkPerMille {
+			buf.WriteString("plain junk: no scheme separator anywhere on this line")
+			continue
+		}
+		block := "203.0.113."
+		if node%1000 < keptPerMille {
+			block = "198.51.100."
+			kept++
+		}
+		node++
+		buf.WriteString("vless://b831381d-6324-4d53-ad4f-8cda48b30811@")
+		buf.WriteString(block)
+		buf.WriteString(strconv.Itoa(i%254 + 1))
+		buf.WriteString(":443?security=reality&sni=www.example.org&fp=chrome")
+		buf.WriteString("&pbk=UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA")
+		buf.WriteString("&sid=4e9b0c2d1a3f5768&type=tcp&flow=xtls-rprx-vision#Node ")
+		buf.WriteString(strconv.Itoa(i))
+	}
+	return buf.Bytes(), kept
+}
+
+// benchCollectSurvivors runs one cycle's sources through the sink the worker
+// takes, reporting the dead capacity the returned slices still hold — the
+// quantity B/op cannot show, since an over-reservation is one allocation
+// however much of it is never written.
+func benchCollectSurvivors(b *testing.B, bodies [][]byte, wantKept int) {
+	b.Helper()
+	p := benchCIDRProcessor(b)
+	lookup := p.GeofeedState().Lookup
+	resolved := p.resolver.GetResolvedMap()
+	defer p.resolver.PutResolvedMap(resolved)
+	ctx := context.Background()
+
+	dead := 0
+	b.ReportAllocs()
+	for b.Loop() {
+		kept, deadCap := 0, 0
+		for _, body := range bodies {
+			clear(resolved)
+			stats := Stats{}
+			sink := &sliceSink{}
+			pctx := &PipelineContext{
+				sink:     sink,
+				Lookup:   lookup,
+				Allowed:  filter.All(),
+				Resolved: resolved,
+				Stats:    &stats,
+			}
+			if err := p.processBody(ctx, body, pctx); err != nil {
+				b.Fatalf("processBody: %v", err)
+			}
+			nodes := sink.fit()
+			kept += len(nodes)
+			deadCap += cap(nodes) - len(nodes)
+		}
+		if kept != wantKept {
+			b.Fatalf("kept = %d, want %d", kept, wantKept)
+		}
+		dead = deadCap
+	}
+	b.ReportMetric(float64(dead)*float64(unsafe.Sizeof(NodeResult{})), "deadB/cycle")
+}
+
+func benchShapeBodies(sources, lines, junk, kept int) ([][]byte, int) {
+	bodies := make([][]byte, sources)
+	body, keptOne := benchShapeBody(lines, junk, kept)
+	for i := range bodies {
+		bodies[i] = body
+	}
+	return bodies, keptOne * sources
+}
+
+func BenchmarkCollectSurvivors_Permissive(b *testing.B) {
+	bodies, kept := benchShapeBodies(benchPermissiveSources, benchPermissiveLines,
+		benchPermissiveJunk, benchPermissiveKept)
+	benchCollectSurvivors(b, bodies, kept)
+}
+
+func BenchmarkCollectSurvivors_Filtering(b *testing.B) {
+	bodies, kept := benchShapeBodies(benchFilteringSources, benchFilteringLines,
+		benchFilteringJunk, benchFilteringKept)
+	benchCollectSurvivors(b, bodies, kept)
+}
+
+func BenchmarkCollectSurvivors_LargestSourcePermissive(b *testing.B) {
+	bodies, kept := benchShapeBodies(1, benchLargestLines, benchLargestJunk, benchLargestKeptPermissive)
+	benchCollectSurvivors(b, bodies, kept)
+}
+
+func BenchmarkCollectSurvivors_LargestSourceFiltering(b *testing.B) {
+	bodies, kept := benchShapeBodies(1, benchLargestLines, benchLargestJunk, benchLargestKeptFiltering)
+	benchCollectSurvivors(b, bodies, kept)
 }

@@ -314,11 +314,36 @@ type sizer interface {
 
 // reserve sizes the survivor slice once, from a bound the parse loop already
 // knows. Growing into it instead cost a measured 7.6 MB per cycle over the
-// 157-source corpus, every byte of it a copy of the slice's own tail.
+// 157-source corpus, every byte of it a copy of the slice's own tail. The bound
+// counts LINES, so it overshoots by whatever share of the body the IP stage
+// drops — see fit, which is what keeps that overshoot from being retained.
 func (s *sliceSink) reserve(nodes int) {
 	if s.nodes == nil {
 		s.nodes = make([]NodeResult, 0, nodes)
 	}
+}
+
+// fit hands the survivors back without the reservation's unwritten tail, which
+// the caller would otherwise hold for as long as the nodes themselves. How far
+// the line bound overshoots is a property of the INSTANCE, measured 2026-08-14
+// over every configured source of each: config/ keeps 66495 survivors out of
+// 71512 lines (1.08x), while config-vassago's cidr allow-list keeps 15904 of
+// 108742 (6.84x) and left 3.69 MB of never-written capacity live across the
+// whole fetch phase.
+//
+// Copying is gated on the copy being no larger than the capacity it releases,
+// so no shape can lose: the permissive instance keeps its slice untouched
+// (measured byte-identical B/op, its 9519-line largest source included) and the
+// filtering one trades 0.71 MB of transient copy for those 3.69 MB. Zero
+// survivors release the whole reservation and allocate nothing.
+func (s *sliceSink) fit() []NodeResult {
+	if len(s.nodes)*2 > cap(s.nodes) {
+		return s.nodes
+	}
+	if len(s.nodes) == 0 {
+		return nil
+	}
+	return append(make([]NodeResult, 0, len(s.nodes)), s.nodes...)
 }
 
 // providerNeeds reports which lazily-built geo backends the configured IP
@@ -491,7 +516,7 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 func (p *Processor) FilterNodes(ctx context.Context, req FilterRequest) ([]NodeResult, Stats, error) {
 	sink := &sliceSink{}
 	stats, err := p.filterInto(ctx, sink, req)
-	return sink.nodes, stats, err
+	return sink.fit(), stats, err
 }
 
 func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterRequest) (Stats, error) {
