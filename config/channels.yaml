@@ -23,6 +23,7 @@ channels:
   - Holost_VPN   # measured 2026-08-12: one cycle yielded 22 of the 23 managed sources added that day
   - FreeCFGHub   # measured 2026-08-12: 1 live sub of its own, plus 12 inline nodes on page 1; it is the CHANNEL behind chat FreeCFGHubMIX, whose /s/ 302s (chats have no web preview)
   - mifa_world/1310   # measured 2026-08-14: forum topic, publishes a NEW 24h link daily; its /s/ preview carries zero messages, and 19 of the 20 links on the topic are the panel's own "больше неактуальны" list
+  - razlo4ka7/39   # measured 2026-08-14: the group's only subscription topic of 9; 296 inline endpoints and 13 candidates at comments_limit=200, 68 endpoints new against the 159 configured sources, and absent from every other seed's depth-1 frontier so BFS cannot reach it
 
 # Subscription URLs the crawler must never manage. Deleting a tg-* source from
 # private.yaml by hand does not stick: the next cycle rediscovers the URL in a

@@ -366,11 +366,19 @@ func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out 
 // for a group, and the <chat>/<topic>/<msg> permalink form answers with no
 // external link at all. The topic id alone suffices; no message id is needed.
 //
-// The listing saturates at 3 message wraps for comments_limit 50/100/200
-// (byte-identical responses), and that ceiling is accepted: a link rotating
-// every 24h is only useful from the newest messages, while walking message ids
-// instead measured ~1182 requests for one pass and invites the rate limiter.
-const topicQuery = "?embed=1&discussion=1&comments_limit=50"
+// comments_limit is HONOURED, up to a server ceiling around 96 messages. An
+// earlier comment here read the limit as saturating at 3, generalised from one
+// seed: mifa_world/1310 does return 3 wraps at 50, 200 and 500, but it is a
+// channel post's comment thread that only holds 3 comments. A real forum topic
+// scales — razlo4ka7/39 returns 49 wraps and 186 KB at 50, and 96 wraps at
+// 400 KB at both 200 and 500. So 50 was reading half a topic: on that seed it
+// saw 7 of 13 subscription candidates and 134 of 296 inline endpoints, and the
+// candidates it could not see included the only durable source there.
+//
+// 200 is where the ceiling is reached, so a higher value only re-sends the same
+// body. Walking message ids instead measured ~1182 requests for one pass and
+// invites the rate limiter, which is still refused.
+const topicQuery = "?embed=1&discussion=1&comments_limit=200"
 
 // messageWrap is t.me's per-message container class in both the /s/ listing and
 // the discussion widget. Its presence in a /s/ page is also what separates a
