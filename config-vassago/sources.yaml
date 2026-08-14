@@ -145,10 +145,14 @@
 #
 # Do not re-add: wepogp-2 and wepogp-3 are both 404, and fastnodes-se,
 # rabbitson, genlib, zhuhaiuk, bocchi2b, abikus, obwl-wwh, lime, mifa, wepogp-1,
-# wepogp-4 and wepogp-5 measured zero whitelisted nodes. Four of those are
-# expired rather than geographically wrong -- mifa, obwl-wwh and lime serve
+# wepogp-4 and wepogp-5 measured zero whitelisted nodes. Three of those are
+# expired rather than geographically wrong -- mifa and obwl-wwh serve
 # placeholder nodes, abikus serves HTML -- so they are dead weight for
-# instance 1 too.
+# instance 1 too. mifa was retired from both configs in 91b2ab2: its stable URL
+# is gone for good, replaced by a 24h link its forum topic publishes daily.
+# lime does NOT belong in that group. Re-measured 2026-08-14 it serves a single
+# node with an ordinary credential on a routable server, so it fails only the
+# vassago allow-list, on geography, and it stays in config/sources.yaml.
 subscriptions:
   sources:
     - name: bywarm-merged
