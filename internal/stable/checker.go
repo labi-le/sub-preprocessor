@@ -198,6 +198,10 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("cycle cancelled after probe: %w", err)
 	}
 
+	// Read while it still describes THIS probe: PrecheckAbsent afterwards would
+	// be indistinguishable from a prober that runs no pre-check.
+	precheck := precheckReportOf(spec.Prober)
+
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
@@ -243,6 +247,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		Probed:        len(probe),
 		Kept:          len(survivors),
 		ProbeStages:   probeStages(probe, res),
+		Precheck:      precheck,
 		GeoUnknown:    geoUnknownCount(survivors),
 		KeptCountries: keptCountries(survivors),
 		Duration:      time.Since(start),
@@ -321,6 +326,23 @@ func keptLatencies(survivors []Survivor) []int {
 		latencies = append(latencies, s.MeanMs)
 	}
 	return latencies
+}
+
+// precheckReporter is the optional half of a Prober that runs the TCP
+// reachability pre-check, asserted like the traceChecker capability. A Prober
+// without one reports PrecheckAbsent, which renders as no series rather than as
+// a pre-check that condemned nobody.
+type precheckReporter interface {
+	PrecheckReport() PrecheckReport
+}
+
+func precheckReportOf(p Prober) PrecheckReport {
+	reporter, ok := p.(precheckReporter)
+	if !ok {
+		return PrecheckReport{}
+	}
+
+	return reporter.PrecheckReport()
 }
 
 // probeStages counts the probed set by how far each probe got. It walks the

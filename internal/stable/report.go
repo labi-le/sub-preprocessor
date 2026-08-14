@@ -20,6 +20,11 @@ type CycleReport struct {
 	// sums to Probed: a label the prober never named -- its proxies did not
 	// parse -- counts as StageUnknown rather than falling out of the total.
 	ProbeStages map[ProbeStage]int
+	// Precheck is what the reachability pre-check inside Probe did, in
+	// ENDPOINTS rather than nodes -- see PrecheckReport. It is the only place a
+	// discarded pre-check verdict survives: ProbeStages then holds no
+	// StageCondemned at all.
+	Precheck PrecheckReport
 	// GeoUnknown counts published nodes carrying a [GEO:??] tag: the
 	// annotation chain resolved no country for them. It has an irreducible
 	// floor and zero is not the target. A DNS-poisoning sinkhole answers with
@@ -66,9 +71,10 @@ type CyclePhases struct {
 	DeadFilter time.Duration
 	// Probe covers Prober.Probe whole: parsing the payload into live mihomo
 	// adapters, the TCP pre-check, and every URL-test round. Splitting the
-	// pre-check out is DEFERRED — it would need a per-cycle plumbing path back
-	// through Probe, which the third return value was already refused for — so
-	// its share is inferred from the stage="condemned" count instead.
+	// pre-check's own duration out is DEFERRED — it would need a per-cycle
+	// plumbing path back through Probe, which the third return value was
+	// already refused for — so its share is inferred from the endpoints it
+	// dialled (Precheck) and the stage="condemned" count.
 	Probe time.Duration
 	// Egress covers filterAndMeasureEgress: the through-node filters and the
 	// cdn-cgi/trace measurement.
@@ -76,6 +82,47 @@ type CyclePhases struct {
 	// Publish covers BuildPayload, movedCount and c.publish: the in-memory
 	// swap, SaveSnapshot and the published-cycle log.
 	Publish time.Duration
+}
+
+// PrecheckState is what the TCP reachability pre-check did in a cycle. The zero
+// value is PrecheckAbsent, so a CycleReport from a Prober that runs no
+// pre-check says so without anyone setting a field.
+type PrecheckState uint8
+
+const (
+	// PrecheckAbsent means no pre-check ran: the cycle's Prober does not
+	// implement one, or Probe failed before reaching it.
+	PrecheckAbsent PrecheckState = iota
+	// PrecheckTripped means the breaker judged the pre-check's own verdict
+	// implausible, so it was DISCARDED and every node was URL-tested. Nothing
+	// is condemned, which makes stage="condemned" read 0 exactly as it does
+	// for a pre-check that ran and condemned nobody -- the case this state
+	// exists to tell apart, on the gemini gate's precedent.
+	PrecheckTripped
+	// PrecheckRan means the verdict was used: refused endpoints were condemned
+	// unprobed and dead-cached.
+	PrecheckRan
+)
+
+// PrecheckReport accounts the reachability pre-check in ENDPOINTS: one distinct
+// server:port is dialled once, while a multi-port mierus:// node is several, so
+// none of these is interchangeable with the stage="condemned" NODE count.
+//
+// Refused is what the pre-check proved unreachable -- condemned under
+// PrecheckRan, thrown away under PrecheckTripped, where this field is the only
+// surviving trace of the rejected verdict. Unresolved is the DNS fail-open
+// share: the name never became an address, which proves nothing about the
+// endpoint, so those nodes were probed instead (see filterReachable).
+//
+// Deliberately not a FilterReport: Dropped renders as
+// stable_filter_dropped_nodes{reason=...}, the pre-check is not a filter, and
+// that is the defect b545d0a shipped for the trace's counts and e554307
+// corrected.
+type PrecheckReport struct {
+	State      PrecheckState
+	Dialled    int
+	Refused    int
+	Unresolved int
 }
 
 // GeminiGateState is what the gemini gate did in a cycle. The zero value is

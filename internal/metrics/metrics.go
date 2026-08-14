@@ -106,6 +106,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: a recent probe found them dead.", float64(r.DeadSkipped))
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
 	writeProbeStages(w, r.ProbeStages)
+	writePrecheck(w, r.Precheck)
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
 	writeTrace(w, r.Trace)
@@ -193,7 +194,7 @@ func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
 		return
 	}
 	help(w, "stable_probe_outcome_nodes", "gauge",
-		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check found the server accepts no TCP connection. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
+		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
 	// Progress order, unknown last: it is a defect indicator, not a stage.
 	for _, s := range []stable.ProbeStage{
 		stable.StageCondemned, stable.StageConnect, stable.StageFetch, stable.StagePassed,
@@ -203,6 +204,39 @@ func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
 	if n := stages[stable.StageUnknown]; n > 0 {
 		sample(w, "stable_probe_outcome_nodes", map[string]string{labelStage: stable.StageUnknown.String()}, float64(n))
 	}
+}
+
+// writePrecheck renders the reachability pre-check's self-account. A tripped
+// breaker discards its verdict and URL-tests everything, which leaves
+// stable_probe_outcome_nodes{stage="condemned"} at 0 -- byte-identical to a
+// pre-check that ran and condemned nobody. Same failure mode as the gemini
+// gate's, so the same shape of fix: the trusted flag renders an explicit 0
+// there, an explicit 1 when the verdict was used, and NOTHING when no
+// pre-check ran at all.
+//
+// The counts are ENDPOINTS, not nodes: one distinct server:port is dialled
+// once where a multi-port mierus:// node is several, so they never match the
+// condemned node count.
+func writePrecheck(w io.Writer, p stable.PrecheckReport) {
+	if p.State == stable.PrecheckAbsent {
+		return
+	}
+	var trusted float64
+	if p.State == stable.PrecheckRan {
+		trusted = 1
+	}
+	gauge(w, "stable_precheck_trusted",
+		"1 when the TCP reachability pre-check's verdict was used last cycle, 0 when its breaker rejected it: refused at least 95% of the endpoints it judged, so the verdict was DISCARDED, every node was URL-tested and stable_probe_outcome_nodes{stage=\"condemned\"} reads 0 exactly as it does for a pre-check that condemned nobody. stable_precheck_refused_endpoints is then the only trace of what was thrown away.",
+		trusted)
+	gauge(w, "stable_precheck_dialled_endpoints",
+		"Distinct server:port endpoints the pre-check dialled last cycle: its own denominator. Endpoints, not nodes -- a multi-port mierus:// node is several, and a node whose adapter reaches its server over UDP (hysteria2/tuic/mieru, or vless xhttp-over-QUIC) is dialled not at all.",
+		float64(p.Dialled))
+	gauge(w, "stable_precheck_refused_endpoints",
+		"Endpoints the pre-check proved unreachable: a refused or black-holed SYN on every attempt. Condemned unprobed and dead-cached while stable_precheck_trusted is 1; discarded when it is 0. A healthy egress measured ~59% of dialled endpoints here.",
+		float64(p.Refused))
+	gauge(w, "stable_precheck_unresolved_endpoints",
+		"Endpoints whose name never became an address inside the dial budget (a *net.DNSError, timeout included). The pre-check proved nothing about them, so they were URL-tested rather than condemned: mihomo's own dial resolves through a stale-serving cache where this path pays an uncached lookup per attempt. ~5% of dialled endpoints in the measured mix; a spike is a resolver fault, not a pool fault.",
+		float64(p.Unresolved))
 }
 
 // writeTrace renders the cloudflare annotation stage. It is not a filter and has

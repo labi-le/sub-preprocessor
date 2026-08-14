@@ -40,6 +40,7 @@ func TestMetricsObserveRender(t *testing.T) {
 		},
 		Trace:         stable.TraceReport{Answered: 157, Unanswered: 8, Moved: 47},
 		Gemini:        stable.GeminiReport{State: stable.GeminiGateRan, Checks: 306, Unverified: 22},
+		Precheck:      stable.PrecheckReport{State: stable.PrecheckRan, Dialled: 1907, Refused: 1119, Unresolved: 99},
 		KeptSpeeds:    []int{3, 7, 30, 120},
 		GeoUnknown:    3,
 		KeptCountries: map[string]int{"NL": 40, "FI": 12},
@@ -81,6 +82,11 @@ func TestMetricsObserveRender(t *testing.T) {
 		"stable_gemini_gate_enabled 1",
 		"stable_gemini_gate_checks 306",
 		"stable_gemini_gate_unverified_checks 22",
+		"# TYPE stable_precheck_trusted gauge",
+		"stable_precheck_trusted 1",
+		"stable_precheck_dialled_endpoints 1907",
+		"stable_precheck_refused_endpoints 1119",
+		"stable_precheck_unresolved_endpoints 99",
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {
@@ -183,6 +189,96 @@ func geminiLines(out string) string {
 	var b strings.Builder
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(line, "stable_gemini_gate_") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// TestMetricsPrecheckStatesRenderApart is the gemini gate's lesson on the
+// pre-check: a breaker that discarded the verdict condemns nobody, so
+// stage="condemned" reads 0 for it exactly as it does for a pre-check that
+// found every server reachable, and only these series tell the two apart. A
+// prober that runs no pre-check emits nothing at all, matching how a filter
+// that never ran emits no drop series.
+func TestMetricsPrecheckStatesRenderApart(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[stable.PrecheckState]string{}
+	for _, tc := range []struct {
+		name string
+		rep  stable.PrecheckReport
+		want []string
+	}{
+		{
+			name: "absent",
+			rep:  stable.PrecheckReport{},
+		},
+		{
+			name: "tripped, verdict discarded",
+			rep:  stable.PrecheckReport{State: stable.PrecheckTripped, Dialled: 1907, Refused: 1889},
+			want: []string{
+				"stable_precheck_trusted 0",
+				"stable_precheck_dialled_endpoints 1907",
+				"stable_precheck_refused_endpoints 1889",
+				"stable_precheck_unresolved_endpoints 0",
+			},
+		},
+		{
+			name: "ran and condemned nobody",
+			rep:  stable.PrecheckReport{State: stable.PrecheckRan, Dialled: 1907},
+			want: []string{
+				"stable_precheck_trusted 1",
+				"stable_precheck_dialled_endpoints 1907",
+				"stable_precheck_refused_endpoints 0",
+			},
+		},
+	} {
+		m := metrics.New()
+		m.Observe(stable.CycleReport{
+			Precheck: tc.rep,
+			Probed:   1907,
+			ProbeStages: map[stable.ProbeStage]int{
+				stable.StageUnknown: 0, stable.StageCondemned: 0,
+				stable.StageConnect: 0, stable.StageFetch: 0, stable.StagePassed: 1907,
+			},
+		})
+		out := render(t, m)
+		// The series a tripped breaker leaves indistinguishable, pinned as the
+		// reason these gauges exist.
+		if !strings.Contains(out, `stable_probe_outcome_nodes{stage="condemned"} 0`) {
+			t.Fatalf("%s: fixture must condemn nobody:\n%s", tc.name, out)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: missing %q in:\n%s", tc.name, w, out)
+			}
+		}
+		// Sample lines, not a substring search: the probe-stage HELP text names
+		// stable_precheck_trusted, and an absent pre-check may still be
+		// mentioned there.
+		if len(tc.want) == 0 && precheckLines(out) != "" {
+			t.Errorf("%s: must render no pre-check sample:\n%s", tc.name, out)
+		}
+		rendered[tc.rep.State] = precheckLines(out)
+	}
+
+	for a, ra := range rendered {
+		for b, rb := range rendered {
+			if a != b && ra == rb {
+				t.Errorf("pre-check states %d and %d render identically as %q", a, b, ra)
+			}
+		}
+	}
+}
+
+// precheckLines extracts the pre-check samples so two renderings can be
+// compared for equality; the HELP/TYPE headers are constant.
+func precheckLines(out string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_precheck_") {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}

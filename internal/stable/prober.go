@@ -41,6 +41,10 @@ type MihomoProber struct {
 	cloudflare config.CloudflareConfig
 	geminiKey  string
 	logger     zerolog.Logger
+	// precheck is filled by filterReachable and read back through
+	// PrecheckReport after Probe returns, both on the cycle goroutine. Cycles
+	// never overlap (Controller.Apply swaps a spec, it does not run one).
+	precheck PrecheckReport
 	// traceEndpoint overrides the cdn-cgi/trace URL for tests, which point it
 	// at an httptest server. It is a field rather than a config key because
 	// the answer is only parseable from Cloudflare (see cloudflareTraceURL);
@@ -106,6 +110,9 @@ func betterProbe(a, b ProbeResult) bool {
 // that reached the prober, failures included: Successes == 0 is what marks a
 // node dead, never absence.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
+	// Never last cycle's verdict: a Probe that fails before the pre-check must
+	// report PrecheckAbsent, not the previous pool's numbers.
+	m.precheck = PrecheckReport{}
 	proxies, tcpServer, err := m.parseProxies(payload)
 	if err != nil {
 		return nil, err
@@ -225,24 +232,45 @@ func (m *MihomoProber) parseProxies(payload []byte) ([]mihomo.Proxy, []bool, err
 // overwhelming majority of probed nodes fail, so pre-checking the TCP connect
 // is the cheapest way to stop paying that twice.
 const (
-	// Retried once: neither a single dropped SYN nor one DNS hiccup may cost a
-	// live node its dead-cache TTL, and each attempt resolves again.
+	// Retried once so a single dropped SYN cannot cost a live node its
+	// dead-cache TTL. A resolver hiccup no longer rides on this: an
+	// unresolvable name is failed open outright (see reachableTCP).
 	precheckAttempts = 2
-	// Deliberately not check.concurrency, which is per-instance and pinned per
-	// instance by its own latency measurement — config ships 16 against
-	// max_avg_ms 800, config-vassago 32 against 4000 — because URLTest reports
-	// the wall clock max_avg_ms gates on. This dial yields no bit any gate
-	// reads, so it is bounded on its own.
+	// Bounded by the ROUTER's conntrack table, which is the binding cost here.
+	// Measurement independence is real but secondary: this dial yields no bit
+	// any gate reads, so check.concurrency — 16 in config against max_avg_ms
+	// 800, 32 in config-vassago against 4000, each pinned by its own latency
+	// measurement — has no claim on it.
+	//
+	// Measured 2.8 tracked flows per endpoint (one TCP flow when the first
+	// attempt connects, two when it is black-holed, plus the A/AAAA pair for a
+	// hostname). A production pool's ~8800 distinct endpoints is ~24700 flows,
+	// created in the ~35s this phase takes at 128 and each held for
+	// nf_conntrack's 120s SYN_SENT/TIME_WAIT default — 13x the ~1900 the
+	// URL-test path alone creates. The phase is SHORTER than that timeout, so
+	// peak occupancy is essentially everything created: ~24700 entries, which
+	// assumes nf_conntrack_max 32768 and does NOT fit the 8192 an OpenWrt box
+	// ships. This service runs beside one, and a full table drops the whole
+	// LAN's traffic, not just this worker's.
+	//
+	// Kept at 128 because lowering it is not the lever: occupancy is
+	// min(flows created, rate * 120s) and the rate is proportional to this
+	// constant, so every value above ~37 peaks at the same ~24700, while the
+	// ~12 that would fit 8192 stretches the phase to ~6min against a gross
+	// saving of ~465s — below a break-even near 10 the pre-check costs more
+	// than it saves.
 	precheckConcurrency = 128
-	// Above this share of refused endpoints the pre-check is judged unreliable
-	// rather than believed. A healthy egress measured 58.9% condemned on the
-	// raw merged pool, while the faults this guards — a local egress outage,
-	// DNS down, a degenerate check.timeout — refuse essentially EVERY
-	// endpoint, so their signature is ~100% and the 36-point margin costs no
-	// real verdict.
+	// Above this share of the endpoints it JUDGED — refused plus reachable, the
+	// fail-open ones excluded — the pre-check is judged unreliable rather than
+	// believed. A healthy egress measured 58.9% condemned on the raw merged
+	// pool, while the faults this guards — a local egress outage, a degenerate
+	// check.timeout — refuse essentially EVERY endpoint they touch, so their
+	// signature is ~100% and the 36-point margin costs no real verdict. DNS
+	// down is no longer one of them: it leaves nothing judged, and an empty
+	// judged set condemns nobody anyway.
 	precheckBreakerPercent = 95
-	// A share over a handful of endpoints carries no signal; production cycles
-	// dial thousands.
+	// A share over a handful of judged endpoints carries no signal; production
+	// cycles dial thousands.
 	precheckBreakerMin = 100
 )
 
@@ -254,10 +282,18 @@ const (
 // All precheckAttempts attempts share exactly ONE url-test round's budget,
 // which is what makes the verdict safe by construction: a node that cannot
 // finish a bare TCP handshake inside check.timeout cannot finish TCP, TLS,
-// tunnel and GET inside it either. The budget binds only on a black-holed
-// endpoint — a refused SYN returns in microseconds.
+// tunnel and GET inside it either. The budget binds on a black-holed endpoint
+// and on a lookup that does not answer inside it — a refused SYN returns in
+// microseconds — and only the first of those two condemns.
 func (m *MihomoProber) precheckDialBudget() time.Duration {
 	return m.cfg.Timeout / precheckAttempts
+}
+
+// PrecheckReport is the optional half of the Prober contract the checker reads
+// after Probe (see stable.precheckReporter). A tripped breaker condemns nobody,
+// so without this the metrics cannot tell it from a pre-check that ran clean.
+func (m *MihomoProber) PrecheckReport() PrecheckReport {
+	return m.precheck
 }
 
 // dialsServerOverTCP reports whether mihomo reaches this node's server with a
@@ -323,10 +359,18 @@ func dialsServerOverQUIC(mapping map[string]any) bool {
 // The bare net.Dialer is deliberate — warming mihomo's own DNS cache would
 // shave the delay max_avg_ms gates on — and it costs a THIRD resolver in one
 // cycle beside internal/resolver (TTL-cached, resolver.address-configurable)
-// and mihomo's SystemResolver, neither of which this path honours. A failed
-// lookup is also indistinguishable here from a refused SYN, so a resolver
-// hiccup condemns and dead-caches; precheckAttempts resolving again, and the
-// breaker below, are what bound that.
+// and mihomo's SystemResolver, neither of which this path honours. That
+// asymmetry is why a failed LOOKUP fails open and only a refused or black-holed
+// SYN condemns: mihomo's URL test dials through a stale-serving LRU
+// (dns/system.go:69 builds SystemResolver over the cache dns/resolver.go:460
+// creates WithStale(true)), at most one blocking lookup per host per PROCESS,
+// while every attempt here pays the uncached net.DefaultResolver inside its own
+// budget. The same name also resolved through internal/resolver earlier in this
+// cycle — preprocess drops a node whose server resolves to nothing as DNSDrop
+// before the merge — so a failure here, 5.2% of endpoints in the measured mix,
+// is evidence about this path's resolver rather than about the node, and
+// condemning on it would dead-cache a live node for a jittered [3h, 4.5h)
+// against a 1h interval.
 func (m *MihomoProber) filterReachable(
 	ctx context.Context,
 	opLog zerolog.Logger,
@@ -347,10 +391,14 @@ func (m *MihomoProber) filterReachable(
 		}
 	}
 	if len(addrs) == 0 {
+		// Ran with nothing to dial, which Dialled 0 says; PrecheckAbsent would
+		// claim there is no pre-check at all.
+		m.precheck = PrecheckReport{State: PrecheckRan}
+
 		return allPositions(len(proxies)), nil
 	}
 
-	reachable := make([]bool, len(addrs))
+	verdicts := make([]precheckVerdict, len(addrs))
 	sem := fanoutSem(precheckConcurrency)
 	budget := m.precheckDialBudget()
 	var wg sync.WaitGroup
@@ -361,27 +409,41 @@ func (m *MihomoProber) filterReachable(
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			reachable[i] = reachableTCP(ctx, addr, budget)
+			verdicts[i] = reachableTCP(ctx, addr, budget)
 		}()
 	}
 	wg.Wait()
 
-	refused := 0
-	for _, ok := range reachable {
-		if !ok {
+	refused, unresolved := 0, 0
+	for _, v := range verdicts {
+		if v == verdictRefused {
 			refused++
+		}
+		if v == verdictUnresolved {
+			unresolved++
 		}
 	}
 	// Condemning the pool writes the whole probed set into the dead cache for
 	// deadcache.ttl — three cycles at the shipped 3h against a 1h interval —
 	// and the pre-check now reaches that verdict in ~75s where a full probe
 	// pass took ~20min, so an implausible verdict must fail open.
-	if len(addrs) >= precheckBreakerMin && refused*100 >= len(addrs)*precheckBreakerPercent {
-		opLog.Warn().Int("refused", refused).Int("dialled", len(addrs)).
-			Int("threshold_pct", precheckBreakerPercent).
-			Msg("tcp pre-check refused nearly every endpoint; treating it as unreliable and probing everything")
+	//
+	// The share is taken over the endpoints the pre-check actually JUDGED: a
+	// resolver outage must not dilute the denominator until the breaker stops
+	// firing.
+	decided := len(addrs) - unresolved
+	if decided >= precheckBreakerMin && refused*100 >= decided*precheckBreakerPercent {
+		m.precheck = PrecheckReport{
+			State: PrecheckTripped, Dialled: len(addrs), Refused: refused, Unresolved: unresolved,
+		}
+		opLog.Warn().Int("refused", refused).Int("decided", decided).
+			Int("dialled", len(addrs)).Int("threshold_pct", precheckBreakerPercent).
+			Msg("tcp pre-check refused nearly every endpoint it judged; treating it as unreliable and probing everything")
 
 		return allPositions(len(proxies)), nil
+	}
+	m.precheck = PrecheckReport{
+		State: PrecheckRan, Dialled: len(addrs), Refused: refused, Unresolved: unresolved,
 	}
 
 	live = make([]int, 0, len(proxies))
@@ -389,7 +451,7 @@ func (m *MihomoProber) filterReachable(
 		// Re-tested rather than looked up by address alone: a proxy the
 		// pre-check excludes may share server:port with one it dialled, and
 		// Merge's dedupe key does not rule that out for a mierus:// port list.
-		if !tcpServer[i] || reachable[index[px.Addr()]] {
+		if !tcpServer[i] || verdicts[index[px.Addr()]] != verdictRefused {
 			live = append(live, i)
 
 			continue
@@ -398,7 +460,8 @@ func (m *MihomoProber) filterReachable(
 	}
 	if len(condemned) > 0 {
 		opLog.Info().Int("condemned", len(condemned)).Int("dialled", len(addrs)).
-			Int("probing", len(live)).Msg("tcp pre-check ruled out unreachable endpoints")
+			Int("unresolved", unresolved).Int("probing", len(live)).
+			Msg("tcp pre-check ruled out unreachable endpoints")
 	}
 
 	return live, condemned
@@ -413,8 +476,24 @@ func allPositions(n int) []int {
 	return all
 }
 
-func reachableTCP(ctx context.Context, addr string, budget time.Duration) bool {
+// precheckVerdict is what one endpoint's dials proved. The zero value proves
+// nothing, so a slot no dial reached fails open.
+type precheckVerdict uint8
+
+const (
+	verdictUnresolved precheckVerdict = iota
+	verdictRefused
+	verdictReachable
+)
+
+// reachableTCP dials addr up to precheckAttempts times, the last attempt
+// deciding. A *net.DNSError — which net.Dialer wraps in *net.OpError, and which
+// net/lookup.go:358 also returns when the budget kills the lookup itself —
+// means the name never became an address, so nothing was proved about the
+// endpoint; every other dial error is a refused or black-holed SYN.
+func reachableTCP(ctx context.Context, addr string, budget time.Duration) precheckVerdict {
 	var d net.Dialer
+	verdict := verdictRefused
 	for range precheckAttempts {
 		dctx, cancel := context.WithTimeout(ctx, budget)
 		conn, err := d.DialContext(dctx, "tcp", addr)
@@ -422,14 +501,21 @@ func reachableTCP(ctx context.Context, addr string, budget time.Duration) bool {
 		if err == nil {
 			_ = conn.Close()
 
-			return true
+			return verdictReachable
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			verdict = verdictUnresolved
+		} else {
+			verdict = verdictRefused
 		}
 		if ctx.Err() != nil {
-			return false
+			// The cycle ran out, not the endpoint's patience.
+			return verdictUnresolved
 		}
 	}
 
-	return false
+	return verdict
 }
 
 // probeStage tells a failure that never got a tunnel from one that failed the

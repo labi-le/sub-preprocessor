@@ -395,10 +395,13 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 		desc          string
 		live          int
 		wantCondemned int
+		wantRep       PrecheckReport
 	}{
-		{"every endpoint refused", 0, 0},
+		{"every endpoint refused", 0, 0,
+			PrecheckReport{State: PrecheckTripped, Dialled: total, Refused: total}},
 		// 95 of 101 refused is 94.05%, just under the threshold.
-		{"just under the threshold", total - 95, 95},
+		{"just under the threshold", total - 95, 95,
+			PrecheckReport{State: PrecheckRan, Dialled: total, Refused: 95}},
 	} {
 		t.Run(c.desc, func(t *testing.T) {
 			t.Parallel()
@@ -415,13 +418,19 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 				tcpServer[i] = true
 			}
 
-			live, condemned := precheckProber(t).
-				filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+			p := precheckProber(t)
+			live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
 			if len(condemned) != c.wantCondemned {
 				t.Errorf("condemned %d of %d, want %d", len(condemned), total, c.wantCondemned)
 			}
 			if len(live)+len(condemned) != total {
 				t.Errorf("live %d + condemned %d != %d parsed proxies", len(live), len(condemned), total)
+			}
+			// A tripped breaker condemns nobody, which is also what a pool of
+			// reachable servers looks like: the state is the only thing that
+			// says whether the verdict was believed.
+			if got := p.PrecheckReport(); got != c.wantRep {
+				t.Errorf("PrecheckReport() = %+v, want %+v", got, c.wantRep)
 			}
 		})
 	}
@@ -504,5 +513,149 @@ func TestPrecheckBudgetTracksTheDefaultTimeout(t *testing.T) {
 	if budget, want := precheckAttempts*p.precheckDialBudget(), check.Timeout; budget != want {
 		t.Errorf("pre-check spends %v on an endpoint under the default check.timeout, want %v",
 			budget, want)
+	}
+}
+
+// The pre-check resolves through an uncached net.DefaultResolver inside its own
+// budget, while mihomo's URL test dials through a stale-serving cache and the IP
+// stage already resolved every kept name this cycle. A lookup failure here is
+// therefore evidence about this path's resolver, not about the node, so it must
+// fail OPEN: condemning on it dead-caches a live node for a jittered [3h, 4.5h)
+// against a 1h interval.
+func TestFilterReachableFailsOpenOnAnUnresolvableName(t *testing.T) {
+	t.Parallel()
+
+	// .invalid resolves for nobody (RFC 6761), so the dial fails at the lookup
+	// and no SYN leaves the machine.
+	pxs := []mihomo.Proxy{
+		&precheckProxy{addr: "no-such-host.invalid:443"},
+		&precheckProxy{addr: deadTCPAddr(t)},
+		&precheckProxy{addr: liveTCPAddr(t)},
+	}
+	tcpServer := []bool{true, true, true}
+
+	p := precheckProber(t)
+	live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+	if want := []int{0, 2}; !slices.Equal(live, want) {
+		t.Errorf("live = %v, want %v: an unresolvable name proves nothing about the endpoint", live, want)
+	}
+	if want := []int{1}; !slices.Equal(condemned, want) {
+		t.Errorf("condemned = %v, want %v: only a refused or black-holed SYN is proof", condemned, want)
+	}
+	want := PrecheckReport{State: PrecheckRan, Dialled: 3, Refused: 1, Unresolved: 1}
+	if got := p.PrecheckReport(); got != want {
+		t.Errorf("PrecheckReport() = %+v, want %+v", got, want)
+	}
+}
+
+// The breaker's share is taken over the endpoints the pre-check JUDGED, never
+// over everything it dialled: a resolver outage adds fail-open endpoints that
+// prove nothing, and counting them in the denominator would hold a wholly
+// refused egress under the threshold and condemn the pool it was built to
+// spare. 101 refused against 99 unresolvable is 100% of the judged set and
+// 50.5% of the dialled one.
+func TestFilterReachableBreakerIgnoresUnjudgedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	const unresolvable = 99
+	pxs := make([]mihomo.Proxy, 0, precheckBreakerMin+1+unresolvable)
+	for _, addr := range refusedAddrs(precheckBreakerMin + 1) {
+		pxs = append(pxs, &precheckProxy{addr: addr})
+	}
+	for i := range unresolvable {
+		pxs = append(pxs, &precheckProxy{addr: fmt.Sprintf("no-such-host-%d.invalid:443", i)})
+	}
+	tcpServer := make([]bool, len(pxs))
+	for i := range tcpServer {
+		tcpServer[i] = true
+	}
+
+	p := precheckProber(t)
+	_, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+	if len(condemned) != 0 {
+		t.Errorf("condemned %d endpoints, want 0: the breaker must fire on the judged share", len(condemned))
+	}
+	want := PrecheckReport{
+		State: PrecheckTripped, Dialled: len(pxs), Refused: precheckBreakerMin + 1, Unresolved: unresolvable,
+	}
+	if got := p.PrecheckReport(); got != want {
+		t.Errorf("PrecheckReport() = %+v, want %+v", got, want)
+	}
+}
+
+// precheckingProber is the smallest publishing prober that also carries the
+// pre-check capability, so the seam Probe -> CycleReport -> Reporter is
+// exercised for a report no other fake reports.
+type precheckingProber struct {
+	oneNodeProber
+	rep PrecheckReport
+}
+
+func (p precheckingProber) PrecheckReport() PrecheckReport { return p.rep }
+
+// Every hand-off on the way to the Reporter can drop the account without
+// failing anything: a lost one is the zero PrecheckReport, which renders as no
+// series at all and so looks like a prober that runs no pre-check.
+func TestPrecheckReportReachesTheCycleReport(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		desc   string
+		prober Prober
+		want   PrecheckReport
+	}{
+		{"verdict used", precheckingProber{rep: PrecheckReport{
+			State: PrecheckRan, Dialled: 1907, Refused: 1119, Unresolved: 99,
+		}}, PrecheckReport{State: PrecheckRan, Dialled: 1907, Refused: 1119, Unresolved: 99}},
+		{"verdict discarded", precheckingProber{rep: PrecheckReport{
+			State: PrecheckTripped, Dialled: 1907, Refused: 1889,
+		}}, PrecheckReport{State: PrecheckTripped, Dialled: 1907, Refused: 1889}},
+		{"prober runs no pre-check", oneNodeProber{}, PrecheckReport{}},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			rec := &cycleRecorder{}
+			ch := NewChecker(CheckerSpec{
+				Sources:       []config.SubscriptionSource{{Name: "src", Body: benchVlessLine("1.1.1.1", "443", "n")}},
+				Interval:      time.Hour,
+				Rounds:        5,
+				MaxAvgMs:      1000,
+				SourceTimeout: time.Minute,
+				Prober:        c.prober,
+			}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+			if err := ch.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if rec.last == nil {
+				t.Fatal("a published cycle must reach the Reporter")
+			}
+			if rec.last.Precheck != c.want {
+				t.Fatalf("CycleReport.Precheck = %+v, want %+v", rec.last.Precheck, c.want)
+			}
+		})
+	}
+}
+
+// A Probe that fails before the pre-check must publish PrecheckAbsent, never the
+// previous cycle's verdict: a stale PrecheckRan claims a pre-check that this
+// cycle never performed.
+func TestProbeClearsLastCyclesPrecheckReport(t *testing.T) {
+	t.Parallel()
+
+	p := precheckProber(t)
+	if _, err := p.Probe(context.Background(), vmessPayload(t)); err != nil {
+		t.Fatalf("setup probe: %v", err)
+	}
+	if got := p.PrecheckReport(); got.State != PrecheckRan {
+		t.Fatalf("setup: a completed pre-check must report PrecheckRan, got %+v", got)
+	}
+
+	if _, err := p.Probe(context.Background(), []byte("no nodes here\n")); err == nil {
+		t.Fatal("a payload with no parsable proxy must fail the probe")
+	}
+	if got := p.PrecheckReport(); got != (PrecheckReport{}) {
+		t.Errorf("PrecheckReport() = %+v, want the zero report", got)
 	}
 }

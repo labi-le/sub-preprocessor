@@ -966,7 +966,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Probe outcome by stage",
-      "description": "Where the probe ended for each node it was spent on, stacked, closed over stable_probed_nodes: condemned = the TCP reachability pre-check refused the server, so no URL test was spent on it — a saving for the cycle, never a free verdict for the node: a condemned label folds to Successes 0, recordDead blocks its server:port, and filterDead then skips that address for deadcache.ttl, 3h in both shipped configs and jittered to [3h, 4.5h), against a 1h interval — so one condemnation costs the node its next three to four cycles, which is where a yield drop on the funnel panel comes from; connect = the URL test never got a tunnel up; fetch = the tunnel came up and the GET through it failed; passed = at least one round answered, i.e. the input to SelectSurvivors. unknown is the zero ProbeStage, and it counts probed labels the prober returned NO result for — which is exactly what a node whose proxies failed adapter.ParseProxy leaves behind, since probeStages walks the probed ENTRIES and indexes the result map, so an absent label reads as the zero value instead of vanishing and the stack keeps closing over stable_probed_nodes. Non-zero here means the payload carried lines mihomo would not convert; it is not a mis-assigned stage. condemned/probed is the series to watch: it is the pre-check's yield, and it is what decides how much probe time a reachability gate can ever save. Measured off-prod before this shipped, 1898 TCP-gated nodes from 45 of 51 sources: 58.9% condemned, corroborated at 58.1% by an independent TCP sweep of 2861 endpoints. Do NOT expect prod to reproduce that: the measurement ran from a different egress, and it sampled the RAW merged pool while prod probes the ~26% the dead cache did not skip, a set biased toward less-dead nodes -- so prod's condemned share should be LOWER. This counts NODES, folded best-of-ports by foldProbeResults, so it cannot express what share of ATTEMPTS burned the full check.timeout; that is an attempt statistic and no series here reproduces it. An aborted cycle contributes nothing: ObserveError leaves the last report in place, so the stack keeps describing the last cycle that PUBLISHED.",
+      "description": "Where the probe ended for each node it was spent on, stacked, closed over stable_probed_nodes: condemned = the TCP reachability pre-check refused the server, so no URL test was spent on it — a saving for the cycle, never a free verdict for the node: a condemned label folds to Successes 0, recordDead blocks its server:port, and filterDead then skips that address for deadcache.ttl, 3h in both shipped configs and jittered to [3h, 4.5h), against a 1h interval — so one condemnation costs the node its next three to four cycles, which is where a yield drop on the funnel panel comes from; connect = the URL test never got a tunnel up; fetch = the tunnel came up and the GET through it failed; passed = at least one round answered, i.e. the input to SelectSurvivors. unknown is the zero ProbeStage, and it counts probed labels the prober returned NO result for — which is exactly what a node whose proxies failed adapter.ParseProxy leaves behind, since probeStages walks the probed ENTRIES and indexes the result map, so an absent label reads as the zero value instead of vanishing and the stack keeps closing over stable_probed_nodes. Non-zero here means the payload carried lines mihomo would not convert; it is not a mis-assigned stage. condemned/probed is the series to watch: it is the pre-check's yield, and it is what decides how much probe time a reachability gate can ever save — but only while stable_precheck_trusted is 1. When the pre-check's breaker discards its own verdict (trusted 0, see the TCP pre-check panel) nothing is condemned at all and this series reads 0, indistinguishable here from a pre-check that ran and found every server reachable; the endpoint counts on that panel are then the only record of the discarded verdict. An endpoint whose NAME did not resolve is not condemned either: a failed lookup proves nothing, so the pre-check fails open and the URL test decides. Measured off-prod before this shipped, 1898 TCP-gated nodes from 45 of 51 sources: 58.9% condemned, corroborated at 58.1% by an independent TCP sweep of 2861 endpoints. Do NOT expect prod to reproduce that: the measurement ran from a different egress, and it sampled the RAW merged pool while prod probes the ~26% the dead cache did not skip, a set biased toward less-dead nodes -- so prod's condemned share should be LOWER. This counts NODES, folded best-of-ports by foldProbeResults, so it cannot express what share of ATTEMPTS burned the full check.timeout; that is an attempt statistic and no series here reproduces it. An aborted cycle contributes nothing: ObserveError leaves the last report in place, so the stack keeps describing the last cycle that PUBLISHED.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1273,6 +1273,105 @@
           },
           "expr": "100 * sum(stable_source_kept_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
           "legendFormat": "% survived"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "TCP pre-check (reachability)",
+      "description": "What the TCP reachability pre-check inside the probe phase did, in ENDPOINTS: one distinct server:port is dialled once, so a multi-port mierus:// node counts several times here, and a node whose adapter reaches its server over UDP (hysteria2/tuic/mieru, or vless xhttp-over-QUIC) is dialled not at all — no line here is the condemned NODE count on \"Probe outcome by stage\". Three states, which must never be read alike. verdict trusted = 1: the verdict was used, and every refused endpoint was condemned unprobed and dead-cached for deadcache.ttl. verdict trusted = 0: the breaker rejected it — refused at least 95% of the endpoints it JUDGED, a signature of a local egress fault or a degenerate check.timeout rather than a dead pool; a resolver outage does not reach this breaker at all, since an unresolvable endpoint is judged by nobody and counted as unresolved — so the verdict was DISCARDED and every node was URL-tested; stage=\"condemned\" then reads 0 exactly as it does for a pre-check that ran and condemned nobody, and \"refused\" here is the only surviving trace of what was thrown away. No series at all: no pre-check ran in the last published cycle (a prober without one, or nothing published or scraped yet). refused ~59% of dialled is the healthy band measured on this pool. unresolved is the DNS fail-open share, ~5%: the name never became an address inside the dial budget, which proves nothing about the endpoint, so those nodes were probed instead of condemned — a spike there is a resolver fault, not a pool fault.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verdict trusted"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_dialled_endpoints{job=\"$job\"}",
+          "legendFormat": "dialled"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_refused_endpoints{job=\"$job\"}",
+          "legendFormat": "refused"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_unresolved_endpoints{job=\"$job\"}",
+          "legendFormat": "unresolved (failed open)"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_trusted{job=\"$job\"}",
+          "legendFormat": "verdict trusted"
         }
       ]
     }
