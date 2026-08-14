@@ -18,6 +18,11 @@ gets unpredictable routing. This service sits between the raw sources and the
 router and does the filtering once, centrally, so the router just fetches a
 ready-to-use list over HTTP.
 
+It is written in Go because Mihomo is: the stable worker embeds
+`github.com/metacubex/mihomo` to build live proxies from a subscription payload and
+probe each one through the real adapter stack, so a node published here is a node
+the router's own Mihomo can dial. That single dependency fixes the language.
+
 ## Endpoints
 
 | Endpoint | What it does |

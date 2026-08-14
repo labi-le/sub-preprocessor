@@ -217,6 +217,30 @@ no deployment may be sized off the 15649, only off a measured node count.
 
 ## Important current design decisions
 
+- **The project is in Go because mihomo is, and that is the root of every rule below
+  that starts "mirrors mihomo".** `internal/stable/prober.go` imports
+  `mihomo/adapter`, `mihomo/common/convert` and `mihomo/constant` (lines 9-12) to
+  turn a subscription payload into LIVE proxies (`parseProxies`, :165) and dial
+  through each one — the `/stable.txt` worker's entire purpose. Nothing else needs
+  the language: outside the prober the dependency is type constants
+  (`mihomo/constant` in `internal/stable/{label,nodefilter,checker}.go`) and one
+  helper (`mihomo/common/utils` in `internal/config/config.go:22`), and the rest of
+  the pipeline is HTTP, YAML and parsing. The hand-rolled metrics renderer is a
+  second-order cost of the same dependency (see the monitoring section below).
+- **"Rewrite it in another language" is a SETTLED question — do not reopen it as a
+  performance change.** A line-by-line Rust port was written, measured against this
+  tree and dropped. It reached parity on every mihomo-free package and could not
+  cross the prober: replacing the language means reimplementing mihomo's adapter set
+  (vless/vmess/ss/ssr/trojan/hysteria2/tuic/mieru) *and* its parse quirks, and
+  without that step the worker probes nobody and publishes nothing. The CPU gain
+  measured ~1.2x on microbenchmarks — **that figure's artifacts are not in this
+  repository and cannot be reproduced from a checkout, so cite the mechanism, not the
+  number**: a `/stable.txt` cycle is 20-55 min on a 68k-node pool, nearly all of it
+  DNS resolution and one URL-test probe per node, so microbenchmark seconds are not
+  the cycle. What the exercise actually bought is the three commits sitting on top of
+  `cd21b6b` — the `inet_aton` SSRF gate, one shared `net.Resolver`, and a single
+  unescape per crawled page. Writing the pipeline a second time is what found them;
+  keeping a second implementation was not what paid.
 - Parsing is **generic URI parsing**, not hardcoded to `vless://` only, and that stays the policy: there is deliberately **no whitelist** of mihomo-known schemes, so a scheme with no concrete reason to be rejected keeps the generic `scheme://[userinfo@]host[:port][?query][#fragment]` walk. Four schemes need more than that walk, because the fields the pipeline needs are not where it looks, and each decoder mirrors mihomo's so that a node we keep is a node the prober can convert:
   - `vmess://` — base64 JSON (`add`/`port`/`ps`).
   - `ss://` — the PORT picks the form, as it does for mihomo: a portful SIP002 link takes the untouched generic path, and a portless authority is the legacy form, base64 of `method:pass@host:port`, decoded with `base64.RawStdEncoding` ONLY. Narrower than our tolerant vmess decoder on purpose: the shadowsocks spec writes that form WITHOUT padding and mihomo decodes it with that alphabet alone, so a padded or url-safe payload is a node that merges, spends a probe, converts to nothing and parks in the dead cache. Branching on the `@` instead would keep `ss://<b64userinfo>@host` — SIP002-shaped but portless, and a line mihomo drops — and publish it under a defaulted port 443 it does not have.
