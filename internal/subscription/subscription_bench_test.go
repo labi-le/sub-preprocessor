@@ -2,6 +2,7 @@ package subscription_test
 
 import (
 	"encoding/base64"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -247,5 +248,120 @@ func BenchmarkRewriteSSRName(b *testing.B) {
 	for b.Loop() {
 		out, _ := subscription.RewriteSSRName(raw, newName)
 		sinkStr = out
+	}
+}
+
+// The five benchmarks below measure a whole SOURCE BODY through the seam the
+// /stable.txt worker drives it through — Normalize then Parse — rather than one
+// node at a time. Their shapes and sizes come from fetching all 163 configured
+// sources on 2026-08-14: 157 answered non-empty, 20.51 MB in total over 72568
+// nodes, median body 38 KB, p90 173 KB, largest 3.06 MB; by shape 79 bodies
+// were base64-wrapped (3.16 MB), 44 plain URI lists (16.93 MB) and 25 Xray JSON
+// (0.41 MB). Every one of the 79 base64 bodies arrived with NO whitespace, so
+// stripWhitespace's copying branch is unreached in production.
+//
+// The 10 MiB pair is maxSubscriptionSize, which no configured source comes near:
+// it bounds what one runaway source can cost, and it is where a growth chain
+// hurts most.
+const (
+	benchMedianBody = 38 << 10
+	benchLargeBody  = 10 << 20
+	benchSources    = 157
+)
+
+// benchURIList builds an already-normalized vless body of at least size bytes,
+// at the corpus's measured 267 B/node.
+func benchURIList(size int) []byte {
+	var sb strings.Builder
+	sb.Grow(size + 512)
+	for i := 0; sb.Len() < size; i++ {
+		sb.WriteString("vless://b831381d-6324-4d53-ad4f-8cda48b30811@node")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString(".example.com:443?security=reality&sni=www.example.org")
+		sb.WriteString("&fp=chrome&pbk=UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA")
+		sb.WriteString("&sid=4e9b0c2d1a3f5768&type=tcp&flow=xtls-rprx-vision#Node ")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString("\n")
+	}
+	return []byte(sb.String())
+}
+
+// benchBase64Body wraps a URI list so the ENCODED body is about size bytes,
+// which is what the fetch actually carries.
+func benchBase64Body(size int) []byte {
+	raw := benchURIList(size * 3 / 4)
+	out := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
+	base64.StdEncoding.Encode(out, raw)
+	return out
+}
+
+// benchXrayJSON builds the Hiddify-style document Normalize has to convert:
+// outbounds vless configs of the reality-over-tcp shape 85 of one measured
+// post's 158 outbounds had.
+func benchXrayJSON(outbounds int) []byte {
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := range outbounds {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strings.Replace(
+			strings.TrimSuffix(strings.TrimPrefix(realityTCP, "["), "]"),
+			"node-a", "node-"+strconv.Itoa(i), 1))
+	}
+	sb.WriteByte(']')
+	return []byte(sb.String())
+}
+
+func benchNormalizeParse(b *testing.B, body []byte) {
+	b.Helper()
+	b.ReportAllocs()
+	for b.Loop() {
+		count := 0
+		subscription.Parse(subscription.Normalize(body), func(subscription.Node) bool {
+			count++
+			return true
+		})
+		if count == 0 {
+			b.Fatal("fixture parsed no nodes")
+		}
+		sinkInt = count
+	}
+}
+
+func BenchmarkNormalizeParse_URIList10MiB(b *testing.B) {
+	benchNormalizeParse(b, benchURIList(benchLargeBody))
+}
+
+func BenchmarkNormalizeParse_Base64Wrapped10MiB(b *testing.B) {
+	benchNormalizeParse(b, benchBase64Body(benchLargeBody))
+}
+
+func BenchmarkNormalizeParse_MedianBody38KiB(b *testing.B) {
+	benchNormalizeParse(b, benchURIList(benchMedianBody))
+}
+
+func BenchmarkNormalizeParse_XrayJSON160Outbounds(b *testing.B) {
+	benchNormalizeParse(b, benchXrayJSON(160))
+}
+
+// BenchmarkNormalizeParse_ManySmallSources is one cycle's worth of the median
+// shape: 157 bodies of 38 KB, so the per-BODY costs (the JSON sniff, the "://"
+// scan, the base64 decision) are measured at the count a cycle pays them.
+func BenchmarkNormalizeParse_ManySmallSources(b *testing.B) {
+	bodies := make([][]byte, benchSources)
+	for i := range bodies {
+		bodies[i] = benchURIList(benchMedianBody)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		count := 0
+		for _, body := range bodies {
+			subscription.Parse(subscription.Normalize(body), func(subscription.Node) bool {
+				count++
+				return true
+			})
+		}
+		sinkInt = count
 	}
 }

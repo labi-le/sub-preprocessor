@@ -20,16 +20,20 @@ const SchemeVmess Scheme = "vmess"
 // base64 JSON of the form {"add":host,"port":port,"ps":name,...}.
 func parseVmess(line string, schemeEnd int) (Node, bool) {
 	payload := line[schemeEnd+len(schemeSep):]
-	m, ok := decodeVmessJSON(payload)
+	doc, ok := decodeVmessPayload(payload)
+	if !ok {
+		return Node{}, false
+	}
+	fields, ok := vmessFields(doc)
 	if !ok {
 		return Node{}, false
 	}
 
-	server := jsonFieldString(m, "add")
+	server := jsonValueString(fields.add)
 	if server == "" {
 		return Node{}, false
 	}
-	port := jsonFieldString(m, "port")
+	port := jsonValueString(fields.port)
 	if port == "" {
 		port = "443"
 	}
@@ -38,7 +42,7 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 	// itself in the fragment is still naming the node, so prefer that over the
 	// bare host. FragmentIdx stays -1: rewrite folds the vmess name back into
 	// "ps" and emits no fragment, so there is nothing for it to point at.
-	name := jsonFieldString(m, "ps")
+	name := jsonValueString(fields.ps)
 	if name == "" {
 		if _, frag, found := strings.Cut(payload, "#"); found {
 			name = strings.TrimSpace(frag)
@@ -87,14 +91,17 @@ func RewriteVmessName(raw, newName string) (string, bool) {
 	return ioutil.UnsafeString(buf), true
 }
 
-// decodeVmessJSON strips an optional trailing fragment, base64-decodes the
-// payload and unmarshals it into a raw-message map so unknown fields survive a
-// round-trip. A JSON null or non-object payload is rejected as unusable.
+// decodeVmessJSON base64-decodes the payload and unmarshals it into a
+// raw-message map so unknown fields survive RewriteVmessName's round-trip. A
+// JSON null or non-object payload is rejected as unusable.
+//
+// parseVmess deliberately does NOT come through here: the map form copies every
+// field of a document whose ~16 fields it needs three of, at a measured 55
+// allocations and 3050 B per node against a ~400 B line. It reads them with
+// vmessFields instead, and the map is left to the one caller that must rebuild
+// the document.
 func decodeVmessJSON(payload string) (map[string]json.RawMessage, bool) {
-	if i := strings.IndexByte(payload, '#'); i >= 0 {
-		payload = payload[:i]
-	}
-	decoded, ok := decodeBase64Tolerant(stripWhitespace(payload))
+	decoded, ok := decodeVmessPayload(payload)
 	if !ok {
 		return nil, false
 	}
@@ -104,6 +111,136 @@ func decodeVmessJSON(payload string) (map[string]json.RawMessage, bool) {
 		return nil, false
 	}
 	return m, true
+}
+
+// decodeVmessPayload strips an optional trailing fragment and base64-decodes
+// what is left.
+func decodeVmessPayload(payload string) ([]byte, bool) {
+	if i := strings.IndexByte(payload, '#'); i >= 0 {
+		payload = payload[:i]
+	}
+	return decodeBase64Tolerant(stripWhitespace(payload))
+}
+
+// vmessScalars holds the three fields parseVmess needs, each a raw JSON view
+// into the decoded payload rather than a copy of it.
+type vmessScalars struct {
+	add, port, ps []byte
+}
+
+// vmessFields reads add/port/ps off a decoded vmess payload.
+//
+// json.Valid runs first, so the walk below only ever sees a document
+// encoding/json would have accepted and needs no error paths of its own: the
+// accept set is the map decode's, minus nothing. Key matching stays
+// BYTE-EXACT because mihomo's own vmess decode is a map decode reading
+// values["add"] (common/convert/converter.go:274) — a struct decode would match
+// "Add" case-insensitively and keep a node mihomo converts to nothing, which
+// costs a probe and a dead-cache entry.
+//
+// A repeated key resolves to the LAST occurrence, as it does in a map decode.
+func vmessFields(doc []byte) (vmessScalars, bool) {
+	var out vmessScalars
+	if !json.Valid(doc) {
+		return out, false
+	}
+	i := skipJSONSpace(doc, 0)
+	if i == len(doc) || doc[i] != '{' {
+		return out, false
+	}
+
+	for i++; ; {
+		i = skipJSONSpace(doc, i)
+		if i == len(doc) || doc[i] == '}' {
+			return out, true
+		}
+		keyEnd := endOfJSONString(doc, i)
+		key := doc[i:keyEnd]
+		i = skipJSONSpace(doc, skipJSONSpace(doc, keyEnd)+1) // past ':'
+		valEnd := endOfJSONValue(doc, i)
+		switch {
+		case jsonKeyEquals(key, "add"):
+			out.add = doc[i:valEnd]
+		case jsonKeyEquals(key, "port"):
+			out.port = doc[i:valEnd]
+		case jsonKeyEquals(key, "ps"):
+			out.ps = doc[i:valEnd]
+		}
+		i = skipJSONSpace(doc, valEnd)
+		if i < len(doc) && doc[i] == ',' {
+			i++
+		}
+	}
+}
+
+func skipJSONSpace(doc []byte, i int) int {
+	for ; i < len(doc); i++ {
+		switch doc[i] {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// endOfJSONString returns the index just past the closing quote of the string
+// starting at doc[i].
+func endOfJSONString(doc []byte, i int) int {
+	for i++; i < len(doc); i++ {
+		switch doc[i] {
+		case '\\':
+			i++
+		case '"':
+			return i + 1
+		}
+	}
+	return len(doc)
+}
+
+// endOfJSONValue returns the index just past the value starting at doc[i].
+// Nested objects and arrays are skipped whole, so a "ps" inside a transport
+// sub-object is not mistaken for the node's own display name.
+func endOfJSONValue(doc []byte, i int) int {
+	switch doc[i] {
+	case '"':
+		return endOfJSONString(doc, i)
+	case '{', '[':
+		depth := 0
+		for ; i < len(doc); i++ {
+			switch doc[i] {
+			case '"':
+				i = endOfJSONString(doc, i) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					return i + 1
+				}
+			}
+		}
+		return len(doc)
+	}
+	for ; i < len(doc); i++ {
+		switch doc[i] {
+		case ',', '}', ']', ' ', '\t', '\r', '\n':
+			return i
+		}
+	}
+	return len(doc)
+}
+
+// jsonKeyEquals reports whether the quoted key token names want. An escaped key
+// is legal and a map decode unescapes it before the lookup, so "\u0061dd" has
+// to keep reading as "add"; that form costs one allocation and appears in no
+// real payload, while the escape-free comparison costs none.
+func jsonKeyEquals(token []byte, want string) bool {
+	inner := token[1 : len(token)-1]
+	if bytes.IndexByte(inner, '\\') < 0 {
+		return string(inner) == want
+	}
+	var key string
+	return json.Unmarshal(token, &key) == nil && key == want
 }
 
 // decodeBase64Tolerant decodes s under whichever base64 flavour its producer
@@ -133,11 +270,11 @@ func decodeBase64Tolerant(s string) ([]byte, bool) {
 	return nil, false
 }
 
-// jsonFieldString reads a field as a string, accepting both JSON strings and
-// bare numbers (vmess "port" appears in the wild as both "443" and 443).
-func jsonFieldString(m map[string]json.RawMessage, key string) string {
-	raw, ok := m[key]
-	if !ok {
+// jsonValueString reads a raw JSON value as a string, accepting both JSON
+// strings and bare numbers (vmess "port" appears in the wild as both "443" and
+// 443). An absent field is a nil value and reads as "".
+func jsonValueString(raw []byte) string {
+	if len(raw) == 0 {
 		return ""
 	}
 	// Fast path: an escape-free JSON string is its own content minus the
