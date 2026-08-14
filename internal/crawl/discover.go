@@ -307,10 +307,13 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 // separates them: measured 2026-08-14, t.me/s/<channel> returns 20 message
 // wraps and 20 cursors per page while t.me/s/<group> returns none, and a
 // channel post's discussion embed returns one wrap — so the topic shape cannot
-// be the probe, it succeeds for both. A topic-carrying ref whose listing
-// carries no message is the group case: that empty listing and its cursor
-// outcome are dropped and the topic is read instead, which costs a genuine
-// forum seed one wasted fetch per cycle and a channel seed nothing.
+// be the probe, it succeeds for both. A topic-carrying ref whose listing was
+// reached and carried no message is the group case: that empty listing and its
+// cursor outcome are dropped and the topic is read instead, which costs a
+// genuine forum seed one wasted fetch per cycle and a channel seed nothing.
+// A listing that never came back is not that case and does not fall back: a
+// transport or status error says nothing about the seed's shape, and a host
+// that just rate-limited us must not be asked twice in one scrape.
 //
 // out is newest-first on every return path, and harvestPages takes its inline
 // nodes from out[0] alone: reordering here silently ages that harvest.
@@ -320,16 +323,19 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 // indistinguishable from a short channel per-channel but diagnostic in
 // aggregate; see cursorStats.
 func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
-	out, cursorLost = c.walkListing(ctx, ref.slug, pages)
-	if ref.topic == "" || (len(out) > 0 && strings.Contains(out[0], messageWrap)) {
+	out, cursorLost, listingFailed := c.walkListing(ctx, ref.slug, pages)
+	if listingFailed || ref.topic == "" || (len(out) > 0 && strings.Contains(out[0], messageWrap)) {
 		return out, cursorLost
 	}
 	return c.scrapeTopic(ctx, ref), false
 }
 
 // walkListing pages backward through a channel's t.me/s listing; see
-// scrapeChannel for what cursorLost means.
-func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out []string, cursorLost bool) {
+// scrapeChannel for what cursorLost means. fetchFailed separates a listing the
+// walk never read from one it read and found empty, which is the only thing
+// that tells a group apart from an unreachable host. It never coincides with
+// cursorLost: a lost cursor is a page that was read.
+func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out []string, cursorLost, fetchFailed bool) {
 	before := ""
 	for range pages {
 		u := "https://t.me/s/" + slug
@@ -338,20 +344,21 @@ func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out 
 		}
 		page, err := c.client.page(ctx, u)
 		if err != nil {
-			c.logger.Warn().Err(err).Str("channel", slug).Msg("channel page fetch failed")
-			return out, false
+			c.logger.Warn().Err(err).Str("channel", slug).Str("url", u).
+				Msg("channel listing page fetch failed")
+			return out, false, true
 		}
 		if page == "" {
-			return out, false
+			return out, false, false
 		}
 		out = append(out, page)
 		cur := pageCursor(page)
 		if cur == "" {
-			return out, len(out) < pages
+			return out, len(out) < pages, false
 		}
 		before = cur
 	}
-	return out, false
+	return out, false, false
 }
 
 // topicQuery is the only shape measured (2026-08-14) to return a forum topic's
@@ -376,10 +383,10 @@ const messageWrap = "tgme_widget_message_wrap"
 // a false cursor loss per forum seed would drag the fleet-wide ratio toward
 // reportCursors' markup alarm.
 //
-// Getting here means the /s/ listing carried no message either, so a reachable
-// body with no message wrap means this seed yields nothing at all: logged apart
-// from a failed fetch, so a topic that went empty is never read as one that was
-// never reachable.
+// Getting here means the /s/ listing was reached and carried no message either,
+// so a reachable body with no message wrap means this seed yields nothing at
+// all: logged apart from a failed fetch, so a topic that went empty is never
+// read as one that was never reachable.
 func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
 	u := "https://t.me/" + ref.slug + "/" + ref.topic + topicQuery
 	page, err := c.client.page(ctx, u)

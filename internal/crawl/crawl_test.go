@@ -2287,6 +2287,55 @@ func TestScrapeChannelGroupSeedFallsBackToItsTopic(t *testing.T) {
 	}
 }
 
+// TestScrapeChannelListingFetchFailureDoesNotReadTheTopic pins the other half of
+// the dispatch: only a listing that was REACHED and carried no message is the
+// group case. A 429 says nothing about the seed's shape, and the topic read is
+// a second fetch aimed at the host that just refused the first — per seed, per
+// cycle. The embed here would answer with a message wrap, so a fetch count of
+// zero can only come from the failure being distinguished from an empty page.
+func TestScrapeChannelListingFetchFailureDoesNotReadTheTopic(t *testing.T) {
+	t.Parallel()
+
+	const (
+		topicURL = "https://t.me/forumchat/1310" + topicQuery
+		listURL  = "https://t.me/s/forumchat"
+		subURL   = "https://sub.example/today"
+	)
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		client: pageFetcher{
+			hits: hits,
+			pages: map[string]string{
+				topicURL: `<div class="tgme_widget_message_wrap"><a href="` + subURL + `">x</a></div>`,
+			},
+			errs: map[string]error{listURL: errors.New("bad status: 429 Too Many Requests")},
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	pages, lost := c.scrapeChannel(context.Background(), parseSeed("forumchat/1310"), 6)
+	logged := logBuf.String()
+	if got := hits[topicURL]; got != 0 {
+		t.Errorf("the discussion embed was fetched %d time(s); a host that just failed the listing must not be asked again", got)
+	}
+	if got := hits[listURL]; got != 1 {
+		t.Errorf("t.me/s/forumchat requested %d times, want the 1 that failed", got)
+	}
+	if len(pages) != 0 {
+		t.Errorf("pages = %v, want none from a listing that never came back", pages)
+	}
+	if lost {
+		t.Error("cursorLost = true; a fetch that failed read no page and so cannot have lost its cursor")
+	}
+	if !strings.Contains(logged, "channel listing page fetch failed") || !strings.Contains(logged, `"url":"`+listURL+`"`) {
+		t.Errorf("log %s must name the listing as what failed", logged)
+	}
+	if strings.Contains(logged, "carried no message") || strings.Contains(logged, "topic") {
+		t.Errorf("log %s blames the topic for a listing failure", logged)
+	}
+}
+
 // TestScanCrawlsAChatOnceWhateverItsSeedShape pins the crawl identity: the slug.
 // A chat seeded with a forum topic and reposted bare by another channel is one
 // target, so t.me/s/<chat> is fetched exactly once — the probe that tells a
