@@ -581,6 +581,52 @@ func TestProcessBodyEnforcesNodeCeiling(t *testing.T) {
 	}
 }
 
+// TestProcessBodyReservesSurvivorSliceFromLineCount pins the sizing half of the
+// same newline count the ceiling above uses. The collecting sink is the
+// /stable.txt worker's, and it is handed one source body per source: growing its
+// slice instead of reserving it cost a measured 7.6 MB per cycle across the
+// 157-source corpus. The clamp is the other half of the contract — the line
+// count is an upper bound, so a body of junk lines must not buy a reservation
+// sized for nodes it does not carry.
+func TestProcessBodyReservesSurvivorSliceFromLineCount(t *testing.T) {
+	t.Parallel()
+
+	body := func(lines int, line string) []byte {
+		var sb strings.Builder
+		for range lines {
+			sb.WriteString(line)
+		}
+		return []byte(sb.String())
+	}
+
+	p := &Processor{}
+	for _, tc := range []struct {
+		name    string
+		body    []byte
+		wantCap int
+	}{
+		{"nodes", body(300, "vless://u@192.0.2.1:443#n\n"), 301},
+		{"junk lines clamp", body(maxNodeHint+5000, "not a node at all\n"), maxNodeHint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &sliceSink{}
+			pctx := &PipelineContext{
+				sink:     sink,
+				Resolved: map[string][]netip.Addr{},
+				Stats:    &Stats{},
+			}
+			if err := p.processBody(context.Background(), tc.body, pctx); err != nil {
+				t.Fatalf("processBody: %v", err)
+			}
+			if cap(sink.nodes) != tc.wantCap {
+				t.Fatalf("survivor slice cap = %d, want %d", cap(sink.nodes), tc.wantCap)
+			}
+		})
+	}
+}
+
 // TestFilterIPv6LiteralIsNotADNSFailure pins the accepted half of PP-04. The
 // pipeline is IPv4-only, so an IPv6-literal node is refused before any lookup
 // happens — but it used to be booked as Stats.DNSDrop, telling the operator

@@ -120,3 +120,84 @@ func BenchmarkProcessBodyPipeline(b *testing.B) {
 		}
 	}
 }
+
+// The two benchmarks below drive the sink the /stable.txt worker uses —
+// sliceSink, which clones each survivor's line — where BenchmarkProcessBodyPipeline
+// above drives the "/" endpoint's rendering sink. Both bodies are bare-IPv4
+// nodes so no DNS is touched, which is also the corpus's majority shape: of
+// 73256 nodes measured across all 163 configured sources on 2026-08-14, 53066
+// (72%) carry a literal IP and 20190 carry a hostname over 8327 unique names.
+//
+// The country filter is armed the way the worker arms it — every country
+// allowed, a deny list non-empty — so filter.Permitted runs per node instead of
+// early-returning on a full allow set with an empty deny set.
+const (
+	benchSliceNodes   = 11000 // the largest configured source: 3.06 MB, ~11k nodes
+	benchSmallNodes   = 140   // the median 38 KB body
+	benchSmallSources = 157   // sources answering non-empty in one cycle
+)
+
+// benchIPBody builds an already-normalized body of nodes whose server is a bare
+// address inside benchGeofeed's NL block, at the corpus's measured 267 B/node.
+func benchIPBody(nodes int) []byte {
+	var buf bytes.Buffer
+	buf.Grow(nodes * 280)
+	for i := range nodes {
+		if i > 0 {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString("vless://b831381d-6324-4d53-ad4f-8cda48b30811@198.51.100.")
+		buf.WriteString(strconv.Itoa(i%254 + 1))
+		buf.WriteString(":443?security=reality&sni=www.example.org&fp=chrome")
+		buf.WriteString("&pbk=UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA")
+		buf.WriteString("&sid=4e9b0c2d1a3f5768&type=tcp&flow=xtls-rprx-vision#Node ")
+		buf.WriteString(strconv.Itoa(i))
+	}
+	return buf.Bytes()
+}
+
+func benchProcessBodySlice(b *testing.B, bodies [][]byte, wantKept int) {
+	b.Helper()
+	p := newBenchProcessor(b)
+	lookup := p.GeofeedState().Lookup
+	resolved := p.resolver.GetResolvedMap()
+	defer p.resolver.PutResolvedMap(resolved)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	for b.Loop() {
+		kept := 0
+		for _, body := range bodies {
+			clear(resolved)
+			stats := Stats{}
+			sink := &sliceSink{}
+			pctx := &PipelineContext{
+				sink:     sink,
+				Lookup:   lookup,
+				Allowed:  filter.All(),
+				Denied:   filter.ParseAllowed("RU,CN"),
+				Resolved: resolved,
+				Stats:    &stats,
+			}
+			if err := p.processBody(ctx, body, pctx); err != nil {
+				b.Fatalf("processBody: %v", err)
+			}
+			kept += len(sink.nodes)
+		}
+		if kept != wantKept {
+			b.Fatalf("kept = %d, want %d", kept, wantKept)
+		}
+	}
+}
+
+func BenchmarkProcessBodySlice_LargestSource(b *testing.B) {
+	benchProcessBodySlice(b, [][]byte{benchIPBody(benchSliceNodes)}, benchSliceNodes)
+}
+
+func BenchmarkProcessBodySlice_ManySmallSources(b *testing.B) {
+	bodies := make([][]byte, benchSmallSources)
+	for i := range bodies {
+		bodies[i] = benchIPBody(benchSmallNodes)
+	}
+	benchProcessBodySlice(b, bodies, benchSmallSources*benchSmallNodes)
+}
