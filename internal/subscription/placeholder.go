@@ -108,29 +108,35 @@ func localServer(server string) bool {
 	if server == "" {
 		return false
 	}
+	// An address shape that MATCHES answers here; one that does not falls
+	// through, because a hostname may begin with any of these bytes too —
+	// 0.localhost and 127.0.0.1.localhost are names, not addresses, and both
+	// are loopback by RFC 6761 §6.3. Returning from an arm on a failed match is
+	// the bug this structure exists to avoid.
 	switch server[0] {
 	case '0':
-		if localV4(server) {
-			return true
-		}
 		// Only a zero group can begin a written-out IPv6 loopback: a group of
 		// 1 has to be the last one.
-		return strings.IndexByte(server, ':') >= 0 && localV6(server)
-	case '1':
-		// Hoisted out of localV4, which is not inlinable (cost 99 against a
-		// budget of 80): every IPv4 literal in 10/8, 172.16/12 and 192.168/16
-		// starts with '1', so most of a real pool reached that call only to
-		// fail this prefix. Measured +8.45% per node on a 192.168/16 corpus.
-		if !strings.HasPrefix(server, loopbackV4Prefix) {
-			return false
+		if localV4(server) || (strings.IndexByte(server, ':') >= 0 && localV6(server)) {
+			return true
 		}
-		return localV4(server)
+	case '1':
+		// The prefix is hoisted out of localV4, which is not inlinable (cost 99
+		// against a budget of 80): every IPv4 literal in 10/8, 172.16/12 and
+		// 192.168/16 starts with '1', so most of a real pool reached that call
+		// only to fail this test. Measured +8.45% per node on a 192.168/16
+		// corpus.
+		if strings.HasPrefix(server, loopbackV4Prefix) && localV4(server) {
+			return true
+		}
 	case ':':
-		return localV6(server)
+		if localV6(server) {
+			return true
+		}
 	}
-	// Not an address shape, so the only thing left that this rule may judge is
-	// the one reserved name. Reached for every hostname, which is why the test
-	// below rejects on a length compare before touching a byte.
+	// Every remaining string reaches the one reserved NAME this rule may judge
+	// without a resolver, which is why that test rejects on a length compare
+	// before it touches a byte.
 	return loopbackName(server)
 }
 

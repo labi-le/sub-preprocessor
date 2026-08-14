@@ -117,6 +117,14 @@ var serverCases = []struct {
 	{server: "notlocalhost", want: false},
 	{server: "localhostx", want: false},
 	{server: "localhost.example.com", want: false},
+	// A name may begin with a byte the address arms dispatch on. These answered
+	// false while those arms returned unconditionally on a failed match, which
+	// is the reachability bug the switch was restructured to remove.
+	{server: "0.localhost", want: true},
+	{server: "1.localhost", want: true},
+	{server: "127.localhost", want: true},
+	{server: "127.0.0.1.localhost", want: true},
+	{server: "2.localhost", want: true},
 	{server: "localhost.", want: false},
 	// Out of scope by decision, documented on localV6: netip reads these as
 	// local, but no formatter emits them, and a miss only costs a probe slot.
