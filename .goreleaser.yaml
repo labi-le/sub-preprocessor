@@ -8,21 +8,21 @@ builds:
     mod_timestamp: '{{ .CommitTimestamp }}'
     goos:
       - linux
+    # No mips: internal/geoblock pulls modernc.org/sqlite -> modernc.org/libc,
+    # which ships no Go files for any mips target — build constraints exclude
+    # every Go file in libc/signal, /stdio, /stdlib, /sys/types and /time, so the
+    # build fails rather than degrading. Measured 2026-08-14 by running the
+    # release path for the first time: amd64, arm64 and arm all build, every mips
+    # variant fails. The matrix had named them since it was written because no
+    # tag had ever exercised it.
     goarch:
       - amd64
       - arm64
       - arm
-      - mips
-      - mipsle
-      - mips64
-      - mips64le
     goarm:
       - "5"
       - "6"
       - "7"
-    gomips:
-      - hardfloat
-      - softfloat
     tags:
       - netgo
       - osusergo
