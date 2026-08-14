@@ -8,7 +8,9 @@
 #
 # This file is re-read every crawl cycle: add a channel and it is picked up on
 # the next cycle, no restart needed. Entries may be a bare slug, an @handle, or
-# a full t.me URL.
+# a full t.me URL, and any of those may carry a trailing "/<topic>" to name a
+# forum topic inside a group (e.g. mifa_world/1310). A group has no t.me/s
+# preview at all, so without the topic the seed is unreadable, not merely empty.
 channels:
   - o00000000i
   - hiddifycode
@@ -20,6 +22,7 @@ channels:
   - DailyV2RY   # research find: daily rotating bin.mudfish.net pastes, 42% novelty measured; isolated in the repost graph so BFS cannot reach it
   - Holost_VPN   # measured 2026-08-12: one cycle yielded 22 of the 23 managed sources added that day
   - FreeCFGHub   # measured 2026-08-12: 1 live sub of its own, plus 12 inline nodes on page 1; it is the CHANNEL behind chat FreeCFGHubMIX, whose /s/ 302s (chats have no web preview)
+  - mifa_world/1310   # measured 2026-08-14: forum topic, publishes a NEW 24h link daily; its /s/ preview carries zero messages, and 19 of the 20 links on the topic are the panel's own "больше неактуальны" list
 
 # Subscription URLs the crawler must never manage. Deleting a tg-* source from
 # private.yaml by hand does not stick: the next cycle rediscovers the URL in a
