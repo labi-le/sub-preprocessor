@@ -3,6 +3,8 @@ package classify_test
 import (
 	"encoding/base64"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/classify"
@@ -292,5 +294,99 @@ func TestBodyCountsShortAllZeroCredential(t *testing.T) {
 	got := classify.Body([]byte(raw), "", 1000)
 	if got.Nodes != 2 || !got.Live() {
 		t.Fatalf("got %+v, want 2 nodes and live", got)
+	}
+}
+
+// TestBodyRejectsDashLeadingNilCredential: the guard counts zeros and ignores
+// dashes wherever they fall, so a credential may legally START with one. The
+// first-byte fast path in front of that scan has to admit '-' for that reason,
+// and dropping it would silently narrow the guard.
+func TestBodyRejectsDashLeadingNilCredential(t *testing.T) {
+	t.Parallel()
+
+	raw := "vless://-00000000000000000000000000000000@192.0.2.1:443#x\n"
+
+	got := classify.Body([]byte(raw), "", 1000)
+	if got.Nodes != 0 || got.Reason() != classify.ReasonNodeless {
+		t.Fatalf("got %+v reason %v, want 0 nodes and nodeless-2xx", got, got.Reason())
+	}
+}
+
+// benchNodes is the node count the wave's A/B used, so a delta measured here is
+// comparable with the numbers recorded against it.
+const benchNodes = 1000
+
+// benchBody builds a plain URI-list body whose credentials cycle through all 16
+// leading hex digits: a real UUID starts with '0' one time in sixteen, and a
+// corpus that never does would hide the cost of the Nil-UUID scan entirely.
+func benchBody(nodes int, server func(i int) string) []byte {
+	var sb strings.Builder
+	for i := range nodes {
+		sb.WriteString("vless://")
+		sb.WriteByte("0123456789abcdef"[i%16])
+		sb.WriteString("1b2c3d4-1111-4000-8000-0000")
+		sb.WriteString(strconv.Itoa(100000000 + i))
+		sb.WriteByte('@')
+		sb.WriteString(server(i))
+		sb.WriteString(":443?security=tls#node")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteByte('\n')
+	}
+	return []byte(sb.String())
+}
+
+func benchBodyDigitHost() []byte {
+	return benchBody(benchNodes, func(int) string { return "0.tcp.example.com" })
+}
+
+func benchBodyHostnames() []byte {
+	return benchBody(benchNodes, func(i int) string {
+		return "node" + strconv.Itoa(i) + ".example.com"
+	})
+}
+
+var benchSink int
+
+func benchClassify(b *testing.B, body []byte) {
+	b.ReportAllocs()
+	for b.Loop() {
+		r := classify.Body(body, "", 1000)
+		if r.Nodes != benchNodes {
+			b.Fatalf("Nodes = %d, want %d", r.Nodes, benchNodes)
+		}
+		benchSink = r.Nodes
+	}
+}
+
+// BenchmarkBodyDigitLeadingHostnames is the shape a server-prefix gate mistakes
+// for an address: a tunnel host like "0.tcp.example.com" reached
+// netip.ParseAddr, whose error is heap-boxed, and cost 46.88 KiB and 1000 allocs
+// per body. The ordinary-hostname twin below cannot see that at all.
+func BenchmarkBodyDigitLeadingHostnames(b *testing.B) {
+	benchClassify(b, benchBodyDigitHost())
+}
+
+func BenchmarkBodyHostnames(b *testing.B) {
+	benchClassify(b, benchBodyHostnames())
+}
+
+// TestBodyAllocatesNothingPerNode is the standing guard the benchmarks above can
+// only report: classify.Body walks views into the caller's body, so its cost per
+// node must be zero allocations regardless of what the servers spell. The
+// threshold is loose because -race and coverage add their own; the regression it
+// exists to catch was one alloc per node.
+func TestBodyAllocatesNothingPerNode(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"digit-leading hostnames": benchBodyDigitHost(),
+		"ordinary hostnames":      benchBodyHostnames(),
+	} {
+		got := testing.AllocsPerRun(3, func() {
+			if r := classify.Body(body, "", 1000); r.Nodes != benchNodes {
+				t.Fatalf("%s: Nodes = %d, want %d", name, r.Nodes, benchNodes)
+			}
+		})
+		if got > benchNodes/10 {
+			t.Errorf("%s: %.0f allocs for %d nodes, want per-node zero", name, got, benchNodes)
+		}
 	}
 }

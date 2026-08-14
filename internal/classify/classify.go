@@ -1,7 +1,9 @@
 // Package classify decides whether a URL serves a usable Mihomo-compatible
-// subscription. It reuses the same body normalizer/parser the preprocessor uses
-// (so a "live subscription" verdict matches what the stable worker sees) and
-// fetches through a caller-supplied client whose dialer owns the IP/SSRF policy.
+// subscription. Its verdict is meant to match what the stable worker sees, so
+// it shares both halves of what the worker judges a node by: internal/
+// subscription's normalizer/parser, and subscription.PlaceholderNode, which the
+// worker's Merge applies to its own pool. It fetches through a caller-supplied
+// client whose dialer owns the IP/SSRF policy.
 package classify
 
 import (
@@ -9,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -113,78 +114,13 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 		// so the whitelist is what keeps such a page from reading as a live
 		// subscription. Schemes are case-insensitive (RFC 3986), so lowercase
 		// before the lookup.
-		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] && !placeholderNode(n) {
+		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] &&
+			!subscription.PlaceholderNode(n.Raw, n.Server) {
 			r.Nodes++
 		}
 		return true
 	})
 	return r
-}
-
-const (
-	schemeSep = "://"
-	// nilUUIDDigits is the hex-digit count of the Nil UUID, dashes aside.
-	nilUUIDDigits = 32
-)
-
-// placeholderNode reports whether n is a panel's stand-in for a subscription it
-// no longer serves. Such a body answers 200 with one unusable node, and in the
-// measured case advertises an expire= still in the future, so the header gate
-// cannot see the death and the body would otherwise read live.
-func placeholderNode(n subscription.Node) bool {
-	return nilCredential(n.Raw) || unspecifiedServer(n.Server)
-}
-
-// nilCredential reports whether the URI userinfo is the RFC 9562 §5.9 Nil UUID,
-// which by definition names no account. All 32 zeros are required: a short
-// all-zero credential is a legal password, not evidence of a dead panel.
-func nilCredential(raw string) bool {
-	_, auth, ok := strings.Cut(raw, schemeSep)
-	if !ok {
-		return false
-	}
-	// Authority ends at the first '/', '?' or '#'; explicit IndexByte calls
-	// beat IndexAny on strings this short (subscription.parseNode).
-	end := len(auth)
-	if j := strings.IndexByte(auth, '/'); j >= 0 && j < end {
-		end = j
-	}
-	if j := strings.IndexByte(auth, '?'); j >= 0 && j < end {
-		end = j
-	}
-	if j := strings.IndexByte(auth, '#'); j >= 0 && j < end {
-		end = j
-	}
-	// splitHostPort takes the last '@' as the userinfo boundary; match it, so
-	// this reads the credential the parsed Server actually came after.
-	at := strings.LastIndexByte(auth[:end], '@')
-	if at <= 0 {
-		return false
-	}
-	zeros := 0
-	for j := range at {
-		switch auth[j] {
-		case '0':
-			zeros++
-		case '-':
-		default:
-			return false
-		}
-	}
-	return zeros >= nilUUIDDigits
-}
-
-// unspecifiedServer reports whether server is 0.0.0.0 or ::, an address no
-// client can dial. Deliberately not a reserved-range test: the measured
-// placeholder sits on a routable address, which such a test would miss.
-func unspecifiedServer(server string) bool {
-	// netip.ParseAddr heap-allocates its error and most node servers are
-	// hostnames, so only a server that could spell the address is parsed.
-	if server == "" || (server[0] != '0' && server[0] != ':') {
-		return false
-	}
-	addr, err := netip.ParseAddr(server)
-	return err == nil && addr.IsUnspecified()
 }
 
 // parseExpire extracts expire=<unix> from a subscription-userinfo header value

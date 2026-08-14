@@ -39,6 +39,15 @@ type Entry struct {
 // counts kept nodes per source. Entry.Addr carries the lowercased key so
 // mixed-case duplicates share one dead-cache entry; Raw keeps the original
 // casing.
+//
+// A placeholder node is dropped here rather than given a probe slot: its Nil
+// UUID cannot authenticate, and an unspecified server dials the worker's own
+// loopback, where a port collision with the service listener buys a full
+// URLTest round against itself. Measured on both shipped configs, 2026-08-14:
+// 8 such nodes in a 24554-entry pool, 9 in a 40277-entry one, every one of
+// them on 0.0.0.0 or 127.0.0.1, one per config on the listener's own port.
+// Dropping before the dedupe key is interned leaves a real node on the same
+// server:port still admittable.
 func Merge(bodies []SourceBody) []Entry {
 	total := 0
 	for _, src := range bodies {
@@ -57,6 +66,9 @@ func Merge(bodies []SourceBody) []Entry {
 			lineBuf = append(lineBuf[:0], node.Raw...)
 			n, ok := parseOne(lineBuf)
 			if !ok {
+				continue
+			}
+			if subscription.PlaceholderNode(n.Raw, n.Server) {
 				continue
 			}
 			// Dedupe key: lowercased server:port in the reused scratch buffer.
