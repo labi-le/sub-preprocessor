@@ -12,10 +12,50 @@ import (
 	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
+// ProbeStage names how far a node's probe got. The values are ordered by
+// progress so a fold can keep the highest: a mierus:// label whose port once
+// opened a tunnel must not be reported as a connect failure.
+//
+// StageUnknown is the zero value, so a ProbeResult built without a stage — a
+// test fake, say — reports "unknown" rather than a stage it never observed.
+type ProbeStage uint8
+
+const (
+	StageUnknown ProbeStage = iota
+	// StageCondemned is the reachability pre-check's verdict: the server
+	// accepted no TCP connection, so no URL test was spent on it.
+	StageCondemned
+	// StageConnect merges transport and crypto failures on purpose; see
+	// probeStage for why mihomo cannot tell them apart.
+	StageConnect
+	// StageFetch means the tunnel came up and the GET through it failed.
+	StageFetch
+	StagePassed
+)
+
+func (s ProbeStage) String() string {
+	switch s {
+	case StageCondemned:
+		return "condemned"
+	case StageConnect:
+		return "connect"
+	case StageFetch:
+		return "fetch"
+	case StagePassed:
+		return "passed"
+	case StageUnknown:
+	}
+
+	return "unknown"
+}
+
 // ProbeResult aggregates URL test outcomes for one node across all rounds.
+// Entries exist for nodes that never succeeded too, so Successes == 0 — not
+// absence from the map — is what marks a node dead (see recordDead).
 type ProbeResult struct {
 	Successes int
 	MeanMs    int
+	Stage     ProbeStage
 }
 
 // Survivor is an entry that passed selection, with its mean delay, whatever the

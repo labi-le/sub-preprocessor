@@ -109,6 +109,36 @@ func TestSelectSurvivorsFiltersAndSorts(t *testing.T) {
 	}
 }
 
+// TestSelectSurvivorsNeverPublishesZeroSuccess turns a cross-package invariant
+// into a local one. A node that answered no round must never be published, and
+// today that holds only because config.go clamps max_fail to [0, rounds) --
+// two packages away, where a loosening would silently start publishing nodes
+// that never answered. It matters now because the probe map is about to carry
+// an entry per label (Successes: 0 for a total failure) instead of successes
+// alone, so the case stops being unreachable-by-construction.
+func TestSelectSurvivorsNeverPublishesZeroSuccess(t *testing.T) {
+	t.Parallel()
+
+	entries := []stable.Entry{entry("dead"), entry("live")}
+	res := map[string]stable.ProbeResult{
+		"dead": {Successes: 0, MeanMs: 0},
+		"live": {Successes: 3, MeanMs: 100},
+	}
+
+	const rounds = 3
+	for maxFail := range rounds { // every value the validator admits
+		got := stable.SelectSurvivors(entries, res, rounds, maxFail, 1000)
+		for _, s := range got {
+			if s.Label == "dead" {
+				t.Errorf("max_fail=%d published a node with zero successful rounds", maxFail)
+			}
+		}
+		if len(got) != 1 {
+			t.Errorf("max_fail=%d: got %d survivors, want only the live node", maxFail, len(got))
+		}
+	}
+}
+
 // TestBuildPayloadWithoutAnnotator: annotation off publishes the merged line as
 // it stands, and no chain ran to judge a country — "" rather than "??", which
 // the geo-unknown gauge counts.

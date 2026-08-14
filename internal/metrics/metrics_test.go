@@ -206,6 +206,157 @@ func TestMetricsObserveError(t *testing.T) {
 	}
 }
 
+// TestMetricsCyclePhasesRender gives every phase a distinct value, so a
+// rendering that pairs a label with the wrong field fails here rather than
+// sending an operator to optimise the wrong stage. The values are the shape
+// production shows: probe dominates, the rest share the remainder.
+func TestMetricsCyclePhasesRender(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Kept:     149,
+		Duration: 1204*time.Second + 900*time.Millisecond,
+		Phases: stable.CyclePhases{
+			Fetch:      61 * time.Second,
+			Merge:      1500 * time.Millisecond,
+			DeadFilter: 250 * time.Millisecond,
+			Probe:      1084 * time.Second,
+			Egress:     52 * time.Second,
+			Publish:    3 * time.Second,
+		},
+	})
+
+	out := render(t, m)
+	wants := []string{
+		"# TYPE stable_cycle_phase_duration_seconds gauge",
+		`stable_cycle_phase_duration_seconds{phase="fetch"} 61`,
+		`stable_cycle_phase_duration_seconds{phase="merge"} 1.5`,
+		`stable_cycle_phase_duration_seconds{phase="dead_filter"} 0.25`,
+		`stable_cycle_phase_duration_seconds{phase="probe"} 1084`,
+		`stable_cycle_phase_duration_seconds{phase="egress"} 52`,
+		`stable_cycle_phase_duration_seconds{phase="publish"} 3`,
+		"stable_cycle_duration_seconds 1204.9",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q in:\n%s", w, out)
+		}
+	}
+	// Six phases, one metric: a seventh line means a label was duplicated or a
+	// phase rendered twice, which double-counts the stack.
+	if got := strings.Count(out, "stable_cycle_phase_duration_seconds{"); got != 6 {
+		t.Errorf("phase samples = %d, want 6:\n%s", got, out)
+	}
+
+	// An aborted cycle publishes no phases of its own: ObserveError leaves
+	// m.last alone, so the breakdown keeps describing the last PUBLISHED
+	// cycle. A zeroed stack would read as a cycle that did nothing.
+	before := phaseLines(out)
+	m.ObserveError()
+	after := render(t, m)
+	if got := phaseLines(after); got != before {
+		t.Errorf("a failed cycle rewrote the phase breakdown:\ngot  %s\nwant %s", got, before)
+	}
+	if !strings.Contains(after, "stable_cycle_failures_total 1") {
+		t.Errorf("the failure itself must still count:\n%s", after)
+	}
+}
+
+func phaseLines(out string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_cycle_phase_duration_seconds{") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
+}
+
+// TestMetricsProbeStagesRender pairs every stage with a distinct count, so a
+// label wired to the wrong key fails here. The shape is the measured one: most
+// of the probed set is condemned by the reachability pre-check, a minority
+// passes.
+func TestMetricsProbeStagesRender(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Probed: 1898,
+		ProbeStages: map[stable.ProbeStage]int{
+			stable.StageCondemned: 1118,
+			stable.StageConnect:   612,
+			stable.StageFetch:     19,
+			stable.StagePassed:    149,
+			stable.StageUnknown:   0, // classified every probed node
+		},
+	})
+
+	out := render(t, m)
+	wants := []string{
+		"# TYPE stable_probe_outcome_nodes gauge",
+		`stable_probe_outcome_nodes{stage="condemned"} 1118`,
+		`stable_probe_outcome_nodes{stage="connect"} 612`,
+		`stable_probe_outcome_nodes{stage="fetch"} 19`,
+		`stable_probe_outcome_nodes{stage="passed"} 149`,
+		"stable_probed_nodes 1898",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q in:\n%s", w, out)
+		}
+	}
+	// Nothing classified as unknown, so that series must be absent rather than
+	// a permanent zero.
+	if strings.Contains(out, `stable_probe_outcome_nodes{stage="unknown"}`) {
+		t.Errorf("an empty unknown bucket must not render:\n%s", out)
+	}
+}
+
+// TestMetricsProbeStagesRenderZerosAndUnknown pins the two halves of the
+// absent/zero decision. A stage that nobody reached is an answer and renders 0;
+// a report carrying no fold at all renders NOTHING, because four zeros beside a
+// non-zero stable_probed_nodes would read as a cycle that probed nobody rather
+// than as the dropped hand-off it is. Unknown renders only when the prober left
+// nodes unclassified.
+func TestMetricsProbeStagesRenderZerosAndUnknown(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Probed: 7,
+		ProbeStages: map[stable.ProbeStage]int{
+			stable.StageCondemned: 0,
+			stable.StageConnect:   0,
+			stable.StageFetch:     0,
+			stable.StagePassed:    3,
+			stable.StageUnknown:   4,
+		},
+	})
+
+	out := render(t, m)
+	wants := []string{
+		`stable_probe_outcome_nodes{stage="condemned"} 0`,
+		`stable_probe_outcome_nodes{stage="connect"} 0`,
+		`stable_probe_outcome_nodes{stage="fetch"} 0`,
+		`stable_probe_outcome_nodes{stage="passed"} 3`,
+		`stable_probe_outcome_nodes{stage="unknown"} 4`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q in:\n%s", w, out)
+		}
+	}
+
+	dropped := metrics.New()
+	dropped.Observe(stable.CycleReport{Probed: 7})
+	if got := render(t, dropped); strings.Contains(got, "stable_probe_outcome_nodes") {
+		t.Errorf("a report with no fold must render no stage series:\n%s", got)
+	}
+}
+
 func TestMetricsEmptyRender(t *testing.T) {
 	t.Parallel()
 

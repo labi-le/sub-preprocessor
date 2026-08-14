@@ -872,6 +872,227 @@
       "description": "Published nodes whose GEO tag came out as [GEO:??] — no annotation provider resolved a country for them — as a count on the left axis and as a percentage of the published list on the right. Zero is healthy. stable_geo_unknown_nodes HELP: \"Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.\" Unresolved nodes are absent from stable_kept_country_nodes, so the countries panel cannot show this: an annotation chain that collapses reads there as nothing worse than a shorter list."
     },
     {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Cycle time by phase",
+      "description": "Where the last published cycle's wall time went, stacked. The phases come from one metric, stable_cycle_phase_duration_seconds{phase=...}, in pipeline order: fetch = every source downloaded, parsed and run through the per-node IP stage (DNS, geo/asn/cidr); merge = dedupe by server:port; dead_filter = the dead-node cache skip; probe = the mihomo URL test, bounded by check.timeout * check.rounds; egress = the through-node filters plus the cdn-cgi/trace measurement, each on its own timeout, which also do network work per SURVIVOR and are deliberately NOT folded into probe; publish = payload build, moved-country count, atomic swap, snapshot write and the published-cycle log line. The unstacked \"cycle total\" line runs ABOVE the stack on purpose: the steps between phases (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase, so the gap is the cycle's own overhead and shrinking to zero is not the goal. A cycle that ABORTED contributes nothing here — ObserveError leaves the last report in place, so this stack keeps describing the last cycle that PUBLISHED, and only the failures series on the cycle-duration panel moves. Both series are absent until the first cycle publishes, the same cold-start gap the duration line has.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "phase"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cycle total"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_cycle_phase_duration_seconds{job=\"$job\"}",
+          "legendFormat": "{{phase}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
+          "legendFormat": "cycle total"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Probe outcome by stage",
+      "description": "Where the probe ended for each node it was spent on, stacked, closed over stable_probed_nodes: condemned = the TCP reachability pre-check refused the server, so no URL test was spent on it; connect = the URL test never got a tunnel up; fetch = the tunnel came up and the GET through it failed; passed = at least one round answered, i.e. the input to SelectSurvivors. unknown appears only when the prober left probed nodes unclassified (proxies that did not parse never reach it) and is a defect indicator, not a stage. condemned/probed is the series to watch: it is the pre-check's yield, and it is what decides how much probe time a reachability gate can ever save. Measured off-prod before this shipped, 1898 TCP-gated nodes from 45 of 51 sources: 58.9% condemned, corroborated at 58.1% by an independent TCP sweep of 2861 endpoints. Do NOT expect prod to reproduce that: the measurement ran from a different egress, and it sampled the RAW merged pool while prod probes the ~26% the dead cache did not skip, a set biased toward less-dead nodes -- so prod's condemned share should be LOWER. This counts NODES, folded best-of-ports by foldProbeResults, so it cannot express what share of ATTEMPTS burned the full check.timeout; that is an attempt statistic and no series here reproduces it. An aborted cycle contributes nothing: ObserveError leaves the last report in place, so the stack keeps describing the last cycle that PUBLISHED.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "stage"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "probed"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "condemned %"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_probe_outcome_nodes{job=\"$job\"}",
+          "legendFormat": "{{stage}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_probed_nodes{job=\"$job\"}",
+          "legendFormat": "probed"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * stable_probe_outcome_nodes{job=\"$job\",stage=\"condemned\"} / clamp_min(stable_probed_nodes{job=\"$job\"}, 1)",
+          "legendFormat": "condemned %"
+        }
+      ]
+    },
+    {
       "id": 12,
       "type": "bargauge",
       "title": "Top countries in published list (last cycle)",
@@ -883,7 +1104,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 60
       },
       "fieldConfig": {
         "defaults": {
@@ -935,7 +1156,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 60
       },
       "fieldConfig": {
         "defaults": {
@@ -987,7 +1208,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 68
       },
       "fieldConfig": {
         "defaults": {

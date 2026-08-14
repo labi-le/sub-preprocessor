@@ -1,7 +1,6 @@
 package stable
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -167,8 +166,10 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	// reload swaps the snapshot mid-cycle.
 	svc := c.filterer()
 	bodies, sourceReports := c.fetchSources(ctx, spec, svc)
+	fetchedAt := time.Now()
 
 	entries := Merge(bodies)
+	mergedAt := time.Now()
 	if len(entries) == 0 {
 		c.logger.Warn().Msg("no entries merged; keeping previous stable list")
 		c.reportError()
@@ -176,6 +177,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	}
 
 	probe, skipped, ok := c.filterDead(entries)
+	deadFilteredAt := time.Now()
 	if !ok {
 		c.reportError()
 		return nil
@@ -184,6 +186,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", skipped).
 		Int("rounds", spec.Rounds).Msg("probing merged nodes")
 	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
+	probedAt := time.Now()
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
 		c.reportError()
@@ -198,7 +201,9 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	c.recordDead(probe, res)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
+	selectedAt := time.Now()
 	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors)
+	filteredAt := time.Now()
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled during node filters; keeping previous stable list")
@@ -211,49 +216,44 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
+	publishingAt := time.Now()
 	// Before observe, not merely before Store: this is what fills
 	// Survivor.Country, which the gauges below then count.
 	ann := svc.Annotator()
 	payload := BuildPayload(ctx, ann, survivors)
 	trace.Moved = movedCount(ctx, ann, survivors)
 
-	snap := &Snapshot{
-		Payload:   payload,
-		UpdatedAt: time.Now(),
-		Stats: Stats{
-			SourcesOK:    len(bodies),
-			SourcesTotal: len(spec.Sources),
-			Merged:       len(entries),
-			Tested:       len(probe),
-			Kept:         len(survivors),
-		},
-	}
-	c.holder.Store(snap)
-	// After the in-memory publication and never gating it: a snapshot that
-	// cannot be written costs the NEXT restart its head start, and nothing at
-	// all in this cycle, so it is a warning rather than an error return.
-	if saveErr := SaveSnapshot(c.snapshotPath, snap); saveErr != nil {
-		c.logger.Warn().Err(saveErr).Str("path", c.snapshotPath).
-			Msg("persisting the stable snapshot failed; the list is published in memory only")
-	}
-	c.logger.Info().
-		Int("sources_ok", len(bodies)).
-		Int("merged", len(entries)).
-		Int("dead_skipped", skipped).
-		Int("probed", len(probe)).
-		Int("kept", len(survivors)).
-		Msg("stable list updated")
+	// Only ever len()-ed from here down, which needs the length word alone:
+	// the three pools are already collected, and a full-slice read added here
+	// pins them across the probe (checker_retention_test.go).
+	c.publish(payload, Stats{
+		SourcesOK:    len(bodies),
+		SourcesTotal: len(spec.Sources),
+		Merged:       len(entries),
+		Tested:       len(probe),
+		Kept:         len(survivors),
+	}, skipped)
+	publishedAt := time.Now()
 
 	c.observe(CycleReport{
-		SourcesOK:       len(bodies),
-		SourcesTotal:    len(spec.Sources),
-		Merged:          len(entries),
-		DeadSkipped:     skipped,
-		Probed:          len(probe),
-		Kept:            len(survivors),
-		GeoUnknown:      geoUnknownCount(survivors),
-		KeptCountries:   keptCountries(survivors),
-		Duration:        time.Since(start),
+		SourcesOK:     len(bodies),
+		SourcesTotal:  len(spec.Sources),
+		Merged:        len(entries),
+		DeadSkipped:   skipped,
+		Probed:        len(probe),
+		Kept:          len(survivors),
+		ProbeStages:   probeStages(probe, res),
+		GeoUnknown:    geoUnknownCount(survivors),
+		KeptCountries: keptCountries(survivors),
+		Duration:      time.Since(start),
+		Phases: CyclePhases{
+			Fetch:      fetchedAt.Sub(start),
+			Merge:      mergedAt.Sub(fetchedAt),
+			DeadFilter: deadFilteredAt.Sub(mergedAt),
+			Probe:      probedAt.Sub(deadFilteredAt),
+			Egress:     filteredAt.Sub(selectedAt),
+			Publish:    publishedAt.Sub(publishingAt),
+		},
 		Sources:         sourceReports,
 		Filters:         filterReports,
 		KeptSpeeds:      keptSpeeds(survivors),
@@ -263,6 +263,26 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+// publish swaps the new list in, persists it and logs the cycle. The save runs
+// AFTER the in-memory publication and never gates it: a snapshot that cannot be
+// written costs the NEXT restart its head start and nothing at all in this
+// cycle, so it is a warning rather than an error.
+func (c *Checker) publish(payload []byte, stats Stats, deadSkipped int) {
+	snap := &Snapshot{Payload: payload, UpdatedAt: time.Now(), Stats: stats}
+	c.holder.Store(snap)
+	if saveErr := SaveSnapshot(c.snapshotPath, snap); saveErr != nil {
+		c.logger.Warn().Err(saveErr).Str("path", c.snapshotPath).
+			Msg("persisting the stable snapshot failed; the list is published in memory only")
+	}
+	c.logger.Info().
+		Int("sources_ok", stats.SourcesOK).
+		Int("merged", stats.Merged).
+		Int("dead_skipped", deadSkipped).
+		Int("probed", stats.Tested).
+		Int("kept", stats.Kept).
+		Msg("stable list updated")
 }
 
 // reportError records a cycle that did not publish a new list (hard error or
@@ -301,6 +321,19 @@ func keptLatencies(survivors []Survivor) []int {
 		latencies = append(latencies, s.MeanMs)
 	}
 	return latencies
+}
+
+// probeStages counts the probed set by how far each probe got. It walks the
+// probed entries rather than the result map so the counts sum to len(probe): a
+// label the prober never named indexes to StageUnknown instead of vanishing,
+// which keeps the ratio against stable_probed_nodes closed.
+func probeStages(probe []Entry, res map[string]ProbeResult) map[ProbeStage]int {
+	stages := make(map[ProbeStage]int)
+	for _, e := range probe {
+		stages[res[e.Label].Stage]++
+	}
+
+	return stages
 }
 
 // geoUnknownCount counts published nodes whose annotation resolved no country
@@ -539,6 +572,10 @@ func (c *Checker) fetchSources(
 // A through-node filter's verdict is deliberately absent here: the checks whose
 // verdict is worth reusing write the geoblock store instead, and preprocess
 // drops those hosts a whole stage earlier, before the node is ever merged.
+//
+// The cap is len(entries), not the kept count: at production shape (36342
+// merged, 9503 kept) an exact fit would save 2.4MB of live heap and cost a
+// second Blocked pass over the whole pool, measured at +1.7ms.
 func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, ok bool) {
 	probe = make([]Entry, 0, len(entries))
 	for _, e := range entries {
@@ -563,7 +600,11 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
 		return
 	}
 	for _, e := range probe {
-		if _, ok := res[e.Label]; !ok {
+		// Zero successes, not absence: the prober emits an entry per label and
+		// a label reads zero only when every port failed (foldProbeResults
+		// folds best-of-ports), so an absence test would silently stop
+		// blocking anything the moment the map is fully populated.
+		if r, ok := res[e.Label]; !ok || r.Successes == 0 {
 			_ = c.dead.Block(e.Addr)
 		}
 	}
@@ -581,12 +622,20 @@ func (c *Checker) pruneCaches() {
 	}
 }
 
+// entriesPayload sizes the probe payload in one pass, as BuildPayload does: a
+// bytes.Buffer grows to the next power of two, so at production shape it copied
+// 2MB through 13 dead intermediates and handed the probe 46KB of slack to hold
+// for the whole run.
 func entriesPayload(entries []Entry) []byte {
-	var b bytes.Buffer
-	for _, e := range entries {
-		b.WriteString(e.Raw)
-		b.WriteByte('\n')
+	total := 0
+	for i := range entries {
+		total += len(entries[i].Raw) + 1
+	}
+	out := make([]byte, 0, total)
+	for i := range entries {
+		out = append(out, entries[i].Raw...)
+		out = append(out, '\n')
 	}
 
-	return b.Bytes()
+	return out
 }

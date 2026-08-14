@@ -141,13 +141,17 @@ func TestFoldProbeResults(t *testing.T) {
 		"src-001:3000/UDP": {succ: rounds, sum: 900},
 		"src-001:3001/TCP": {succ: 2, sum: 200},
 		"src-002":          {succ: 2, sum: 500},
-		// src-003 never answered: dropped, not folded as a zero.
-		"src-003": {succ: 0, sum: 0},
+		// src-003 never answered: folded as a zero, because absence is no
+		// longer what marks a node dead — recordDead reads Successes.
+		"src-003": {succ: 0, sum: 0, stage: StageConnect},
 	}
 	res := foldProbeResults(pxs, accs)
 
-	if len(res) != 2 {
-		t.Fatalf("folded to %d results, want src-001 and src-002 only: %+v", len(res), res)
+	if len(res) != 3 {
+		t.Fatalf("folded to %d results, want src-001, src-002 and src-003: %+v", len(res), res)
+	}
+	if res["src-003"] != (ProbeResult{Stage: StageConnect}) {
+		t.Errorf("a node that never answered must fold to a zero-success entry, got %+v", res["src-003"])
 	}
 	got, ok := res["src-001"]
 	if !ok {
@@ -160,7 +164,7 @@ func TestFoldProbeResults(t *testing.T) {
 		// however badly it probed.
 		t.Errorf("src-001 = %+v, want the best port {Successes:%d MeanMs:300}", got, rounds)
 	}
-	if res["src-002"] != (ProbeResult{Successes: 2, MeanMs: 250}) {
+	if res["src-002"] != (ProbeResult{Successes: 2, MeanMs: 250, Stage: StageUnknown}) {
 		t.Errorf("non-mieru result changed: %+v", res["src-002"])
 	}
 }
@@ -193,6 +197,40 @@ func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
 			}
 			if got := foldProbeResults(pxs, accs); got["src-001"].MeanMs != 50 {
 				t.Errorf("src-001 = %+v, want the 50ms port", got["src-001"])
+			}
+		})
+	}
+}
+
+// TestFoldProbeResultsTieBreaksOnStage locks the LAST tiebreak, the only one
+// that can separate two ports that both failed: successes and mean are 0 for
+// both, so without the stage key a label reports whichever port the payload
+// happened to list first. A port that got a tunnel up is not a connect failure.
+func TestFoldProbeResultsTieBreaksOnStage(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		desc       string
+		fetchFirst bool
+	}{
+		{"furthest port first", true},
+		{"furthest port last", false},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			pxs := parseTestProxies(t, mieruLine("1.2.3.4", "src-001",
+				[2]string{"2999", "TCP"}, [2]string{"3000", "UDP"}))
+			fetch, connect := "src-001:2999/TCP", "src-001:3000/UDP"
+			if !c.fetchFirst {
+				fetch, connect = connect, fetch
+			}
+			accs := map[string]*delayAcc{
+				fetch:   {stage: StageFetch},
+				connect: {stage: StageConnect},
+			}
+			if got := foldProbeResults(pxs, accs); got["src-001"] != (ProbeResult{Stage: StageFetch}) {
+				t.Errorf("src-001 = %+v, want the furthest stage (fetch)", got["src-001"])
 			}
 		})
 	}

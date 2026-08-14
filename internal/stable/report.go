@@ -16,6 +16,10 @@ type CycleReport struct {
 	DeadSkipped int
 	Probed      int
 	Kept        int
+	// ProbeStages counts the probed set by how far each node's probe got, and
+	// sums to Probed: a label the prober never named -- its proxies did not
+	// parse -- counts as StageUnknown rather than falling out of the total.
+	ProbeStages map[ProbeStage]int
 	// GeoUnknown counts published nodes carrying a [GEO:??] tag: the
 	// annotation chain resolved no country for them. It has an irreducible
 	// floor and zero is not the target. A DNS-poisoning sinkhole answers with
@@ -28,16 +32,43 @@ type CycleReport struct {
 	GeoUnknown int
 	// KeptCountries counts published nodes per resolved country code.
 	KeptCountries map[string]int
-	Duration      time.Duration
-	Sources       []SourceReport
-	Filters       []FilterReport
-	KeptSpeeds    []int
+	// Duration is the whole cycle; Phases is where it went, and the two do
+	// not agree exactly -- see CyclePhases.
+	Duration   time.Duration
+	Phases     CyclePhases
+	Sources    []SourceReport
+	Filters    []FilterReport
+	KeptSpeeds []int
 	// KeptLatenciesMs is unfiltered where KeptSpeeds skips zeros: every
 	// survivor was probed by definition, so a zero here is a real sub-1ms
 	// mean and not the "no bandwidth filter ran" hole.
 	KeptLatenciesMs []int
 	Trace           TraceReport
 	Gemini          GeminiReport
+}
+
+// CyclePhases is where one cycle's wall time went, timed by RunOnce at the
+// boundaries between its stages. Probe and Egress are separate because both do
+// per-node network work: Probe is bounded by check.timeout, Egress by each
+// filter's own timeout.
+//
+// The fields sum to slightly LESS than CycleReport.Duration: the steps between
+// phases (dead-cache write, SelectSurvivors, pruneCaches, report assembly) are
+// in no phase, so the residue is the cycle's non-stage overhead rather than a
+// rounding error.
+type CyclePhases struct {
+	// Fetch covers fetchSources: download, parse and the per-node IP stage
+	// (DNS, geo/asn/cidr) of every source.
+	Fetch      time.Duration
+	Merge      time.Duration
+	DeadFilter time.Duration
+	Probe      time.Duration
+	// Egress covers filterAndMeasureEgress: the through-node filters and the
+	// cdn-cgi/trace measurement.
+	Egress time.Duration
+	// Publish covers BuildPayload, movedCount and c.publish: the in-memory
+	// swap, SaveSnapshot and the published-cycle log.
+	Publish time.Duration
 }
 
 // GeminiGateState is what the gemini gate did in a cycle. The zero value is

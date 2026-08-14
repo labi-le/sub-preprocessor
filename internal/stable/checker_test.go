@@ -364,6 +364,50 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	}
 }
 
+// TestCheckerDeadCacheRecordsZeroSuccessAndAbsent covers both shapes a failed
+// node can arrive in, because the prober's map is moving from successes-only to
+// one entry per label. A presence test used to be equivalent to "no successful
+// round"; under a populated map it silently blocks nobody, which empties the
+// dead cache and quadruples the next cycle's probe set with every counter still
+// reading plausible. The absent case must keep working regardless: nothing
+// obliges a Prober implementation to name every label.
+func TestCheckerDeadCacheRecordsZeroSuccessAndAbsent(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		"https://gamma.example/sub": "vless://u@3.3.3.3:443#c\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 0, MeanMs: 0}, // every port failed, reported
+		"gamma-001": {Successes: 5, MeanMs: 100},
+		// beta-001 is named by no entry at all.
+	}}
+	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	spec := testCheckerSpec(prober)
+	spec.Sources = append(spec.Sources, config.SubscriptionSource{
+		Name: "gamma", URL: "https://gamma.example/sub",
+	})
+	c := stable.NewChecker(
+		spec,
+		func() stable.Filterer { return filterer }, nil, dead, stable.NewHolder(), "", zerolog.Nop(), nil,
+	)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if !dead.blocked["1.1.1.1:443"] {
+		t.Errorf("a reported zero-success node must be recorded dead, got %v", dead.recorded)
+	}
+	if !dead.blocked["2.2.2.2:443"] {
+		t.Errorf("a node absent from the results must be recorded dead, got %v", dead.recorded)
+	}
+	if dead.blocked["3.3.3.3:443"] {
+		t.Errorf("the live node must not be recorded dead, got %v", dead.recorded)
+	}
+}
+
 // fakeBlocklist mirrors fakeDeadCache for the persistent side: it counts the
 // calls the Checker makes so the prune cadence is observable.
 type fakeBlocklist struct {
@@ -619,6 +663,136 @@ func TestKeptLatenciesReachTheCycleReport(t *testing.T) {
 	// Ascending, because the report carries them in published order.
 	if want := []int{0, 130, 420}; !slices.Equal(rep.last.KeptLatenciesMs, want) {
 		t.Errorf("report KeptLatenciesMs = %v, want %v", rep.last.KeptLatenciesMs, want)
+	}
+}
+
+// slowProber burns a known interval inside Probe so the phase breakdown can be
+// checked for attribution rather than for merely being non-zero.
+type slowProber struct {
+	fakeProber
+	delay time.Duration
+}
+
+func (p *slowProber) Probe(ctx context.Context, payload []byte) (map[string]stable.ProbeResult, error) {
+	time.Sleep(p.delay)
+
+	return p.fakeProber.Probe(ctx, payload)
+}
+
+// TestCyclePhasesAttributeTheProbe pins the boundaries, not the plumbing: a
+// breakdown that charges the probe's time to another phase is worse than no
+// breakdown, since it sends the next optimisation at the wrong stage. The
+// prober's sleep is the only thing in the cycle that takes measurable time, so
+// it must appear in Probe and in nothing else.
+func TestCyclePhasesAttributeTheProbe(t *testing.T) {
+	t.Parallel()
+
+	const delay = 40 * time.Millisecond
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	prober := &slowProber{
+		fakeProber: fakeProber{res: map[string]stable.ProbeResult{
+			"alpha-001": {Successes: 5, MeanMs: 100},
+			"beta-001":  {Successes: 5, MeanMs: 100},
+		}},
+		delay: delay,
+	}
+	rep := &fakeReporter{}
+	c := stable.NewChecker(
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep,
+	)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+
+	p := rep.last.Phases
+	if p.Probe < delay {
+		t.Errorf("Phases.Probe = %v, want >= %v", p.Probe, delay)
+	}
+	others := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"Fetch", p.Fetch}, {"Merge", p.Merge}, {"DeadFilter", p.DeadFilter},
+		{"Egress", p.Egress}, {"Publish", p.Publish},
+	}
+	for _, o := range others {
+		if o.d >= delay {
+			t.Errorf("Phases.%s = %v, want < %v: the probe's time leaked into it", o.name, o.d, delay)
+		}
+	}
+	sum := p.Fetch + p.Merge + p.DeadFilter + p.Probe + p.Egress + p.Publish
+	if sum > rep.last.Duration {
+		t.Errorf("phases sum to %v, past the cycle's own %v", sum, rep.last.Duration)
+	}
+}
+
+// TestProbeStagesReachTheCycleReport walks the whole seam the metric rides:
+// prober -> probeStages -> CycleReport -> Reporter. The absent label is the
+// point: it must count as StageUnknown rather than drop out, or the stage
+// counts stop summing to Probed and the panel's ratio silently stops closing.
+func TestProbeStagesReachTheCycleReport(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		"https://gamma.example/sub": "vless://u@3.3.3.3:443#c\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100, Stage: stable.StagePassed},
+		"beta-001":  {Stage: stable.StageCondemned},
+		// gamma-001 is named by no entry: unparsable proxies never reach the
+		// prober, and a fake need not name every label either.
+	}}
+	rep := &fakeReporter{}
+	spec := testCheckerSpec(prober)
+	spec.Sources = append(spec.Sources, config.SubscriptionSource{
+		Name: "gamma", URL: "https://gamma.example/sub",
+	})
+	c := stable.NewChecker(
+		spec,
+		func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep,
+	)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+
+	// A pair slice, not a map literal keyed by ProbeStage: the fold must NOT
+	// carry a key for a stage nobody reached, and an exhaustive literal cannot
+	// express that.
+	wants := []struct {
+		stage stable.ProbeStage
+		n     int
+	}{
+		{stable.StagePassed, 1},
+		{stable.StageCondemned, 1},
+		{stable.StageUnknown, 1},
+	}
+	for _, w := range wants {
+		if got := rep.last.ProbeStages[w.stage]; got != w.n {
+			t.Errorf("ProbeStages[%v] = %d, want %d", w.stage, got, w.n)
+		}
+	}
+	if len(rep.last.ProbeStages) != len(wants) {
+		t.Errorf("report ProbeStages = %v, want exactly %d stages", rep.last.ProbeStages, len(wants))
+	}
+	total := 0
+	for _, n := range rep.last.ProbeStages {
+		total += n
+	}
+	if total != rep.last.Probed {
+		t.Errorf("stage counts sum to %d, want Probed = %d: the ratio must stay closed", total, rep.last.Probed)
 	}
 }
 

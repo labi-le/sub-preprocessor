@@ -43,6 +43,8 @@ const (
 	labelFilter = "filter"
 	labelSource = "source"
 	labelReason = "reason"
+	labelPhase  = "phase"
+	labelStage  = "stage"
 )
 
 // Metrics holds the latest cycle report plus lifetime counters and renders them
@@ -103,6 +105,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	gauge(w, "stable_merged_nodes", "Unique nodes after merge/dedupe.", float64(r.Merged))
 	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: a recent probe found them dead.", float64(r.DeadSkipped))
 	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
+	writeProbeStages(w, r.ProbeStages)
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
 	writeTrace(w, r.Trace)
@@ -114,6 +117,7 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 		}
 	}
 	gauge(w, "stable_cycle_duration_seconds", "Wall time of the last cycle.", r.Duration.Seconds())
+	writePhases(w, r.Phases)
 	gauge(w, "stable_last_success_timestamp_seconds", "Unix time of the last published cycle.", float64(m.lastAt.Unix()))
 
 	writeFilters(w, r.Filters)
@@ -144,6 +148,60 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 		for _, reason := range sortedKeys(f.Dropped) {
 			sample(w, "stable_filter_dropped_nodes", map[string]string{labelFilter: f.Name, labelReason: reason}, float64(f.Dropped[reason]))
 		}
+	}
+}
+
+// writePhases renders where the cycle's wall time went. One metric with a
+// phase label, not six names: the panel stacks them, and a stack wants one
+// series selector.
+//
+// The phases sum to LESS than stable_cycle_duration_seconds, and the panel
+// says so -- the steps between stages are in no phase. A cycle that aborted
+// renders nothing here at all: reportError reaches ObserveError, which leaves
+// m.last alone, so every gauge on this page -- these included -- keeps
+// describing the last cycle that PUBLISHED. Only stable_cycles_total and
+// stable_cycle_failures_total move on a failure.
+func writePhases(w io.Writer, p stable.CyclePhases) {
+	help(w, "stable_cycle_phase_duration_seconds", "gauge",
+		"Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase=\"probe\" is the latency probe alone; the through-node filters and the cdn-cgi/trace measurement are phase=\"egress\", and both do per-node network work.")
+	// Pipeline order, not sorted: the panel legend reads as the funnel.
+	for _, ph := range []struct {
+		name string
+		d    time.Duration
+	}{
+		{"fetch", p.Fetch},
+		{"merge", p.Merge},
+		{"dead_filter", p.DeadFilter},
+		{"probe", p.Probe},
+		{"egress", p.Egress},
+		{"publish", p.Publish},
+	} {
+		sample(w, "stable_cycle_phase_duration_seconds", map[string]string{labelPhase: ph.name}, ph.d.Seconds())
+	}
+}
+
+// writeProbeStages splits the probed set by how far each node's probe got. The
+// four known stages render even at zero -- "nobody failed at fetch" is an
+// answer -- while stage="unknown" appears only when the prober left nodes
+// unclassified, since a permanent zero there says nothing.
+//
+// A nil map renders nothing: the fold reaching CycleReport is the hand-off that
+// can be dropped, and an absent series says that, where four zeros beside a
+// non-zero stable_probed_nodes would read as a cycle that probed nobody.
+func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
+	if len(stages) == 0 {
+		return
+	}
+	help(w, "stable_probe_outcome_nodes", "gauge",
+		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check found the server accepts no TCP connection. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, so no error inspection can separate them for 80% of the pool. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
+	// Progress order, unknown last: it is a defect indicator, not a stage.
+	for _, s := range []stable.ProbeStage{
+		stable.StageCondemned, stable.StageConnect, stable.StageFetch, stable.StagePassed,
+	} {
+		sample(w, "stable_probe_outcome_nodes", map[string]string{labelStage: s.String()}, float64(stages[s]))
+	}
+	if n := stages[stable.StageUnknown]; n > 0 {
+		sample(w, "stable_probe_outcome_nodes", map[string]string{labelStage: stable.StageUnknown.String()}, float64(n))
 	}
 }
 
