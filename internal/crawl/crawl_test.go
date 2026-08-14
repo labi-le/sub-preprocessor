@@ -629,20 +629,29 @@ func TestExtractChannels(t *testing.T) {
 	}
 }
 
-func TestNormalizeSlug(t *testing.T) {
+// TestParseSeed pins the seed forms channels.yaml documents. The forum one is
+// load-bearing: a group answers t.me/s/ with no message at all, so an entry that
+// names a topic must keep it, and a permalink's message id must not survive as
+// one — the <chat>/<topic>/<msg> shape was measured to return no link at all.
+func TestParseSeed(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]string{
-		"o00000000i":            "o00000000i",
-		"@rap_ex":               "rap_ex",
-		"https://t.me/rap_ex":   "rap_ex",
-		"https://t.me/s/chan01": "chan01",
-		"T.me/Foo/123":          "foo",
-		"  spaced  ":            "spaced",
+	cases := map[string]chanRef{
+		"o00000000i":                            {slug: "o00000000i"},
+		"@rap_ex":                               {slug: "rap_ex"},
+		"https://t.me/rap_ex":                   {slug: "rap_ex"},
+		"https://t.me/s/chan01":                 {slug: "chan01"},
+		"  spaced  ":                            {slug: "spaced"},
+		"forumchat/1310":                        {slug: "forumchat", topic: "1310"},
+		"T.me/Forum/123":                        {slug: "forum", topic: "123"},
+		"https://t.me/forumchat/1310/21206":     {slug: "forumchat", topic: "1310"},
+		"https://t.me/forumchat/1310?comment=9": {slug: "forumchat", topic: "1310"},
+		"https://t.me/chan01/about":             {slug: "chan01"},
+		"https://t.me/share/url?url=x":          {},
 	}
 	for in, want := range cases {
-		if got := normalizeSlug(in); got != want {
-			t.Errorf("normalizeSlug(%q) = %q, want %q", in, got, want)
+		if got := parseSeed(in); got != want {
+			t.Errorf("parseSeed(%q) = %+v, want %+v", in, got, want)
 		}
 	}
 }
@@ -795,10 +804,18 @@ func TestExtractInlineNodes(t *testing.T) {
 	}
 }
 
-// pageFetcher is a network-free fetchClient returning canned HTML per URL.
-type pageFetcher struct{ pages map[string]string }
+// pageFetcher is a network-free fetchClient returning canned HTML per URL, or a
+// canned error for a URL in errs: the crawler must not report a page it read and
+// found nothing in the same way as one it never reached.
+type pageFetcher struct {
+	pages map[string]string
+	errs  map[string]error
+}
 
 func (f pageFetcher) page(_ context.Context, u string) (string, error) {
+	if err := f.errs[u]; err != nil {
+		return "", err
+	}
 	return f.pages[u], nil
 }
 
@@ -1527,14 +1544,14 @@ func TestPagesForBudget(t *testing.T) {
 	t.Parallel()
 
 	c := &Crawler{opts: Options{Pages: 6}}
-	if got := c.pagesFor(scanNode{channel: "a", configured: true}); got != 6 {
+	if got := c.pagesFor(scanNode{ref: chanRef{slug: "a"}, configured: true}); got != 6 {
 		t.Errorf("configured seed budget = %d, want 6", got)
 	}
-	if got := c.pagesFor(scanNode{channel: "b"}); got != discoveredPages {
+	if got := c.pagesFor(scanNode{ref: chanRef{slug: "b"}}); got != discoveredPages {
 		t.Errorf("remembered seed budget = %d, want %d", got, discoveredPages)
 	}
 	small := &Crawler{opts: Options{Pages: 1}}
-	if got := small.pagesFor(scanNode{channel: "b", depth: 2}); got != 1 {
+	if got := small.pagesFor(scanNode{ref: chanRef{slug: "b"}, depth: 2}); got != 1 {
 		t.Errorf("budget = %d, want never more than Pages (1)", got)
 	}
 }
@@ -1638,7 +1655,7 @@ func TestScrapeChannelReportsLostCursor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := &Crawler{client: pageFetcher{pages: tc.pages}, logger: zerolog.Nop()}
-			pages, lost := c.scrapeChannel(context.Background(), "chan", tc.budget)
+			pages, lost := c.scrapeChannel(context.Background(), chanRef{slug: "chan"}, tc.budget)
 			if len(pages) != tc.wantPages {
 				t.Errorf("pages = %d, want %d", len(pages), tc.wantPages)
 			}
@@ -1726,5 +1743,180 @@ func TestRunOnceHonoursBlockedList(t *testing.T) {
 	}
 	if !urls[keptURL] {
 		t.Errorf("the unblocked URL must still be harvested, got %+v", got.Subscriptions.Sources)
+	}
+}
+
+// TestScrapeChannelForumTopic pins the fetch shape a seed's topic selects and the
+// outcomes the log has to keep apart. A group answers t.me/s/ with 200 and zero
+// messages, so "read a listing and found nothing in it" must never be reported
+// as "never reachable" — and a topic has no cursor to lose, which keeps forum
+// seeds out of the fleet-wide ratio reportCursors alarms on.
+func TestScrapeChannelForumTopic(t *testing.T) {
+	t.Parallel()
+
+	const (
+		topicURL = "https://t.me/forumchat/1310" + topicQuery
+		listURL  = "https://t.me/s/forumchat"
+	)
+	withMessage := `<div class="tgme_widget_message_wrap"><a href="https://sub.example/x">x</a></div>`
+	noMessage := `<html><body>a group has a page, just no message on it</body></html>`
+
+	cases := []struct {
+		name       string
+		ref        chanRef
+		budget     int
+		pages      map[string]string
+		errs       map[string]error
+		wantPages  int
+		wantLog    string
+		wantNotLog string
+	}{
+		{
+			name:      "forum topic",
+			ref:       chanRef{slug: "forumchat", topic: "1310"},
+			budget:    6,
+			pages:     map[string]string{topicURL: withMessage},
+			wantPages: 1,
+		},
+		{
+			name:      "same chat without a topic keeps the t.me/s/ shape",
+			ref:       chanRef{slug: "forumchat"},
+			budget:    1,
+			pages:     map[string]string{listURL: withMessage},
+			wantPages: 1,
+		},
+		{
+			name:       "reachable but message-less",
+			ref:        chanRef{slug: "forumchat", topic: "1310"},
+			budget:     6,
+			pages:      map[string]string{topicURL: noMessage},
+			wantPages:  0,
+			wantLog:    "carried no message",
+			wantNotLog: "fetch failed",
+		},
+		{
+			name:       "never reachable",
+			ref:        chanRef{slug: "forumchat", topic: "1310"},
+			budget:     6,
+			errs:       map[string]error{topicURL: errors.New("bad status: 404 Not Found")},
+			wantPages:  0,
+			wantLog:    "fetch failed",
+			wantNotLog: "carried no message",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logBuf bytes.Buffer
+			c := &Crawler{
+				client: pageFetcher{pages: tc.pages, errs: tc.errs},
+				logger: zerolog.New(&logBuf),
+			}
+			pages, lost := c.scrapeChannel(context.Background(), tc.ref, tc.budget)
+			logged := logBuf.String()
+			if len(pages) != tc.wantPages {
+				t.Fatalf("pages = %d, want %d (log: %s)", len(pages), tc.wantPages, logged)
+			}
+			if lost {
+				t.Errorf("cursorLost = true with %d of %d pages; nothing here can lose a cursor", len(pages), tc.budget)
+			}
+			assertTopicLog(t, logged, tc.wantLog, tc.wantNotLog)
+		})
+	}
+}
+
+// assertTopicLog checks the outcome a forum-seed scrape reported. An empty
+// wantLog means the scrape produced a page, and a quiet log is the assertion:
+// the two failure warns must be distinguishable from each other, and both must
+// name the seed the way the operator wrote it, topic included.
+func assertTopicLog(t *testing.T, logged, wantLog, wantNotLog string) {
+	t.Helper()
+	if wantLog == "" {
+		if logged != "" {
+			t.Errorf("a listing that yielded a page must stay quiet, logged: %s", logged)
+		}
+		return
+	}
+	if !strings.Contains(logged, wantLog) {
+		t.Errorf("log %s does not carry %q", logged, wantLog)
+	}
+	if strings.Contains(logged, wantNotLog) {
+		t.Errorf("log %s carries %q, the other outcome", logged, wantNotLog)
+	}
+	if !strings.Contains(logged, `"channel":"forumchat/1310"`) {
+		t.Errorf("log %s must name the seed as the operator wrote it", logged)
+	}
+}
+
+// TestRunOnceHarvestsForumTopic drives a whole cycle over the seed form an
+// operator writes for a forum topic. The listing's links go through the ordinary
+// harvest, Telegram's own hosts are not candidates, the source is attributed to
+// the bare chat (a managed name is permanent, a topic id is not), and the
+// productive ref is remembered WITH its topic — remembering the bare chat would
+// re-seed the next cycle with the t.me/s/ shape that answers a group nothing.
+func TestRunOnceHarvestsForumTopic(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	statePath := filepath.Join(dir, ".crawler-state.json")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	const subURL = "https://sub.example/rotating"
+	page := `<div class="tgme_widget_message_wrap">` +
+		`<a href="https://t.me/forumchat/1310/21206">permalink</a>` +
+		`<script src="https://oauth.tg.dev/js/telegram-widget.js?24"></script>` +
+		`<a href="` + subURL + `">today's link</a></div>`
+
+	c := &Crawler{
+		opts: Options{
+			Channels:    []string{"forumchat/1310"},
+			PrivatePath: priv,
+			StatePath:   statePath,
+			StateTTL:    30 * oneDay, // without a TTL the prune cutoff is now, and now-recorded memory is stale
+			Pages:       6,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/forumchat/1310" + topicQuery: page,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) != subURL {
+				t.Errorf("fetched %q; only the listing's external link is a candidate", u)
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	b, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	var pf privateFile
+	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+	if len(pf.Subscriptions.Sources) != 1 {
+		t.Fatalf("want exactly the topic's one live link managed, got %+v", pf.Subscriptions.Sources)
+	}
+	got := pf.Subscriptions.Sources[0]
+	if got.URL != subURL {
+		t.Errorf("managed URL = %q, want %q", got.URL, subURL)
+	}
+	if !strings.HasPrefix(got.Name, managedPrefix+"forumchat-") {
+		t.Errorf("name = %q, want it attributed to the bare chat (%sforumchat-<sha6>)", got.Name, managedPrefix)
+	}
+	if strings.Contains(got.Name, "1310") {
+		t.Errorf("name = %q; a permanent name must not carry the topic id", got.Name)
+	}
+
+	st := loadState(statePath, zerolog.Nop())
+	if _, ok := st.Productive["forumchat/1310"]; !ok {
+		t.Errorf("productive memory = %+v, want the seed remembered with its topic", st.Productive)
 	}
 }

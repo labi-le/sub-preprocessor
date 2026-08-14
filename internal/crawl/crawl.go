@@ -793,12 +793,13 @@ func candidate(raw string) (bool, rejectReason, error) {
 	return true, "", nil
 }
 
-// isNoiseHost matches hosts that never serve subscriptions (Telegram itself and
-// its media CDN), so they are skipped before the fetch.
+// isNoiseHost matches hosts that never serve subscriptions (Telegram itself, its
+// media CDN, and the login-widget host every discussion embed loads a script
+// from), so they are skipped before the fetch.
 func isNoiseHost(host string) bool {
 	host = strings.ToLower(host)
 	switch host {
-	case "t.me", "telegram.org", "www.telegram.org", "telegram.me", "telegram.dog":
+	case "t.me", "telegram.org", "www.telegram.org", "telegram.me", "telegram.dog", "oauth.tg.dev":
 		return true
 	}
 	return host == "telesco.pe" || strings.HasSuffix(host, ".telesco.pe")

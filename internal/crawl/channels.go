@@ -9,12 +9,16 @@ import (
 )
 
 // channelsFile is the seed-channel config, analogous to config.yaml/private.yaml.
-// Entries may be bare slugs, @handles, or t.me URLs (normalized on use).
+// Entries may be bare slugs, @handles, or t.me URLs (normalized on use). A
+// trailing "/<topic>" names a forum topic inside a group and is kept: such a
+// chat has no t.me/s/ preview to scrape at all, so the topic id is the only way
+// to reach its messages (see topicQuery).
 //
 //	channels:
 //	  - o00000000i
 //	  - "@rap_ex"
 //	  - https://t.me/remiuc
+//	  - somegroup/1310
 //	blocked:
 //	  - https://panel.example/sub/abc
 type channelsFile struct {

@@ -39,10 +39,28 @@ const defaultMaxDiscovered = 200
 // here (the later dedupe + InlineMax cap still applies to the survivors).
 const maxInlineAccum = 20000
 
+// chanRef is one crawl target. topic carries a Telegram forum-topic id when the
+// seed named one: a group has no t.me/s/ preview at all (measured 2026-08-14:
+// 200 with zero message wraps), so the topic is what makes such a chat readable.
+type chanRef struct {
+	slug  string
+	topic string
+}
+
+// String renders the ref in the seed syntax channels.yaml uses, "<slug>" or
+// "<slug>/<topic>". state remembers a productive ref in that form; dropping the
+// topic there would re-seed the next cycle with the message-less t.me/s/ shape.
+func (r chanRef) String() string {
+	if r.topic == "" {
+		return r.slug
+	}
+	return r.slug + "/" + r.topic
+}
+
 // scanNode is a channel queued for crawling at a given repost-graph depth.
 // configured marks an operator-supplied seed, which gets the full page budget.
 type scanNode struct {
-	channel    string
+	ref        chanRef
 	depth      int
 	configured bool
 }
@@ -60,7 +78,7 @@ type scanNode struct {
 func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []string) {
 	live := map[string]string{}
 	var inline []string
-	visited := map[string]bool{}
+	visited := map[chanRef]bool{}
 	discovered := 0
 	var cursors cursorStats
 	rej := newRejects(c.logger)
@@ -76,14 +94,14 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 		maxDiscovered = defaultMaxDiscovered
 	}
 	queue := make([]scanNode, 0, len(seeds))
-	for slug, configured := range seeds {
-		queue = append(queue, scanNode{channel: slug, configured: configured})
+	for ref, configured := range seeds {
+		queue = append(queue, scanNode{ref: ref, configured: configured})
 	}
 
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		if n.channel == "" || visited[n.channel] {
+		if n.ref.slug == "" || visited[n.ref] {
 			continue
 		}
 		if n.depth > 0 {
@@ -92,11 +110,12 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 			}
 			discovered++
 		}
-		visited[n.channel] = true
+		visited[n.ref] = true
 
 		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors, rej) {
-			if !visited[ch] {
-				queue = append(queue, scanNode{channel: ch, depth: n.depth + 1})
+			ref := chanRef{slug: ch}
+			if !visited[ref] {
+				queue = append(queue, scanNode{ref: ref, depth: n.depth + 1})
 			}
 		}
 	}
@@ -110,11 +129,11 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []str
 // channels are seeds too — always expanded — but not configured: they pay the
 // shallower discovered page budget, because they accumulate across cycles and
 // paying full Pages for each is what makes a cycle cost more than the last.
-func (c *Crawler) buildSeeds(st *state) map[string]bool {
-	seeds := map[string]bool{}
+func (c *Crawler) buildSeeds(st *state) map[chanRef]bool {
+	seeds := map[chanRef]bool{}
 	addSeed := func(s string) {
-		if slug := normalizeSlug(s); slug != "" {
-			seeds[slug] = true
+		if ref := parseSeed(s); ref.slug != "" {
+			seeds[ref] = true
 		}
 	}
 	for _, s := range c.opts.Channels {
@@ -123,9 +142,10 @@ func (c *Crawler) buildSeeds(st *state) map[string]bool {
 	for _, s := range loadChannels(c.opts.ChannelsPath, c.logger).Channels {
 		addSeed(s)
 	}
-	for _, slug := range st.seeds() {
-		if _, ok := seeds[slug]; !ok {
-			seeds[slug] = false
+	for _, s := range st.seeds() {
+		ref := parseSeed(s)
+		if _, ok := seeds[ref]; !ok && ref.slug != "" {
+			seeds[ref] = false
 		}
 	}
 	return seeds
@@ -164,7 +184,7 @@ func (c *Crawler) reportCursors(cs cursorStats) {
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
 func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string, cs *cursorStats, rej *rejects) []string {
-	pages, cursorLost := c.scrapeChannel(ctx, n.channel, c.pagesFor(n))
+	pages, cursorLost := c.scrapeChannel(ctx, n.ref, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
 		cs.lost++
@@ -175,19 +195,21 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 		return nil
 	}
 
-	cand := c.harvestPages(pages, inline, rej, n.channel)
-	found, _ := c.classifyAll(ctx, keys(cand), rej, n.channel)
+	cand := c.harvestPages(pages, inline, rej, n.ref.slug)
+	found, _ := c.classifyAll(ctx, keys(cand), rej, n.ref.slug)
 	for u := range found {
 		// First discoverer wins: BFS visits seeds before discovered channels,
-		// so attribution prefers the operator-configured origin.
+		// so attribution prefers the operator-configured origin. The bare slug
+		// is the origin, not the ref: a managed source name is permanent, and a
+		// topic id is not part of the chat's identity.
 		if _, ok := live[u]; !ok {
-			live[u] = n.channel
+			live[u] = n.ref.slug
 		}
 	}
 	if len(found) > 0 {
-		st.record(n.channel, time.Now())
+		st.record(n.ref.String(), time.Now())
 	}
-	c.logger.Info().Str("channel", n.channel).Int("depth", n.depth).
+	c.logger.Info().Str("channel", n.ref.String()).Int("depth", n.depth).
 		Int("pages", len(pages)).Int("subs", len(found)).Msg("scanned channel")
 
 	// Thematic gate: expand into referenced channels only from seeds or from
@@ -195,7 +217,7 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	if n.depth >= c.opts.MaxDepth || (n.depth > 0 && len(found) == 0) {
 		return nil
 	}
-	return extractChannels(pages, n.channel)
+	return extractChannels(pages, n.ref.slug)
 }
 
 // harvestPages pulls the subscription candidates out of a channel's scraped
@@ -259,7 +281,8 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
 // channel, walking backward via the ?before= cursor. Fetches are sequential,
-// which naturally rate-limits the crawler against t.me.
+// which naturally rate-limits the crawler against t.me. A ref carrying a forum
+// topic takes the single-page topic shape instead; t.me/s/ has nothing for it.
 //
 // out is newest-first on every return path, and harvestPages takes its inline
 // nodes from out[0] alone: reordering here silently ages that harvest.
@@ -268,16 +291,19 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 // no cursor while the page budget still had room — the one outcome that is
 // indistinguishable from a short channel per-channel but diagnostic in
 // aggregate; see cursorStats.
-func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) (out []string, cursorLost bool) {
+func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
+	if ref.topic != "" {
+		return c.scrapeTopic(ctx, ref), false
+	}
 	before := ""
 	for range pages {
-		u := "https://t.me/s/" + channel
+		u := "https://t.me/s/" + ref.slug
 		if before != "" {
 			u += "?before=" + before
 		}
 		page, err := c.client.page(ctx, u)
 		if err != nil {
-			c.logger.Warn().Err(err).Str("channel", channel).Msg("channel page fetch failed")
+			c.logger.Warn().Err(err).Str("channel", ref.slug).Msg("channel page fetch failed")
 			return out, false
 		}
 		if page == "" {
@@ -293,6 +319,44 @@ func (c *Crawler) scrapeChannel(ctx context.Context, channel string, pages int) 
 	return out, false
 }
 
+// topicQuery is the only shape measured (2026-08-14) to return a forum topic's
+// messages and their links: t.me/s/<chat> answers 200 with zero message wraps
+// for a group, and the <chat>/<topic>/<msg> permalink form answers with no
+// external link at all. The topic id alone suffices; no message id is needed.
+//
+// The listing saturates at 3 message wraps for comments_limit 50/100/200
+// (byte-identical responses), and that ceiling is accepted: a link rotating
+// every 24h is only useful from the newest messages, while walking message ids
+// instead measured ~1182 requests for one pass and invites the rate limiter.
+const topicQuery = "?embed=1&discussion=1&comments_limit=50"
+
+// messageWrap is t.me's per-message container class in both the /s/ listing and
+// the discussion widget.
+const messageWrap = "tgme_widget_message_wrap"
+
+// scrapeTopic fetches a forum topic's newest messages as one page. The
+// discussion widget carries no ?before= cursor, so a topic is always one page
+// and never enters cursorStats — a false cursor loss per forum seed would drag
+// the fleet-wide ratio toward reportCursors' markup alarm.
+//
+// A body with no message wrap is reachable but message-less, which is what a
+// seed that is not a forum topic answers: logged apart from a failed fetch so
+// a topic yielding nothing is never read as one that was never reachable.
+func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
+	u := "https://t.me/" + ref.slug + "/" + ref.topic + topicQuery
+	page, err := c.client.page(ctx, u)
+	if err != nil {
+		c.logger.Warn().Err(err).Str("channel", ref.String()).Msg("topic listing fetch failed")
+		return nil
+	}
+	if !strings.Contains(page, messageWrap) {
+		c.logger.Warn().Str("channel", ref.String()).Int("bytes", len(page)).
+			Msg("topic listing carried no message; seed is probably not a forum topic")
+		return nil
+	}
+	return []string{page}
+}
+
 // pagesFor returns how many pages to fetch for a node: the full Pages budget for
 // operator-configured seeds, the shallower discovered budget for everything else
 // (remembered seeds and repost discoveries), bounding per-cycle cost.
@@ -305,6 +369,9 @@ func (c *Crawler) pagesFor(n scanNode) int {
 
 // extractChannels returns the distinct channel slugs referenced across pages,
 // excluding the channel itself, reserved paths, and bot deep links (?start=).
+// Discoveries are bare slugs by design: nothing in a t.me/<chat>/<n> link tells
+// a forum topic from a message permalink, so a topic is only ever crawled
+// because an operator seeded it.
 func extractChannels(pages []string, self string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -324,17 +391,40 @@ func extractChannels(pages []string, self string) []string {
 	return out
 }
 
-// normalizeSlug turns a seed entry (bare slug, @handle, or t.me URL) into a
-// lowercase channel slug.
-func normalizeSlug(s string) string {
+// parseSeed turns a seed entry (bare slug, @handle, "<slug>/<topic>", or a t.me
+// URL of either) into a chanRef. A numeric second segment is the forum topic;
+// a permalink's trailing message id, and any non-numeric segment, is dropped.
+// A reserved path is no channel, so it yields an empty ref the caller skips.
+func parseSeed(s string) chanRef {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.TrimPrefix(s, "@")
 	if i := strings.Index(s, "t.me/"); i >= 0 {
 		s = s[i+len("t.me/"):]
 	}
 	s = strings.TrimPrefix(s, "s/")
-	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
 		s = s[:i]
 	}
-	return s
+	slug, rest, _ := strings.Cut(s, "/")
+	if reservedSlugs[slug] {
+		return chanRef{}
+	}
+	topic, _, _ := strings.Cut(rest, "/")
+	if !isDecimal(topic) {
+		return chanRef{slug: slug}
+	}
+	return chanRef{slug: slug, topic: topic}
+}
+
+// isDecimal reports whether s is a non-empty run of ASCII digits.
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
