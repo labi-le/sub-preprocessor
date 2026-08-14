@@ -1,7 +1,5 @@
 subscriptions:
   sources:
-    - name: mifa
-      url: https://mifa.world/vless
     - name: aetris
       url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
     - name: purple

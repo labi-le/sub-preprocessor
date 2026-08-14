@@ -21,6 +21,6 @@ pkgs.mkShell {
     echo "  bench: make bench"
     echo "  lint: make lint"
     echo "  default: make"
-    echo "  curl: curl \"http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries=FI,EE,LV,LT,SE,PL,DE,NL\""
+    echo "  curl: curl \"http://127.0.0.1:8080/?subscription_url=https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt&countries=FI,EE,LV,LT,SE,PL,DE,NL\""
   '';
 }

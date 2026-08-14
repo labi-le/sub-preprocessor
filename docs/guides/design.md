@@ -119,6 +119,6 @@ no deployment may be sized off the 15649, only off a measured node count.
 Example:
 
 ```bash
-curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&countries=FI,EE,LV,LT,SE,PL,DE,NL"
-curl "http://127.0.0.1:8080/?subscription_url=https://mifa.world/vless&groups=nordics,euronorth"
+curl "http://127.0.0.1:8080/?subscription_url=https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt&countries=FI,EE,LV,LT,SE,PL,DE,NL"
+curl "http://127.0.0.1:8080/?subscription_url=https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt&groups=nordics,euronorth"
 ```

@@ -15,7 +15,10 @@ PROFILE_DIR="$(dirname "$0")/.."
 DURATION="${1:-60}"
 PPROF_PORT=":6060"
 SERVER_PORT=":8080"
-SUBSCRIPTION_URL="https://mifa.world/vless"
+# A PGO profile is only worth the build it shapes if the workload is real: a dead
+# subscription profiles the error path. mifa.world served 24h trials and expired,
+# so this points at a source config/sources.yaml actually carries.
+SUBSCRIPTION_URL="https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt"
 
 echo "=== Building server binary (without PGO) ==="
 cd "$PROFILE_DIR"
@@ -83,7 +86,7 @@ hammer() {
   )
   local urls=(
     "$SUBSCRIPTION_URL"
-    "https://mifa.world/vless"
+    "https://raw.githubusercontent.com/RKPchannel/RKP_bypass_configs/refs/heads/main/whitelist.txt"
     "https://example.com/sub"
   )
 

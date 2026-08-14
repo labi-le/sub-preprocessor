@@ -89,6 +89,12 @@ blocked:
   - "https://raw.githubusercontent.com/masir-sefid/Sub/main/@Masir_Sefid.txt"
   - "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Sub2.txt"
   - "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub1.txt"
+  # mifa.world hands out 24h trial subscriptions. Both entries are now the ONLY
+  # thing stopping the crawler from re-adding a URL whose body is an expiry
+  # notice: measured 2026-08-14 it serves one placeholder node,
+  # vless://0000...@1.1.1.1:1111, which passes the IP stage on a public address
+  # and then spends a probe slot every cycle. The curated source was retired
+  # in the same change; do not delete these without deleting that too.
   - "https://mifa.world/vless"
   - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt"
   - "https://channel.tradeip.store:2096/sub/t.me.TradeIP"
