@@ -427,7 +427,7 @@ Important keys:
 - `groups.<name>` (country sets referenced by requests and `exclude_groups`)
 - `subscriptions.interval` and every `subscriptions.check.*` param are validated on every load, even with no sources configured (they all arrive from the overlays here, and a list-gated check let a bad value boot clean and then fail every later reload)
 - `subscriptions.sources[].name` + `url` *or* inline `body` (base64/raw node URIs; used by the crawler's `tg-inline` harvest)
-- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `expected_status`, `concurrency`, `source_timeout`) — URL-test (latency) prober params ONLY; through-node filters and exclusions live in the top-level `filters` list
+- `subscriptions.check.*` (`rounds`, `timeout`, `max_fail`, `max_avg_ms`, `test_url`, `expected_status`, `concurrency`, `source_timeout`) — probe params; through-node filters and exclusions live in the top-level `filters` list. Mostly URL-test params, with one exception worth knowing before you retune `timeout`: it ALSO sets the reachability pre-check's dial budget (`precheckDialBudget` = `timeout` / `precheckAttempts`, so both attempts share exactly one round's budget). That coupling is deliberate — a node that cannot complete a bare TCP handshake inside one round's budget could not have completed TCP + TLS + tunnel + `GET` inside it either, so the pre-check can only condemn what that round would have failed anyway — and it replaced a hardcoded 500ms that was 8x tighter than `config-vassago`'s own `max_avg_ms: 4000`, silently deleting nodes that instance is tuned to keep. A test reads both shipped configs to pin it.
 - `subscriptions.snapshot_path` — where the worker persists the list it just published, reloaded at startup so `/stable.txt` serves the last good list instead of `503` while the first cycle runs (measured 58 minutes on a 68266-node pool). Empty disables. The shipped value is `/config/.stable-snapshot.json`: `./config` (`docker-compose.yaml:14`) is that service's only WRITABLE host bind mount — its other one, the agenix secret at line 16, is a read-only file — and uid 1000 already writes `.geoblock.db` into it — `.crawler-state.json` sits there too, but the crawler container writes that one as root (`docker-compose.yaml:42`) — so persistence adds no volume and no host-side provisioning. `config-vassago/config.yaml` sets the same key against that instance's own `./config-vassago` mount, and that snapshot is the only file the instance writes there: it ships no `geoblock` block, so `app.Run` opens no store for it. It is absolute because every OTHER path key the SHIPPED file sets is (`geoblock.db_path`, `geoblock.gemini.key_file`), and the runtime image is `WORKDIR /`. A path under `/tmp` would land in the container's OWN writable layer, which `docker compose up -d` recreates after a build — it would survive `docker restart` but not the redeploy those 58 minutes came from. The accepted cost is that the snapshot now outlives a host reboot too, the same guarantee its two neighbours already have. Writing it into the watched directory does NOT self-trigger a reload: `reload.Watcher` adds that directory to fsnotify, but `matches` compares each event against the three exact overlay paths, so the per-cycle temp-create + rename is ignored. There is no TTL, deliberately — the in-memory rule already keeps the last good list through failing cycles, and the age stays visible in `X-Stable-Stats updated=`. It takes no validator beyond the strict decoder, exactly like the three other path keys in the SCHEMA (`geoblock.db_path`, `geoblock.gemini.key_file`, `filters[].key_file`) — a wider population than the two the shipped file sets, and `routes.md` enumerates that one. **Startup-only:** it is in `config.StoresChanged` and EXCLUDED from `config.SubscriptionsChanged`, so a reload warns instead of re-applying the worker — the only key in the block that behaves that way
 - `fetch.timeout` — per-subscription fetch deadline (default 3s)
 - `log.level` — zerolog level, hot-reloadable
@@ -492,10 +492,35 @@ vendor the dashboard into the nixos repo.
   `127.0.0.1:9092:9090` for `sub-preprocessor-vassago` — keep both non-public.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport`
   (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds AND kept
-  mean latencies, cycle aggregate + duration) to `metrics.Metrics.Observe` on a
+  mean latencies, cycle aggregate + duration, the six `Phases` and the probed set
+  split by `ProbeStages`) to `metrics.Metrics.Observe` on a
   published cycle, and
   `ObserveError()` on any abort. **Adding/renaming a metric? Update
   `deploy/grafana/sub-preprocessor.json` in the same commit.**
+- **The cycle is timed per PHASE, and the probe phase is not what its name suggests.**
+  `stable_cycle_phase_duration_seconds{phase}` carries `fetch`/`merge`/`dead_filter`/
+  `probe`/`egress`/`publish`; they sum to slightly LESS than
+  `stable_cycle_duration_seconds` because the steps between them (dead-cache write,
+  survivor selection, cache prune, report assembly) belong to no phase, and the panel
+  draws the total over the stack so the residue is visible rather than hidden.
+  `phase="probe"` is the whole `Prober.Probe` call — payload parsing, then the TCP
+  reachability pre-check at its own concurrency OUTSIDE `check.concurrency`, then the
+  URL-test rounds — so `check.timeout * check.rounds` bounds only its last part. The
+  pre-check is deliberately not its own phase (that needs a per-cycle path back out of
+  `Probe`, and `Prober` gained a per-node `ProbeResult.Stage` instead of a second
+  return value); read its share off
+  `stable_probe_outcome_nodes{stage="condemned"}`. A cycle that ABORTS publishes no
+  phase numbers at all, so both families keep describing the last cycle that PUBLISHED.
+- **Two figures were retracted mid-wave; do not re-derive them from an older
+  transcript.** (1) A "~664 MB transient allocation burst during fetch/parse" was a
+  `GOGC=off` run, where RSS approximates CUMULATIVE allocation and belongs to no
+  phase; measured over the real 163-source corpus that phase allocated 40.69 MB
+  before the wave and 24.57 MB after. (2) "`check.concurrency: 16` is pinned" is
+  instance-specific: `config/config.yaml` ships 16, `config-vassago/config.yaml`
+  ships 32, each with its own measured rationale in its own comment. A constant in
+  the prober that is tighter than either instance's `check.timeout` deletes nodes
+  that instance is tuned to keep, which is why `precheckDialBudget` derives from
+  `check.timeout` and a test reads BOTH shipped configs to pin it.
 - **A histogram bound that marks a gate is a CONTRACT with the config, not a default.**
   `latencyBuckets` MUST carry a bound equal to every `check.max_avg_ms` that any shipped
   config sets, because `SelectSurvivors` admits on exactly that value and a threshold

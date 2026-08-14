@@ -163,7 +163,7 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 // stable_cycle_failures_total move on a failure.
 func writePhases(w io.Writer, p stable.CyclePhases) {
 	help(w, "stable_cycle_phase_duration_seconds", "gauge",
-		"Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase=\"probe\" is the latency probe alone; the through-node filters and the cdn-cgi/trace measurement are phase=\"egress\", and both do per-node network work.")
+		"Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase=\"probe\" is the whole Prober.Probe call -- payload parsing, then the TCP reachability pre-check at its own concurrency outside check.concurrency, then the URL-test rounds -- so check.timeout * check.rounds bounds only its last part; the condemned count in the probe-outcome stage breakdown is what shows the pre-check's share. phase=\"egress\" is the through-node filters and the cdn-cgi/trace measurement, which also do per-node network work.")
 	// Pipeline order, not sorted: the panel legend reads as the funnel.
 	for _, ph := range []struct {
 		name string
@@ -193,7 +193,7 @@ func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
 		return
 	}
 	help(w, "stable_probe_outcome_nodes", "gauge",
-		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check found the server accepts no TCP connection. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, so no error inspection can separate them for 80% of the pool. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
+		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check found the server accepts no TCP connection. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
 	// Progress order, unknown last: it is a defect indicator, not a stage.
 	for _, s := range []stable.ProbeStage{
 		stable.StageCondemned, stable.StageConnect, stable.StageFetch, stable.StagePassed,
