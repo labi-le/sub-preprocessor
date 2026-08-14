@@ -187,8 +187,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt
     - name: iboxz
       url: https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/vless
-    - name: prince
-      url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
     - name: flat447
       url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
     - name: obhodwl
@@ -231,11 +229,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/continents/Asia_part5.txt
     - name: rudolfdiesel1488-dot-whitelist-con
       url: https://raw.githubusercontent.com/rudolfdiesel1488-dot/my-vpn-sub/main/whitelist_configs.txt
-    # Name hand-trimmed: the generator cut at 34 chars mid-octet and left a
-    # trailing hyphen, which sourceNameRe permits and Merge would publish as
-    # a doubled separator in every node label this source contributes.
-    - name: hafanupdadas-namiranet
-      url: https://raw.githubusercontent.com/hafanupdadas/effective-fiesta/main/countries/%E2%9C%A8_namiranet_%7C_%F0%9F%94%92_%7C_%F0%9F%8C%90_173.244.56.6.txt
     - name: rtwo2-ru
       url: https://raw.githubusercontent.com/rtwo2/Temp/main/sub/countries/RU.txt
     - name: holms2012-shj1

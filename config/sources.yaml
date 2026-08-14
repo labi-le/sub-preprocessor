@@ -38,8 +38,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
     - name: avia
       url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
-    - name: prince
-      url: https://raw.githubusercontent.com/PrinceVSFX/Adapt-Configs/main/Configs/White_list.txt
     - name: niqonopin
       url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
     - name: wind7077
@@ -92,11 +90,5 @@ subscriptions:
       url: https://raw.githubusercontent.com/kasesm/Free-Config/main/all_raw.txt
     - name: wepogp-1
       url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=9Uysah7/fNwcH4ZJtls6A4Z7UCZ9hyL1hepLRS1kavYU555xTTqq4nGazHwhIJ%2BAWCwES/fmUfcpC1f3KXbVhsynIWUHbjEFRm37H2t%2BrNItwjcbN8j6D4arQKoCCb3/2nLMsLAYo29QGnH4ei51yctLBhubqY8eUgubEq9U4zc%3D"
-    - name: wepogp-2
-      url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=LZgRo3fjD0PYxY9QdngXXYeRxmLsF4wnd3aE2%2BUfUzEDDH%2Bv96RMWMddfOY3OZlpYS%2BFl4RWMUY5lNg2SQtAkIzkRszXQrXhBCg4G0XmaVl1uAqG6VBPW9J0fIkfFkaG"
-    - name: wepogp-3
-      url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=LZgRo3fjD0PYxY9QdngXXYeRxmLsF4wnd3aE2%2BUfUzHO030rad6OUjzSSzu7E%2Bdq2STODGsJm/vTgPgdOVSmkIv4AOPXL4ulc0RnalezhML3GVkaTSbSmBf4YufYGRFq"
     - name: wepogp-4
       url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=TT9IrxOfhgJyEk0MCOdGYXwx6vwM%2Bi30GcZkAeCHYhCGDHEqZJJKYTE61E1nPyGNDm274BT9fzc8PEKr3Xj5hC1A3Xt7p%2BCmcI7SXDA86nr0uvOInbPurA3heJf4d%2BFhkAjTFkQJ/rfGYEDZVuFVC4BxV/diP0/xn0qHNU8PNC0qAafArQuNc0ZT5noIrVKn"
-    - name: wepogp-5
-      url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=ncTwh6gLb370N1FwGTSe9FPwZxM8uFWYJOSPWbo7QreJUCFVW84ZPq8/sdNUKlnXb21ftuvaaLnJUEqjhb63S1eK%2BVQuYI2%2Boj1TEADb/m/1tga9qF7onHhZrxFlRZBRcKH8ysDzfLmWd9IhowLLEWwAlL5TAOx7I0E3Bb5FircknxatdMjNeDT6Sj7bBqyFx7zTmZoVEtL9IiRInsh3Kw%3D%3D"
