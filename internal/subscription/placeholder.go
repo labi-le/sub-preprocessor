@@ -217,10 +217,14 @@ func dottedQuad(s string) ([4]byte, bool) {
 // localV6 reports whether s spells the unspecified address or the IPv6
 // loopback: zero groups with at most one "::" and an optional final group of 1,
 // or mappedV4Prefix before a local IPv4 address. That covers every spelling
-// netip.Addr.String emits for those, which is the boundary — a zoned form, a
-// hex-written mapping or the deprecated embedded-quad form answers false and
-// keeps its probe slot, the pre-gate behaviour, because the error this predicate
-// must not make is dropping a working node.
+// netip.Addr.String emits for those, which is the boundary. Four classes netip
+// reads as local answer false and keep their probe slot — the pre-gate
+// behaviour — because the error this predicate must not make is dropping a
+// working node: a zoned form ("::1%lo"), a hex-written mapping
+// ("::ffff:7f00:1"), the deprecated embedded-quad form ("::0.0.0.0"), and the
+// long-form mapping ("0:0:0:0:0:ffff:127.0.0.1"), which cutMappedV4 misses
+// because it matches the literal "::ffff:" head only. Each is pinned false in
+// serverCases so widening cutMappedV4 cannot move one silently.
 func localV6(s string) bool {
 	if rest, ok := cutMappedV4(s); ok {
 		return localV4(rest)

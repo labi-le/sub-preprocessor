@@ -36,8 +36,9 @@ channels:
 # That second shape no longer NEEDS listing. Since the placeholder guard, such
 # a body counts zero nodes and reads nodeless-2xx, so classify never calls it
 # live and the crawler never re-adds it. The entries stay because a nodeless
-# verdict is deliberately not a death verdict, so nothing prunes what is
-# already listed, and because the list records which panels were rejected.
+# verdict only DELAYS pruning -- a managed source that stays not-live for the
+# retirement window is dropped -- and because the list is the record of which
+# panels were checked and rejected, which no pruned entry preserves.
 #
 # Checking one of these by hand MUST use the service User-Agent:
 # is.wepogp.gay serves the real payload to mihomo-geofeed-preprocessor/0.1 and

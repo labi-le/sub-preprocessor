@@ -120,9 +120,14 @@ var serverCases = []struct {
 	{server: "localhost.", want: false},
 	// Out of scope by decision, documented on localV6: netip reads these as
 	// local, but no formatter emits them, and a miss only costs a probe slot.
+	// The long-form mapping is here because the enumeration test cannot reach it
+	// (maxLen 7, and the shortest such spelling is 22 chars), so this table is
+	// the only thing stopping a widened cutMappedV4 from moving it silently.
 	{server: "::1%lo", want: false},
 	{server: "::ffff:7f00:1", want: false},
 	{server: "::0.0.0.0", want: false},
+	{server: "0:0:0:0:0:ffff:127.0.0.1", want: false},
+	{server: "0000:0000:0000:0000:0000:ffff:127.0.0.1", want: false},
 	// Malformed: the shapes the charset filter used to hand to netip.ParseAddr.
 	{server: "00.00.00.00", want: false},
 	{server: "0.0.0.0.0", want: false},
