@@ -31,10 +31,13 @@ channels:
 # URL; re-read every cycle like the channel list above.
 # Two shapes end up here. A duplicate of a curated source (the crawler mirror
 # of a URL sources.yaml already carries), and a panel endpoint whose body is a
-# single placeholder node -- vless://0000...@0.0.0.0:1 whose NAME carries the
-# error text ("Подписка умерла.", "Превышен трафик"). The placeholder parses
-# as a valid node, so classify counts it live and the crawler would re-add the
-# source forever.
+# single placeholder node: an all-zero credential on the unspecified address,
+# whose NAME carries the error text ("Подписка умерла.", "Превышен трафик").
+# That second shape no longer NEEDS listing. Since the placeholder guard, such
+# a body counts zero nodes and reads nodeless-2xx, so classify never calls it
+# live and the crawler never re-adds it. The entries stay because a nodeless
+# verdict is deliberately not a death verdict, so nothing prunes what is
+# already listed, and because the list records which panels were rejected.
 #
 # Checking one of these by hand MUST use the service User-Agent:
 # is.wepogp.gay serves the real payload to mihomo-geofeed-preprocessor/0.1 and
@@ -87,19 +90,20 @@ blocked:
   - "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Sub3.txt"
   - "https://raw.githubusercontent.com/masir-sefid/Sub/main/Telegram-Channel-@Masir_Sefid.txt"
   - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
-  - "https://mifa.world/trojan"
   - "https://github.com/hrostami/SNI-balancer"
   - "https://raw.githubusercontent.com/masir-sefid/Sub/main/@Masir_Sefid.txt"
   - "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Sub2.txt"
   - "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub1.txt"
   # mifa.world hands out 24h trial subscriptions, and its forum topic (seeded
-  # above) publishes a fresh one daily. These two entries are belt-and-braces
-  # now, not the mechanism: since the placeholder guard, an expired mifa body
-  # reads nodeless-2xx and never reaches mergeManaged as live. They still earn
-  # their place by naming the two links the panel itself lists as dead, so a
-  # reader is not left wondering whether they were once curated. The curated
-  # source was retired in the same change; do not delete these without it.
+  # above) publishes a fresh one daily. The two entries below are belt-and-
+  # braces now, not the mechanism: since the placeholder guard, an expired mifa
+  # body reads nodeless-2xx and never reaches mergeManaged as live. They are
+  # kept, and moved next to each other, because they name the exact two links
+  # the panel itself lists as no longer valid, so a reader is not left
+  # wondering whether they were once curated. The curated source was retired in
+  # the same change; do not delete these without it.
   - "https://mifa.world/vless"
+  - "https://mifa.world/trojan"
   - "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt"
   - "https://channel.tradeip.store:2096/sub/t.me.TradeIP"
   - "https://etoneya.best/whitelist"
