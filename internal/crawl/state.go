@@ -19,11 +19,26 @@ type channelState struct {
 	LastSubAt time.Time `json:"last_sub_at"`
 }
 
+// managedState is one managed source's liveness history. LastLiveAt zero means
+// the crawler has never yet seen this URL serve nodes — "no history" and "was
+// live, then stopped" are different verdicts and the retirement log says which.
+// NotLiveSince anchors the current not-live streak and NotLiveCycles counts the
+// cycles in it; a live answer clears both. See ageManaged.
+type managedState struct {
+	LastLiveAt    time.Time `json:"last_live_at,omitzero"`
+	NotLiveSince  time.Time `json:"not_live_since,omitzero"`
+	NotLiveCycles int       `json:"not_live_cycles,omitempty"`
+}
+
 // state is the crawler's persistent memory across cycles: which channels proved
-// productive (they become depth-0 seeds until they go stale past the TTL), and
-// which bulk-prune proposal a cycle already made and was refused.
+// productive (they become depth-0 seeds until they go stale past the TTL), how
+// long each managed source has been failing to serve nodes, and which bulk-prune
+// proposal a cycle already made and was refused.
 type state struct {
 	Productive map[string]channelState `json:"productive"`
+	// Managed is keyed by managed source URL and bounded by the corpus, not by
+	// time: ageManaged drops any record whose URL private.yaml no longer holds.
+	Managed map[string]managedState `json:"managed,omitempty"`
 	// BulkPruneAt and BulkPruneURLs are the refused proposal: when a cycle
 	// first asked to delete a large slice of the managed corpus, and the sorted
 	// set of URLs it asked to delete. The URL set is half the record — a bare
@@ -85,6 +100,73 @@ func (s *state) prune(cutoff time.Time) {
 	for _, ch := range slugs[maxProductive:] {
 		delete(s.Productive, ch)
 	}
+}
+
+const (
+	// staleRetireAfter and staleRetireCycles are the retirement window: a managed
+	// source is retired only once it has answered as something other than a live
+	// subscription on staleRetireCycles consecutive cycles AND for staleRetireAfter
+	// of wall clock since the first of them. Both are required — the duration alone
+	// would let a crawler resuming after days of downtime retire a source on a
+	// single bad answer, and the count alone can be burned through in minutes by
+	// the CRAWL_HTTP trigger, which runs cycles back to back.
+	//
+	// 24h outlasts a nightly panel maintenance window, a day-long WAF block and a
+	// momentarily empty pool, and it is one full rotation of the 24h-validity links
+	// this rule exists for: one that has served nothing for a whole period is not
+	// coming back. Six independent fetches spread over at least that day cannot all
+	// be the same momentary fault.
+	//
+	// At the shipped hourly interval a daily-rotating seed therefore leaves at most
+	// two stale entries in the corpus at once (dead ~24h after harvest, retired
+	// ~24h later), against unbounded accrual before — one entry per day forever,
+	// each costing two classify fetches per cycle.
+	staleRetireAfter  = 24 * time.Hour
+	staleRetireCycles = 6
+)
+
+// ageManaged folds one cycle's liveness verdicts into the per-URL streaks and
+// returns the managed URLs whose streak has run past the retirement window.
+// managed is the cycle-start managed snapshot — every URL that got a verdict this
+// cycle — and live is every URL seen serving nodes, whether rediscovered in a
+// channel or revived by a recheck.
+//
+// A missing record means "no history yet", never "stale since the zero time": a
+// streak is anchored at the observation that opens it, so the first cycle after
+// this bookkeeping ships grandfathers the whole corpus instead of condemning all
+// of it at once. With no state file nothing is remembered and nothing is ever
+// retired — the safe direction, as with confirmBulkPrune.
+//
+// Callers must skip a cycle that learned nothing (recheckResult.dark): its
+// not-live answers are a crawler-side fault, not evidence about any source.
+func (s *state) ageManaged(managed map[string]bool, live map[string]string, now time.Time) (stale map[string]bool) {
+	for u := range s.Managed {
+		if !managed[u] {
+			delete(s.Managed, u)
+		}
+	}
+	if s.Managed == nil && len(managed) > 0 {
+		s.Managed = make(map[string]managedState, len(managed))
+	}
+	for u := range managed {
+		if _, isLive := live[u]; isLive {
+			s.Managed[u] = managedState{LastLiveAt: now}
+			continue
+		}
+		m := s.Managed[u]
+		if m.NotLiveSince.IsZero() {
+			m.NotLiveSince = now
+		}
+		m.NotLiveCycles++
+		s.Managed[u] = m
+		if m.NotLiveCycles >= staleRetireCycles && !now.Before(m.NotLiveSince.Add(staleRetireAfter)) {
+			if stale == nil {
+				stale = make(map[string]bool)
+			}
+			stale[u] = true
+		}
+	}
+	return stale
 }
 
 const (

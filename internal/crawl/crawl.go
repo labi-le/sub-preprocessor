@@ -269,12 +269,14 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 			Msg("cycle aborted mid-recheck; skipping merge")
 		return
 	}
-	prune := c.opts.Prune
-	if prune && rr.dark(discovered) {
+	dark := rr.dark(discovered)
+	if dark {
 		c.logger.Error().Int("rechecked", rr.checked).
-			Msg("cycle discovered no subscription and revived none; treating as crawler-side fault, pruning nothing")
-		prune = false
+			Msg("cycle discovered no subscription and revived none; treating as crawler-side fault, pruning nothing and advancing no retirement streak")
+	} else {
+		rr.stale = c.trackLiveness(&st, rr.managedURL, live)
 	}
+	prune := c.opts.Prune && !dark
 	// A cycle takes minutes to hours; re-load private.yaml so the merge sees
 	// concurrent hand edits instead of clobbering them with a stale snapshot.
 	pf, err = loadPrivate(c.opts.PrivatePath)
@@ -335,8 +337,11 @@ func abortReason(err error) string {
 type recheckResult struct {
 	managedURL map[string]bool // every managed URL in the cycle-start snapshot
 	unknown    map[string]bool // rechecked URLs whose verdict is undetermined
-	checked    int             // URLs rechecked (not rediscovered in a channel)
-	revived    int             // rechecked URLs that answered as a live subscription
+	// stale is filled by RunOnce from the persisted streaks, not by the recheck:
+	// one cycle's undetermined answer never retires a source, N of them do.
+	stale   map[string]bool
+	checked int // URLs rechecked (not rediscovered in a channel)
+	revived int // rechecked URLs that answered as a live subscription
 }
 
 // dark reports a cycle that learned nothing anywhere: no live subscription found
@@ -470,11 +475,12 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 	return kept, managed, deleted
 }
 
-// retainManaged decides whether one managed URL survives the cycle. Only a
-// definitive not-live verdict prunes: a source whose status came back
-// undetermined, or one that appeared in the re-loaded file mid-cycle and was
-// therefore never checked, is kept. prune is the cycle's decision, not
-// opts.Prune — a cycle that learned nothing prunes nothing.
+// retainManaged decides whether one managed URL survives the cycle. A definitive
+// not-live verdict prunes at once; an undetermined one prunes only after the
+// retirement window has run out on it (state.ageManaged), because a panel can
+// serve a placeholder or an empty pool for a cycle. A source that appeared in the
+// re-loaded file mid-cycle was never checked and is kept. prune is the cycle's
+// decision, not opts.Prune — a cycle that learned nothing prunes nothing.
 func retainManaged(u string, live map[string]string, rr recheckResult, prune bool) bool {
 	if _, isLive := live[u]; isLive {
 		return true
@@ -484,7 +490,36 @@ func retainManaged(u string, live map[string]string, rr recheckResult, prune boo
 		// crawler's back, so it was never a candidate for a liveness verdict.
 		return true
 	}
-	return rr.unknown[u] || !prune
+	if !prune {
+		return true
+	}
+	if rr.unknown[u] {
+		return !rr.stale[u]
+	}
+	return false
+}
+
+// trackLiveness folds this cycle's liveness verdicts into the persisted streaks
+// and returns the managed URLs the retirement window has run out on, logging the
+// evidence behind each. It saves the state itself: the streak is this cycle's
+// only record that these sources were observed at all, and every path from the
+// merge on may return without another save.
+func (c *Crawler) trackLiveness(st *state, managed map[string]bool, live map[string]string) map[string]bool {
+	now := time.Now()
+	stale := st.ageManaged(managed, live, now)
+	for u := range stale {
+		m := st.Managed[u]
+		ev := c.logger.Info().Str("url", u).Int("not_live_cycles", m.NotLiveCycles).
+			Str("not_live_for", now.Sub(m.NotLiveSince).Truncate(time.Minute).String())
+		if m.LastLiveAt.IsZero() {
+			ev.Msg("condemning managed source: no live answer since the crawler began tracking it")
+		} else {
+			ev.Time("last_live_at", m.LastLiveAt).
+				Msg("condemning managed source: was live, then not live for the whole retirement window")
+		}
+	}
+	c.persistState(*st)
+	return stale
 }
 
 const (

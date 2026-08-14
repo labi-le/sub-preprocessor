@@ -448,10 +448,14 @@ compose sidecar) that discovers new sources automatically:
 - remembers productive channels in a JSON state file and re-seeds them on
   future cycles (pruned after `CRAWL_STATE_TTL` without a live sub, then capped
   at the 200 most recently productive so cycle cost stays bounded),
-- prunes conservatively: a harvested source is dropped only when the origin
-  proves it gone (404/410/451) or serves no nodes — a 403/429/5xx or a network
-  error keeps it — and a cycle that would delete a large share of the list at
-  once refuses to write until a later cycle confirms the loss,
+- prunes conservatively: a harvested source is dropped at once only when the
+  origin proves it gone (404/410/451) or advertises an expiry already past.
+  Anything less definitive — a 403/429/5xx, a network error, a 2xx carrying no
+  node — keeps it, and retires it only after it has answered that way for 6
+  consecutive cycles *and* 24h, so a rotating link that died yesterday leaves
+  the corpus while a panel with a momentarily empty pool stays. A cycle that
+  would delete a large share of the list at once refuses to write until a later
+  cycle confirms the loss,
 - additionally harvests **raw proxy URIs pasted directly in messages**
   (`vless://…` etc.) from each channel's **newest page only**, dedupes them,
   and packs them into a single inline `tg-inline` source with a base64 `body`,
