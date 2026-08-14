@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -49,9 +50,9 @@ var proxySchemes = map[string]bool{
 type Reason uint8
 
 const (
-	ReasonLive     Reason = iota // at least one proxy-scheme node and no advertised expiry
+	ReasonLive     Reason = iota // at least one usable proxy-scheme node and no advertised expiry
 	ReasonExpired                // subscription-userinfo advertised an expiry already past
-	ReasonNodeless               // 2xx body carrying no proxy-scheme node
+	ReasonNodeless               // 2xx body carrying no usable proxy-scheme node
 )
 
 func (r Reason) String() string {
@@ -68,16 +69,19 @@ func (r Reason) String() string {
 
 // Result reports what a fetched body looks like.
 type Result struct {
-	Nodes   int  // parseable scheme:// nodes after base64 normalization
+	Nodes   int  // usable proxy-scheme nodes after base64 normalization, placeholders excluded
 	Expired bool // subscription-userinfo advertised an expiry in the past
 }
 
-// Live reports a usable subscription: at least one node and not past expiry.
-// Its negation is NOT a death verdict. A 2xx body with no proxy-scheme node is
-// what a captive portal, a CDN interstitial or a panel login page serves, so
-// only Expired — an expiry the origin itself advertised — and a Gone status
-// prove a URL stopped being a subscription; callers that delete on a dead
-// verdict must not delete on a merely nodeless one.
+// Live reports a usable subscription: at least one node that is not a
+// placeholder, and not past expiry.
+// Its negation is NOT a death verdict. A 2xx body with no usable node is what a
+// captive portal, a CDN interstitial, a panel login page or a dead panel's
+// placeholder body serves, so only Expired — an expiry the origin itself
+// advertised — and a Gone status prove a URL stopped being a subscription;
+// callers that delete on a dead verdict must not delete on a merely nodeless
+// one. That the placeholder verdict is read out of node contents rather than
+// stated by the origin is exactly why it must not authorize deletion.
 func (r Result) Live() bool { return r.Reason() == ReasonLive }
 
 // Reason reports the verdict behind Live. Expired outranks a zero node count:
@@ -109,12 +113,78 @@ func Body(body []byte, subUserinfo string, now int64) Result {
 		// so the whitelist is what keeps such a page from reading as a live
 		// subscription. Schemes are case-insensitive (RFC 3986), so lowercase
 		// before the lookup.
-		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] {
+		if n.Server != "" && proxySchemes[strings.ToLower(string(n.Scheme))] && !placeholderNode(n) {
 			r.Nodes++
 		}
 		return true
 	})
 	return r
+}
+
+const (
+	schemeSep = "://"
+	// nilUUIDDigits is the hex-digit count of the Nil UUID, dashes aside.
+	nilUUIDDigits = 32
+)
+
+// placeholderNode reports whether n is a panel's stand-in for a subscription it
+// no longer serves. Such a body answers 200 with one unusable node, and in the
+// measured case advertises an expire= still in the future, so the header gate
+// cannot see the death and the body would otherwise read live.
+func placeholderNode(n subscription.Node) bool {
+	return nilCredential(n.Raw) || unspecifiedServer(n.Server)
+}
+
+// nilCredential reports whether the URI userinfo is the RFC 9562 §5.9 Nil UUID,
+// which by definition names no account. All 32 zeros are required: a short
+// all-zero credential is a legal password, not evidence of a dead panel.
+func nilCredential(raw string) bool {
+	_, auth, ok := strings.Cut(raw, schemeSep)
+	if !ok {
+		return false
+	}
+	// Authority ends at the first '/', '?' or '#'; explicit IndexByte calls
+	// beat IndexAny on strings this short (subscription.parseNode).
+	end := len(auth)
+	if j := strings.IndexByte(auth, '/'); j >= 0 && j < end {
+		end = j
+	}
+	if j := strings.IndexByte(auth, '?'); j >= 0 && j < end {
+		end = j
+	}
+	if j := strings.IndexByte(auth, '#'); j >= 0 && j < end {
+		end = j
+	}
+	// splitHostPort takes the last '@' as the userinfo boundary; match it, so
+	// this reads the credential the parsed Server actually came after.
+	at := strings.LastIndexByte(auth[:end], '@')
+	if at <= 0 {
+		return false
+	}
+	zeros := 0
+	for j := range at {
+		switch auth[j] {
+		case '0':
+			zeros++
+		case '-':
+		default:
+			return false
+		}
+	}
+	return zeros >= nilUUIDDigits
+}
+
+// unspecifiedServer reports whether server is 0.0.0.0 or ::, an address no
+// client can dial. Deliberately not a reserved-range test: the measured
+// placeholder sits on a routable address, which such a test would miss.
+func unspecifiedServer(server string) bool {
+	// netip.ParseAddr heap-allocates its error and most node servers are
+	// hostnames, so only a server that could spell the address is parsed.
+	if server == "" || (server[0] != '0' && server[0] != ':') {
+		return false
+	}
+	addr, err := netip.ParseAddr(server)
+	return err == nil && addr.IsUnspecified()
 }
 
 // parseExpire extracts expire=<unix> from a subscription-userinfo header value

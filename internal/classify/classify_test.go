@@ -208,3 +208,89 @@ func TestBodyReportsWhyItIsNotLive(t *testing.T) {
 		t.Errorf("an expired subscription reads %v, want expired", got)
 	}
 }
+
+// TestBodyRejectsNilUUIDPlaceholder pins the measured dead-panel shape: prose
+// saying the subscription expired, one node whose credential is the Nil UUID,
+// and a subscription-userinfo whose expire= is still in the FUTURE — so the
+// header gate cannot see the death and only the node carries the evidence.
+func TestBodyRejectsNilUUIDPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("# This subscription was valid for exactly 24 hours and has now expired.\n" +
+		"# A new free link is announced at https://example.com\n\n" +
+		"vless://00000000-0000-0000-0000-000000000000@192.0.2.1:1111" +
+		"?encryption=none&security=none&type=tcp&headerType=none#get%20a%20new%20link\n")
+
+	got := classify.Body(body, "upload=0; download=0; total=1099511627776; expire=2000", 1000)
+	if got.Nodes != 0 {
+		t.Fatalf("Nodes = %d, want 0: a Nil-UUID node is not a usable node", got.Nodes)
+	}
+	if got.Reason() != classify.ReasonNodeless {
+		t.Fatalf("reason = %v, want nodeless-2xx", got.Reason())
+	}
+	// Nodeless, never a death verdict: Prune must not delete on this body.
+	if got.Expired {
+		t.Fatalf("placeholder body read as a death verdict: %+v", got)
+	}
+}
+
+// TestBodyPlaceholderDoesNotPoisonRealNodes: panels pad a working list with a
+// notice node, so the guard has to drop that one node and keep the rest.
+func TestBodyPlaceholderDoesNotPoisonRealNodes(t *testing.T) {
+	t.Parallel()
+
+	raw := "vless://00000000-0000-0000-0000-000000000000@192.0.2.1:1111#notice\n" +
+		"vless://a1b2c3d4-0000-4000-8000-000000000001@198.51.100.2:443#a\n" +
+		"trojan://user@203.0.113.3:443#b\n"
+	body := []byte(base64.StdEncoding.EncodeToString([]byte(raw)))
+
+	got := classify.Body(body, "", 1000)
+	if got.Nodes != 2 || !got.Live() {
+		t.Fatalf("got %+v, want 2 nodes and live", got)
+	}
+}
+
+// TestBodyRejectsUnspecifiedServerPlaceholder: the other placeholder spelling
+// carries its error text in the node NAME and points at the unspecified
+// address. The credential is ordinary here, so only the address can fire.
+func TestBodyRejectsUnspecifiedServerPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"vless://a1b2c3d4-1111-4000-8000-000000000009@0.0.0.0:1#subscription%20has%20died\n",
+		"vless://a1b2c3d4-1111-4000-8000-000000000009@[::]:1#traffic%20limit%20exceeded\n",
+	} {
+		got := classify.Body([]byte(raw), "", 1000)
+		if got.Nodes != 0 || got.Reason() != classify.ReasonNodeless {
+			t.Errorf("%q: got %+v reason %v, want 0 nodes and nodeless-2xx", raw, got, got.Reason())
+		}
+	}
+}
+
+// TestBodyCountsUUIDContainingZeros: the guard demands the whole Nil UUID, one
+// zero less included, or it would drop the working node of a live source.
+func TestBodyCountsUUIDContainingZeros(t *testing.T) {
+	t.Parallel()
+
+	raw := "vless://00000000-0000-0000-0000-000000000001@192.0.2.1:443#a\n" +
+		"vless://10000000-0000-0000-0000-000000000000@198.51.100.2:443#b\n"
+
+	got := classify.Body([]byte(raw), "", 1000)
+	if got.Nodes != 2 || !got.Live() {
+		t.Fatalf("got %+v, want 2 nodes and live", got)
+	}
+}
+
+// TestBodyCountsShortAllZeroCredential: "0" is a legal password, so the guard
+// demands the Nil UUID's full digit count instead of any all-zero credential.
+func TestBodyCountsShortAllZeroCredential(t *testing.T) {
+	t.Parallel()
+
+	raw := "trojan://0@192.0.2.1:443#a\n" +
+		"vless://0-0@198.51.100.2:443#b\n"
+
+	got := classify.Body([]byte(raw), "", 1000)
+	if got.Nodes != 2 || !got.Live() {
+		t.Fatalf("got %+v, want 2 nodes and live", got)
+	}
+}
