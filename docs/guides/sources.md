@@ -143,7 +143,10 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
   figure, drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard;
   prefer it to any number below. It counts BOTH overlays — `config/sources.yaml`'s 46
   curated names as well as the crawler's private ones — and it lags the file on disk by up
-  to one cycle, because a reload only reaches the worker when its next cycle starts.
+  to one cycle, because a reload only reaches the worker when its next cycle starts. At
+  17:23Z it read 396 = the 46 curated names plus the 350 private ones the 17:09Z cycle
+  loaded (`stable_last_success_timestamp_seconds`), while the file on disk already held
+  357 — the lag, in one arithmetic.
 - **Fan-out is real, but it counts LINKS, not panels.** The largest channels on prod
   2026-08-15 17:20Z were 71 (`tg-dailyv2ry`), 42 (`tg-file-vpn-2`), 29 (`tg-proxytglte`),
   27 (`tg-v2raytunsub`), 24 (`tg-hiddifycode`) and 23 (`tg-holost-vpn`) — 216 of the 354
