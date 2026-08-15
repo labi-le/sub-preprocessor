@@ -106,3 +106,70 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   (`discover.go:78`), so the truncation point is arbitrary within one cycle's fresh pool.
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
+
+## What a managed source name means
+
+A crawler-written source is named `tg-<channel-slug>-<sha6>` by `sourceName`
+(`internal/crawl/crawl.go:606`): `tg-` marks the source as MANAGED and so eligible for
+rewrite or prune (`managedPrefix`, `crawl.go:36`), the slug is the Telegram channel folded
+into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and
+`sha6` is the first 6 hex of the sha256 of the SUBSCRIPTION URL. `tg-seyedng-1444c8` reads
+"one of the subscriptions the crawler found in @seyedng".
+
+- **The URL is not the name, and the decisive reason is that the name is PUBLISHED.**
+  `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:82-86`), and that
+  label is what a client ends up displaying — though it is not the whole node name. Under
+  the shipped config the stable worker prepends `[SPD:<n>M] ` and the configured
+  `annotate` chain prepends `[GEO:xx] ` ahead of it (`internal/rewrite/rewrite.go:15`), so
+  a real line fetched from `/stable.txt` on prod 2026-08-15 ends
+  `#[SPD:65M] [GEO:GB] tg-hiddifycode-03a8d8-002` — tags first, source label last. A URL
+  in that slot would hand every private or paid panel link to everyone who fetches the
+  list. The second reason is merely mechanical and would not save it on its own: the
+  config source-name alphabet is `^[a-z0-9-]+$` (`internal/config/config.go:115`, mirrored
+  for the crawler's own write-back at `crawl.go:865`), and `:` `/` `.` `?` all fall
+  outside it.
+- **The hash is there because a channel is not a source.** One channel routinely publishes
+  several distinct subscription URLs, so the slug alone is not unique. Counted over
+  `config/private.yaml` on prod 2026-08-15: 350 `name:` entries, of which 347 carry the
+  attributed `tg-<slug>-<sha6>` shape and 3 do not — `commsub` (this file's only
+  hand-named entry), one legacy `tg-<10 hex>` (`tg-96c4d7c7a7`) and `tg-inline`. Only
+  those 347 have a channel to map, and they land on 45 distinct channels, 25 of which
+  carry more than one URL.
+- **Read every count in this section as a dated reading, never a constant.** The crawler
+  adds sources every hour: `stable_sources_total` went 229 → 370 over the fourteen days to
+  2026-08-15, so any total here is stale within days. That metric is the live figure,
+  drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard; prefer it to
+  any number below. It counts BOTH overlays — `config/sources.yaml`'s 46 curated names as
+  well as the crawler's private ones — and it lags the file on disk by up to one cycle,
+  because a reload only reaches the worker when its next cycle starts.
+- **Fan-out is real, but it counts LINKS, not panels.** The largest channels on prod
+  2026-08-15 were 71 (`tg-dailyv2ry`), 42 (`tg-file-vpn-2`), 29 (`tg-proxytglte`), 27
+  (`tg-v2raytunsub`), 23 (`tg-holost-vpn`) and 22 (`tg-hiddifycode`) — 214 of the 347
+  attributed names in six channels. Each of those URLs does answer with its own payload;
+  what varies is how many distinct PANELS stand behind the names, and the shapes are not
+  interchangeable. `tg-proxytglte`'s 29 are 29 unrelated hosts and paths.
+  `tg-file-vpn-2`'s 42 are one numbered catalogue on one host, `cyb-portal.com/CP-0NN`.
+  `tg-dailyv2ry`'s 71 are 71 one-shot pastes at `bin.mudfish.net/r/<id>`, all still
+  answering and nearly disjoint — 12 sampled gave 145-235 nodes each at a mean pairwise
+  Jaccard of 0.016, so they are separate drops, not re-snapshots of one feed. And 47 names
+  spread over `tg-hiddifycode`, `tg-v2raytunsub` and `tg-o00000000i` are ONE host on ONE
+  path, `is.wepogp.gay/bypass-hwid-lock-<id>`, separated only by a `?payload=` token: 47
+  per-user accounts on a single panel. So the name promises exactly one thing and no more.
+  Anything that ranks or budgets per NAME ranks per LINK — never per channel, and never
+  per panel, where a single operator can hold 47 of the rows.
+- **The name → URL mapping exists in exactly one place: the `name:`/`url:` pair in
+  `config/private.yaml`.** One line recovers the link behind a row in Grafana or a node in
+  the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`.
+- **`tg-<10 hex>` is the other managed shape and carries no channel at all.** It is not
+  merely historical: `legacyNameRe` (`crawl.go:65`) matches it and `managedName`
+  (`crawl.go:845`) still MINTS it — for a URL discovered with no usable channel slug, and
+  for the (never observed, ~2^-24) case where the attributed candidate is already taken.
+  `sourceName` upgrades a legacy name to the attributed form the first time the URL turns
+  up in a channel, and that is the only rewrite it ever performs: an already-attributed
+  name is kept VERBATIM forever, because a rename churns `private.yaml` and relabels every
+  published node. It does NOT restart the stable worker: `Controller.Apply` reconfigures a
+  live checker instead of cancelling it, and only shutdown calls `Stop`
+  (`docs/guides/design.md:100`). Prod carried one legacy name on 2026-08-15,
+  `tg-96c4d7c7a7`. The crawler's own inline harvest is a third shape, the fixed
+  `tg-inline` (`crawl.go:771`), which carries a `body:` and not a `url:`, so there is
+  nothing behind it to look up.

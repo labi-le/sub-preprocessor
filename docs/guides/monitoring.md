@@ -114,6 +114,19 @@ vendor the dashboard into the nixos repo.
   means PUBLISHED. That collision is known and left standing: the global name is a wire format
   that panels and alerts already read, and renaming it to tidy a column label is a bigger break
   than the ambiguity.
+- **The channel breakdown (panel 20) is a query, not a metric.** The exporter emits `source` and
+  nothing else — Prometheus knows no `channel` label, `label_values(..., channel)` comes back
+  empty and there are no recording rules — so panel 20 derives it inline, `label_replace`
+  stripping the `-<sha6>` suffix off `source`. Nothing ships on the exporter side and no series
+  cardinality is added: the dashboard JSON is the whole change. The cost lands on anyone writing
+  their own query or alert, because a per-source series thresholds ONE URL — an alert that means
+  a channel must carry the same `label_replace` pair itself, and both of its calls are
+  load-bearing. The inner call copies `source` into `channel` verbatim; the outer overwrites that
+  copy for names matching the slug form. Drop the inner copy and every unmatched name falls into
+  one empty-`channel` bucket instead of standing alone (verified against `:9091`, 2026-08-15).
+  For how many sources are configured, read `stable_sources_total` — panel 3, top of the same
+  dashboard — rather than counting a config file; it is published per cycle, so it trails a
+  config edit by a cycle.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
   Prometheus scrape jobs + the Grafana dashboard provider
   (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
