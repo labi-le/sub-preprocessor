@@ -541,6 +541,127 @@
       "description": "Four counts per source from the last cycle, in pipeline order, for the top 25 sources ranked on valid \u2014 the column this table is also sorted by, so adding columns never reorders it. yielded = raw nodes the source yielded; valid = what survived the IP-stage filters, counted per source BEFORE merge dedupes across sources; kept = that source's nodes that survived the URL test, counted after merge; filtered = what then passed every through-node gate and reached the published payload. valid >= kept >= filtered holds, but the first gap is NOT probe failure alone: valid is pre-merge and kept is post-merge, so valid - kept also absorbs every node whose server:port another source supplied first (merge keeps the first label and drops the rest) plus the dead-node cache skip. That dedupe term dominates \u2014 sum(stable_source_valid_nodes) / scalar(stable_merged_nodes) ran 1.00\u20134.93 (avg 3.37) over the 15d window ending 2026-08-08 19:30Z. filtered DOES attribute published nodes to a source, exactly one per node, because merge leaves one <source>-NNN label per duplicate group: a large valid with filtered 0 means nothing reached the payload under that source's own name, whether the nodes were duplicates, dead-cached, probe failures or gate drops. One cycle, published 2026-08-08 17:29Z, shows the scale of the collapse: the top row's valid was 15034 nodes from a single source against 130 nodes in the entire published list, while valid summed to 119159 across 228 sources, of which this table shows the top 25. Note the vocabulary: kept here is THIS table's column name for the probe verdict, while the global stable_kept_nodes gauge counts what this table calls filtered."
     },
     {
+      "id": 20,
+      "type": "table",
+      "title": "Top channels: yielded, valid, kept, filtered (last cycle)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "valid",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{channel}}",
+          "expr": "sum by (channel) (label_replace(label_replace(stable_source_nodes_total{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{channel}}",
+          "expr": "topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{channel}}",
+          "expr": "sum by (channel) (label_replace(label_replace(stable_source_tested_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{channel}}",
+          "expr": "sum by (channel) (label_replace(label_replace(stable_source_published_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "keepLabels": [
+              "channel"
+            ]
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "channel",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "job": true,
+              "instance": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "Value #A": "yielded",
+              "Value #B": "valid",
+              "Value #C": "kept",
+              "Value #D": "filtered"
+            },
+            "indexByName": {
+              "channel": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
+            }
+          }
+        }
+      ],
+      "description": "Same four counts as the per-source table, but summed by CHANNEL: the channel is derived from the source name by stripping the -<sha6> suffix that sourceName appends per URL, so tg-genliberty-7e9b21 and its 16 siblings collapse into one tg-genliberty row. Nearly every source the crawler writes into config/private.yaml carries a channel-attributed tg-<slug>-<sha6> name; a handful of channels supply dozens of URLs each while many carry exactly one, and the curated git-tracked config/sources.yaml contributes further names that carry no channel at all. For the live configured total read panel 3 (Sources OK / total, stable_sources_total) at the top of this dashboard rather than any figure quoted here \u2014 the crawler rewrites private.yaml hourly, and that gauge reflects the config the last cycle loaded, so it trails the file on disk by a cycle. As one dated illustration, the cycle published 2026-08-15 16:07Z: 350 private plus 46 curated names produce 94 buckets, 45 of them channels of which 25 hold more than one URL, and the panel drew the 87 buckets that reported a series in that cycle while stable_sources_total still read 370. Fan-out does not decide placement \u2014 the per-URL distribution does. tg-file-vpn-2 has the second-largest fan-out AND is the most repeated name in the per-URL top 25, holding SIX of its rows: its 42 URLs are a numbered catalogue (all 42 are cyb-portal.com/CP-0NN), each big enough to place on its own. tg-dailyv2ry is the case this panel exists for: 71 URLs, all one-off pastes on bin.mudfish.net, best single URL 182 valid against a per-URL top-25 cutoff of 1627, so it appears nowhere in that table, yet it sums to 9339 and ranks 6th here. The axis that explains the difference is how many distinct panels sit behind a channel's names: one paste host (tg-dailyv2ry, 71 paths), one numbered catalogue (tg-file-vpn-2, 42 paths), a single panel behind per-user tokens (is.wepogp.gay: 47 names on ONE identical path differing only in ?payload=), or genuinely unrelated resources (tg-proxytglte, 29 URLs across 8 hosts, 29 distinct paths). Attribution is first-seen-channel-wins and keeps the URL verbatim \u2014 private.yaml's 349 url: entries contain zero duplicates \u2014 so the framing above, one channel publishing many URLs, has a mirror: when several channels relay ONE panel, the rows split across them. Those 47 is.wepogp.gay names sit under tg-hiddifycode, tg-o00000000i and tg-v2raytunsub. There is no resource rollup to add here: a host is not a resource key (raw.githubusercontent.com sits under 28 channel buckets, unrelated repos sharing a host) and the full URL is exactly the per-URL table. Names matching neither strip pattern form their own single-URL buckets, per-URL numbers unchanged: commsub, the only hand-named entry in private.yaml; tg-inline, the inline-harvest source, which carries body: instead of url:; and the legacy tg-<10hex> form tg-96c4d7c7a7, which carries no channel. fifthidea, bywarm-merged and goida are NOT private \u2014 they are curated entries in git-tracked config/sources.yaml, as are the 43 other names there. Column meanings are exactly the per-source table's, and so are its caveats plus one more: valid is counted BEFORE merge dedupes, so summing it over a channel's URLs also counts every node that several of that channel's own URLs carry \u2014 globally sum(stable_source_valid_nodes{job=\"$job\"}) / scalar(stable_merged_nodes{job=\"$job\"}) was 4.91 on this cycle, and within a channel whose names sit behind one panel the overlap is far worse, so channel valid reads as an upper bound. filtered does NOT inflate: merge leaves exactly one <source>-NNN label per published node, so sum(stable_source_published_nodes) == stable_kept_nodes exactly (165 == 165 here) and summing it by channel stays exact. Use the per-URL table, not this one, to retire a single dead link: the dead-node cache, the dedupe and the attribution all key on the individual URL, and only its own row tells you which of a channel's 71 links went dark."
+    },
+    {
       "id": 15,
       "type": "timeseries",
       "title": "Cloudflare egress trace",
@@ -553,7 +674,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -623,7 +744,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -696,7 +817,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 36
       },
       "fieldConfig": {
         "defaults": {
@@ -768,7 +889,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -865,7 +986,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       },
       "fieldConfig": {
         "defaults": {
@@ -938,7 +1059,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
@@ -1029,7 +1150,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 60
       },
       "fieldConfig": {
         "defaults": {
@@ -1158,7 +1279,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "fieldConfig": {
         "defaults": {
@@ -1210,7 +1331,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 60
+        "y": 68
       },
       "fieldConfig": {
         "defaults": {
@@ -1262,7 +1383,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 68
+        "y": 76
       },
       "fieldConfig": {
         "defaults": {
@@ -1343,7 +1464,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 68
+        "y": 76
       },
       "fieldConfig": {
         "defaults": {
