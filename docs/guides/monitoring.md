@@ -16,9 +16,9 @@ vendor the dashboard into the nixos repo.
   it loopback-only once per instance — `127.0.0.1:9091:9090` for `sub-preprocessor`,
   `127.0.0.1:9092:9090` for `sub-preprocessor-vassago` — keep both non-public.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport`
-  (per-source drops, per-filter in/kept/dropped-by-reason, kept speeds AND kept
-  mean latencies, cycle aggregate + duration, the six `Phases` and the probed set
-  split by `ProbeStages`) to `metrics.Metrics.Observe` on a
+  (per-source stage counts AND drops, per-filter in/kept/dropped-by-reason, kept
+  speeds AND kept mean latencies, cycle aggregate + duration, the six `Phases` and
+  the probed set split by `ProbeStages`) to `metrics.Metrics.Observe` on a
   published cycle, and
   `ObserveError()` on any abort. **Adding/renaming a metric? Update
   `deploy/grafana/sub-preprocessor.json` in the same commit.**
@@ -87,6 +87,33 @@ vendor the dashboard into the nixos repo.
   breaker condemns nobody, so `stage="condemned"` reads 0 exactly as it does for a pre-check that
   found every server reachable. The condemned count stays OUT of `Dropped` too: the pre-check is
   not a filter, and its counts are ENDPOINTS where every filter series counts NODES.
+- **`kept` means two different things, one per scope, and the per-source funnel is where that
+  bites.** Each source carries four falling counts —
+  `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source}`: yielded, survived
+  the IP stage, survived the URL test, reached the published payload — with
+  `stable_source_dropped_nodes{source,reason}` splitting the first gap by reason, `unsupported`
+  aside (it counts unparseable input LINES, which never entered `nodes_total`). `valid_nodes` was
+  `stable_source_kept_nodes` until the two post-merge counts joined it and the name had to say
+  WHICH kept. The gap readers get wrong is the first one, and it is not the probe's failure
+  rate: `valid_nodes` is counted per source in `fetchSources`, BEFORE `Merge`, while
+  `tested_nodes` is counted after it, and SIX stages sit between them — `Merge` drops a node
+  whose line will not re-parse, one `PlaceholderNode` names, one whose lowercased `server:port`
+  an earlier source already claimed, and one `relabelNode` fails; then `filterDead` skips every
+  merged node the dead cache holds, before `SelectSurvivors` ever sees it; and only the
+  remainder is URL-tested. The biggest term is the dedupe, not the dead-node
+  skip: measured 2026-08-15, `valid_nodes` summed over sources less `stable_merged_nodes` was
+  145553 on `sub-preprocessor` (`:9091`) and 64308 on `sub-preprocessor-vassago` (`:9092`),
+  against a dead skip of 34282 and 32284 and a probe loss of 3102 and 2972. Reach for the dead
+  skip second, as the largest term no per-source series shows: merged 37760 vs probed 3478 on
+  the first instance and 36109 vs 3825 on the second, so nine merged nodes in ten never reach
+  the URL test at all and probe failure can account for at most the ~9% that did — read
+  `stable_dead_skipped_nodes` against `stable_merged_nodes` before blaming a source's probe
+  results. The "Top sources" table (panel 8) renames the four columns
+  `yielded`/`valid`/`kept`/`filtered`, so its `kept` column is `stable_source_tested_nodes` and
+  its `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
+  means PUBLISHED. That collision is known and left standing: the global name is a wire format
+  that panels and alerts already read, and renaming it to tidy a column label is a bigger break
+  than the ambiguity.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
   Prometheus scrape jobs + the Grafana dashboard provider
   (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
