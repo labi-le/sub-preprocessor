@@ -206,7 +206,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	selectedAt := time.Now()
-	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors)
+	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors, sourceReports)
 	filteredAt := time.Now()
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
@@ -427,26 +427,36 @@ func movedCount(ctx context.Context, ann preprocess.Annotator, survivors []Survi
 // gate is in the chain. It rides beside the FilterReports rather than inside
 // one because the nodes it counts are KEPT, and a FilterReport's only
 // per-reason field is Dropped.
+//
+// The per-source stage counts are folded in here rather than in RunOnce because
+// this is the only scope that holds both sides of the narrowing at once: tested
+// is what the probe passed over, kept is what the chain left. Deferred so every
+// exit accounts for itself: the two early returns -- nothing to filter, and a
+// ParseProxies failure -- the two normal ones, and a panic unwinding through.
+// A cancelled check is not an exit here at all: the filters test ctx.Err()
+// inside apply and hand their survivors back to the loop below.
 func (c *Checker) filterAndMeasureEgress(
-	ctx context.Context, spec *CheckerSpec, survivors []Survivor,
-) ([]Survivor, []FilterReport, TraceReport, GeminiReport) {
+	ctx context.Context, spec *CheckerSpec, tested []Survivor, sources []SourceReport,
+) (kept []Survivor, reports []FilterReport, tr TraceReport, gemini GeminiReport) {
+	defer func() { c.countSourceStages(sources, tested, kept) }()
+	kept = tested
 	tracer, canTrace := spec.Prober.(traceChecker)
 	if spec.Trace && !canTrace {
 		c.logger.Warn().Msg("cloudflare annotation requested but prober lacks trace support; skipping")
 	}
 	trace := spec.Trace && canTrace
-	if (len(spec.Filters) == 0 && !trace) || len(survivors) == 0 {
-		return survivors, nil, TraceReport{}, GeminiReport{}
+	if (len(spec.Filters) == 0 && !trace) || len(kept) == 0 {
+		return kept, nil, TraceReport{}, GeminiReport{}
 	}
 
-	entries := make([]Entry, len(survivors))
-	for i, s := range survivors {
+	entries := make([]Entry, len(kept))
+	for i, s := range kept {
 		entries[i] = s.Entry
 	}
 	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-		return survivors, nil, TraceReport{}, GeminiReport{}
+		return kept, nil, TraceReport{}, GeminiReport{}
 	}
 	defer func() {
 		for _, px := range proxies {
@@ -466,11 +476,10 @@ func (c *Checker) filterAndMeasureEgress(
 		label := entryLabel(px)
 		byLabel[label] = append(byLabel[label], px)
 	}
-	reports := make([]FilterReport, 0, len(spec.Filters))
-	var gemini GeminiReport
+	reports = make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {
 		var rep FilterReport
-		survivors, rep = f.apply(ctx, survivors, byLabel)
+		kept, rep = f.apply(ctx, kept, byLabel)
 		reports = append(reports, rep)
 		// Optional capability, read exactly like spec.Prober.(traceChecker)
 		// above: only the gemini gate can answer before its own verdict
@@ -480,10 +489,49 @@ func (c *Checker) filterAndMeasureEgress(
 		}
 	}
 	if !trace {
-		return survivors, reports, TraceReport{}, gemini
+		return kept, reports, TraceReport{}, gemini
 	}
 
-	return survivors, reports, applyTrace(ctx, tracer, survivors, byLabel), gemini
+	return kept, reports, applyTrace(ctx, tracer, kept, byLabel), gemini
+}
+
+// countSourceStages fills the two post-merge per-source counts. One index
+// serves both passes and sourceOfLabel returns a substring, so the only
+// allocation is that one map -- 13.6kB at 349 sources, flat in the node count,
+// zero per node. The CPU is not free at ~11ns a lookup, but tested is the
+// PROBE's survivor set, not the merged pool: measured 2026-08-15 it held 376
+// nodes on prod and 853 on vassago, so the two passes cost under 20us once per
+// cycle. The map is sized by the source count, which is why it dwarfs them.
+//
+// A label attributing to no configured source has nowhere to land, so the
+// shortfall is logged rather than dropped in silence: the per-source columns
+// would otherwise stop summing to the cycle's totals with every gauge still
+// looking plausible. Only the tested pass reports it, the filtered set being a
+// subset of it.
+func (c *Checker) countSourceStages(reports []SourceReport, tested, filtered []Survivor) {
+	byName := make(map[string]int, len(reports))
+	for i := range reports {
+		byName[reports[i].Name] = i
+	}
+	unattributed := 0
+	for _, s := range tested {
+		i, ok := byName[sourceOfLabel(s.Label)]
+		if !ok {
+			unattributed++
+
+			continue
+		}
+		reports[i].Tested++
+	}
+	for _, s := range filtered {
+		if i, ok := byName[sourceOfLabel(s.Label)]; ok {
+			reports[i].Filtered++
+		}
+	}
+	if unattributed > 0 {
+		c.logger.Warn().Int("nodes", unattributed).
+			Msg("survivors attributed to no configured source; per-source stage counts understate")
+	}
 }
 
 // applyTrace records what each survivor reported about its own egress. It
@@ -573,7 +621,7 @@ func (c *Checker) fetchSources(
 		reports = append(reports, SourceReport{
 			Name:         spec.Sources[i].Name,
 			Total:        r.stats.Total,
-			Kept:         r.stats.Kept,
+			Valid:        r.stats.Kept,
 			DNSDrop:      r.stats.DNSDrop,
 			GeoDrop:      r.stats.GeoDrop,
 			CIDRDrop:     r.stats.CIDRDrop,

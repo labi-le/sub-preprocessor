@@ -34,3 +34,29 @@ func entryLabel(px mihomo.Proxy) string {
 	}
 	return name[:i]
 }
+
+// sourceOfLabel maps an Entry.Label back onto the source that produced it.
+// Merge builds every label as "<source>-NNN", so the split is at the LAST '-':
+// a source name may contain '-' and ':' while the pad-3 counter tail cannot.
+//
+// It returns a substring, never a copy, because countSourceStages calls it from
+// both of its passes -- over tested and over the filtered subset of it -- so a
+// published node is split twice and a dropped one once. Both passes walk the
+// probe's survivors, not the merged pool: 572 calls on prod and 1441 on
+// vassago, measured 2026-08-15.
+//
+// A label of another shape is returned unchanged rather than "" so a future
+// naming change degrades into one unattributed row instead of collapsing
+// every source onto one key.
+func sourceOfLabel(label string) string {
+	i := strings.LastIndexByte(label, '-')
+	if i <= 0 || i == len(label)-1 {
+		return label
+	}
+	for j := i + 1; j < len(label); j++ {
+		if label[j] < '0' || label[j] > '9' {
+			return label
+		}
+	}
+	return label[:i]
+}

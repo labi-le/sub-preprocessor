@@ -187,12 +187,28 @@ type TraceReport struct {
 	Moved      int
 }
 
-// SourceReport is one source's contribution to a cycle: how many nodes it
-// yielded and why the rest dropped, taken from its preprocess pass.
+// SourceReport is one source's contribution to a cycle. Total and the drop
+// counts come from its preprocess pass; Valid is that pass's survivors, so it
+// is counted BEFORE Merge's cross-source dedupe. Tested and Filtered are
+// post-merge, attributed back by sourceOfLabel: survivors of SelectSurvivors
+// and of every through-node filter respectively.
+//
+// Valid >= Tested >= Filtered holds, but Valid-Tested is not probe failure
+// plus duplicates. Merge drops a node whose line will not re-parse, one
+// PlaceholderNode names, one whose server:port an earlier source already
+// claimed, and one relabelNode fails; then filterDead removes every node the
+// dead cache holds, before SelectSurvivors ever sees it, and only the
+// remainder is probed. Ordered by size the three terms are Merge, the dead
+// cache, then the probe: measured 2026-08-15, sum(Valid) less merged was
+// 145553 against a 34282-node dead skip and 3102 probe failures on prod, and
+// 64308 / 32284 / 2972 on vassago. The dedupe dominates; the dead cache is
+// only the largest term no per-source series exposes.
 type SourceReport struct {
 	Name         string
 	Total        int
-	Kept         int
+	Valid        int
+	Tested       int
+	Filtered     int
 	DNSDrop      int
 	GeoDrop      int
 	CIDRDrop     int

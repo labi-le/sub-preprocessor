@@ -402,3 +402,88 @@ func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
 		t.Fatalf("CycleReport.Gemini = %+v, want %+v", rec.last.Gemini, want)
 	}
 }
+
+// dropLabelFilter drops exactly the labels named and needs no proxies, so a
+// cycle test can tell a filter drop from a probe drop.
+type dropLabelFilter map[string]bool
+
+func (f dropLabelFilter) apply(
+	_ context.Context, survivors []Survivor, _ map[string][]mihomo.Proxy,
+) ([]Survivor, FilterReport) {
+	rep := FilterReport{Name: "drop", In: len(survivors), Dropped: map[string]int{}}
+	kept := make([]Survivor, 0, len(survivors))
+	for _, s := range survivors {
+		if f[s.Label] {
+			rep.Dropped[dropBlocked]++
+
+			continue
+		}
+		kept = append(kept, s)
+	}
+	rep.Kept = len(kept)
+
+	return kept, rep
+}
+
+type threeNodeFilterer struct{}
+
+func (threeNodeFilterer) FilterNodes(
+	context.Context, preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return []preprocess.NodeResult{
+		{Raw: benchVlessLine("192.0.2.1", "443", "n1")},
+		{Raw: benchVlessLine("192.0.2.2", "443", "n2")},
+		{Raw: benchVlessLine("192.0.2.3", "443", "n3")},
+	}, preprocess.Stats{Total: 3, Kept: 3}, nil
+}
+
+//nolint:ireturn // implements Filterer; handing out the interface is the point
+func (threeNodeFilterer) Annotator() preprocess.Annotator { return nil }
+
+// twoOfThreeProber fails the third node by omission, which is how a prober
+// reports a node that never answered a round (see SelectSurvivors).
+type twoOfThreeProber struct{}
+
+func (twoOfThreeProber) Probe(context.Context, []byte) (map[string]ProbeResult, error) {
+	return map[string]ProbeResult{
+		"src-001": {Successes: 5, MeanMs: 100},
+		"src-002": {Successes: 5, MeanMs: 100},
+	}, nil
+}
+
+func (twoOfThreeProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestSourceStageCountsSeparateTheTwoCuts walks the seam the two new columns
+// ride: SelectSurvivors -> filterAndMeasureEgress -> CycleReport -> Reporter.
+// The three nodes of the one source take the three possible routes, so a count
+// taken at the wrong cut point cannot pass: the probed-out node must be in
+// neither column, and the filtered-out one in Tested only.
+func TestSourceStageCountsSeparateTheTwoCuts(t *testing.T) {
+	t.Parallel()
+
+	rec := &cycleRecorder{}
+	c := NewChecker(CheckerSpec{
+		Sources:       []config.SubscriptionSource{{Name: "src", Body: benchVlessLine("192.0.2.1", "443", "n")}},
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        twoOfThreeProber{},
+		Filters:       []NodeFilter{dropLabelFilter{"src-002": true}},
+	}, func() Filterer { return threeNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rec.last == nil {
+		t.Fatal("a published cycle must reach the Reporter")
+	}
+	if len(rec.last.Sources) != 1 {
+		t.Fatalf("CycleReport.Sources = %+v, want the one configured source", rec.last.Sources)
+	}
+	got := rec.last.Sources[0]
+	if got.Valid != 3 || got.Tested != 2 || got.Filtered != 1 {
+		t.Fatalf("source stage counts = valid %d tested %d filtered %d, want 3/2/1",
+			got.Valid, got.Tested, got.Filtered)
+	}
+}

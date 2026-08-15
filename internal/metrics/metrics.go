@@ -286,9 +286,17 @@ func writeSources(w io.Writer, sources []stable.SourceReport) {
 	for _, s := range sources {
 		sample(w, "stable_source_nodes_total", map[string]string{labelSource: s.Name}, float64(s.Total))
 	}
-	help(w, "stable_source_kept_nodes", "gauge", "Nodes each source contributed after preprocess filtering.")
+	help(w, "stable_source_valid_nodes", "gauge", "Nodes each source contributed after preprocess filtering. Counted per source BEFORE Merge dedupes across sources, so a node two sources both yield is counted in both.")
 	for _, s := range sources {
-		sample(w, "stable_source_kept_nodes", map[string]string{labelSource: s.Name}, float64(s.Kept))
+		sample(w, "stable_source_valid_nodes", map[string]string{labelSource: s.Name}, float64(s.Valid))
+	}
+	help(w, "stable_source_tested_nodes", "gauge", "Nodes each source contributed that survived the URL test. Measured after the merge, so stable_source_valid_nodes minus this is NOT the probe failures. Merge first drops what will not re-parse, what is a placeholder, what an earlier source already yielded at the same server:port, and what cannot carry its label; then the dead-node cache skips every merged node whose recent probe failed, and only the remainder is URL-tested. The duplicate term is the largest of the three -- a node two sources both yield counts in both of their valid gauges and in neither's later ones -- and the dead-node skip is merely the largest term no per-source series exposes: read stable_dead_skipped_nodes against stable_merged_nodes for it.")
+	for _, s := range sources {
+		sample(w, "stable_source_tested_nodes", map[string]string{labelSource: s.Name}, float64(s.Tested))
+	}
+	help(w, "stable_source_published_nodes", "gauge", "Nodes each source contributed that survived every through-node filter and reached the published list.")
+	for _, s := range sources {
+		sample(w, "stable_source_published_nodes", map[string]string{labelSource: s.Name}, float64(s.Filtered))
 	}
 	help(w, "stable_source_dropped_nodes", "gauge", "Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total).")
 	for _, s := range sources {
