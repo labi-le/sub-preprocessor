@@ -662,6 +662,141 @@
       "description": "Same four counts as the per-source table, but summed by CHANNEL, for the top 25 channels ranked on valid \u2014 the column this table is also sorted by, so adding columns never reorders it. The channel is derived from the source name by stripping the -<sha6> suffix that sourceName appends per URL, so tg-genliberty-7e9b21 and its 16 siblings collapse into one tg-genliberty row. Nearly every source the crawler writes into config/private.yaml carries a channel-attributed tg-<slug>-<sha6> name; a handful of channels supply dozens of URLs each while many carry exactly one, and the curated git-tracked config/sources.yaml contributes further names that carry no channel at all. For the live configured total read panel 3 (Sources OK / total, stable_sources_total) at the top of this dashboard rather than any figure quoted here \u2014 the crawler rewrites private.yaml hourly, and that gauge reflects the config the last cycle loaded, so it trails the file on disk by a cycle. As one dated illustration, the cycle published 2026-08-15 17:09Z: the 350 private plus 46 curated names it loaded \u2014 396, exactly what stable_sources_total read \u2014 produce 94 buckets, 45 of them channels of which 25 hold more than one URL, and 87 buckets reported a series, of which this table shows the top 25. The 25th row was tg-96c4d7c7a7 at 1007 valid, so 62 reporting buckets sat below that cutoff and drew nothing: a channel you cannot find here is under the cutoff far more often than it is absent from the config. Every config figure below is that loaded config rather than the file on disk, and is stamped to the cycle rather than to the day for a reason: the crawler rewrote private.yaml to 357 names at 17:20Z, eleven minutes later. Fan-out does not decide placement \u2014 the per-URL distribution does. tg-file-vpn-2 had the second-largest fan-out in that config (42 URLs, all cyb-portal.com/CP-0NN) and placed four rows in the per-URL top 25, but not because its URLs are interchangeable: on that cycle their valid ran 2669, 2217, 2051, 1975, 1627, 1500 and then fell away through a median of 222 to a tail of 15, 2 and 0, so only FOUR cleared the per-URL top-25 cutoff of 1970 while the other 38 placed nowhere. tg-dailyv2ry is the case this panel exists for: 71 URLs on bin.mudfish.net, best single URL 182 valid, so not one of its rows reaches the per-URL table, yet it sums to 9339 and ranks 7th here. Skew, not count, is the point: a channel earns per-URL rows only when a few of its links are individually large, and when none are, this table is the only place its weight shows at all. Whether a channel's many names are one panel or many is decided by what they return, not by how their URLs look. Fetched 17:27Z the same day with the worker's own UA: eight of tg-holost-vpn's URLs sit at eight DIFFERENT raw.githubusercontent.com repo paths (Ai123999/1Mond, 2Tues, 3Wend, 4Thur, 5Frid, 6Satu, 7Sand and RU_other) yet answer byte-identical \u2014 md5 2193975ecadf359d136da4658ca7a1e6, 121 endpoints each, pairwise Jaccard 1.000 \u2014 so eight unrelated-looking paths are one panel, and across all ten Ai123999 URLs 1520 endpoints collapse to a union of 636, 41.8% distinct. A 12-URL sample of tg-dailyv2ry the same day ran the other way, mean pairwise Jaccard 0.054 and 74.5% distinct, so those names really are separate panels. Nothing about the hosts or the paths tells the two cases apart; only the fetched payload does. Attribution is first-seen-channel-wins and keeps the URL verbatim \u2014 private.yaml's url: entries carry zero duplicate URLs, all 349 of them on that cycle \u2014 so the framing above, one channel publishing many URLs, has a mirror: when several channels relay ONE panel, the rows split across them. In that cycle's config, 47 names differing only in ?payload= on a single is.wepogp.gay path sat under tg-hiddifycode, tg-o00000000i and tg-v2raytunsub \u2014 by 17:20Z the crawler had made it 49. There is no resource rollup to add here, because a host is not a resource key. In the bucket space this table actually renders \u2014 curated names included, since the inner label_replace gives every name matching neither strip pattern a bucket of its own \u2014 raw.githubusercontent.com sat under 62 of that cycle's 87 reporting buckets: 28 private buckets, one of them the channel-less tg-96c4d7c7a7, plus 34 of config/sources.yaml's 46 curated names. Over private.yaml alone it is those 28 buckets, or 27 channels once tg-96c4d7c7a7 is set aside, but 62 is the figure for what you actually see drawn. Either way one host spans dozens of unrelated panels while, per Ai123999 above, also hiding eight names behind a single one \u2014 and the full URL is exactly the per-URL table. Names matching neither strip pattern form their own single-URL buckets, per-URL numbers unchanged: commsub, the only hand-named entry in private.yaml; tg-inline, the inline-harvest source, which carries body: instead of url:; and the legacy tg-<10hex> form tg-96c4d7c7a7, which carries no channel. fifthidea, bywarm-merged and goida are NOT private \u2014 they are curated entries in git-tracked config/sources.yaml, as are the 43 other names there. Column meanings are exactly the per-source table's, and so are its caveats plus one more: valid is counted BEFORE merge dedupes, so summing it over a channel's URLs also counts every node that several of that channel's own URLs carry \u2014 globally sum(stable_source_valid_nodes{job=\"$job\"}) / scalar(stable_merged_nodes{job=\"$job\"}) was 5.76 on the 2026-08-15 17:09Z cycle, and within a channel whose names sit behind one panel the overlap is far worse, so channel valid reads as an upper bound. filtered does NOT inflate: merge leaves exactly one <source>-NNN label per published node, so sum(stable_source_published_nodes) == stable_kept_nodes exactly (172 == 172 on that cycle) and summing it by channel stays exact. Use the per-URL table, not this one, to retire a single dead link: the dead-node cache, the dedupe and the attribution all key on the individual URL, and only its own row tells you which of a channel's 71 links went dark."
     },
     {
+      "id": 21,
+      "type": "table",
+      "title": "Ownership split: crawler-managed vs hand-curated (last cycle)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "valid",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{owner}}",
+          "expr": "count by (owner) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{owner}}",
+          "expr": "sum by (owner) (label_replace(label_replace(stable_source_nodes_total{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{owner}}",
+          "expr": "sum by (owner) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{owner}}",
+          "expr": "sum by (owner) (label_replace(label_replace(stable_source_tested_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{owner}}",
+          "expr": "sum by (owner) (label_replace(label_replace(stable_source_published_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "keepLabels": [
+              "owner"
+            ]
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "owner",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "job": true,
+              "instance": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "Value #A": "sources",
+              "Value #B": "yielded",
+              "Value #C": "valid",
+              "Value #D": "kept",
+              "Value #E": "filtered"
+            },
+            "indexByName": {
+              "owner": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5
+            }
+          }
+        }
+      ],
+      "description": "The whole list in two rows, split on who owns the source: crawler-managed (source=~\"tg-.*\") versus hand-curated (source!~\"tg-.*\"), summing the same per-source series panel 8 lists one by one. That regex is the discriminator and the ONLY one available \u2014 source is the sole label on every stable_source_* series, so origin, channel and URL never reach Prometheus and there is no cleaner field to switch to. The axis is ownership, not provenance: crawl.go:36 stamps managedPrefix \"tg-\" on exactly the sources the crawler owns and never touches the rest, so the managed side also holds tg-inline (raw node URIs harvested out of message bodies, not a channel) and the legacy tg-<sha10> names. Columns are panel 8's, same series in the same pipeline order, plus sources = how many per-source series carry that ownership. That column counts the sources that REPORTED last cycle \u2014 it equals panel 3's stable_sources_ok, not stable_sources_total: a source that failed to fetch emits no per-source series at all, so it sits in neither row and its ownership is unknowable from Prometheus. A side with no sources on the selected instance renders no row at all rather than a zero \u2014 the selector matches nothing, so there is no series for sum to return; a single-row table here means that instance is entirely one or the other, not that the panel broke. Read filtered \u2014 stable_source_published_nodes, what reached the published payload \u2014 as ATTRIBUTION, not contribution: merge.go:79 dedupes first-wins in source order and config.go:1000 appends the crawler's private.yaml overlay AFTER the curated config/sources.yaml, so a curated source claims every node a crawler source also yields, by construction and before any quality judgement. These series cannot answer what the list would lose without the crawler; only a re-run with the overlay removed can. Nor is filtered/valid a survival rate: valid is pre-merge and double-counts a node two sources both yield, while filtered is post-attribution. Cells are live from the last cycle, so no counts are quoted here to rot."
+    },
+    {
       "id": 15,
       "type": "timeseries",
       "title": "Cloudflare egress trace",
