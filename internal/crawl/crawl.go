@@ -598,8 +598,10 @@ func (c *Crawler) persistState(st state) {
 }
 
 // sourceName picks the managed name for url u. An already-attributed name is
-// kept verbatim (renames churn private.yaml, restart the stable worker, and
-// relabel published nodes). A legacy hash-only name upgrades to the
+// kept verbatim: a rename churns private.yaml and relabels every published
+// node, and buys nothing. It does NOT restart the worker -- Controller.Apply
+// swaps the spec the next cycle reads (docs/guides/design.md) -- so the cost is
+// the churn, not an interrupted cycle. A legacy hash-only name upgrades to the
 // channel-attributed form tg-<slug>-<sha6> the first time the URL is seen in a
 // channel; on a (never observed, ~2^-24) name collision or when no channel is
 // known, the legacy hash form is used so the name stays valid and unique.
