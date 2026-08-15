@@ -127,6 +127,54 @@ vendor the dashboard into the nixos repo.
   For how many sources are configured, read `stable_sources_total` — panel 3, top of the same
   dashboard — rather than counting a config file; it is published per cycle, so it trails a
   config edit by a cycle.
+- **The crawler-managed vs hand-curated split is a NAME PREFIX, and its `published` column
+  measures ATTRIBUTION, not contribution.** The discriminator is `source=~"tg-.*"` for
+  crawler-managed and `source!~"tg-.*"` for hand-curated, and it is the only one that exists:
+  `source` is the SOLE label on every per-source series (`labelSource`,
+  `internal/metrics/metrics.go:44`, sampled at :287, :291, :295, :299 and — with `reason` — :312),
+  so no origin, channel or url field ever reaches Prometheus and a query written against one
+  matches nothing. The prefix is `managedPrefix` (`internal/crawl/crawl.go:36`), whose comment
+  fixes the axis as OWNERSHIP rather than provenance: "marks sources this crawler owns. Sources
+  without it (hand-added private subscriptions) are never touched." So do not read it as
+  "telegram": `tg-inline` (`crawl.go:771`) is crawler-managed but is harvested raw node URIs
+  rather than a channel, and the legacy `^tg-[0-9a-f]{10}$` form (`legacyNameRe`, `crawl.go:65`)
+  is managed too — measured on `:9091` 2026-08-15, the managed side was 325 channel-attributed
+  names, 1 `tg-inline` and 1 legacy. Nor is it a file boundary: a hand-added entry in
+  `private.yaml` carries no prefix and lands on the curated side.
+  Read the funnel across that split and the crawler looks worthless — 327 managed sources against
+  45 curated, `valid` 165792 vs 47307, `published` 23 vs 149 (`:9091`, 2026-08-15). **That
+  conclusion does not follow**, because two mechanisms hand every shared node to the curated side
+  before any quality judgement happens: `Merge` dedupes FIRST-WINS on lowercased `server:port`
+  (`internal/stable/merge.go:79`), and `config.Load` merges the curated `config/sources.yaml`
+  overlay at `internal/config/config.go:985` but appends the crawler's `private.yaml` only at
+  :1000, so every crawler source sits after every curated one in the slice `Merge` walks. That is
+  measured, not read off the code: decoding `tg-inline`'s inline body and diffing lowercased
+  `server:port` against the persisted published payload (`config/.stable-snapshot.json`) on
+  2026-08-15 found 13 published nodes attributed to a curated source that `tg-inline` ALSO yields
+  — e.g. `104.17.28.89:443` published as `mehrtat-021`, `mehrtat` at config index 2 against
+  `tg-inline` at 402 of 403. 13 is a FLOOR, not the total: `tg-inline` is the only one of 357
+  `private.yaml` sources carrying an inline body, the other 356 being URLs that measurement did
+  not fetch. `tested` inverts the same way one column earlier (59 managed vs 239 curated), for the
+  same reason — it is post-merge, so it is not the probe killing crawler nodes either.
+  Therefore these series CANNOT answer "what would we lose without the crawler". They are
+  post-attribution by construction, while the question is about nodes NO curated source yields —
+  which nothing exported distinguishes from nodes a curated source merely claimed first.
+  Answering it needs the counterfactual: a cycle merged with the crawler overlay absent, or a
+  per-node record of every source that also yielded each published node. Neither exists today;
+  name that gap rather than squeezing an answer out of these numbers.
+  Three traps when querying the split. `count()` over a per-source series counts sources that
+  RETURNED A BODY, not sources configured — 327 + 45 = 372 = `stable_sources_ok`, against
+  `stable_sources_total` 396, so 24 fetch failures sit on NEITHER side and their ownership is
+  unknowable from Prometheus. `job="sub-preprocessor-vassago"` has no managed series at all (52
+  sources, all hand-curated), so there `source=~"tg-.*"` is EMPTY rather than 0 and a panel scoped
+  to it reads "No data" correctly. And never divide the two columns into a survival rate: `valid`
+  is counted per source BEFORE `Merge` and double-counts a node two sources both yield, whereas
+  `published` is post-attribution. Panel 21 (Ownership split: crawler-managed vs hand-curated
+  (last cycle)) renders it as a table because its five numeric columns span 23 to 194274 and a
+  shared axis would flatten `filtered` to zero. It quotes no digits of its own, derives `owner`
+  with the same nested `label_replace` pair panel 20 uses for `channel` — so both of those calls
+  are load-bearing here too — and keeps panels 8 and 20's column vocabulary, in which `filtered`
+  IS `stable_source_published_nodes`.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
   Prometheus scrape jobs + the Grafana dashboard provider
   (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
