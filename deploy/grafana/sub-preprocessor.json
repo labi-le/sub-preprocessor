@@ -422,7 +422,7 @@
     {
       "id": 8,
       "type": "table",
-      "title": "Top sources: nodes yielded vs kept (last cycle)",
+      "title": "Top sources: yielded, valid, kept, filtered (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -437,7 +437,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "kept",
+            "displayName": "valid",
             "desc": true
           }
         ]
@@ -456,7 +456,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "topk(25, stable_source_kept_nodes{job=\"$job\"})"
+          "expr": "stable_source_nodes_total{job=\"$job\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\"})"
         },
         {
           "refId": "B",
@@ -467,7 +467,29 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "stable_source_nodes_total{job=\"$job\"} and on(source) topk(25, stable_source_kept_nodes{job=\"$job\"})"
+          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\"})"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_tested_nodes{job=\"$job\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\"})"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_published_nodes{job=\"$job\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\"})"
         }
       ],
       "transformations": [
@@ -494,23 +516,29 @@
               "Time": true,
               "Time 1": true,
               "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
               "job": true,
               "instance": true,
               "__name__": true
             },
             "renameByName": {
-              "Value #A": "kept",
-              "Value #B": "yielded"
+              "Value #A": "yielded",
+              "Value #B": "valid",
+              "Value #C": "kept",
+              "Value #D": "filtered"
             },
             "indexByName": {
               "source": 0,
-              "Value #B": 1,
-              "Value #A": 2
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
             }
           }
         }
       ],
-      "description": "Each source's contribution after the IP-stage filters, top 25 by count, from the last cycle. This is NOT the published list: it is counted in preprocess, per source, before merge/dedupe and before any probing. Two unmeasured stages sit in between and their product is the whole gap \u2014 dedupe, where sum(stable_source_kept_nodes) / scalar(stable_merged_nodes) ran 1.00\u20134.93 (avg 3.37) over the 15d window ending 2026-08-08 19:30Z, and then the latency probe plus the through-node gates, which is the merged\u2192kept collapse on the funnel panel. One cycle, published 2026-08-08 17:29Z: the top row here was 15034 nodes from a single source against 130 nodes in the entire published list \u2014 15034/130 = 116x, one source's pre-dedupe yield over the whole post-probe result \u2014 while the full metric summed to 119159 across 228 sources, of which this table shows the top 25. Use it to spot a source that has stopped yielding or started yielding junk, not to attribute published nodes to a source \u2014 nothing on this dashboard does that."
+      "description": "Four counts per source from the last cycle, in pipeline order, for the top 25 sources ranked on valid \u2014 the column this table is also sorted by, so adding columns never reorders it. yielded = raw nodes the source yielded; valid = what survived the IP-stage filters, counted per source BEFORE merge dedupes across sources; kept = that source's nodes that survived the URL test, counted after merge; filtered = what then passed every through-node gate and reached the published payload. valid >= kept >= filtered holds, but the first gap is NOT probe failure alone: valid is pre-merge and kept is post-merge, so valid - kept also absorbs every node whose server:port another source supplied first (merge keeps the first label and drops the rest) plus the dead-node cache skip. That dedupe term dominates \u2014 sum(stable_source_valid_nodes) / scalar(stable_merged_nodes) ran 1.00\u20134.93 (avg 3.37) over the 15d window ending 2026-08-08 19:30Z. filtered DOES attribute published nodes to a source, exactly one per node, because merge leaves one <source>-NNN label per duplicate group: a large valid with filtered 0 means nothing reached the payload under that source's own name, whether the nodes were duplicates, dead-cached, probe failures or gate drops. One cycle, published 2026-08-08 17:29Z, shows the scale of the collapse: the top row's valid was 15034 nodes from a single source against 130 nodes in the entire published list, while valid summed to 119159 across 228 sources, of which this table shows the top 25. Note the vocabulary: kept here is THIS table's column name for the probe verdict, while the global stable_kept_nodes gauge counts what this table calls filtered."
     },
     {
       "id": 15,
@@ -1288,7 +1316,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(stable_source_kept_nodes{job=\"$job\"})",
+          "expr": "sum(stable_source_valid_nodes{job=\"$job\"})",
           "legendFormat": "survived IP-stage"
         },
         {
@@ -1297,7 +1325,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "100 * sum(stable_source_kept_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
+          "expr": "100 * sum(stable_source_valid_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
           "legendFormat": "% survived"
         }
       ]
