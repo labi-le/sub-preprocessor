@@ -110,7 +110,7 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
 ## What a managed source name means
 
 A crawler-written source is named `tg-<channel-slug>-<sha6>` by `sourceName`
-(`internal/crawl/crawl.go:606`): `tg-` marks the source as MANAGED and so eligible for
+(`internal/crawl/crawl.go:608`): `tg-` marks the source as MANAGED and so eligible for
 rewrite or prune (`managedPrefix`, `crawl.go:36`), the slug is the Telegram channel folded
 into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and
 `sha6` is the first 6 hex of the sha256 of the SUBSCRIPTION URL. `tg-seyedng-1444c8` reads
@@ -119,44 +119,55 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
 - **The URL is not the name, and the decisive reason is that the name is PUBLISHED.**
   `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:82-86`), and that
   label is what a client ends up displaying — though it is not the whole node name. Under
-  the shipped config the stable worker prepends `[SPD:<n>M] ` and the configured
-  `annotate` chain prepends `[GEO:xx] ` ahead of it (`internal/rewrite/rewrite.go:15`), so
-  a real line fetched from `/stable.txt` on prod 2026-08-15 ends
-  `#[SPD:65M] [GEO:GB] tg-hiddifycode-03a8d8-002` — tags first, source label last. A URL
+  the shipped config the `annotate` chain writes `[GEO:xx]` into that name and the stable
+  worker prepends its own `[SPD:<n>M] ` ahead of THAT, in that order and not the reverse
+  (`internal/rewrite/rewrite.go:15`), so the speed tag lands leftmost. All 172 lines
+  fetched from `/stable.txt` on prod 2026-08-15 17:23Z are in that order; one of them ends
+  `#[SPD:54M] [GEO:GB] tg-hiddifycode-03a8d8-002` — tags first, source label last. A URL
   in that slot would hand every private or paid panel link to everyone who fetches the
   list. The second reason is merely mechanical and would not save it on its own: the
   config source-name alphabet is `^[a-z0-9-]+$` (`internal/config/config.go:115`, mirrored
-  for the crawler's own write-back at `crawl.go:865`), and `:` `/` `.` `?` all fall
+  for the crawler's own write-back at `crawl.go:867`), and `:` `/` `.` `?` all fall
   outside it.
 - **The hash is there because a channel is not a source.** One channel routinely publishes
   several distinct subscription URLs, so the slug alone is not unique. Counted over
-  `config/private.yaml` on prod 2026-08-15: 350 `name:` entries, of which 347 carry the
-  attributed `tg-<slug>-<sha6>` shape and 3 do not — `commsub` (this file's only
-  hand-named entry), one legacy `tg-<10 hex>` (`tg-96c4d7c7a7`) and `tg-inline`. Only
-  those 347 have a channel to map, and they land on 45 distinct channels, 25 of which
-  carry more than one URL.
+  `config/private.yaml` as the crawler left it at 17:20Z on 2026-08-15: 357 `name:`
+  entries, of which 354 carry the attributed `tg-<slug>-<sha6>` shape and 3 do not:
+  `commsub` (this file's only hand-named entry), one legacy `tg-<10 hex>`
+  (`tg-96c4d7c7a7`) and `tg-inline`. Only those 354 have a channel to map, and they land
+  on 46 distinct channels, 26 of which carry more than one URL. An hour earlier the same
+  four counts read 350 / 347 / 45 / 25.
 - **Read every count in this section as a dated reading, never a constant.** The crawler
-  adds sources every hour: `stable_sources_total` went 229 → 370 over the fourteen days to
-  2026-08-15, so any total here is stale within days. That metric is the live figure,
-  drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard; prefer it to
-  any number below. It counts BOTH overlays — `config/sources.yaml`'s 46 curated names as
-  well as the crawler's private ones — and it lags the file on disk by up to one cycle,
-  because a reload only reaches the worker when its next cycle starts.
+  adds sources every hour: `stable_sources_total` went 230 → 396 over the fourteen days
+  to 2026-08-15 17:23Z, so any total here is stale within hours. That metric is the live
+  figure, drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard;
+  prefer it to any number below. It counts BOTH overlays — `config/sources.yaml`'s 46
+  curated names as well as the crawler's private ones — and it lags the file on disk by up
+  to one cycle, because a reload only reaches the worker when its next cycle starts.
 - **Fan-out is real, but it counts LINKS, not panels.** The largest channels on prod
-  2026-08-15 were 71 (`tg-dailyv2ry`), 42 (`tg-file-vpn-2`), 29 (`tg-proxytglte`), 27
-  (`tg-v2raytunsub`), 23 (`tg-holost-vpn`) and 22 (`tg-hiddifycode`) — 214 of the 347
-  attributed names in six channels. Each of those URLs does answer with its own payload;
-  what varies is how many distinct PANELS stand behind the names, and the shapes are not
-  interchangeable. `tg-proxytglte`'s 29 are 29 unrelated hosts and paths.
-  `tg-file-vpn-2`'s 42 are one numbered catalogue on one host, `cyb-portal.com/CP-0NN`.
-  `tg-dailyv2ry`'s 71 are 71 one-shot pastes at `bin.mudfish.net/r/<id>`, all still
-  answering and nearly disjoint — 12 sampled gave 145-235 nodes each at a mean pairwise
-  Jaccard of 0.016, so they are separate drops, not re-snapshots of one feed. And 47 names
-  spread over `tg-hiddifycode`, `tg-v2raytunsub` and `tg-o00000000i` are ONE host on ONE
-  path, `is.wepogp.gay/bypass-hwid-lock-<id>`, separated only by a `?payload=` token: 47
-  per-user accounts on a single panel. So the name promises exactly one thing and no more.
-  Anything that ranks or budgets per NAME ranks per LINK — never per channel, and never
-  per panel, where a single operator can hold 47 of the rows.
+  2026-08-15 17:20Z were 71 (`tg-dailyv2ry`), 42 (`tg-file-vpn-2`), 29 (`tg-proxytglte`),
+  27 (`tg-v2raytunsub`), 24 (`tg-hiddifycode`) and 23 (`tg-holost-vpn`) — 216 of the 354
+  attributed names in six channels. How many PANELS stand behind those names is decided by
+  what the URLs return, not by how they look, and only a fetch settles it. All 165 URLs of
+  `tg-dailyv2ry`, `tg-file-vpn-2`, `tg-proxytglte` and `tg-holost-vpn`, fetched at 17:22Z
+  on 2026-08-15 with the service's own User-Agent (`mihomo-geofeed-preprocessor/0.1`,
+  `internal/fetch/fetch.go:20`), answered 200, and the URL misleads in both directions.
+  Eight of `tg-holost-vpn`'s 23 sit at eight different repository paths under one GitHub
+  account (`Ai123999`) and return one byte-identical 33101-byte body, all with md5
+  `2193975ecadf359d136da4658ca7a1e6` and 121 server endpoints each — so eight names are
+  one payload; two of `tg-proxytglte`'s 29 do the same at 3473 endpoints, differing only
+  in how the URL spells the git ref. Yet `tg-file-vpn-2`'s 42, one numbered catalogue on
+  one host (`cyb-portal.com/CP-0NN`), return 42 distinct bodies at a mean pairwise Jaccard
+  of 0.027, and `tg-dailyv2ry`'s 71 one-shot pastes at `bin.mudfish.net/r/<id>` return 71
+  distinct bodies at 0.054, 4322 distinct endpoints out of 8789 — separate drops, not
+  re-snapshots of one feed. Host counts do not rescue the guess either: `tg-proxytglte`'s
+  29 URLs are 8 hosts and 29 distinct paths, 20 of them on `raw.githubusercontent.com`.
+  What a URL does settle is sameness of service: 49 names spread over `tg-hiddifycode`,
+  `tg-v2raytunsub` and `tg-o00000000i` are ONE host on ONE path, separated only by a
+  `?payload=` credential on `is.wepogp.gay/bypass-hwid-lock-<id>` — 49 per-user accounts
+  on a single panel. So the name promises exactly one thing and no more. Anything that
+  ranks or budgets per NAME ranks per LINK — never per channel, and never per panel, where
+  a single operator can hold 49 of the rows.
 - **The name → URL mapping exists in exactly one place: the `name:`/`url:` pair in
   `config/private.yaml`.** One line recovers the link behind a row in Grafana or a node in
   the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`.
