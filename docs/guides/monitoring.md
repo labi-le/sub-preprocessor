@@ -108,12 +108,66 @@ vendor the dashboard into the nixos repo.
   the first instance and 36109 vs 3825 on the second, so nine merged nodes in ten never reach
   the URL test at all and probe failure can account for at most the ~9% that did — read
   `stable_dead_skipped_nodes` against `stable_merged_nodes` before blaming a source's probe
-  results. The "Top sources" table (panel 8) renames the four columns
-  `yielded`/`valid`/`kept`/`filtered`, so its `kept` column is `stable_source_tested_nodes` and
-  its `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
+  results. The "Top sources" tables — panel 8 (`Top sources: crawler-managed (last cycle)`) and
+  panel 22 (`Top sources: hand-curated (last cycle)`) beside it — rename the four columns
+  `yielded`/`valid`/`kept`/`filtered`, so their `kept` column is `stable_source_tested_nodes` and
+  their `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
   means PUBLISHED. That collision is known and left standing: the global name is a wire format
   that panels and alerts already read, and renaming it to tidy a column label is a bigger break
   than the ambiguity.
+- **"Top sources" is a PAIR of tables split by owner, and the split is not an invitation to read
+  them side by side.** Panel 8 (x=0 y=20) takes `source=~"tg-.*"`, panel 22 (x=12 y=20, the new
+  one) takes `source!~"tg-.*"`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set;
+  panel 21 sums both sides full-width beneath them. That regex is the only discriminator that
+  exists, because the four per-source counters the tables read carry `source` and nothing else
+  (`labelSource`, `internal/metrics/metrics.go:44`, sampled at :287, :291, :295, :299; only
+  `stable_source_dropped_nodes` adds a second label at :312, and `reason` is a drop cause, not
+  an owner) — no owner, origin or file field ever reaches Prometheus.
+  Panel 8 hides the prefix with an outermost `label_replace(<expr>, "source", "$1", "source",
+  "tg-(.*)")` in all four targets, and the two matchers around it see DIFFERENT names. The `and
+  on(source)` join matches the ORIGINAL prefixed name, because it sits inside the `label_replace`.
+  The `joinByField` transformation matches the STRIPPED name: Prometheus returns frames whose
+  `source` label is already rewritten, so the original name never reaches Grafana at all. The join
+  is still correct because all four targets rewrite identically, and the strip is injective over
+  every name that can reach the table — so the stripped key is as unique as the original. That is
+  display-only PromQL and it changes NO source name: the prefix is WRITE AUTHORITY over
+  `config/private.yaml` — `crawl.go:367` rechecks only prefixed sources, `:419` preserves
+  non-prefixed entries verbatim, and `:546` counts only prefixed ones so bulk-prune can never
+  delete a hand-added source. It costs no information to hide only because every row in that table
+  is crawler-managed already; panel 22 strips nothing. Row counts across the two are NOT
+  comparable evidence of anything: measured on `:9091`, job `sub-preprocessor`, 2026-08-16
+  12:45 +03:00, 439 of the sources reporting series were crawler-managed against 45 hand-curated,
+  so panel 8's 25 rows are a 5.7% window on its side while panel 22's 25 cover 55.6% of its own.
+  The crawler side grows hourly — the same count read 327 a day earlier — so take the live
+  denominator from panel 3 (Sources OK / total), not a stamp here.
+  **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
+  `config.Load` merges the curated `config/sources.yaml` overlay at
+  `internal/config/config.go:985` but appends the crawler's `private.yaml` only at :1000, and
+  `Merge` dedupes FIRST-WINS on lowercased `server:port` (`internal/stable/merge.go:79`).
+  Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
+  (`internal/stable/checker.go:605`) and reassembles them `for i, r := range results` (:615), so
+  config order survives into `Merge` intact. Every curated source therefore claims each shared
+  node BEFORE any quality judgement, and panel 22's `kept` and `filtered` are inflated against
+  panel 8's. Measured floor on the cycle behind those numbers (prod
+  `config/.stable-snapshot.json`, `updated_at` 2026-08-16 09:16:16Z, whose 83/231 published split
+  matches Prometheus exactly): decoding `tg-inline`'s inline body (500 node URIs) and diffing
+  lowercased `server:port` against the published payload found 16 published nodes attributed to a
+  curated source that `tg-inline` ALSO yields — `fifthidea` 6, `mehrtat` 5, `bahemmat` 4,
+  `yafeisun` 1, at merged-slice config index 10, 2, 5 and 14 against `tg-inline` at 492 of 493,
+  so the curated index is below the crawler one in all 16. Read `server:port` off BOTH sides with
+  `subscription.Parse` — the call `Merge` uses to build `Entry.Addr` — and never off the URI text:
+  `vmess` and legacy `ss`/`ssr` keep server and port inside a base64 payload, so a regex or a
+  URL-shaped `server:port` extraction finds 15 of these 16 and silently skips the `vmess` one
+  (`bahemmat-481` at `165.140.216.142:443`, on both sides). A FLOOR, not the total: only 1 of the
+  447 `private.yaml` entries carries an inline body (file at 2026-08-16 12:15 +03:00), the other
+  446 being URLs the measurement did not fetch.
+  Two more things the pair will not tell you. On `sub-preprocessor-vassago` there are no `tg-*`
+  sources at all (52 configured, every one hand-curated, same instant), so panel 8 there is
+  EMPTY: all four targets return no series and Grafana renders "No data" — not rows of zeros.
+  And the gap between `stable_sources_total` 493 and `stable_sources_ok` 484 at that instant is 9
+  sources that FAILED TO FETCH that cycle, where `fetchSources` warns and `continue`s
+  (`checker.go:618`); they emit no per-source series and appear in neither table. They are not
+  dead, not pruned, not dropped from config, and the next cycle may fetch them fine.
 - **The channel breakdown (panel 20) is a query, not a metric.** The exporter emits `source` and
   nothing else — Prometheus knows no `channel` label, `label_values(..., channel)` comes back
   empty and there are no recording rules — so panel 20 derives it inline, `label_replace`
@@ -138,23 +192,19 @@ vendor the dashboard into the nixos repo.
   without it (hand-added private subscriptions) are never touched." So do not read it as
   "telegram": `tg-inline` (`crawl.go:771`) is crawler-managed but is harvested raw node URIs
   rather than a channel, and the legacy `^tg-[0-9a-f]{10}$` form (`legacyNameRe`, `crawl.go:65`)
-  is managed too — measured on `:9091` 2026-08-15, the managed side was 325 channel-attributed
-  names, 1 `tg-inline` and 1 legacy. Nor is it a file boundary: a hand-added entry in
-  `private.yaml` carries no prefix and lands on the curated side.
-  Read the funnel across that split and the crawler looks worthless — 327 managed sources against
-  45 curated, `valid` 165792 vs 47307, `published` 23 vs 149 (`:9091`, 2026-08-15). **That
-  conclusion does not follow**, because two mechanisms hand every shared node to the curated side
-  before any quality judgement happens: `Merge` dedupes FIRST-WINS on lowercased `server:port`
-  (`internal/stable/merge.go:79`), and `config.Load` merges the curated `config/sources.yaml`
-  overlay at `internal/config/config.go:985` but appends the crawler's `private.yaml` only at
-  :1000, so every crawler source sits after every curated one in the slice `Merge` walks. That is
-  measured, not read off the code: decoding `tg-inline`'s inline body and diffing lowercased
-  `server:port` against the persisted published payload (`config/.stable-snapshot.json`) on
-  2026-08-15 found 13 published nodes attributed to a curated source that `tg-inline` ALSO yields
-  — e.g. `104.17.28.89:443` published as `mehrtat-021`, `mehrtat` at config index 2 against
-  `tg-inline` at 402 of 403. 13 is a FLOOR, not the total: `tg-inline` is the only one of 357
-  `private.yaml` sources carrying an inline body, the other 356 being URLs that measurement did
-  not fetch. `tested` inverts the same way one column earlier (59 managed vs 239 curated), for the
+  is managed too — measured on `:9091` 2026-08-16 12:45 +03:00, the managed side was 439 names
+  reporting series: 437 channel-attributed, 1 `tg-inline` and 1 legacy (`tg-96c4d7c7a7`). Nor is
+  it a file boundary: `private.yaml` held 447 entries at 2026-08-16 12:15 +03:00, one of them
+  (`commsub`) hand-added without the prefix, and it lands on the curated side.
+  Read the funnel across that split and the crawler looks worthless — 439 managed sources against
+  45 curated, `valid` 227878 vs 57121, `published` 83 vs 231 (`:9091`, 2026-08-16 12:45 +03:00).
+  **That conclusion does not follow**, for the attribution reason the panel 8 / 22 bullet above
+  measures: the curated overlay is merged first (`config.go:985` before :1000) and `Merge` dedupes
+  first-wins (`merge.go:79`), so a curated source claims every shared node before any quality
+  judgement, and the floor measured on that cycle is 16 published nodes held by a curated source
+  that `tg-inline` also yields. Breadth says it from the other side: 29 managed sources published
+  at least one node against 18 curated ones at the same instant, so the curated lead is volume per
+  source, not reach. `tested` inverts one column earlier too (139 managed vs 493 curated), for the
   same reason — it is post-merge, so it is not the probe killing crawler nodes either.
   Therefore these series CANNOT answer "what would we lose without the crawler". They are
   post-attribution by construction, while the question is about nodes NO curated source yields —
@@ -163,17 +213,19 @@ vendor the dashboard into the nixos repo.
   per-node record of every source that also yielded each published node. Neither exists today;
   name that gap rather than squeezing an answer out of these numbers.
   Three traps when querying the split. `count()` over a per-source series counts sources that
-  RETURNED A BODY, not sources configured — 327 + 45 = 372 = `stable_sources_ok`, against
-  `stable_sources_total` 396, so 24 fetch failures sit on NEITHER side and their ownership is
-  unknowable from Prometheus. `job="sub-preprocessor-vassago"` has no managed series at all (52
-  sources, all hand-curated), so there `source=~"tg-.*"` is EMPTY rather than 0 and a panel scoped
-  to it reads "No data" correctly. And never divide the two columns into a survival rate: `valid`
-  is counted per source BEFORE `Merge` and double-counts a node two sources both yield, whereas
-  `published` is post-attribution. Panel 21 (Ownership split: crawler-managed vs hand-curated
-  (last cycle)) renders it as a table because its five numeric columns span 23 to 194274 and a
-  shared axis would flatten `filtered` to zero. It quotes no digits of its own, derives `owner`
-  with the same nested `label_replace` pair panel 20 uses for `channel` — so both of those calls
-  are load-bearing here too — and keeps panels 8 and 20's column vocabulary, in which `filtered`
+  RETURNED A BODY, not sources configured — 439 + 45 = 484 = `stable_sources_ok`, against
+  `stable_sources_total` 493 (`:9091`, 2026-08-16 12:45 +03:00), so the 9 fetch failures of that
+  cycle sit on NEITHER side and their ownership is unknowable from Prometheus.
+  `job="sub-preprocessor-vassago"` has no managed series at all (52 sources, all hand-curated),
+  so there `source=~"tg-.*"` is EMPTY rather than 0 and a panel scoped to it reads "No data"
+  correctly. And never divide the two columns into a survival rate: `valid` is counted per source
+  BEFORE `Merge` and double-counts a node two sources both yield, whereas `published` is
+  post-attribution. Panel 21 (Ownership split: crawler-managed vs hand-curated (last cycle)) sits
+  full-width at the row below panels 8 and 22, summarising the pair it follows, and renders as a
+  table because its five numeric columns spanned 45 to 263500 at that instant and a shared axis
+  would flatten `filtered` to zero. It quotes no digits of its own, derives `owner` with the same
+  nested `label_replace` pair panel 20 uses for `channel` — so both of those calls are
+  load-bearing here too — and keeps panels 8, 22 and 20's column vocabulary, in which `filtered`
   IS `stable_source_published_nodes`.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
   Prometheus scrape jobs + the Grafana dashboard provider
