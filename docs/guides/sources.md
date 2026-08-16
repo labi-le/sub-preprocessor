@@ -173,7 +173,14 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
   a single operator can hold 49 of the rows.
 - **The name → URL mapping exists in exactly one place: the `name:`/`url:` pair in
   `config/private.yaml`.** One line recovers the link behind a row in Grafana or a node in
-  the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`.
+  the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`. Repair the
+  token first, because every wrong form misses SILENTLY instead of failing. Off panel 8, put
+  back the `tg-` its display-only strip removed. Off the published list, drop the trailing
+  numeric index `Merge` appends (`internal/stable/merge.go:82-86`; `appendPad3` pads to a
+  minimum of three digits, not to a width, so the index can be longer). Then grep both
+  overlays rather than reasoning about which file owns the name: `private.yaml` holds the
+  managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
+  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1432`).
 - **`tg-<10 hex>` is the other managed shape and carries no channel at all.** It is not
   merely historical: `legacyNameRe` (`crawl.go:65`) matches it and `managedName`
   (`crawl.go:845`) still MINTS it — for a URL discovered with no usable channel slug, and
