@@ -992,7 +992,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Kept-node speed",
-      "description": "Download speed of the nodes published last cycle: exact avg and max, plus p50/p90 interpolated from fixed buckets topping out at 500 Mbps, so a quantile pinned at 500 means faster than 500, not a plateau. With no bandwidth filter measured, avg still draws a flat zero while p50/p90 and max vanish.",
+      "description": "Download speed of the nodes published last cycle: exact avg and max, plus p50/p90 interpolated from fixed buckets topping out at 500 Mbps, so a quantile pinned at 500 means faster than 500, not a plateau. With no bandwidth filter configured, avg still draws a flat zero while p50/p90 and max vanish.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1631,7 +1631,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "IP-stage yield",
-      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so they normally sit far above merged \u2014 the floor is equality, when one source supplies everything. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
+      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so survived normally sits far above merged, equal only when one source supplies everything. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
