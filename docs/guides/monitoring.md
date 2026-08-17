@@ -253,13 +253,17 @@ vendor the dashboard into the nixos repo.
   allow-list), `geoblock` (host in the geoblock store), `unsupported`. A zero on the middle three
   is ambiguous — no filter, nothing to exclude, or broken — and each gate differs: `geo` a
   `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:45` no-ops on the
-  worker's full allow set), `asn` that entry's `deny_patterns`, `cidr` a `cidr` entry
-  (`internal/config/config.go:364`). The other four ignore `filters:` — `geoblock` the separate
-  `geoblock:` block (`internal/preprocess/processor.go:713`), `ipv6` and `dns` to `resolveNode`
-  in `processNode` (:719, :723), `unsupported` the parser — so their zero is real. Worker cycles
-  only: the on-demand `GET /` path runs the same IP-stage chain but samples nothing, every
-  `stable_source_*` series coming out of the cycle report (`internal/metrics/metrics.go:125`), so
-  preprocessing done for an HTTP request is invisible here.
+  worker's full allow set) or an `asn` entry whose ASN-resolved country the policy rejects, `asn`
+  that same asn entry's `deny_patterns` (`internal/config/config.go:257`, copied only under `case
+  FilterASN`, :358-363), `cidr` a `cidr` entry (:364). The other four ignore `filters:` —
+  `geoblock` the separate `geoblock:` block (`internal/preprocess/processor.go:713`), `ipv6` and
+  `dns` to `resolveNode` in `processNode` (:719, :723), `unsupported` the parser — so their zero
+  is real. Seven holds for the current build only: `ipv6` joined the table in `1638523`
+  (2026-07-29) and `cidr` in `82e8ef3` (2026-08-09), so a range reaching back past either plots
+  fewer series, and an absence there is not a zero. Worker cycles only: the on-demand `GET /`
+  path runs the same IP-stage chain but samples nothing, every `stable_source_*` series coming
+  out of the cycle report (`internal/metrics/metrics.go:125`), so preprocessing done for an HTTP
+  request is invisible here.
 - **The through-node drops panel has three states, not two.** `apiFilter.apply` and
   `bandwidthFilter.apply` each assign a full `Dropped` map on the completing path — `{blocked,
   unreachable}` at `internal/stable/nodefilter.go:146`, `{slow, unreachable}` at :253, both keys
@@ -280,7 +284,8 @@ vendor the dashboard into the nixos repo.
   `connect` = no tunnel, `fetch` = tunnel up, GET failed, `condemned` = the pre-check refused the
   server. `unknown` is no mis-assignment: `probeStages` walks the PROBED ENTRIES
   (`checker.go:352-355`), so a label the prober never named reads as the zero `ProbeStage`, not
-  as an absence; a non-zero one counts lines `adapter.ParseProxy` refused (`prober.go:212`).
+  as an absence; a non-zero `unknown` COUNT is the payload's lines `adapter.ParseProxy` refused
+  (`prober.go:212`).
 - **The breaker trips on a share of what the pre-check JUDGED, over a floor.** `filterReachable`
   dials each distinct `server:port` once, and a node whose adapter reaches its server over UDP —
   hysteria2, tuic, mieru, vless xhttp-over-QUIC — is not dialled at all
