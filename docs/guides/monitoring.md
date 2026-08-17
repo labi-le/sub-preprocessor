@@ -246,6 +246,91 @@ vendor the dashboard into the nixos repo.
   (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
   variable, so no fixed uid). `nixosModules.default` is the separate systemd-service
   module — leave it.
+- **Every IP-stage drop reason is emitted every cycle, so a zero is an answer on four of the
+  seven.** `writeSources` builds a FIXED seven-entry table per source, never reading `filters:`
+  (`internal/metrics/metrics.go:303-310`): `dns` (nothing resolved), `ipv6` (a non-IPv4 literal,
+  unlooked-up), `geo` (country policy), `asn` (ASN deny-patterns), `cidr` (outside the
+  allow-list), `geoblock` (host in the geoblock store), `unsupported`. A zero on the middle three
+  is ambiguous — no filter, nothing to exclude, or broken — and each gate differs: `geo` a
+  `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:45` no-ops on the
+  worker's full allow set), `asn` that entry's `deny_patterns`, `cidr` a `cidr` entry
+  (`internal/config/config.go:364`). The other four ignore `filters:` — `geoblock` the separate
+  `geoblock:` block (`internal/preprocess/processor.go:713`), `ipv6` and `dns` to `resolveNode`
+  in `processNode` (:719, :723), `unsupported` the parser — so their zero is real. Worker cycles
+  only: the on-demand `GET /` path runs the same IP-stage chain but samples nothing, every
+  `stable_source_*` series coming out of the cycle report (`internal/metrics/metrics.go:125`), so
+  preprocessing done for an HTTP request is invisible here.
+- **The through-node drops panel has three states, not two.** `apiFilter.apply` and
+  `bandwidthFilter.apply` each assign a full `Dropped` map on the completing path — `{blocked,
+  unreachable}` at `internal/stable/nodefilter.go:146`, `{slow, unreachable}` at :253, both keys
+  either way — so a gate that ran clean emits a PRESENT ZERO. Every early return keeps the empty
+  map from :98/:216 (`apiFilter` :99/:106/:110 — no usable key, nil outcomes, cancelled context;
+  `bandwidthFilter` :219/:223), and `writeFilters` iterates only the keys present
+  (`internal/metrics/metrics.go:149`), so an inert gate writes NO SERIES though its
+  `filter_in`/`filter_kept` still land. Third: a gate dropped from `filters:` adds nothing, yet
+  its old rows stop rather than vanish, so a long range still draws lines ending at that sample;
+  the legend reduces with `last`, not `lastNotNull`, so its cell reads empty rather than frozen.
+- **The dead cache turns one condemnation into several cycles of missing funnel.** A node
+  answering no round folds to `Successes: 0`, which `recordDead` blocks its `server:port` on
+  (`internal/stable/checker.go:677`); `filterDead` skips it for the TTL (:652). Both ship
+  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:163` and :210,
+  `config-vassago/config.yaml:65` and :77), and `jitteredTTL` stretches it by a uniform [1, 1.5)
+  so the graveyard does not expire as one batch (`internal/stable/deadset.go:45-49`): [3h, 4.5h),
+  three to four cycles. Stages (`internal/stable/select.go:24-33`): `passed` = a round answered,
+  `connect` = no tunnel, `fetch` = tunnel up, GET failed, `condemned` = the pre-check refused the
+  server. `unknown` is no mis-assignment: `probeStages` walks the PROBED ENTRIES
+  (`checker.go:352-355`), so a label the prober never named reads as the zero `ProbeStage`, not
+  as an absence; a non-zero one counts lines `adapter.ParseProxy` refused (`prober.go:212`).
+- **The breaker trips on a share of what the pre-check JUDGED, over a floor.** `filterReachable`
+  dials each distinct `server:port` once, and a node whose adapter reaches its server over UDP —
+  hysteria2, tuic, mieru, vless xhttp-over-QUIC — is not dialled at all
+  (`internal/stable/prober.go:314-321`, :385-392), which is why these counts are endpoints (see
+  above). Both halves must hold: at least 100 judged endpoints, at least 95% of them refused
+  (:271, :274, :435). Judged is dialled minus unresolved: an unresolvable name is judged by
+  nobody, so no resolver outage can fire the breaker, and every verdict but `verdictRefused`
+  falls through to `live` (:454).
+- **Two counters render BEFORE the cycle report exists, and they are all a no-data page has.**
+  `writeMetrics` emits `stable_cycles_total` and `stable_cycle_failures_total`
+  (`internal/metrics/metrics.go:95`, :96) BEFORE returning on a nil `m.last` (:98), so a worker
+  yet to publish exports those two alone — the cold-start twin of the abort case above, and every
+  other panel's no-data state. `stable_last_success_timestamp_seconds` (:122) reads `m.lastAt`,
+  which only `Observe` sets (:67; `ObserveError` moves the counters alone, :73-78), so a no-data
+  publish-age tile means restart-before-first-publish, dead scrape or dead worker — only cycles/h
+  parts them. `CyclePhases` (`internal/stable/report.go:67`) fixes the phase contents: the
+  per-node IP stage (DNS, geo/asn/cidr) inside `fetch`, the through-node filters and the
+  cdn-cgi/trace measurement inside `egress`, and payload build, the moved recount, the swap,
+  snapshot write and log inside `publish`. That recount re-runs the chain over traced nodes alone
+  (`internal/stable/checker.go:391`), so `stable_trace_moved_nodes` counts how often the GEO tag
+  WOULD have been wrong: the trace CORRECTS the chain, it rejects nobody.
+- **A panel declaring no colour is not neutral: Grafana merges in green-base/red-from-80, so an
+  ABSENT series paints green.** A no-value takes the BASE threshold step's colour, which is why
+  the stat tiles declare an explicit red base. A continuous palette fails the other way: it
+  interpolates on percent alone, ignoring value and thresholds, so the merged default is inert
+  and a no-value's percent 0 is the FIRST palette colour. Panel 12 therefore uses
+  `continuous-BlPu`, whose low end asserts nothing; a green-yellow-red palette would paint an
+  empty panel green.
+- **The speed ladder is fixed, and only its average survives a cycle that measured nothing.**
+  `speedBuckets` is seven bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:26`), so a quantile
+  at the top bound means faster than 500, not a plateau. `keptSpeeds` skips a zero Mbps
+  (`internal/stable/checker.go:313`), so an unmeasured cycle passes an empty slice and
+  `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:126`,
+  :333-334): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
+  NaN over all-zero buckets and the guarded max (:127) vanishes. `stable_kept_speed_min_mbps` is
+  exported (:128) and plotted by NO panel; the floor question is
+  `stable_kept_speed_mbps_bucket{le="5"}`, unplotted too. `keptLatencies` keeps every survivor
+  (`internal/stable/checker.go:323`), so `stable_kept_latency_ms_count` always equals
+  `stable_kept_nodes` and that panel has no such trap.
+- **A source you cannot find in a "Top" table is under the cutoff, and a group's `valid` is an
+  upper bound.** On the 2026-08-17 04:48 +03:00 reading above (108 buckets, 25 drawn), 83 buckets
+  went undrawn. Skew, not fan-out, decides placement — individually small URLs place no per-URL
+  row yet rank high summed. Summing `valid` over a group's own URLs double-counts every node
+  several carry: the inflation above applies WITHIN a group too. `filtered` does not, `Merge`
+  giving each node exactly one `<source>-NNN` label (`internal/stable/merge.go:83`) and
+  `countSourceStages` crediting one source per published node (`internal/stable/checker.go:526`),
+  so `sum(stable_source_published_nodes)` equals `stable_kept_nodes` unless `countSourceStages`
+  logged unattributed survivors (`checker.go:531`) — the one way it can undercount. `filtered` 0
+  beside a large `valid` says only that nothing reached the payload under that name: dedupe,
+  dead-cache skip, probe failure and a gate read alike.
 - **Two instances, two scrape JOBS — not two targets in one job.** `sub-preprocessor`
   (`127.0.0.1:9091`) and `sub-preprocessor-vassago` (`127.0.0.1:9092`) each carry their
   own `job_name`, because the dashboard's Instance picker is
