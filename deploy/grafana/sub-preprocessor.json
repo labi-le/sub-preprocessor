@@ -1631,7 +1631,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "IP-stage yield",
-      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so survived normally sits far above merged, equal only when one source supplies everything. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
+      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so survived normally sits far above merged, equal only when nothing is left to dedupe. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
