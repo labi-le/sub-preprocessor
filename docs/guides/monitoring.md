@@ -168,19 +168,31 @@ vendor the dashboard into the nixos repo.
   sources that FAILED TO FETCH that cycle, where `fetchSources` warns and `continue`s
   (`checker.go:618`); they emit no per-source series and appear in neither table. They are not
   dead, not pruned, not dropped from config, and the next cycle may fetch them fine.
-- **The channel breakdown (panel 20) is a query, not a metric.** The exporter emits `source` and
-  nothing else — Prometheus knows no `channel` label, `label_values(..., channel)` comes back
-  empty and there are no recording rules — so panel 20 derives it inline, `label_replace`
-  stripping the `-<sha6>` suffix off `source`. Nothing ships on the exporter side and no series
-  cardinality is added: the dashboard JSON is the whole change. The cost lands on anyone writing
-  their own query or alert, because a per-source series thresholds ONE URL — an alert that means
-  a channel must carry the same `label_replace` pair itself, and both of its calls are
-  load-bearing. The inner call copies `source` into `channel` verbatim; the outer overwrites that
-  copy for names matching the slug form. Drop the inner copy and every unmatched name falls into
-  one empty-`channel` bucket instead of standing alone (verified against `:9091`, 2026-08-15).
-  For how many sources are configured, read `stable_sources_total` — panel 3, top of the same
-  dashboard — rather than counting a config file; it is published per cycle, so it trails a
-  config edit by a cycle.
+- **The channel breakdown (panel 20, "Top source groups") is a query, not a metric, and its rows
+  are MIXED.** The exporter emits `source` and nothing else — Prometheus knows no `channel`
+  label, `label_values(..., channel)` comes back empty and there are no recording rules — so
+  panel 20 derives it inline, `label_replace` stripping the `-<sha6>` suffix off `source`.
+  Nothing ships on the exporter side and no series cardinality is added: the dashboard JSON is
+  the whole change. The cost lands on anyone writing their own query or alert, because a
+  per-source series thresholds ONE URL — an alert that means a channel must carry the same
+  `label_replace` pair itself, and both of its calls are load-bearing. The inner call copies
+  `source` into `channel` verbatim; the outer overwrites that copy for names matching the slug
+  form. Drop the inner copy and every unmatched name falls into one empty-`channel` bucket
+  instead of standing alone (verified against `:9091`, 2026-08-15). Because the inner call keeps
+  unmatched names, the buckets are not channels-only — and they are BUCKETS, not rows: all four
+  targets are gated on `topk(25, ...)`, so the table draws 25 rows out of however many groups
+  reported. Measured on `:3020`, host clock 2026-08-17 04:33 +03:00, the query bucketed 493
+  reporting sources into 108 groups: 61 folded channels, `tg-inline` (`crawl.go:771`) and the
+  legacy `tg-96c4d7c7a7` (`legacyNameRe`, `crawl.go:65`), neither of which folds anything nor is
+  a channel, and 45 curated names. The 25 it drew held 18 channels beside 7 curated names. That
+  is why this table keeps the `tg-` prefix where panel 8 strips it: panel 8's query fixes the
+  owner, so there the prefix is redundant, and panel 22 has nothing to strip because its rows
+  never carry the prefix, whereas here the prefix is the ONLY thing separating a folded channel
+  from a curated name. The column is therefore headed `group`, display-only via `renameByName`;
+  the field name and the PromQL label both stay `channel`, which is why `indexByName` still keys
+  on `channel` and a query copied out of this panel works verbatim. For how many sources are
+  configured, read `stable_sources_total` — panel 3, top of the same dashboard — rather than
+  counting a config file; it is published per cycle, so it trails a config edit by a cycle.
 - **The crawler-managed vs hand-curated split is a NAME PREFIX, and its `published` column
   measures ATTRIBUTION, not contribution.** The discriminator is `source=~"tg-.*"` for
   crawler-managed and `source!~"tg-.*"` for hand-curated, and it is the only one that exists:
