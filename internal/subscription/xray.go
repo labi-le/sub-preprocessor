@@ -1,10 +1,10 @@
 package subscription
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -17,7 +17,7 @@ import (
 // JSON. Measured on one t.me/hiddifycode post: 6 of its 7 links served JSON
 // holding 160 proxy outbounds, against 8 nodes in the single URI-list link.
 //
-// vless and hysteria2 are converted; see outboundShareLink for the measured
+// vless and hysteria2 are converted; see appendOutboundShareLink for the measured
 // protocol split that decides what is worth mapping.
 
 // maxJSONOutbounds bounds the expansion. Normalize's output feeds
@@ -27,13 +27,15 @@ import (
 const (
 	maxJSONOutbounds = 50_000
 
-	// queryHint sizes the share-link query map: the widest shape converted
+	// queryHint sizes the share-link query array: the widest shape converted
 	// (reality over ws) sets encryption, flow, type, security, sni, pbk, sid,
 	// fp, path and host.
 	queryHint = 10
 
-	// hysteriaQueryHint sizes the hysteria2 query map: sni, alpn, insecure.
+	// hysteriaQueryHint sizes the hysteria2 query array: sni, alpn, insecure.
 	hysteriaQueryHint = 3
+
+	portBase = 10
 )
 
 // maybeXrayJSON converts body when it is an Xray config document. Normalize
@@ -125,86 +127,106 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 
-	var out bytes.Buffer
+	var out []byte
 	written := 0
 	for i := range configs {
 		for j := range configs[i].Outbounds {
 			if written >= maxJSONOutbounds {
 				break
 			}
-			uri, uriOK := outboundShareLink(&configs[i].Outbounds[j], configs[i].Remarks)
-			if !uriOK {
+			link, linkOK := appendOutboundShareLink(out, &configs[i].Outbounds[j], configs[i].Remarks)
+			if !linkOK {
 				continue
 			}
-			if written > 0 {
-				out.WriteByte('\n')
-			}
-			out.WriteString(uri)
+			// The separator goes WITH the link and the last one is dropped
+			// below, so a refused outbound can leave no blank line behind.
+			out = link
+			out = append(out, '\n')
 			written++
+			if written == 1 {
+				// One Grow off the first link instead of a doubling chain. It
+				// counts outbounds that convert to nothing (every config ships
+				// a "direct" one) so it over-reserves rather than regrows;
+				// reserving BEFORE the first link would charge a document that
+				// converts nothing at all, which a sing-box config decodes as.
+				out = slices.Grow(out, len(out)*(outboundCount(configs)-1))
+			}
 		}
 	}
 	if written == 0 {
 		return nil, false
 	}
 
-	return out.Bytes(), true
+	return out[:len(out)-1], true
 }
 
-// outboundShareLink dispatches on the outbound protocol. Measured across 25
-// JSON links from one channel's history: 344 vless, 35 hysteria, 6 shadowsocks.
-// Shadowsocks stays out at 1.6% -- and the sampled entry carried the literal
-// address "sdfsdf".
-func outboundShareLink(ob *xrayOutbound, remarks string) (string, bool) {
-	switch strings.ToLower(ob.Protocol) {
-	case "vless":
-		return vlessShareLink(ob, remarks)
-	case "hysteria", "hysteria2", "hy2":
-		return hysteria2ShareLink(ob, remarks)
+func outboundCount(configs []xrayConfig) int {
+	n := 0
+	for i := range configs {
+		n += len(configs[i].Outbounds)
 	}
 
-	return "", false
+	return min(n, maxJSONOutbounds)
 }
 
-// hysteria2ShareLink renders a hysteria2 outbound as the share link
+// appendOutboundShareLink dispatches on the outbound protocol. Measured across
+// 25 JSON links from one channel's history: 344 vless, 35 hysteria, 6
+// shadowsocks. Shadowsocks stays out at 1.6% -- and the sampled entry carried
+// the literal address "sdfsdf".
+//
+// The link is appended into the caller's buffer rather than returned as a
+// string: strings.Builder growth was 23% of this path's alloc_objects
+// (2026-08-18), every bit of it for bytes then copied into the output again.
+func appendOutboundShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]byte, bool) {
+	switch strings.ToLower(ob.Protocol) {
+	case "vless":
+		return appendVlessShareLink(dst, ob, remarks)
+	case "hysteria", "hysteria2", "hy2":
+		return appendHysteria2ShareLink(dst, ob, remarks)
+	}
+
+	return dst, false
+}
+
+// appendHysteria2ShareLink renders a hysteria2 outbound as the share link
 // mihomo's converter reads: the credential is userinfo, everything else query.
 //
 // Version 2 ONLY. mihomo parses hysteria v1 under its own `hysteria://` scheme
 // with a different parameter set, so rendering a v1 outbound as hysteria2 would
 // produce a proxy adapter.ParseProxy accepts and the probe then reports as a
 // dead node — a mapping bug wearing the costume of a bad source.
-func hysteria2ShareLink(ob *xrayOutbound, remarks string) (string, bool) {
+func appendHysteria2ShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]byte, bool) {
 	st := &ob.StreamSettings
 	if !isHysteria2(ob) {
-		return "", false
+		return dst, false
 	}
 	if ob.Settings.Address == "" || ob.Settings.Port <= 0 || st.Hysteria.Auth == "" {
-		return "", false
+		return dst, false
 	}
 
-	q := make(url.Values, hysteriaQueryHint)
-	setNonEmpty(q, "sni", st.TLS.ServerName)
+	var scratch [hysteriaQueryHint]queryPair
+	q := setNonEmpty(queryList(scratch[:0]), "sni", st.TLS.ServerName)
 	if len(st.TLS.ALPN) > 0 {
-		q.Set("alpn", strings.Join(st.TLS.ALPN, ","))
+		q = q.set("alpn", strings.Join(st.TLS.ALPN, ","))
 	}
 	if st.TLS.AllowInsecure {
-		q.Set("insecure", "1")
+		q = q.set("insecure", "1")
 	}
 
-	var b strings.Builder
-	b.WriteString("hysteria2://")
-	b.WriteString(url.User(st.Hysteria.Auth).String())
-	b.WriteByte('@')
-	b.WriteString(hostForAuthority(ob.Settings.Address))
-	b.WriteByte(':')
-	b.WriteString(strconv.Itoa(ob.Settings.Port))
+	dst = append(dst, "hysteria2://"...)
+	dst = append(dst, url.User(st.Hysteria.Auth).String()...)
+	dst = append(dst, '@')
+	dst = appendHostForAuthority(dst, ob.Settings.Address)
+	dst = append(dst, ':')
+	dst = strconv.AppendInt(dst, int64(ob.Settings.Port), portBase)
 	if len(q) > 0 {
-		b.WriteByte('?')
-		b.WriteString(q.Encode())
+		dst = append(dst, '?')
+		dst = q.appendEncoded(dst)
 	}
-	b.WriteByte('#')
-	b.WriteString(url.PathEscape(outboundName(ob, remarks, ob.Settings.Address)))
+	dst = append(dst, '#')
+	dst = appendPathEscape(dst, outboundName(ob, remarks, ob.Settings.Address))
 
-	return b.String(), true
+	return dst, true
 }
 
 // isHysteria2 decides the protocol version. "hysteria2"/"hy2" name the version
@@ -247,27 +269,28 @@ func decodeXrayConfigs(body []byte) ([]xrayConfig, bool) {
 	return nil, false
 }
 
-// vlessShareLink builds the share link mihomo's convert.ConvertsV2Ray parses.
-// Parameter names follow the Xray VLESS share-link standard, which is what
-// mihomo's handleVShareLink reads; a name it does not read is dropped
+// appendVlessShareLink builds the share link mihomo's convert.ConvertsV2Ray
+// parses. Parameter names follow the Xray VLESS share-link standard, which is
+// what mihomo's handleVShareLink reads; a name it does not read is dropped
 // silently, so the mapping stays on the keys that survive into the proxy map.
-func vlessShareLink(ob *xrayOutbound, remarks string) (string, bool) {
+func appendVlessShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]byte, bool) {
 	if !strings.EqualFold(ob.Protocol, "vless") || len(ob.Settings.VNext) == 0 {
-		return "", false
+		return dst, false
 	}
-	vnext := ob.Settings.VNext[0]
+	vnext := &ob.Settings.VNext[0]
 	if vnext.Address == "" || vnext.Port <= 0 || len(vnext.Users) == 0 || vnext.Users[0].ID == "" {
-		return "", false
+		return dst, false
 	}
 
 	st := &ob.StreamSettings
-	q := make(url.Values, queryHint)
+	var scratch [queryHint]queryPair
+	q := queryList(scratch[:0])
 	if enc := vnext.Users[0].Encryption; enc != "" {
-		q.Set("encryption", enc)
+		q = q.set("encryption", enc)
 	} else {
-		q.Set("encryption", "none")
+		q = q.set("encryption", "none")
 	}
-	setNonEmpty(q, "flow", vnext.Users[0].Flow)
+	q = setNonEmpty(q, "flow", vnext.Users[0].Flow)
 
 	// Xray renamed the plain-TCP transport to "raw"; mihomo's share-link
 	// handler has no "raw" case, so the name would pass straight into
@@ -276,49 +299,48 @@ func vlessShareLink(ob *xrayOutbound, remarks string) (string, bool) {
 	if network == "raw" || network == "" {
 		network = "tcp"
 	}
-	q.Set("type", network)
+	q = q.set("type", network)
 
 	switch strings.ToLower(st.Security) {
 	case "reality":
-		q.Set("security", "reality")
-		setNonEmpty(q, "sni", st.Reality.ServerName)
-		setNonEmpty(q, "pbk", st.Reality.PublicKey)
-		setNonEmpty(q, "sid", st.Reality.ShortID)
-		setNonEmpty(q, "fp", st.Reality.Fingerprint)
+		q = q.set("security", "reality")
+		q = setNonEmpty(q, "sni", st.Reality.ServerName)
+		q = setNonEmpty(q, "pbk", st.Reality.PublicKey)
+		q = setNonEmpty(q, "sid", st.Reality.ShortID)
+		q = setNonEmpty(q, "fp", st.Reality.Fingerprint)
 	case "tls":
-		q.Set("security", "tls")
-		setNonEmpty(q, "sni", st.TLS.ServerName)
-		setNonEmpty(q, "fp", st.TLS.Fingerprint)
+		q = q.set("security", "tls")
+		q = setNonEmpty(q, "sni", st.TLS.ServerName)
+		q = setNonEmpty(q, "fp", st.TLS.Fingerprint)
 		if len(st.TLS.ALPN) > 0 {
-			q.Set("alpn", strings.Join(st.TLS.ALPN, ","))
+			q = q.set("alpn", strings.Join(st.TLS.ALPN, ","))
 		}
 	}
 
 	switch network {
 	case "ws":
-		setNonEmpty(q, "path", st.WS.Path)
-		setNonEmpty(q, "host", headerValue(st.WS.Headers, "host"))
+		q = setNonEmpty(q, "path", st.WS.Path)
+		q = setNonEmpty(q, "host", headerValue(st.WS.Headers, "host"))
 	case "grpc":
-		setNonEmpty(q, "serviceName", st.GRPC.ServiceName)
+		q = setNonEmpty(q, "serviceName", st.GRPC.ServiceName)
 	case "xhttp":
-		setNonEmpty(q, "path", st.XHTTP.Path)
-		setNonEmpty(q, "host", st.XHTTP.Host)
-		setNonEmpty(q, "mode", st.XHTTP.Mode)
+		q = setNonEmpty(q, "path", st.XHTTP.Path)
+		q = setNonEmpty(q, "host", st.XHTTP.Host)
+		q = setNonEmpty(q, "mode", st.XHTTP.Mode)
 	}
 
-	var b strings.Builder
-	b.WriteString("vless://")
-	b.WriteString(vnext.Users[0].ID)
-	b.WriteByte('@')
-	b.WriteString(hostForAuthority(vnext.Address))
-	b.WriteByte(':')
-	b.WriteString(strconv.Itoa(vnext.Port))
-	b.WriteByte('?')
-	b.WriteString(q.Encode())
-	b.WriteByte('#')
-	b.WriteString(url.PathEscape(outboundName(ob, remarks, vnext.Address)))
+	dst = append(dst, "vless://"...)
+	dst = append(dst, vnext.Users[0].ID...)
+	dst = append(dst, '@')
+	dst = appendHostForAuthority(dst, vnext.Address)
+	dst = append(dst, ':')
+	dst = strconv.AppendInt(dst, int64(vnext.Port), portBase)
+	dst = append(dst, '?')
+	dst = q.appendEncoded(dst)
+	dst = append(dst, '#')
+	dst = appendPathEscape(dst, outboundName(ob, remarks, vnext.Address))
 
-	return b.String(), true
+	return dst, true
 }
 
 // outboundName picks the display name. The config's own remarks win; the
@@ -336,21 +358,39 @@ func outboundName(ob *xrayOutbound, remarks, address string) string {
 	return address
 }
 
-func setNonEmpty(q url.Values, key, value string) {
-	if value != "" {
-		q.Set(key, value)
+func setNonEmpty(q queryList, key, value string) queryList {
+	if value == "" {
+		return q
 	}
+
+	return q.set(key, value)
 }
 
-// hostForAuthority brackets an IPv6 literal. Without it the authority reads
-// "2001:db8::1:443" and splitHostPort treats the whole thing as a portless
-// IPv6 host, so the port is lost and mihomo's url.Parse refuses the link.
-func hostForAuthority(address string) string {
-	if addr, err := netip.ParseAddr(address); err == nil && addr.Is6() && !addr.Is4In6() {
-		return "[" + address + "]"
+// appendHostForAuthority brackets an IPv6 literal. Without it the authority
+// reads "2001:db8::1:443" and splitHostPort treats the whole thing as a
+// portless IPv6 host, so the port is lost and mihomo's url.Parse refuses the
+// link.
+func appendHostForAuthority(dst []byte, address string) []byte {
+	if !ipv6Literal(address) {
+		return append(dst, address...)
 	}
+	dst = append(dst, '[')
+	dst = append(dst, address...)
 
-	return address
+	return append(dst, ']')
+}
+
+// ipv6Literal gates the parse on a ':', which no textual IPv6 address is
+// written without: netip.ParseAddr boxes its error on the heap, so every
+// hostname address paid one allocation per link to be told it is not an address
+// (3% of this path's alloc_objects, 2026-08-18).
+func ipv6Literal(address string) bool {
+	if strings.IndexByte(address, ':') < 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(address)
+
+	return err == nil && addr.Is6() && !addr.Is4In6()
 }
 
 // headerValue looks up an HTTP header case-insensitively. Xray configs are not

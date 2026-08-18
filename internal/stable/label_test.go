@@ -237,7 +237,7 @@ func TestFoldProbeResults(t *testing.T) {
 		// longer what marks a node dead — recordDead reads Successes.
 		"src-003": {succ: 0, sum: 0, stage: StageConnect},
 	})
-	res := foldProbeResults(pxs, accs)
+	res := foldProbeResults(probeNodesOf(pxs), accs)
 
 	if len(res) != 3 {
 		t.Fatalf("folded to %d results, want src-001, src-002 and src-003: %+v", len(res), res)
@@ -287,7 +287,7 @@ func TestFoldProbeResultsTieBreaksOnLatency(t *testing.T) {
 				fast: {succ: 2, sum: 100},
 				slow: {succ: 2, sum: 800},
 			})
-			if got := foldProbeResults(pxs, accs); got["src-001"].MeanMs != 50 {
+			if got := foldProbeResults(probeNodesOf(pxs), accs); got["src-001"].MeanMs != 50 {
 				t.Errorf("src-001 = %+v, want the 50ms port", got["src-001"])
 			}
 		})
@@ -321,7 +321,7 @@ func TestFoldProbeResultsTieBreaksOnStage(t *testing.T) {
 				fetch:   {stage: StageFetch},
 				connect: {stage: StageConnect},
 			})
-			if got := foldProbeResults(pxs, accs); got["src-001"] != (ProbeResult{Stage: StageFetch}) {
+			if got := foldProbeResults(probeNodesOf(pxs), accs); got["src-001"] != (ProbeResult{Stage: StageFetch}) {
 				t.Errorf("src-001 = %+v, want the furthest stage (fetch)", got["src-001"])
 			}
 		})

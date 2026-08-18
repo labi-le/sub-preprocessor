@@ -6,8 +6,6 @@
 package metrics
 
 import (
-	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -18,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"domains.lst/sub-preprocessor/internal/srcname"
 	"domains.lst/sub-preprocessor/internal/stable"
 )
 
@@ -42,9 +41,20 @@ var latencyBuckets = []float64{100, 250, 500, 800, 1000, 1500, 3000, 4000, 6000,
 const (
 	labelFilter = "filter"
 	labelSource = "source"
+	// labelFeed is "feed" and not "group": group is also a PromQL aggregation
+	// operator, so `sum by (group)` reads as a keyword.
+	labelFeed   = "feed"
+	labelOwner  = "owner"
 	labelReason = "reason"
 	labelPhase  = "phase"
 	labelStage  = "stage"
+)
+
+// Who minted a source name: the crawler owns the srcname.ManagedPrefix ones,
+// everything else is hand-added to the config.
+const (
+	ownerCrawler = "crawler"
+	ownerCurated = "curated"
 )
 
 // Metrics holds the latest cycle report plus lifetime counters and renders them
@@ -77,28 +87,32 @@ func (m *Metrics) ObserveError() {
 	m.cyclesFailed++
 }
 
-// Handler serves the metrics in Prometheus text format. It renders into a
-// buffer under a read lock, then writes, so a slow scrape never blocks Observe.
+// Handler serves the metrics in Prometheus text format. It snapshots the cycle
+// report under a read lock and renders outside it, so neither a slow scrape nor
+// the whole exposition sits between Observe and the lock.
 func (m *Metrics) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		var buf bytes.Buffer
-		m.writeMetrics(&buf)
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = w.Write(buf.Bytes())
+		m.writeMetrics(w)
 	})
 }
 
-func (m *Metrics) writeMetrics(w io.Writer) {
+func (m *Metrics) writeMetrics(dst io.Writer) {
+	// Snapshotted rather than rendered under the lock: Observe publishes a
+	// fresh *CycleReport and never mutates a published one.
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	cyclesTotal, cyclesFailed, r, lastAt := m.cyclesTotal, m.cyclesFailed, m.last, m.lastAt
+	m.mu.RUnlock()
 
-	counter(w, "stable_cycles_total", "Stable cycles attempted (published + failed).", m.cyclesTotal)
-	counter(w, "stable_cycle_failures_total", "Stable cycles that did not publish a new list.", m.cyclesFailed)
+	w := newExposition(dst)
+	defer w.flush()
 
-	if m.last == nil {
+	counter(w, "stable_cycles_total", "Stable cycles attempted (published + failed).", cyclesTotal)
+	counter(w, "stable_cycle_failures_total", "Stable cycles that did not publish a new list.", cyclesFailed)
+
+	if r == nil {
 		return
 	}
-	r := m.last
 
 	gauge(w, "stable_sources_ok", "Sources that returned a usable body last cycle.", float64(r.SourcesOK))
 	gauge(w, "stable_sources_total", "Sources configured.", float64(r.SourcesTotal))
@@ -114,12 +128,12 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	if len(r.KeptCountries) > 0 {
 		help(w, "stable_kept_country_nodes", "gauge", "Published nodes per resolved country (last cycle).")
 		for _, c := range sortedKeys(r.KeptCountries) {
-			sample(w, "stable_kept_country_nodes", map[string]string{"country": c}, float64(r.KeptCountries[c]))
+			sampleEsc(w, "stable_kept_country_nodes", "country", c, float64(r.KeptCountries[c]))
 		}
 	}
 	gauge(w, "stable_cycle_duration_seconds", "Wall time of the last cycle.", r.Duration.Seconds())
 	writePhases(w, r.Phases)
-	gauge(w, "stable_last_success_timestamp_seconds", "Unix time of the last published cycle.", float64(m.lastAt.Unix()))
+	gauge(w, "stable_last_success_timestamp_seconds", "Unix time of the last published cycle.", float64(lastAt.Unix()))
 
 	writeFilters(w, r.Filters)
 	writeSources(w, r.Sources)
@@ -135,19 +149,23 @@ func (m *Metrics) writeMetrics(w io.Writer) {
 	}
 }
 
-func writeFilters(w io.Writer, filters []stable.FilterReport) {
+func writeFilters(w *exposition, filters []stable.FilterReport) {
 	help(w, "stable_filter_in_nodes", "gauge", "Survivors entering each through-node filter.")
 	for _, f := range filters {
-		sample(w, "stable_filter_in_nodes", map[string]string{labelFilter: f.Name}, float64(f.In))
+		sampleEsc(w, "stable_filter_in_nodes", labelFilter, f.Name, float64(f.In))
 	}
 	help(w, "stable_filter_kept_nodes", "gauge", "Survivors kept by each through-node filter.")
 	for _, f := range filters {
-		sample(w, "stable_filter_kept_nodes", map[string]string{labelFilter: f.Name}, float64(f.Kept))
+		sampleEsc(w, "stable_filter_kept_nodes", labelFilter, f.Name, float64(f.Kept))
 	}
 	help(w, "stable_filter_dropped_nodes", "gauge", "Survivors dropped by each through-node filter, by reason.")
+	lbl := make([]byte, 0, labelScratch)
 	for _, f := range filters {
 		for _, reason := range sortedKeys(f.Dropped) {
-			sample(w, "stable_filter_dropped_nodes", map[string]string{labelFilter: f.Name, labelReason: reason}, float64(f.Dropped[reason]))
+			lbl = appendLabelEsc(lbl[:0], labelFilter, f.Name)
+			lbl = append(lbl, ',')
+			lbl = appendLabelEsc(lbl, labelReason, reason)
+			sample(w, "stable_filter_dropped_nodes", lbl, float64(f.Dropped[reason]))
 		}
 	}
 }
@@ -162,7 +180,7 @@ func writeFilters(w io.Writer, filters []stable.FilterReport) {
 // m.last alone, so every gauge on this page -- these included -- keeps
 // describing the last cycle that PUBLISHED. Only stable_cycles_total and
 // stable_cycle_failures_total move on a failure.
-func writePhases(w io.Writer, p stable.CyclePhases) {
+func writePhases(w *exposition, p stable.CyclePhases) {
 	help(w, "stable_cycle_phase_duration_seconds", "gauge",
 		"Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase=\"probe\" is the whole Prober.Probe call -- payload parsing, then the TCP reachability pre-check at its own concurrency outside check.concurrency, then the URL-test rounds -- so check.timeout * check.rounds bounds only its last part; the condemned count in the probe-outcome stage breakdown is what shows the pre-check's share. phase=\"egress\" is the through-node filters and the cdn-cgi/trace measurement, which also do per-node network work.")
 	// Pipeline order, not sorted: the panel legend reads as the funnel.
@@ -177,7 +195,7 @@ func writePhases(w io.Writer, p stable.CyclePhases) {
 		{"egress", p.Egress},
 		{"publish", p.Publish},
 	} {
-		sample(w, "stable_cycle_phase_duration_seconds", map[string]string{labelPhase: ph.name}, ph.d.Seconds())
+		sampleLit(w, "stable_cycle_phase_duration_seconds", labelPhase, ph.name, ph.d.Seconds())
 	}
 }
 
@@ -189,7 +207,7 @@ func writePhases(w io.Writer, p stable.CyclePhases) {
 // A nil map renders nothing: the fold reaching CycleReport is the hand-off that
 // can be dropped, and an absent series says that, where four zeros beside a
 // non-zero stable_probed_nodes would read as a cycle that probed nobody.
-func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
+func writeProbeStages(w *exposition, stages map[stable.ProbeStage]int) {
 	if len(stages) == 0 {
 		return
 	}
@@ -199,10 +217,10 @@ func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
 	for _, s := range []stable.ProbeStage{
 		stable.StageCondemned, stable.StageConnect, stable.StageFetch, stable.StagePassed,
 	} {
-		sample(w, "stable_probe_outcome_nodes", map[string]string{labelStage: s.String()}, float64(stages[s]))
+		sampleEsc(w, "stable_probe_outcome_nodes", labelStage, s.String(), float64(stages[s]))
 	}
 	if n := stages[stable.StageUnknown]; n > 0 {
-		sample(w, "stable_probe_outcome_nodes", map[string]string{labelStage: stable.StageUnknown.String()}, float64(n))
+		sampleEsc(w, "stable_probe_outcome_nodes", labelStage, stable.StageUnknown.String(), float64(n))
 	}
 }
 
@@ -217,7 +235,7 @@ func writeProbeStages(w io.Writer, stages map[stable.ProbeStage]int) {
 // The counts are ENDPOINTS, not nodes: one distinct server:port is dialled
 // once where a multi-port mierus:// node is several, so they never match the
 // condemned node count.
-func writePrecheck(w io.Writer, p stable.PrecheckReport) {
+func writePrecheck(w *exposition, p stable.PrecheckReport) {
 	if p.State == stable.PrecheckAbsent {
 		return
 	}
@@ -242,7 +260,7 @@ func writePrecheck(w io.Writer, p stable.PrecheckReport) {
 // writeTrace renders the cloudflare annotation stage. It is not a filter and has
 // no FilterReport: the trace drops nothing, so answered+unanswered is simply
 // the published list split by whether the node told us where it exits.
-func writeTrace(w io.Writer, t stable.TraceReport) {
+func writeTrace(w *exposition, t stable.TraceReport) {
 	gauge(w, "stable_trace_answered_nodes", "Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.", float64(t.Answered))
 	gauge(w, "stable_trace_unanswered_nodes", "Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.", float64(t.Unanswered))
 	gauge(w, "stable_trace_moved_nodes", "Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.", float64(t.Moved))
@@ -262,7 +280,7 @@ func writeTrace(w io.Writer, t stable.TraceReport) {
 // want of Gemini support on the prober, or filterAndMeasureEgress bailed
 // before the chain when ParseProxies failed) -- and mistaking a dead gate for
 // a healthy one is exactly the failure this metric exists to make visible.
-func writeGemini(w io.Writer, g stable.GeminiReport) {
+func writeGemini(w *exposition, g stable.GeminiReport) {
 	if g.State == stable.GeminiGateAbsent {
 		return
 	}
@@ -281,40 +299,95 @@ func writeGemini(w io.Writer, g stable.GeminiReport) {
 		float64(g.Unverified))
 }
 
-func writeSources(w io.Writer, sources []stable.SourceReport) {
-	help(w, "stable_source_nodes_total", "gauge", "Nodes each source yielded before filtering last cycle.")
-	for _, s := range sources {
-		sample(w, "stable_source_nodes_total", map[string]string{labelSource: s.Name}, float64(s.Total))
+// dropReasons is the order the drop family has always rendered in; reason is
+// the only label that varies within a source.
+var dropReasons = [...]string{"dns", "geo", "cidr", "asn", "geoblock", "ipv6", "unsupported"}
+
+func writeSources(w *exposition, sources []stable.SourceReport) {
+	// The four count families below carry one identical label set per source,
+	// but Prometheus wants a family's samples contiguous, so they cannot share
+	// a loop. One arena plus one offset per source costs two allocations where
+	// a []string of rendered label sets cost one per source.
+	labels := make([]byte, 0, sourceLabelBytes(sources))
+	ends := make([]int, len(sources))
+	for i, s := range sources {
+		feed, managed := srcname.Split(s.Name)
+		owner := ownerCurated
+		if managed {
+			owner = ownerCrawler
+		}
+		// Sorted as the label map was: feed, owner, source.
+		labels = appendLabelEsc(labels, labelFeed, feed)
+		labels = append(labels, ',')
+		labels = appendLabel(labels, labelOwner, owner)
+		labels = append(labels, ',')
+		labels = appendLabelEsc(labels, labelSource, s.Name)
+		ends[i] = len(labels)
+	}
+
+	help(w, "stable_source_nodes_total", "gauge", "Nodes each source yielded before filtering last cycle. source is the verbatim config key; feed and owner are derived from it, owner=crawler for a crawler-minted name and curated for a hand-added one.")
+	for i, s := range sources {
+		sample(w, "stable_source_nodes_total", sourceLabels(labels, ends, i), float64(s.Total))
 	}
 	help(w, "stable_source_valid_nodes", "gauge", "Nodes each source contributed after preprocess filtering. Counted per source BEFORE Merge dedupes across sources, so a node two sources both yield is counted in both.")
-	for _, s := range sources {
-		sample(w, "stable_source_valid_nodes", map[string]string{labelSource: s.Name}, float64(s.Valid))
+	for i, s := range sources {
+		sample(w, "stable_source_valid_nodes", sourceLabels(labels, ends, i), float64(s.Valid))
 	}
 	help(w, "stable_source_tested_nodes", "gauge", "Nodes each source contributed that survived the URL test. Measured after the merge, so stable_source_valid_nodes minus this is NOT the probe failures. Merge first drops what will not re-parse, what is a placeholder, what an earlier source already yielded at the same server:port, and what cannot carry its label; then the dead-node cache skips every merged node whose recent probe failed, and only the remainder is URL-tested. The duplicate term is the largest of the three -- a node two sources both yield counts in both of their valid gauges and in neither's later ones -- and the dead-node skip is merely the largest term no per-source series exposes: read stable_dead_skipped_nodes against stable_merged_nodes for it.")
-	for _, s := range sources {
-		sample(w, "stable_source_tested_nodes", map[string]string{labelSource: s.Name}, float64(s.Tested))
+	for i, s := range sources {
+		sample(w, "stable_source_tested_nodes", sourceLabels(labels, ends, i), float64(s.Tested))
 	}
 	help(w, "stable_source_published_nodes", "gauge", "Nodes each source contributed that survived every through-node filter and reached the published list.")
-	for _, s := range sources {
-		sample(w, "stable_source_published_nodes", map[string]string{labelSource: s.Name}, float64(s.Filtered))
+	for i, s := range sources {
+		sample(w, "stable_source_published_nodes", sourceLabels(labels, ends, i), float64(s.Filtered))
 	}
-	help(w, "stable_source_dropped_nodes", "gauge", "Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total).")
+	// The drop family keeps source+reason alone: 7 of every 11 per-source
+	// samples are drops (3507 of 5511 at 501 sources), and nothing consumes
+	// drops by owner. Before these labels the family was 265324 exposition
+	// bytes (prod :9091, 2026-08-18 00:58 +0300).
+	help(w, "stable_source_dropped_nodes", "gauge", "Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total). It deliberately carries no feed or owner labels: nothing reads drops by owner.")
+	lbl, src := make([]byte, 0, labelScratch), make([]byte, 0, labelScratch)
 	for _, s := range sources {
-		reasons := []struct {
-			reason string
-			n      int
-		}{
-			{"dns", s.DNSDrop}, {"geo", s.GeoDrop}, {"cidr", s.CIDRDrop}, {"asn", s.ASNDrop},
-			{"geoblock", s.GeoBlockDrop}, {"ipv6", s.IPv6Drop},
-			{"unsupported", s.Unsupported},
+		counts := [len(dropReasons)]int{
+			s.DNSDrop, s.GeoDrop, s.CIDRDrop, s.ASNDrop,
+			s.GeoBlockDrop, s.IPv6Drop, s.Unsupported,
 		}
-		for _, d := range reasons {
-			sample(w, "stable_source_dropped_nodes", map[string]string{labelSource: s.Name, labelReason: d.reason}, float64(d.n))
+		// reason sorts before source, and only the name needs escaping: the
+		// seven reasons are literals.
+		src = appendLabelEsc(src[:0], labelSource, s.Name)
+		for i, reason := range dropReasons {
+			lbl = appendLabel(lbl[:0], labelReason, reason)
+			lbl = append(lbl, ',')
+			lbl = append(lbl, src...)
+			sample(w, "stable_source_dropped_nodes", lbl, float64(counts[i]))
 		}
 	}
 }
 
-func writeHistogram(w io.Writer, name, helpText string, values []int, buckets []float64) {
+func sourceLabels(arena []byte, ends []int, i int) []byte {
+	if i == 0 {
+		return arena[:ends[0]]
+	}
+	return arena[ends[i-1]:ends[i]]
+}
+
+// sourceLabelBytes estimates the arena -- feed is a slice of the name, so a
+// source costs its name twice plus labelSyntaxBytes. It is not a ceiling: a
+// name carrying a byte appendLabelValue escapes, or one that is not valid
+// UTF-8, renders wider than it measures (`a"b` measures 39 and renders 41,
+// "\xff" measures 35 and renders 57 -- 2026-08-18). The regrow is safe because
+// ends holds lengths, not pointers into the arena.
+func sourceLabelBytes(sources []stable.SourceReport) int {
+	n := 0
+	for _, s := range sources {
+		n += len(s.Name) + len(s.Name) + labelSyntaxBytes
+	}
+	return n
+}
+
+var leInf = []byte(`le="+Inf"`)
+
+func writeHistogram(w *exposition, name, helpText string, values []int, buckets []float64) {
 	help(w, name, "histogram", helpText)
 	counts := make([]int, len(buckets))
 	var sum float64
@@ -326,68 +399,165 @@ func writeHistogram(w io.Writer, name, helpText string, values []int, buckets []
 			}
 		}
 	}
+	le := make([]byte, 0, labelScratch)
 	for i, ub := range buckets {
-		fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", name, formatFloat(ub), counts[i])
+		le = append(le[:0], `le="`...)
+		le = appendFloat(le, ub)
+		le = append(le, '"')
+		intSample(w, name, "_bucket", le, counts[i])
 	}
-	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", name, len(values))
-	fmt.Fprintf(w, "%s_sum %s\n", name, formatFloat(sum))
-	fmt.Fprintf(w, "%s_count %d\n", name, len(values))
+	intSample(w, name, "_bucket", leInf, len(values))
+	floatSample(w, name, "_sum", nil, sum)
+	intSample(w, name, "_count", nil, len(values))
 }
 
-func gauge(w io.Writer, name, helpText string, v float64) {
+// exposition is the scrape's render buffer. The writers below append into it
+// instead of calling fmt.Fprintf per sample: boxing every argument into an
+// []any and heap-copying the string headers accounted for 73% of the objects a
+// 501-source scrape allocated (24912 allocs/op).
+type exposition struct {
+	w io.Writer
+	b []byte
+}
+
+// flushAt caps the buffer, so peak footprint is one bound rather than the whole
+// ~400 kB exposition; bufSlack covers the longest burst between two flush
+// points, help()'s HELP+TYPE pair for stable_probe_outcome_nodes at 941 B
+// (measured on testdata/exposition.golden, 2026-08-18). Neither bufSlack nor
+// labelScratch is a ceiling -- a config-supplied source or filter name renders
+// past both -- but growing them by append is correct, merely one allocation.
+const (
+	flushAt      = 32 << 10
+	bufSlack     = 4 << 10
+	labelScratch = 128
+)
+
+func newExposition(w io.Writer) *exposition {
+	return &exposition{w: w, b: make([]byte, 0, flushAt+bufSlack)}
+}
+
+func (e *exposition) endLine() {
+	e.b = append(e.b, '\n')
+	if len(e.b) >= flushAt {
+		e.flush()
+	}
+}
+
+// flush drops a write error exactly as fmt.Fprintf did: a scrape that hung up
+// mid-render leaves nobody to report it to.
+func (e *exposition) flush() {
+	if len(e.b) == 0 {
+		return
+	}
+	_, _ = e.w.Write(e.b)
+	e.b = e.b[:0]
+}
+
+func gauge(w *exposition, name, helpText string, v float64) {
 	help(w, name, "gauge", helpText)
 	sample(w, name, nil, v)
 }
 
-func counter(w io.Writer, name, helpText string, v int64) {
+func counter(w *exposition, name, helpText string, v int64) {
 	help(w, name, "counter", helpText)
 	sample(w, name, nil, float64(v))
 }
 
-func help(w io.Writer, name, typ, helpText string) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", name, helpText, name, typ)
+func help(w *exposition, name, typ, helpText string) {
+	w.b = append(w.b, "# HELP "...)
+	w.b = append(w.b, name...)
+	w.b = append(w.b, ' ')
+	w.b = append(w.b, helpText...)
+	w.b = append(w.b, "\n# TYPE "...)
+	w.b = append(w.b, name...)
+	w.b = append(w.b, ' ')
+	w.b = append(w.b, typ...)
+	w.endLine()
 }
 
-func sample(w io.Writer, name string, labels map[string]string, v float64) {
-	if len(labels) == 0 {
-		fmt.Fprintf(w, "%s %s\n", name, formatFloat(v))
-		return
-	}
-	fmt.Fprintf(w, "%s{%s} %s\n", name, formatLabels(labels), formatFloat(v))
+func sample(w *exposition, name string, labels []byte, v float64) {
+	floatSample(w, name, "", labels, v)
 }
 
-func formatLabels(labels map[string]string) string {
-	keys := make([]string, 0, len(labels))
-	for k := range labels {
-		keys = append(keys, k)
+// sampleLit takes its label value verbatim, for the values this file spells
+// out; sampleEsc escapes one that arrived from elsewhere.
+func sampleLit(w *exposition, name, key, value string, v float64) {
+	w.b = append(w.b, name...)
+	w.b = append(w.b, '{')
+	w.b = appendLabel(w.b, key, value)
+	w.b = append(w.b, '}', ' ')
+	w.b = appendFloat(w.b, v)
+	w.endLine()
+}
+
+func sampleEsc(w *exposition, name, key, value string, v float64) {
+	w.b = append(w.b, name...)
+	w.b = append(w.b, '{')
+	w.b = appendLabelEsc(w.b, key, value)
+	w.b = append(w.b, '}', ' ')
+	w.b = appendFloat(w.b, v)
+	w.endLine()
+}
+
+func floatSample(w *exposition, name, suffix string, labels []byte, v float64) {
+	w.b = appendSampleHead(w.b, name, suffix, labels)
+	w.b = appendFloat(w.b, v)
+	w.endLine()
+}
+
+// intSample exists because a count must not go through the float path: 'g'
+// would render 12345678 as 1.2345678e+07.
+func intSample(w *exposition, name, suffix string, labels []byte, n int) {
+	w.b = appendSampleHead(w.b, name, suffix, labels)
+	w.b = strconv.AppendInt(w.b, int64(n), intBase)
+	w.endLine()
+}
+
+// A sample's number format is wire format, so it lives in one place: 'g' at
+// shortest round-trip precision, exactly what strconv.FormatFloat rendered
+// before. labelSyntaxBytes is the quotes, equals signs, commas and owner value
+// of a source's three label pairs.
+const (
+	floatVerb        = 'g'
+	floatPrec        = -1
+	floatBits        = 64
+	intBase          = 10
+	labelSyntaxBytes = 33
+)
+
+func appendFloat(dst []byte, v float64) []byte {
+	return strconv.AppendFloat(dst, v, floatVerb, floatPrec, floatBits)
+}
+
+func appendSampleHead(dst []byte, name, suffix string, labels []byte) []byte {
+	dst = append(dst, name...)
+	dst = append(dst, suffix...)
+	if len(labels) > 0 {
+		dst = append(dst, '{')
+		dst = append(dst, labels...)
+		dst = append(dst, '}')
 	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(k)
-		b.WriteString(`="`)
-		b.WriteString(escapeLabelValue(labels[k]))
-		b.WriteByte('"')
-	}
-	return b.String()
+	return append(dst, ' ')
+}
+
+func appendLabel(dst []byte, key, value string) []byte {
+	dst = append(dst, key...)
+	dst = append(dst, '=', '"')
+	dst = append(dst, value...)
+	return append(dst, '"')
+}
+
+func appendLabelEsc(dst []byte, key, value string) []byte {
+	dst = append(dst, key...)
+	dst = append(dst, '=', '"')
+	dst = appendLabelValue(dst, value)
+	return append(dst, '"')
 }
 
 // invalidLabelValue replaces a label value that is not valid UTF-8.
 const invalidLabelValue = "invalid_utf8"
 
-// labelValueEscaper escapes exactly the three characters the text format
-// reserves in a label value. It is not a place to be creative: Prometheus's
-// parser accepts only \\, \" and \n after a backslash and fails the whole
-// scrape on any other escape sequence
-// (prometheus/common expfmt.TextParser.readTokenAsLabelValue). A carriage
-// return needs no escape — the parser copies it through — so it is left alone
-// rather than turned into an invalid \r.
-var labelValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-
-// escapeLabelValue renders s as a Prometheus text-format label value: valid
+// appendLabelValue appends s as a Prometheus text-format label value: valid
 // UTF-8 with the reserved characters escaped.
 //
 // Validity is checked, not assumed. A label value can originate outside this
@@ -398,18 +568,32 @@ var labelValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 // ENTIRE scrape and every other metric down with it. Replacing the value is
 // strictly better than reproducing it faithfully; this is the last line of
 // defence, not the first.
-func escapeLabelValue(s string) string {
+//
+// The escapes are exactly the three the text format reserves and no more:
+// Prometheus's parser accepts only \\, \" and \n after a backslash and fails
+// the whole scrape on any other escape sequence
+// (prometheus/common expfmt.TextParser.readTokenAsLabelValue). A carriage
+// return is copied through, so escaping it would invent an invalid \r.
+func appendLabelValue(dst []byte, s string) []byte {
 	if !utf8.ValidString(s) {
-		return invalidLabelValue
+		return append(dst, invalidLabelValue...)
 	}
 	if !strings.ContainsAny(s, "\\\"\n") {
-		return s
+		return append(dst, s...)
 	}
-	return labelValueEscaper.Replace(s)
-}
-
-func formatFloat(v float64) string {
-	return strconv.FormatFloat(v, 'g', -1, 64)
+	for i := range len(s) {
+		switch c := s[i]; c {
+		case '\\':
+			dst = append(dst, '\\', '\\')
+		case '"':
+			dst = append(dst, '\\', '"')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst
 }
 
 func sortedKeys(m map[string]int) []string {

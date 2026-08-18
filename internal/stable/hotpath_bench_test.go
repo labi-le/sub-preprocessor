@@ -1,4 +1,4 @@
-package stable //nolint:testpackage // benchmarks unexported stable internals (parseProxies)
+package stable //nolint:testpackage // benchmarks unexported stable internals (probeNodes, parseLive)
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/metacubex/mihomo/common/convert"
 	mihomo "github.com/metacubex/mihomo/constant"
 
 	"domains.lst/sub-preprocessor/internal/config"
@@ -20,11 +21,12 @@ import (
 
 // Package-level sinks keep the compiler from eliding benchmarked work.
 var (
-	benchEntriesSink []Entry
-	benchSurvSink    []Survivor
-	benchBytesSink   []byte
-	benchProxSink    []mihomo.Proxy
-	benchProbeSink   map[string]ProbeResult
+	benchEntriesSink   []Entry
+	benchSurvSink      []Survivor
+	benchBytesSink     []byte
+	benchProxSink      []mihomo.Proxy
+	benchProbeSink     map[string]ProbeResult
+	benchProbeNodeSink []probeNode
 )
 
 const benchUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
@@ -145,7 +147,7 @@ func benchSurvivors() []Survivor {
 }
 
 // benchParsePayload builds a ~300-node merged payload (entriesPayload shape) of
-// parseable nodes for parseProxies.
+// parseable nodes for the parse benchmarks.
 func benchParsePayload() []byte {
 	const n = 300
 	entries := make([]Entry, n)
@@ -200,18 +202,13 @@ func BenchmarkBuildPayload(b *testing.B) {
 	}
 }
 
+// BenchmarkParseProxies prices the survivor-set parse (checker.go:464), which
+// is the whole payload: those nodes are live by definition.
 func BenchmarkParseProxies(b *testing.B) {
-	prober, err := NewMihomoProber(
-		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop(),
-	)
-	if err != nil {
-		b.Fatal(err)
-	}
-	payload := benchParsePayload()
+	prober, payload := benchParseProber(b), benchParsePayload()
 
 	// Sanity check + fail loud if the payload isn't parseable.
-	warm, _, err := prober.parseProxies(payload)
+	warm, err := prober.ParseProxies(payload)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -221,7 +218,7 @@ func BenchmarkParseProxies(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		proxies, _, perr := prober.parseProxies(payload)
+		proxies, perr := prober.ParseProxies(payload)
 		if perr != nil {
 			b.Fatal(perr)
 		}
@@ -230,6 +227,73 @@ func BenchmarkParseProxies(b *testing.B) {
 			_ = px.Close()
 		}
 	}
+}
+
+// BenchmarkProbeParseCondemned prices what Probe now spends on the same payload
+// at the production condemned share (benchCondemnedPercent): the converter, the
+// pre-check's whole input, and adapter objects for the survivors alone. Against
+// BenchmarkParseProxies over the same 300 nodes, the difference is the reorder.
+//
+// The condemned set is taken by stride rather than by dialling: a benchmark
+// cannot own the network, and which positions are condemned does not change the
+// work.
+func BenchmarkProbeParseCondemned(b *testing.B) {
+	prober, payload := benchParseProber(b), benchParsePayload()
+
+	b.ReportAllocs()
+	for b.Loop() {
+		mappings, err := convert.ConvertsV2Ray(payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+		nodes := probeNodes(mappings)
+		live := benchSpareEvery(len(nodes), benchCondemnedPercent)
+		live = prober.parseLive(mappings, nodes, live)
+		if len(live) == 0 {
+			b.Fatal("every spared position failed to parse")
+		}
+		benchProbeNodeSink = nodes
+		for _, i := range live {
+			_ = nodes[i].proxy.Close()
+		}
+	}
+}
+
+// benchCondemnedPercent is the NODE share the pre-check condemns on a healthy
+// egress: stable_probe_outcome_nodes{stage="condemned"} over
+// stable_probed_nodes. NOT precheckBreakerPercent's 58.9%, which is
+// refused/judged over distinct ENDPOINTS -- PrecheckReport is explicit that the
+// two are not interchangeable. Derivation, and what seeding this from the
+// endpoint share cost: docs/guides/benchmarks.md.
+const benchCondemnedPercent = 55.8
+
+// benchSpareEvery returns the positions a pre-check condemning pct of n leaves
+// live, spread evenly so no run of positions is either wholly parsed or wholly
+// skipped.
+func benchSpareEvery(n int, pct float64) []int {
+	live := make([]int, 0, n)
+	stride := 100 / (100 - pct)
+	for i := range n {
+		if float64(len(live)) < float64(i+1)/stride {
+			live = append(live, i)
+		}
+	}
+
+	return live
+}
+
+func benchParseProber(b *testing.B) *MihomoProber {
+	b.Helper()
+
+	prober, err := NewMihomoProber(
+		config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop(),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return prober
 }
 
 // foldProxy carries the two methods entryLabel reads, so this prices the
@@ -247,17 +311,17 @@ func (p *foldProxy) Type() mihomo.AdapterType { return mihomo.Vless }
 // result map the cycle carries from Probe into SelectSurvivors.
 func BenchmarkFoldProbeResults(b *testing.B) {
 	const n = 8817
-	pxs := make([]mihomo.Proxy, n)
-	for i := range pxs {
-		pxs[i] = &foldProxy{name: fmt.Sprintf("alpha-%05d", i)}
+	nodes := make([]probeNode, n)
+	for i := range nodes {
+		nodes[i] = probeNode{proxy: &foldProxy{name: fmt.Sprintf("alpha-%05d", i)}}
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		accs := make([]delayAcc, len(pxs))
+		accs := make([]delayAcc, len(nodes))
 		for i := range accs {
 			accs[i] = delayAcc{succ: 2, sum: 300, stage: StagePassed}
 		}
-		benchProbeSink = foldProbeResults(pxs, accs)
+		benchProbeSink = foldProbeResults(nodes, accs)
 	}
 }

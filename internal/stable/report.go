@@ -17,8 +17,9 @@ type CycleReport struct {
 	Probed      int
 	Kept        int
 	// ProbeStages counts the probed set by how far each node's probe got, and
-	// sums to Probed: a label the prober never named -- its proxies did not
-	// parse -- counts as StageUnknown rather than falling out of the total.
+	// sums to Probed: a label the prober never named -- its mapping did not
+	// parse and its endpoint was never condemned -- counts as StageUnknown
+	// rather than falling out of the total.
 	ProbeStages map[ProbeStage]int
 	// Precheck is what the reachability pre-check inside Probe did, in
 	// ENDPOINTS rather than nodes -- see PrecheckReport. It is the only place a
@@ -113,6 +114,10 @@ const (
 // surviving trace of the rejected verdict. Unresolved is the DNS fail-open
 // share: the name never became an address, which proves nothing about the
 // endpoint, so those nodes were probed instead (see filterReachable).
+//
+// Dialled counts every distinct TCP endpoint the payload names, parsable or
+// not: the pre-check judges the raw mapping, and mihomo only sees the ones it
+// spares.
 //
 // Deliberately not a FilterReport: Dropped renders as
 // stable_filter_dropped_nodes{reason=...}, the pre-check is not a filter, and

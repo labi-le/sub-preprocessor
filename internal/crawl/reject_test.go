@@ -25,6 +25,7 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/srcname"
 )
 
 // The fixture covers two of candidate's three pre-fetch gates (noise host, and a
@@ -302,7 +303,7 @@ func TestRejectLineCarriesTheMergeSourceName(t *testing.T) {
 
 	lines := runCycle(t, fixturePage).lines
 	sum := sha256.Sum256([]byte(fixNodeless))
-	want := managedPrefix + fixChannel + "-" + hex.EncodeToString(sum[:])[:6]
+	want := srcname.ManagedPrefix + fixChannel + "-" + hex.EncodeToString(sum[:])[:6]
 
 	var found string
 	for _, l := range withMsg(lines, "candidate rejected") {
@@ -734,9 +735,8 @@ func TestRecheckDoesNotEnterTheDiscoverySummary(t *testing.T) {
 	}
 }
 
-// TestRejectKeyDoesNotPinThePage: extractURLs hands out sub-slices of the page
-// it scanned (urlRe.FindAllString, and strings.TrimRight narrows without
-// copying), so a key kept for the whole cycle
+// TestRejectKeyDoesNotPinThePage: extractURLs hands out sub-slices of the page it
+// scanned, so a key kept for the whole cycle
 // would hold its entire page — up to maxPageBytes, 8 MiB — alive until scan
 // returns. The dedupe set needs the bytes of the URL, not of the page.
 func TestRejectKeyDoesNotPinThePage(t *testing.T) {
@@ -762,8 +762,8 @@ func TestRejectKeyDoesNotPinThePage(t *testing.T) {
 	if key != target {
 		t.Fatalf("recorded key = %q, want %q", key, target)
 	}
-	// The fixture carries no '&', so harvestPages' html.UnescapeString would
-	// return the page itself: the sub-slice points into page either way.
+	// The fixture carries no '&', so harvestPages' unescape returns the page
+	// itself: the sub-slice points into page either way.
 	// Compare against the slice we were given rather than against target, which
 	// is a separate constant.
 	base := uintptr(unsafe.Pointer(unsafe.StringData(urls[0])))

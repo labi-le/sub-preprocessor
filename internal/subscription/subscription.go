@@ -90,7 +90,8 @@ const schemeSep = "://"
 //
 // The generic path allocates nothing: Node.Raw is the caller's line and
 // Server, Port and Name are substrings of it. The three dedicated decoders
-// (vmess, ss legacy, ssr) each allocate one base64 buffer per node, and their
+// (vmess, ss legacy, ssr) each allocate a base64 buffer per node — two for ssr,
+// whose display name is base64 inside the payload — and their
 // Server/Port/Name are views into THAT buffer rather than into Raw — so what a
 // retained node string keeps alive is scheme-dependent, and a caller holding
 // one past the body it came from has to copy rather than slice.

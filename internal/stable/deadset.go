@@ -2,6 +2,7 @@ package stable
 
 import (
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,10 +30,18 @@ func (d *DeadSet) Blocked(key string) bool {
 }
 
 // Block marks key dead until now + jittered ttl (refreshing an existing entry).
+//
+// The clone honours the DeadCache contract: key is a view into Merge's key
+// arena, and a retained view pins its whole 1 KiB block for the entry's whole
+// TTL. Unconditional, because a Go map assignment REPLACES the stored string
+// key with the one passed in (needkeyupdate is true for strings; verified on
+// go1.26.5), so a refresh would swap a durable key for the view. filterDead
+// keeps an already-cached node out of the probe anyway, so nearly every key
+// reaching here is new and would be cloned regardless.
 func (d *DeadSet) Block(key string) error {
 	exp := time.Now().Add(jitteredTTL(d.ttl)).UnixNano()
 	d.mu.Lock()
-	d.m[key] = exp
+	d.m[strings.Clone(key)] = exp
 	d.mu.Unlock()
 	return nil
 }

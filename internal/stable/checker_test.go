@@ -315,6 +315,8 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 	}
 }
 
+// fakeDeadCache remembers what it was told, so like *DeadSet it must clone the
+// caller's key (see the DeadCache contract) rather than pin the arena view.
 type fakeDeadCache struct {
 	blocked  map[string]bool
 	recorded []string
@@ -322,6 +324,7 @@ type fakeDeadCache struct {
 
 func (d *fakeDeadCache) Blocked(key string) bool { return d.blocked[key] }
 func (d *fakeDeadCache) Block(key string) error {
+	key = strings.Clone(key)
 	d.recorded = append(d.recorded, key)
 	d.blocked[key] = true
 	return nil

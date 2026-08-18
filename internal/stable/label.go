@@ -7,6 +7,20 @@ import (
 )
 
 // entryLabel maps a mihomo proxy back onto the Entry.Label it was built from.
+func entryLabel(px mihomo.Proxy) string {
+	return foldMieruName(px.Name(), px.Type() == mihomo.Mieru)
+}
+
+// mappingLabel is entryLabel for a mapping no adapter was built from, which is
+// every node the pre-check condemns. mihomo copies both keys verbatim —
+// Base.name is option.Name (adapter/outbound/base.go:61) and the mieru port
+// suffix is the converter's own (common/convert/converter.go:662-696) — so this
+// answers what entryLabel would have for the proxy the mapping parses into.
+func mappingLabel(name, typ string) string {
+	return foldMieruName(name, typ == "mieru")
+}
+
+// foldMieruName folds a proxy name back onto its Entry.Label.
 //
 // Every scheme but one names its single proxy exactly the label (the URI
 // fragment Merge writes). mierus:// is the exception: mihomo expands ONE link
@@ -23,9 +37,8 @@ import (
 // every mieru name from that exact format, and uniqueName only appends
 // "-%02d" to the tail); it is there so that a future naming change degrades
 // into an unfolded name rather than collapsing every mieru proxy onto "".
-func entryLabel(px mihomo.Proxy) string {
-	name := px.Name()
-	if px.Type() != mihomo.Mieru {
+func foldMieruName(name string, mieru bool) string {
+	if !mieru {
 		return name
 	}
 	i := strings.LastIndexByte(name, ':')

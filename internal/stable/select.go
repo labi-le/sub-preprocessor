@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"domains.lst/sub-preprocessor/internal/geofeed"
+	"domains.lst/sub-preprocessor/internal/ioutil"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
@@ -116,7 +117,7 @@ func BuildPayload(ctx context.Context, ann preprocess.Annotator, survivors []Sur
 		line, country, ok := r.render(ctx, s.Raw, preprocess.AnnotateRequest{
 			IP:     s.annotatedIP(),
 			Egress: s.Egress,
-			Prefix: speedPrefix(s.Mbps),
+			Prefix: r.speedPrefix(s.Mbps),
 		})
 		if !ok {
 			// Annotation is best-effort and always has been: a line the parser
@@ -151,17 +152,38 @@ func (s *Survivor) annotatedIP() netip.Addr {
 // front of the configured tags rather than being one of them because the speed
 // is measured a whole stage after the annotate chain was built, and only for
 // the nodes that got that far.
-func speedPrefix(mbps int) string {
+//
+// The bytes stay in the renderer: Annotate copies the prefix into its own
+// scratch before returning, so this view never outlives the call reading it.
+func (r *renderer) speedPrefix(mbps int) string {
 	if mbps <= 0 {
 		return ""
 	}
+	r.prefix = append(r.prefix[:0], "[SPD:"...)
+	r.prefix = strconv.AppendInt(r.prefix, int64(mbps), decimalBase)
+	r.prefix = append(r.prefix, "M] "...)
 
-	return "[SPD:" + strconv.Itoa(mbps) + "M] "
+	return ioutil.UnsafeString(r.prefix)
 }
 
 // countryUnknown is the annotator's marker for "no provider resolved a
 // country" ([GEO:??]).
 const countryUnknown = "??"
+
+// alphaLetters is the alphabet countryCodes spans.
+const alphaLetters = 'Z' - 'A' + 1
+
+// countryCodes holds every AA..ZZ pair back to back so countryString can hand
+// out a view of immortal package data.
+var countryCodes = func() string {
+	var b [alphaLetters * alphaLetters * countryCodeLen]byte
+	for i := range alphaLetters * alphaLetters {
+		b[countryCodeLen*i] = byte('A' + i/alphaLetters)
+		b[countryCodeLen*i+1] = byte('A' + i%alphaLetters)
+	}
+
+	return string(b[:])
+}()
 
 // countryString renders the GEO chain's verdict into Entry.Country.
 //
@@ -170,12 +192,20 @@ const countryUnknown = "??"
 // cycle inside the metrics snapshot, where it becomes a Prometheus label, so a
 // 2-byte view would pin its whole root until the next publication and a code
 // that is not two letters would break the entire scrape.
+//
+// The codes come from one immortal table, so a published node allocates nothing
+// here and the label a scrape retains points at package data, not at a root.
 func countryString(c geofeed.CountryCode) string {
 	if c == (geofeed.CountryCode{}) {
 		return countryUnknown
 	}
+	hi, lo := int(c[0])-'A', int(c[1])-'A'
+	if hi < 0 || hi >= alphaLetters || lo < 0 || lo >= alphaLetters {
+		return c.String()
+	}
+	i := countryCodeLen * (hi*alphaLetters + lo)
 
-	return c.String()
+	return countryCodes[i : i+countryCodeLen]
 }
 
 // renderer annotates node lines, holding its buffers across a whole survivor
@@ -186,6 +216,7 @@ type renderer struct {
 	dst     bytes.Buffer
 	scratch bytes.Buffer
 	line    []byte
+	prefix  []byte
 }
 
 // render returns the annotated line for raw plus the country the GEO chain

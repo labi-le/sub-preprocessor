@@ -153,6 +153,37 @@ func TestParseSSRRejects(t *testing.T) {
 	}
 }
 
+// ssrQuerySegments is a query of n &-separated segments, the count net/url
+// bounds a query by.
+func ssrQuerySegments(n int) string {
+	return strings.Repeat("k=v&", n-1) + "remarks=" + b64u("Tokyo Node")
+}
+
+// TestParseSSRQueryParamCeiling is the first check mihomo's url.ParseQuery
+// makes: a query past net/url's 10000-segment ceiling is refused before a byte
+// of it is read, so such a payload converts nowhere and has to be counted
+// rejected rather than probed. The relabel path must agree with the parse path,
+// or a node accepted here would publish its raw line unrelabelled.
+func TestParseSSRQueryParamCeiling(t *testing.T) {
+	t.Parallel()
+
+	const ceiling = 10000
+
+	widest := ssrLine(ssrHead + "/?" + ssrQuerySegments(ceiling))
+	if node := mustParseOne(t, widest); node.Name != "Tokyo Node" {
+		t.Errorf("name at the ceiling: got %q, want the decoded remarks", node.Name)
+	}
+	if _, ok := subscription.RewriteSSRName(widest, "[GEO:JP] Tokyo"); !ok {
+		t.Error("RewriteSSRName refused a payload at the ceiling")
+	}
+
+	past := ssrLine(ssrHead + "/?" + ssrQuerySegments(ceiling+1))
+	rejectOne(t, past)
+	if _, ok := subscription.RewriteSSRName(past, "[GEO:JP] Tokyo"); ok {
+		t.Error("RewriteSSRName accepted a payload past the ceiling")
+	}
+}
+
 func TestRewriteSSRNameSetsRemarks(t *testing.T) {
 	t.Parallel()
 

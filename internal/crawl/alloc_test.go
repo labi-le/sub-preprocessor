@@ -15,14 +15,14 @@ import (
 
 // TestHarvestPagesUnescapesPageZeroOnce prices the copy by difference: the two
 // fixtures are the same page apart from one HTML entity in the prose, and
-// html.UnescapeString allocates only when it finds an '&', so what separates
-// them is the copies of page 0 and nothing else — the url and the node the
-// harvest keeps are byte-identical either way. Page 0 is the page both scans
+// unescapeInto copies only when it finds an '&', so what separates them is the
+// scratch the harvest fills for page 0 and nothing else — the url and the node
+// the harvest keeps are byte-identical either way. Page 0 is the page both scans
 // read, which is why unescaping per scan doubled this.
 func TestHarvestPagesUnescapesPageZeroOnce(t *testing.T) {
 	const (
-		// html.UnescapeString's copy is []byte(s) plus string(b[:dst]).
-		allocsPerCopy = 2
+		// One scratch buffer for the whole call, whatever the page count.
+		allocsPerCopy = 1
 		runs          = 50
 		escaped       = `me &amp; you https://sub.example/a?x=1 <pre>vless://u@1.2.3.4:443?a=1#n</pre>`
 	)

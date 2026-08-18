@@ -2,15 +2,19 @@ package subscription
 
 import (
 	"encoding/base64"
-	"net/url"
 	"strings"
 
 	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
+// ssrQueryHint sizes the array an ssr query is parsed into: mihomo reads
+// obfsparam, protoparam, remarks and group, and payloads in the wild add
+// udpport and uot.
+const ssrQueryHint = 8
+
 // ssrURLSafe maps the std base64 alphabet onto the url-safe one. An ssr query
 // carries base64 values ("remarks", "obfsparam", "protoparam", "group") that
-// url.ParseQuery would mangle in the std alphabet: '+' decodes to a space.
+// the query parser would mangle in the std alphabet: '+' decodes to a space.
 // mihomo runs the same substitution before parsing (convert/base64.go:36).
 var ssrURLSafe = strings.NewReplacer("+", "-", "/", "_")
 
@@ -19,7 +23,8 @@ var ssrURLSafe = strings.NewReplacer("+", "-", "/", "_")
 // not even the host — is readable from the URI itself; the generic authority
 // path reads the base64 blob as a hostname and every ssr node dies in DNS.
 func parseSSR(line, payload string) (Node, bool) {
-	head, query, ok := decodeSSR(payload)
+	var scratch [ssrQueryHint]queryPair
+	head, query, ok := decodeSSR(payload, scratch[:0])
 	if !ok {
 		return Node{}, false
 	}
@@ -68,26 +73,28 @@ func parseSSR(line, payload string) (Node, bool) {
 // The result carries no fragment and is encoded with the unpadded url-safe
 // alphabet on purpose: mihomo base64-decodes EVERYTHING after "ssr://",
 // fragment included, and reads "remarks" with RawURLEncoding, so a fragment or
-// a '=' pad (which url.Values.Encode escapes to "%3D") makes the link
+// a '=' pad (which query escaping turns into "%3D") makes the link
 // unconvertible.
 func RewriteSSRName(raw, newName string) (string, bool) {
 	_, payload, found := strings.Cut(raw, schemeSep)
 	if !found {
 		return "", false
 	}
-	head, query, ok := decodeSSR(payload)
+	var scratch [ssrQueryHint]queryPair
+	head, query, ok := decodeSSR(payload, scratch[:0])
 	if !ok {
 		return "", false
 	}
 
-	query.Set("remarks", base64.RawURLEncoding.EncodeToString([]byte(newName)))
-	encoded := query.Encode()
+	query = query.set("remarks", base64.RawURLEncoding.EncodeToString([]byte(newName)))
 
+	// rawLen is exact for a query whose values are all base64, which is every
+	// ssr query: nothing in that alphabet escapes, so plain never grows.
 	const sep = "/?"
-	plain := make([]byte, 0, len(head)+len(sep)+len(encoded))
+	plain := make([]byte, 0, len(head)+len(sep)+query.rawLen())
 	plain = append(plain, head...)
 	plain = append(plain, sep...)
-	plain = append(plain, encoded...)
+	plain = query.appendEncoded(plain)
 
 	const scheme = "ssr://"
 	buf := make([]byte, 0, len(scheme)+base64.RawURLEncoding.EncodedLen(len(plain)))
@@ -97,8 +104,8 @@ func RewriteSSRName(raw, newName string) (string, bool) {
 }
 
 // decodeSSR splits a decoded ssr payload into its colon-separated head and the
-// PARSED query following "/?". The "/?", the exactly-6-fields and the
-// url.ParseQuery requirements are all mihomo's
+// PARSED query following "/?". The "/?", the exactly-6-fields and the net/url
+// query grammar are all mihomo's
 // (convert/converter.go:483-504) and are mirrored deliberately: a node we keep
 // but the prober cannot convert burns probe budget and can never be published,
 // which is worse than an honest reject.
@@ -112,7 +119,7 @@ func RewriteSSRName(raw, newName string) (string, bool) {
 // The optional trailing "#name" is stripped before decoding. mihomo does not do
 // that and fails on such a link, but both of our output paths re-emit ssr nodes
 // through RewriteSSRName, which drops the fragment.
-func decodeSSR(payload string) (head string, query url.Values, ok bool) {
+func decodeSSR(payload string, scratch queryList) (head string, query queryList, ok bool) {
 	if i := strings.IndexByte(payload, '#'); i >= 0 {
 		payload = payload[:i]
 	}
@@ -130,8 +137,8 @@ func decodeSSR(payload string) (head string, query url.Values, ok bool) {
 	if strings.Count(head, ":") != ssrHeadSeparators {
 		return "", nil, false
 	}
-	query, err := url.ParseQuery(ssrURLSafeQuery(rawQuery))
-	if err != nil {
+	query, ok = scratch.parse(ssrURLSafeQuery(rawQuery))
+	if !ok {
 		return "", nil, false
 	}
 	return head, query, true
@@ -143,8 +150,8 @@ func decodeSSR(payload string) (head string, query url.Values, ok bool) {
 // already applied — so both alphabets are accepted; an undecodable value yields
 // "" and the caller falls back to the host, as a name is never worth rejecting
 // a reachable node over.
-func ssrRemarks(query url.Values) string {
-	decoded, ok := decodeBase64Tolerant(query.Get("remarks"))
+func ssrRemarks(query queryList) string {
+	decoded, ok := decodeBase64Tolerant(query.get("remarks"))
 	if !ok {
 		return ""
 	}

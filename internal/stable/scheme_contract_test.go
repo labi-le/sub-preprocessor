@@ -348,6 +348,33 @@ func TestSchemeContractEndToEnd(t *testing.T) {
 	}
 }
 
+// TestSchemeContractProbeNodesMatchTheAdapter runs the same corpus through the
+// derivation the TCP pre-check now judges on, before any adapter exists: for
+// every mapping the relabeled Entry.Raw converts to, what probeNodes read off
+// the raw mapping must be what the adapter would have answered, and the label a
+// condemned node is filed under must be the Entry's own.
+func TestSchemeContractProbeNodesMatchTheAdapter(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range schemeContracts(t) {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := c.assertMerged(t, subscription.Normalize([]byte(c.line+"\n")))
+			nodes := testProbeNodes(t, e.Raw)
+			if len(nodes) != len(c.addrs) {
+				t.Fatalf("converted %d mappings, want %d", len(nodes), len(c.addrs))
+			}
+			for i := range nodes {
+				if nodes[i].label != e.Label {
+					t.Errorf("position %d files under %q, want the entry label %q", i, nodes[i].label, e.Label)
+				}
+			}
+			assertNodesMatchTheAdapter(t, e.Raw, nodes)
+		})
+	}
+}
+
 // assertParsed pins hop 2: the scheme, server and port subscription.Parse reads
 // out of the link, and that it read them without rejecting anything.
 func (c schemeContract) assertParsed(t *testing.T, payload []byte) {

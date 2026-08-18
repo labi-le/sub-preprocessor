@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"domains.lst/sub-preprocessor/internal/ioutil"
 )
@@ -56,28 +57,55 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 }
 
 // RewriteVmessName returns a vmess:// line identical to raw except its "ps"
-// (display name) field is set to newName, re-encoding the JSON payload.
+// (display name) field is set to newName, re-encoding the base64 payload.
 // Downstream consumers that key nodes by name (the mihomo prober) then see the
 // intended label. It returns false when raw is not a decodable vmess payload.
+//
+// The new name is spliced over the old value rather than marshalled from a
+// map[string]json.RawMessage: that round trip was 89% of this function's
+// alloc_objects on 2026-08-18 (json.Unmarshal 68%, json.Marshal 21%) and
+// re-encoded the whole document to change one field. Splicing keeps every other
+// byte — unknown fields, their order, their spelling — as the producer wrote it.
+//
+// vmessFields gates the payload, so the accept set stays the map decode's:
+// TestVmessFieldsAgreeWithMapDecode pins the two together document by document.
 func RewriteVmessName(raw, newName string) (string, bool) {
-	_, payload, found := strings.Cut(raw, "://")
+	_, payload, found := strings.Cut(raw, schemeSep)
 	if !found {
 		return "", false
 	}
-	m, ok := decodeVmessJSON(payload)
+	doc, ok := decodeVmessPayload(payload)
+	if !ok {
+		return "", false
+	}
+	fields, ok := vmessFields(doc)
 	if !ok {
 		return "", false
 	}
 
-	nameJSON, err := json.Marshal(newName)
-	if err != nil {
+	// Encoding the name first makes plain's capacity exact, and the scratch is
+	// wide enough for a tagged label so the common name never reaches the heap.
+	var scratch [nameScratch]byte
+	nameJSON, ok := appendJSONString(scratch[:0], newName)
+	if !ok {
 		return "", false
 	}
-	m["ps"] = nameJSON
 
-	out, err := json.Marshal(m)
-	if err != nil {
-		return "", false
+	const psMember = `"ps":`
+	plain := make([]byte, 0, len(doc)+len(psMember)+len(nameJSON)+len(","))
+	if fields.psAt >= 0 {
+		plain = append(plain, doc[:fields.psAt]...)
+		plain = append(plain, nameJSON...)
+		plain = append(plain, doc[fields.psAt+len(fields.ps):]...)
+	} else {
+		open := skipJSONSpace(doc, 0) + 1
+		plain = append(plain, doc[:open]...)
+		plain = append(plain, psMember...)
+		plain = append(plain, nameJSON...)
+		if doc[skipJSONSpace(doc, open)] != '}' {
+			plain = append(plain, ',')
+		}
+		plain = append(plain, doc[open:]...)
 	}
 
 	// AppendEncode base64 directly after the "vmess://" scheme into one freshly
@@ -85,21 +113,65 @@ func RewriteVmessName(raw, newName string) (string, bool) {
 	// string concatenation. The buffer is never mutated after this point, so
 	// UnsafeString hands it back without a copy.
 	const scheme = "vmess://"
-	buf := make([]byte, 0, len(scheme)+base64.StdEncoding.EncodedLen(len(out)))
+	buf := make([]byte, 0, len(scheme)+base64.StdEncoding.EncodedLen(len(plain)))
 	buf = append(buf, scheme...)
-	buf = base64.StdEncoding.AppendEncode(buf, out)
+	buf = base64.StdEncoding.AppendEncode(buf, plain)
 	return ioutil.UnsafeString(buf), true
 }
 
-// decodeVmessJSON base64-decodes the payload and unmarshals it into a
-// raw-message map so unknown fields survive RewriteVmessName's round-trip. A
-// JSON null or non-object payload is rejected as unusable.
-//
-// parseVmess deliberately does NOT come through here: the map form copies every
-// field of a document whose ~16 fields it needs three of, at a measured 55
-// allocations and 3050 B per node against a ~400 B line. It reads them with
-// vmessFields instead, and the map is left to the one caller that must rebuild
-// the document.
+// nameScratch bounds the stack buffer a JSON-encoded display name is built in.
+// A relabelled name is the upstream one behind a "[GEO:xx][SPD:nM] " prefix,
+// which the shipped tags keep well inside this.
+const nameScratch = 128
+
+// appendJSONString appends s as a JSON string. The escape-free path is the
+// point: json.Marshal allocates an encodeState and a returned copy, and a
+// display name — even an emoji one — is almost always a string it would emit
+// verbatim between quotes. jsonPlainString decides that, and
+// TestAppendJSONStringMatchesMarshal pins the two forms together.
+func appendJSONString(dst []byte, s string) ([]byte, bool) {
+	if jsonPlainString(s) {
+		dst = append(dst, '"')
+		dst = append(dst, s...)
+		return append(dst, '"'), true
+	}
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		return dst, false
+	}
+	return append(dst, encoded...), true
+}
+
+// jsonPlainString reports whether json.Marshal emits s as itself between
+// quotes. Deliberately conservative — a false negative only costs the marshal —
+// so it demands printable ASCII outside the bytes encoding/json escapes ('"',
+// '\\' and the three HTML ones), and for non-ASCII valid UTF-8 that is neither
+// U+2028 nor U+2029, the two runes Marshal escapes anyway.
+func jsonPlainString(s string) bool {
+	const del = 0x7f
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			if c < ' ' || c == del || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+				return false
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || r == '\u2028' || r == '\u2029' {
+			return false
+		}
+		i += size
+	}
+
+	return true
+}
+
+// decodeVmessJSON is the reference decode the field walker and the name splice
+// are pinned against (vmess_internal_test.go). Nothing on the parse or rewrite
+// path comes through here: the map form copies every field of a document whose ~16
+// fields three are read from, at a measured 55 allocations and 3050 B per node
+// against a ~400 B line.
 func decodeVmessJSON(payload string) (map[string]json.RawMessage, bool) {
 	decoded, ok := decodeVmessPayload(payload)
 	if !ok {
@@ -123,9 +195,12 @@ func decodeVmessPayload(payload string) ([]byte, bool) {
 }
 
 // vmessScalars holds the three fields parseVmess needs, each a raw JSON view
-// into the decoded payload rather than a copy of it.
+// into the decoded payload rather than a copy of it. psAt is where that view
+// starts, which is what lets RewriteVmessName splice a new name over it; it is
+// -1 when the document carries no "ps".
 type vmessScalars struct {
 	add, port, ps []byte
+	psAt          int
 }
 
 // vmessFields reads add/port/ps off a decoded vmess payload.
@@ -140,7 +215,7 @@ type vmessScalars struct {
 //
 // A repeated key resolves to the LAST occurrence, as it does in a map decode.
 func vmessFields(doc []byte) (vmessScalars, bool) {
-	var out vmessScalars
+	out := vmessScalars{psAt: -1}
 	if !json.Valid(doc) {
 		return out, false
 	}
@@ -164,7 +239,7 @@ func vmessFields(doc []byte) (vmessScalars, bool) {
 		case jsonKeyEquals(key, "port"):
 			out.port = doc[i:valEnd]
 		case jsonKeyEquals(key, "ps"):
-			out.ps = doc[i:valEnd]
+			out.ps, out.psAt = doc[i:valEnd], i
 		}
 		i = skipJSONSpace(doc, valEnd)
 		if i < len(doc) && doc[i] == ',' {

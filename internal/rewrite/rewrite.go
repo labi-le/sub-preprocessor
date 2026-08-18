@@ -27,11 +27,6 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 		cleanName = node.Server
 	}
 
-	name := cleanName
-	if tags != "" {
-		name = tags + " " + cleanName
-	}
-
 	// vmess and ssr carry their display name inside the base64 payload rather
 	// than in a URI fragment, so the tag prefix is folded into the payload and
 	// re-encoded. For ssr a fragment would be actively harmful: mihomo
@@ -40,14 +35,14 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 	// payload is published verbatim — unannotated beats mangled.
 	switch node.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
 	case subscription.SchemeVmess:
-		if out, ok := subscription.RewriteVmessName(node.Raw, name); ok {
+		if out, ok := subscription.RewriteVmessName(node.Raw, displayName(tags, cleanName)); ok {
 			b.WriteString(out)
 			return
 		}
 		b.WriteString(node.Raw)
 		return
 	case subscription.SchemeSSR:
-		if out, ok := subscription.RewriteSSRName(node.Raw, name); ok {
+		if out, ok := subscription.RewriteSSRName(node.Raw, displayName(tags, cleanName)); ok {
 			b.WriteString(out)
 			return
 		}
@@ -61,7 +56,23 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 		b.WriteString(node.Raw)
 	}
 	b.WriteByte('#')
-	b.WriteString(name)
+	if tags != "" {
+		b.WriteString(tags)
+		b.WriteByte(' ')
+	}
+	b.WriteString(cleanName)
+}
+
+// displayName is called only by the two payload arms: they re-encode the name
+// inside base64 and so need it contiguous. The fragment path writes the same
+// bytes in three writes and pays no allocation for them -- ~300000 nodes a
+// cycle, measured 2026-08-18 as 99.6% of alloc_objects in NodeName.
+func displayName(tags, cleanName string) string {
+	if tags == "" {
+		return cleanName
+	}
+
+	return tags + " " + cleanName
 }
 
 func supportsFragmentRewrite(node subscription.Node) bool {

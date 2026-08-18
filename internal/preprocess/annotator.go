@@ -31,6 +31,11 @@ func (e Egress) Valid() bool { return e.IP.IsValid() }
 // address otherwise), because only the caller knows which of the two it wants
 // published. Prefix is written ahead of the configured tags verbatim, for tags
 // the caller renders itself (`[SPD:60M] `).
+//
+// Annotate may not retain Prefix, and may not return a line that aliases it:
+// the caller renders it into a buffer it reuses per node
+// (stable.renderer.speedPrefix), overwritten on the next survivor, so a stored
+// view would publish the next node's speed.
 type AnnotateRequest struct {
 	Node   subscription.Node
 	IP     netip.Addr
@@ -154,6 +159,8 @@ func (a *annotator) Annotate(
 		}
 		scratch.WriteByte(']')
 	}
+	// Free while NodeName does not retain tags: escape analysis then keeps this
+	// conversion on the stack (BenchmarkAnnotate, 1 -> 0 allocs/op 2026-08-18).
 	rewrite.NodeName(dst, req.Node, scratch.String())
 	return country
 }

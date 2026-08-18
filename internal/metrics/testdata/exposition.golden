@@ -1,0 +1,339 @@
+# case: no cycle published yet
+# HELP stable_cycles_total Stable cycles attempted (published + failed).
+# TYPE stable_cycles_total counter
+stable_cycles_total 7
+# HELP stable_cycle_failures_total Stable cycles that did not publish a new list.
+# TYPE stable_cycle_failures_total counter
+stable_cycle_failures_total 2
+# case: full cycle
+# HELP stable_cycles_total Stable cycles attempted (published + failed).
+# TYPE stable_cycles_total counter
+stable_cycles_total 4211
+# HELP stable_cycle_failures_total Stable cycles that did not publish a new list.
+# TYPE stable_cycle_failures_total counter
+stable_cycle_failures_total 19
+# HELP stable_sources_ok Sources that returned a usable body last cycle.
+# TYPE stable_sources_ok gauge
+stable_sources_ok 6
+# HELP stable_sources_total Sources configured.
+# TYPE stable_sources_total gauge
+stable_sources_total 7
+# HELP stable_merged_nodes Unique nodes after merge/dedupe.
+# TYPE stable_merged_nodes gauge
+stable_merged_nodes 21000
+# HELP stable_dead_skipped_nodes Nodes skipped before probing: a recent probe found them dead.
+# TYPE stable_dead_skipped_nodes gauge
+stable_dead_skipped_nodes 19391
+# HELP stable_probed_nodes Nodes latency-probed.
+# TYPE stable_probed_nodes gauge
+stable_probed_nodes 1609
+# HELP stable_probe_outcome_nodes Probed nodes by how far the probe got, summing to stable_probed_nodes. stage="condemned" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage="connect" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage="fetch" got a tunnel and failed the GET through it. stage="passed" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.
+# TYPE stable_probe_outcome_nodes gauge
+stable_probe_outcome_nodes{stage="condemned"} 700
+stable_probe_outcome_nodes{stage="connect"} 400
+stable_probe_outcome_nodes{stage="fetch"} 100
+stable_probe_outcome_nodes{stage="passed"} 405
+stable_probe_outcome_nodes{stage="unknown"} 4
+# HELP stable_precheck_trusted 1 when the TCP reachability pre-check's verdict was used last cycle, 0 when its breaker rejected it: refused at least 95% of the endpoints it judged, so the verdict was DISCARDED, every node was URL-tested and stable_probe_outcome_nodes{stage="condemned"} reads 0 exactly as it does for a pre-check that condemned nobody. stable_precheck_refused_endpoints is then the only trace of what was thrown away.
+# TYPE stable_precheck_trusted gauge
+stable_precheck_trusted 1
+# HELP stable_precheck_dialled_endpoints Distinct server:port endpoints the pre-check dialled last cycle: its own denominator. Endpoints, not nodes -- a multi-port mierus:// node is several, and a node whose adapter reaches its server over UDP (hysteria2/tuic/mieru, or vless xhttp-over-QUIC) is dialled not at all.
+# TYPE stable_precheck_dialled_endpoints gauge
+stable_precheck_dialled_endpoints 1200
+# HELP stable_precheck_refused_endpoints Endpoints the pre-check proved unreachable: a refused or black-holed SYN on every attempt. Condemned unprobed and dead-cached while stable_precheck_trusted is 1; discarded when it is 0. A healthy egress measured ~59% of dialled endpoints here.
+# TYPE stable_precheck_refused_endpoints gauge
+stable_precheck_refused_endpoints 707
+# HELP stable_precheck_unresolved_endpoints Endpoints whose name never became an address inside the dial budget (a *net.DNSError, timeout included). The pre-check proved nothing about them, so they were URL-tested rather than condemned: mihomo's own dial resolves through a stale-serving cache where this path pays an uncached lookup per attempt. ~5% of dialled endpoints in the measured mix; a spike is a resolver fault, not a pool fault.
+# TYPE stable_precheck_unresolved_endpoints gauge
+stable_precheck_unresolved_endpoints 61
+# HELP stable_kept_nodes Nodes published to /stable.txt.
+# TYPE stable_kept_nodes gauge
+stable_kept_nodes 1509
+# HELP stable_geo_unknown_nodes Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.
+# TYPE stable_geo_unknown_nodes gauge
+stable_geo_unknown_nodes 12
+# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.
+# TYPE stable_trace_answered_nodes gauge
+stable_trace_answered_nodes 1400
+# HELP stable_trace_unanswered_nodes Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.
+# TYPE stable_trace_unanswered_nodes gauge
+stable_trace_unanswered_nodes 109
+# HELP stable_trace_moved_nodes Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.
+# TYPE stable_trace_moved_nodes gauge
+stable_trace_moved_nodes 87
+# HELP stable_gemini_gate_enabled 1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.
+# TYPE stable_gemini_gate_enabled gauge
+stable_gemini_gate_enabled 1
+# HELP stable_gemini_gate_checks Gemini API responses the gate classified last cycle: the denominator for stable_gemini_gate_unverified_checks. One per proxy that ANSWERED, so it is neither the node count nor stable_filter_in_nodes{filter="gemini"} -- a mierus:// node contributes one per answering port, not one per configured port. A proxy that never answered is in neither term here, and reaches stable_filter_dropped_nodes{filter="gemini",reason="unreachable"} only when EVERY proxy of its node was unreachable: that reason is counted per SURVIVOR, off an outcome already folded best-of-ports, so one live port keeps the node and its dead siblings are counted nowhere.
+# TYPE stable_gemini_gate_checks gauge
+stable_gemini_gate_checks 654
+# HELP stable_gemini_gate_unverified_checks Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.
+# TYPE stable_gemini_gate_unverified_checks gauge
+stable_gemini_gate_unverified_checks 12
+# HELP stable_kept_country_nodes Published nodes per resolved country (last cycle).
+# TYPE stable_kept_country_nodes gauge
+stable_kept_country_nodes{country="??"} 3
+stable_kept_country_nodes{country="FI"} 40
+stable_kept_country_nodes{country="a\nb"} 4
+stable_kept_country_nodes{country="c\\d"} 5
+stable_kept_country_nodes{country="x\"y"} 1
+stable_kept_country_nodes{country="invalid_utf8"} 2
+# HELP stable_cycle_duration_seconds Wall time of the last cycle.
+# TYPE stable_cycle_duration_seconds gauge
+stable_cycle_duration_seconds 1.234567891e+06
+# HELP stable_cycle_phase_duration_seconds Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase="probe" is the whole Prober.Probe call -- payload parsing, then the TCP reachability pre-check at its own concurrency outside check.concurrency, then the URL-test rounds -- so check.timeout * check.rounds bounds only its last part; the condemned count in the probe-outcome stage breakdown is what shows the pre-check's share. phase="egress" is the through-node filters and the cdn-cgi/trace measurement, which also do per-node network work.
+# TYPE stable_cycle_phase_duration_seconds gauge
+stable_cycle_phase_duration_seconds{phase="fetch"} 12.5
+stable_cycle_phase_duration_seconds{phase="merge"} 0.3
+stable_cycle_phase_duration_seconds{phase="dead_filter"} 0.042
+stable_cycle_phase_duration_seconds{phase="probe"} 900
+stable_cycle_phase_duration_seconds{phase="egress"} 250
+stable_cycle_phase_duration_seconds{phase="publish"} 1.5
+# HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
+# TYPE stable_last_success_timestamp_seconds gauge
+stable_last_success_timestamp_seconds 1.755474123e+09
+# HELP stable_filter_in_nodes Survivors entering each through-node filter.
+# TYPE stable_filter_in_nodes gauge
+stable_filter_in_nodes{filter="geoblock"} 900
+stable_filter_in_nodes{filter="bandwidth"} 850
+stable_filter_in_nodes{filter="gemini"} 700
+# HELP stable_filter_kept_nodes Survivors kept by each through-node filter.
+# TYPE stable_filter_kept_nodes gauge
+stable_filter_kept_nodes{filter="geoblock"} 850
+stable_filter_kept_nodes{filter="bandwidth"} 700
+stable_filter_kept_nodes{filter="gemini"} 700
+# HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
+# TYPE stable_filter_dropped_nodes gauge
+stable_filter_dropped_nodes{filter="geoblock",reason="blocked"} 50
+stable_filter_dropped_nodes{filter="bandwidth",reason="slow"} 150
+stable_filter_dropped_nodes{filter="bandwidth",reason="unreachable"} 0
+# HELP stable_source_nodes_total Nodes each source yielded before filtering last cycle. source is the verbatim config key; feed and owner are derived from it, owner=crawler for a crawler-minted name and curated for a hand-added one.
+# TYPE stable_source_nodes_total gauge
+stable_source_nodes_total{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 412
+stable_source_nodes_total{feed="inline",owner="crawler",source="tg-inline"} 40
+stable_source_nodes_total{feed="96c4d7c7a7",owner="crawler",source="tg-96c4d7c7a7"} 1
+stable_source_nodes_total{feed="flat447",owner="curated",source="flat447"} 9000
+stable_source_nodes_total{feed="quote\"back\\slash\nnewline",owner="curated",source="quote\"back\\slash\nnewline"} 5
+stable_source_nodes_total{feed="invalid_utf8",owner="curated",source="invalid_utf8"} 2
+# HELP stable_source_valid_nodes Nodes each source contributed after preprocess filtering. Counted per source BEFORE Merge dedupes across sources, so a node two sources both yield is counted in both.
+# TYPE stable_source_valid_nodes gauge
+stable_source_valid_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 388
+stable_source_valid_nodes{feed="inline",owner="crawler",source="tg-inline"} 39
+stable_source_valid_nodes{feed="96c4d7c7a7",owner="crawler",source="tg-96c4d7c7a7"} 1
+stable_source_valid_nodes{feed="flat447",owner="curated",source="flat447"} 8000
+stable_source_valid_nodes{feed="quote\"back\\slash\nnewline",owner="curated",source="quote\"back\\slash\nnewline"} 4
+stable_source_valid_nodes{feed="invalid_utf8",owner="curated",source="invalid_utf8"} 2
+# HELP stable_source_tested_nodes Nodes each source contributed that survived the URL test. Measured after the merge, so stable_source_valid_nodes minus this is NOT the probe failures. Merge first drops what will not re-parse, what is a placeholder, what an earlier source already yielded at the same server:port, and what cannot carry its label; then the dead-node cache skips every merged node whose recent probe failed, and only the remainder is URL-tested. The duplicate term is the largest of the three -- a node two sources both yield counts in both of their valid gauges and in neither's later ones -- and the dead-node skip is merely the largest term no per-source series exposes: read stable_dead_skipped_nodes against stable_merged_nodes for it.
+# TYPE stable_source_tested_nodes gauge
+stable_source_tested_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 201
+stable_source_tested_nodes{feed="inline",owner="crawler",source="tg-inline"} 30
+stable_source_tested_nodes{feed="96c4d7c7a7",owner="crawler",source="tg-96c4d7c7a7"} 1
+stable_source_tested_nodes{feed="flat447",owner="curated",source="flat447"} 1.234567e+06
+stable_source_tested_nodes{feed="quote\"back\\slash\nnewline",owner="curated",source="quote\"back\\slash\nnewline"} 3
+stable_source_tested_nodes{feed="invalid_utf8",owner="curated",source="invalid_utf8"} 2
+# HELP stable_source_published_nodes Nodes each source contributed that survived every through-node filter and reached the published list.
+# TYPE stable_source_published_nodes gauge
+stable_source_published_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 96
+stable_source_published_nodes{feed="inline",owner="crawler",source="tg-inline"} 12
+stable_source_published_nodes{feed="96c4d7c7a7",owner="crawler",source="tg-96c4d7c7a7"} 1
+stable_source_published_nodes{feed="flat447",owner="curated",source="flat447"} 900
+stable_source_published_nodes{feed="quote\"back\\slash\nnewline",owner="curated",source="quote\"back\\slash\nnewline"} 2
+stable_source_published_nodes{feed="invalid_utf8",owner="curated",source="invalid_utf8"} 2
+# HELP stable_source_dropped_nodes Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total). It deliberately carries no feed or owner labels: nothing reads drops by owner.
+# TYPE stable_source_dropped_nodes gauge
+stable_source_dropped_nodes{reason="dns",source="tg-genliberty-7e9b21"} 3
+stable_source_dropped_nodes{reason="geo",source="tg-genliberty-7e9b21"} 0
+stable_source_dropped_nodes{reason="cidr",source="tg-genliberty-7e9b21"} 5
+stable_source_dropped_nodes{reason="asn",source="tg-genliberty-7e9b21"} 0
+stable_source_dropped_nodes{reason="geoblock",source="tg-genliberty-7e9b21"} 11
+stable_source_dropped_nodes{reason="ipv6",source="tg-genliberty-7e9b21"} 0
+stable_source_dropped_nodes{reason="unsupported",source="tg-genliberty-7e9b21"} 7
+stable_source_dropped_nodes{reason="dns",source="tg-inline"} 0
+stable_source_dropped_nodes{reason="geo",source="tg-inline"} 1
+stable_source_dropped_nodes{reason="cidr",source="tg-inline"} 0
+stable_source_dropped_nodes{reason="asn",source="tg-inline"} 2
+stable_source_dropped_nodes{reason="geoblock",source="tg-inline"} 0
+stable_source_dropped_nodes{reason="ipv6",source="tg-inline"} 4
+stable_source_dropped_nodes{reason="unsupported",source="tg-inline"} 0
+stable_source_dropped_nodes{reason="dns",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="geo",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="cidr",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="asn",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="geoblock",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="ipv6",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="unsupported",source="tg-96c4d7c7a7"} 0
+stable_source_dropped_nodes{reason="dns",source="flat447"} 7
+stable_source_dropped_nodes{reason="geo",source="flat447"} 7
+stable_source_dropped_nodes{reason="cidr",source="flat447"} 7
+stable_source_dropped_nodes{reason="asn",source="flat447"} 7
+stable_source_dropped_nodes{reason="geoblock",source="flat447"} 7
+stable_source_dropped_nodes{reason="ipv6",source="flat447"} 7
+stable_source_dropped_nodes{reason="unsupported",source="flat447"} 7
+stable_source_dropped_nodes{reason="dns",source="quote\"back\\slash\nnewline"} 1
+stable_source_dropped_nodes{reason="geo",source="quote\"back\\slash\nnewline"} 0
+stable_source_dropped_nodes{reason="cidr",source="quote\"back\\slash\nnewline"} 0
+stable_source_dropped_nodes{reason="asn",source="quote\"back\\slash\nnewline"} 0
+stable_source_dropped_nodes{reason="geoblock",source="quote\"back\\slash\nnewline"} 0
+stable_source_dropped_nodes{reason="ipv6",source="quote\"back\\slash\nnewline"} 0
+stable_source_dropped_nodes{reason="unsupported",source="quote\"back\\slash\nnewline"} 1
+stable_source_dropped_nodes{reason="dns",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="geo",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="cidr",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="asn",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="geoblock",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="ipv6",source="invalid_utf8"} 0
+stable_source_dropped_nodes{reason="unsupported",source="invalid_utf8"} 0
+# HELP stable_kept_speed_mbps Download speed (Mbps) of kept nodes.
+# TYPE stable_kept_speed_mbps histogram
+stable_kept_speed_mbps_bucket{le="5"} 1
+stable_kept_speed_mbps_bucket{le="10"} 2
+stable_kept_speed_mbps_bucket{le="25"} 3
+stable_kept_speed_mbps_bucket{le="50"} 4
+stable_kept_speed_mbps_bucket{le="100"} 5
+stable_kept_speed_mbps_bucket{le="250"} 6
+stable_kept_speed_mbps_bucket{le="500"} 7
+stable_kept_speed_mbps_bucket{le="+Inf"} 1509
+stable_kept_speed_mbps_sum 1.236932e+06
+stable_kept_speed_mbps_count 1509
+# HELP stable_kept_speed_min_mbps Slowest kept node's measured speed last cycle.
+# TYPE stable_kept_speed_min_mbps gauge
+stable_kept_speed_min_mbps 3
+# HELP stable_kept_speed_max_mbps Fastest kept node's measured speed last cycle.
+# TYPE stable_kept_speed_max_mbps gauge
+stable_kept_speed_max_mbps 1200
+# HELP stable_kept_latency_ms Mean probe delay (ms) of kept nodes.
+# TYPE stable_kept_latency_ms histogram
+stable_kept_latency_ms_bucket{le="100"} 2
+stable_kept_latency_ms_bucket{le="250"} 3
+stable_kept_latency_ms_bucket{le="500"} 4
+stable_kept_latency_ms_bucket{le="800"} 5
+stable_kept_latency_ms_bucket{le="1000"} 6
+stable_kept_latency_ms_bucket{le="1500"} 7
+stable_kept_latency_ms_bucket{le="3000"} 8
+stable_kept_latency_ms_bucket{le="4000"} 9
+stable_kept_latency_ms_bucket{le="6000"} 10
+stable_kept_latency_ms_bucket{le="12000"} 11
+stable_kept_latency_ms_bucket{le="+Inf"} 12
+stable_kept_latency_ms_sum 45400
+stable_kept_latency_ms_count 12
+# HELP stable_kept_latency_min_ms Fastest kept node's mean probe delay last cycle.
+# TYPE stable_kept_latency_min_ms gauge
+stable_kept_latency_min_ms 0
+# HELP stable_kept_latency_max_ms Slowest kept node's mean probe delay last cycle: how close the published list runs to max_avg_ms.
+# TYPE stable_kept_latency_max_ms gauge
+stable_kept_latency_max_ms 20000
+# case: tripped pre-check, keyless gate, nothing kept
+# HELP stable_cycles_total Stable cycles attempted (published + failed).
+# TYPE stable_cycles_total counter
+stable_cycles_total 4212
+# HELP stable_cycle_failures_total Stable cycles that did not publish a new list.
+# TYPE stable_cycle_failures_total counter
+stable_cycle_failures_total 20
+# HELP stable_sources_ok Sources that returned a usable body last cycle.
+# TYPE stable_sources_ok gauge
+stable_sources_ok 0
+# HELP stable_sources_total Sources configured.
+# TYPE stable_sources_total gauge
+stable_sources_total 3
+# HELP stable_merged_nodes Unique nodes after merge/dedupe.
+# TYPE stable_merged_nodes gauge
+stable_merged_nodes 0
+# HELP stable_dead_skipped_nodes Nodes skipped before probing: a recent probe found them dead.
+# TYPE stable_dead_skipped_nodes gauge
+stable_dead_skipped_nodes 0
+# HELP stable_probed_nodes Nodes latency-probed.
+# TYPE stable_probed_nodes gauge
+stable_probed_nodes 0
+# HELP stable_precheck_trusted 1 when the TCP reachability pre-check's verdict was used last cycle, 0 when its breaker rejected it: refused at least 95% of the endpoints it judged, so the verdict was DISCARDED, every node was URL-tested and stable_probe_outcome_nodes{stage="condemned"} reads 0 exactly as it does for a pre-check that condemned nobody. stable_precheck_refused_endpoints is then the only trace of what was thrown away.
+# TYPE stable_precheck_trusted gauge
+stable_precheck_trusted 0
+# HELP stable_precheck_dialled_endpoints Distinct server:port endpoints the pre-check dialled last cycle: its own denominator. Endpoints, not nodes -- a multi-port mierus:// node is several, and a node whose adapter reaches its server over UDP (hysteria2/tuic/mieru, or vless xhttp-over-QUIC) is dialled not at all.
+# TYPE stable_precheck_dialled_endpoints gauge
+stable_precheck_dialled_endpoints 900
+# HELP stable_precheck_refused_endpoints Endpoints the pre-check proved unreachable: a refused or black-holed SYN on every attempt. Condemned unprobed and dead-cached while stable_precheck_trusted is 1; discarded when it is 0. A healthy egress measured ~59% of dialled endpoints here.
+# TYPE stable_precheck_refused_endpoints gauge
+stable_precheck_refused_endpoints 880
+# HELP stable_precheck_unresolved_endpoints Endpoints whose name never became an address inside the dial budget (a *net.DNSError, timeout included). The pre-check proved nothing about them, so they were URL-tested rather than condemned: mihomo's own dial resolves through a stale-serving cache where this path pays an uncached lookup per attempt. ~5% of dialled endpoints in the measured mix; a spike is a resolver fault, not a pool fault.
+# TYPE stable_precheck_unresolved_endpoints gauge
+stable_precheck_unresolved_endpoints 0
+# HELP stable_kept_nodes Nodes published to /stable.txt.
+# TYPE stable_kept_nodes gauge
+stable_kept_nodes 0
+# HELP stable_geo_unknown_nodes Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.
+# TYPE stable_geo_unknown_nodes gauge
+stable_geo_unknown_nodes 0
+# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.
+# TYPE stable_trace_answered_nodes gauge
+stable_trace_answered_nodes 0
+# HELP stable_trace_unanswered_nodes Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.
+# TYPE stable_trace_unanswered_nodes gauge
+stable_trace_unanswered_nodes 0
+# HELP stable_trace_moved_nodes Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.
+# TYPE stable_trace_moved_nodes gauge
+stable_trace_moved_nodes 0
+# HELP stable_gemini_gate_enabled 1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.
+# TYPE stable_gemini_gate_enabled gauge
+stable_gemini_gate_enabled 0
+# HELP stable_gemini_gate_checks Gemini API responses the gate classified last cycle: the denominator for stable_gemini_gate_unverified_checks. One per proxy that ANSWERED, so it is neither the node count nor stable_filter_in_nodes{filter="gemini"} -- a mierus:// node contributes one per answering port, not one per configured port. A proxy that never answered is in neither term here, and reaches stable_filter_dropped_nodes{filter="gemini",reason="unreachable"} only when EVERY proxy of its node was unreachable: that reason is counted per SURVIVOR, off an outcome already folded best-of-ports, so one live port keeps the node and its dead siblings are counted nowhere.
+# TYPE stable_gemini_gate_checks gauge
+stable_gemini_gate_checks 0
+# HELP stable_gemini_gate_unverified_checks Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.
+# TYPE stable_gemini_gate_unverified_checks gauge
+stable_gemini_gate_unverified_checks 0
+# HELP stable_cycle_duration_seconds Wall time of the last cycle.
+# TYPE stable_cycle_duration_seconds gauge
+stable_cycle_duration_seconds 0.5
+# HELP stable_cycle_phase_duration_seconds Wall time of each phase of the last published cycle. The phases sum to slightly less than stable_cycle_duration_seconds: the steps between them (dead-cache write, survivor selection, cache prune, report assembly) belong to no phase. phase="probe" is the whole Prober.Probe call -- payload parsing, then the TCP reachability pre-check at its own concurrency outside check.concurrency, then the URL-test rounds -- so check.timeout * check.rounds bounds only its last part; the condemned count in the probe-outcome stage breakdown is what shows the pre-check's share. phase="egress" is the through-node filters and the cdn-cgi/trace measurement, which also do per-node network work.
+# TYPE stable_cycle_phase_duration_seconds gauge
+stable_cycle_phase_duration_seconds{phase="fetch"} 0
+stable_cycle_phase_duration_seconds{phase="merge"} 0
+stable_cycle_phase_duration_seconds{phase="dead_filter"} 0
+stable_cycle_phase_duration_seconds{phase="probe"} 0
+stable_cycle_phase_duration_seconds{phase="egress"} 0
+stable_cycle_phase_duration_seconds{phase="publish"} 0
+# HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
+# TYPE stable_last_success_timestamp_seconds gauge
+stable_last_success_timestamp_seconds 1.755474123e+09
+# HELP stable_filter_in_nodes Survivors entering each through-node filter.
+# TYPE stable_filter_in_nodes gauge
+# HELP stable_filter_kept_nodes Survivors kept by each through-node filter.
+# TYPE stable_filter_kept_nodes gauge
+# HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
+# TYPE stable_filter_dropped_nodes gauge
+# HELP stable_source_nodes_total Nodes each source yielded before filtering last cycle. source is the verbatim config key; feed and owner are derived from it, owner=crawler for a crawler-minted name and curated for a hand-added one.
+# TYPE stable_source_nodes_total gauge
+# HELP stable_source_valid_nodes Nodes each source contributed after preprocess filtering. Counted per source BEFORE Merge dedupes across sources, so a node two sources both yield is counted in both.
+# TYPE stable_source_valid_nodes gauge
+# HELP stable_source_tested_nodes Nodes each source contributed that survived the URL test. Measured after the merge, so stable_source_valid_nodes minus this is NOT the probe failures. Merge first drops what will not re-parse, what is a placeholder, what an earlier source already yielded at the same server:port, and what cannot carry its label; then the dead-node cache skips every merged node whose recent probe failed, and only the remainder is URL-tested. The duplicate term is the largest of the three -- a node two sources both yield counts in both of their valid gauges and in neither's later ones -- and the dead-node skip is merely the largest term no per-source series exposes: read stable_dead_skipped_nodes against stable_merged_nodes for it.
+# TYPE stable_source_tested_nodes gauge
+# HELP stable_source_published_nodes Nodes each source contributed that survived every through-node filter and reached the published list.
+# TYPE stable_source_published_nodes gauge
+# HELP stable_source_dropped_nodes Nodes each source dropped in preprocess, by reason (reason=unsupported counts unparseable input lines, which are not in stable_source_nodes_total). It deliberately carries no feed or owner labels: nothing reads drops by owner.
+# TYPE stable_source_dropped_nodes gauge
+# HELP stable_kept_speed_mbps Download speed (Mbps) of kept nodes.
+# TYPE stable_kept_speed_mbps histogram
+stable_kept_speed_mbps_bucket{le="5"} 0
+stable_kept_speed_mbps_bucket{le="10"} 0
+stable_kept_speed_mbps_bucket{le="25"} 0
+stable_kept_speed_mbps_bucket{le="50"} 0
+stable_kept_speed_mbps_bucket{le="100"} 0
+stable_kept_speed_mbps_bucket{le="250"} 0
+stable_kept_speed_mbps_bucket{le="500"} 0
+stable_kept_speed_mbps_bucket{le="+Inf"} 0
+stable_kept_speed_mbps_sum 0
+stable_kept_speed_mbps_count 0
+# HELP stable_kept_latency_ms Mean probe delay (ms) of kept nodes.
+# TYPE stable_kept_latency_ms histogram
+stable_kept_latency_ms_bucket{le="100"} 0
+stable_kept_latency_ms_bucket{le="250"} 0
+stable_kept_latency_ms_bucket{le="500"} 0
+stable_kept_latency_ms_bucket{le="800"} 0
+stable_kept_latency_ms_bucket{le="1000"} 0
+stable_kept_latency_ms_bucket{le="1500"} 0
+stable_kept_latency_ms_bucket{le="3000"} 0
+stable_kept_latency_ms_bucket{le="4000"} 0
+stable_kept_latency_ms_bucket{le="6000"} 0
+stable_kept_latency_ms_bucket{le="12000"} 0
+stable_kept_latency_ms_bucket{le="+Inf"} 0
+stable_kept_latency_ms_sum 0
+stable_kept_latency_ms_count 0

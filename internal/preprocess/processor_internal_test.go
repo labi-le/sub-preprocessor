@@ -690,6 +690,55 @@ func TestProcessBodyReservesSurvivorSliceFromLineCount(t *testing.T) {
 	}
 }
 
+// TestProcessBodySizesTheSurvivorArena pins the byteBound half of reserve: the
+// worker holds every source's arena until the merge, so a source answering with
+// a handful of nodes must not be charged a whole arenaChunk for them. The junk
+// shape is the accepted other side — a bound that loose buys the full chunk, and
+// benchCollectSurvivors reports what its tail costs a cycle.
+func TestProcessBodySizesTheSurvivorArena(t *testing.T) {
+	t.Parallel()
+
+	const node = "vless://u@192.0.2.1:443#n\n"
+	const junk = "not a node at all\n"
+
+	p := &Processor{}
+	for _, tc := range []struct {
+		name        string
+		nodes, junk int
+		wantCap     int
+	}{
+		{"body of nodes alone", 4, 0, 4 * (len(node) - 1)},
+		{"junk past one chunk", 10, 500, arenaChunk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var sb strings.Builder
+			for range tc.junk {
+				sb.WriteString(junk)
+			}
+			for range tc.nodes {
+				sb.WriteString(node)
+			}
+			sink := &sliceSink{}
+			pctx := &PipelineContext{
+				sink:     sink,
+				Resolved: map[string][]netip.Addr{},
+				Stats:    &Stats{},
+			}
+			if err := p.processBody(context.Background(), []byte(sb.String()), pctx); err != nil {
+				t.Fatalf("processBody: %v", err)
+			}
+			if len(sink.nodes) != tc.nodes {
+				t.Fatalf("survivors = %d, want %d", len(sink.nodes), tc.nodes)
+			}
+			if cap(sink.arena) != tc.wantCap {
+				t.Fatalf("arena cap = %d, want %d", cap(sink.arena), tc.wantCap)
+			}
+		})
+	}
+}
+
 // TestFilterNodesFitsTheSurvivorSlice pins the other half of that reservation.
 // The line count bounds the node count, so every line the IP stage drops is
 // capacity the worker holds until the merge — measured 2026-08-14 over every

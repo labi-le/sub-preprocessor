@@ -144,6 +144,20 @@ func BenchmarkRewriteVmessName(b *testing.B) {
 	}
 }
 
+// BenchmarkRewriteVmessName_UnicodeName prices the name shape sources actually
+// publish. json.Marshal emits valid non-ASCII UTF-8 verbatim, so this must cost
+// what the ASCII name above costs; a divergence means the splice fell back to
+// marshalling.
+func BenchmarkRewriteVmessName_UnicodeName(b *testing.B) {
+	raw := vmessLine(vmessPayload("Name"))
+	const newName = "[GEO:FI][IP:192.0.2.1] 🇫🇮 fast node (a)"
+	b.ReportAllocs()
+	for b.Loop() {
+		out, _ := subscription.RewriteVmessName(raw, newName)
+		sinkStr = out
+	}
+}
+
 // The four benchmarks below are the first to execute the ss legacy, ssr and
 // mierus decoders, so there is no earlier measurement to compare them with;
 // they exist to fix a floor for the next change to this code.
@@ -166,6 +180,24 @@ func ssrBenchLine(name string) string {
 		"/?obfsparam=" + b64("obfs.example.com") + "&protoparam=" + b64("auth-token") +
 		"&remarks=" + b64(name) + "&group=" + b64("grp")
 	return "ssr://" + b64(payload)
+}
+
+// ssrWideBenchLine mirrors what a source can hand RewriteSSRName: a query of
+// pairs distinct keys, descending, the worst order for a sort.
+func ssrWideBenchLine(pairs int) string {
+	var q strings.Builder
+	q.Grow(pairs * len("k0000000=v&"))
+	for i := pairs - 1; i >= 0; i-- {
+		if q.Len() > 0 {
+			q.WriteByte('&')
+		}
+		q.WriteString("k")
+		q.WriteString(strconv.Itoa(1_000_000 + i))
+		q.WriteString("=v")
+	}
+	payload := "1.2.3.4:8388:origin:aes-256-cfb:plain:" +
+		base64.RawURLEncoding.EncodeToString([]byte("secret")) + "/?" + q.String()
+	return "ssr://" + base64.RawURLEncoding.EncodeToString([]byte(payload))
 }
 
 // benchParseInput repeats line into a benchNodes-line payload and pins that
@@ -236,11 +268,10 @@ func BenchmarkParse_Mieru(b *testing.B) {
 }
 
 // BenchmarkRewriteSSRName is the ssr twin of BenchmarkRewriteVmessName: both
-// run once per published node on the annotated "/" path. It is the
-// allocation-heaviest thing the ssr support adds (base64 decode,
-// url.ParseQuery, url.Values.Encode, base64 encode) yet still lands well under
-// its vmess counterpart, whose JSON round-trip through a RawMessage map costs
-// more — so ssr publication needs no budget the "/" path did not already have.
+// run once per published node on the annotated "/" path. What ssr adds is a
+// base64 decode, a query parse, a query encode and a base64 encode; measured
+// 2026-08-18 that is 5 allocs / 656 B against the vmess splice's 3 / 448, the
+// extra one being the base64 remarks the vmess form has no equivalent of.
 func BenchmarkRewriteSSRName(b *testing.B) {
 	raw := ssrBenchLine("Tokyo Node")
 	const newName = "[GEO:FI][IP:1.2.3.4] mifa-001"
@@ -267,6 +298,10 @@ const (
 	benchMedianBody = 38 << 10
 	benchLargeBody  = 10 << 20
 	benchSources    = 157
+
+	// benchXrayOutbounds is the 160 proxy outbounds the measured JSON links
+	// carried, and it names BenchmarkNormalizeParse_XrayJSON160Outbounds.
+	benchXrayOutbounds = 160
 )
 
 // benchURIList builds an already-normalized vless body of at least size bytes,
@@ -313,6 +348,31 @@ func benchXrayJSON(outbounds int) []byte {
 	return []byte(sb.String())
 }
 
+// benchXrayHysteria2JSON is the hysteria2 shape 35 of one channel's 385 measured
+// outbounds had. Its converter writes a userinfo credential, an alpn list and a
+// name the vless fixture never reaches — the address, since every config calls
+// its outbound "proxy".
+func benchXrayHysteria2JSON(outbounds int) []byte {
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := range outbounds {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strings.ReplaceAll(hysteriaV2, "popa.example.ru", "node-"+strconv.Itoa(i)+".example"))
+	}
+	sb.WriteByte(']')
+	return []byte(sb.String())
+}
+
+// benchXrayEscapedNameJSON names each node the way sources actually do — a flag,
+// spaces and parentheses — so the fragment escaper is measured on a name that
+// needs escaping rather than on the fixture's escape-free "node-N".
+func benchXrayEscapedNameJSON(outbounds int) []byte {
+	body := benchXrayJSON(outbounds)
+	return []byte(strings.ReplaceAll(string(body), `"remarks":"node-`, `"remarks":"🇫🇮 fast node (a) `))
+}
+
 func benchNormalizeParse(b *testing.B, body []byte) {
 	b.Helper()
 	b.ReportAllocs()
@@ -342,7 +402,15 @@ func BenchmarkNormalizeParse_MedianBody38KiB(b *testing.B) {
 }
 
 func BenchmarkNormalizeParse_XrayJSON160Outbounds(b *testing.B) {
-	benchNormalizeParse(b, benchXrayJSON(160))
+	benchNormalizeParse(b, benchXrayJSON(benchXrayOutbounds))
+}
+
+func BenchmarkNormalizeParse_XrayJSONHysteria2(b *testing.B) {
+	benchNormalizeParse(b, benchXrayHysteria2JSON(benchXrayOutbounds))
+}
+
+func BenchmarkNormalizeParse_XrayJSONEscapedNames(b *testing.B) {
+	benchNormalizeParse(b, benchXrayEscapedNameJSON(benchXrayOutbounds))
 }
 
 // BenchmarkNormalizeParse_ManySmallSources is one cycle's worth of the median
@@ -363,5 +431,26 @@ func BenchmarkNormalizeParse_ManySmallSources(b *testing.B) {
 			})
 		}
 		sinkInt = count
+	}
+}
+
+// benchMaxQueryParams is net/url's defaultMaxParams, the segment ceiling
+// queryList.parse mirrors: the widest query an accepted ssr payload can carry.
+const benchMaxQueryParams = 10000
+
+// BenchmarkRewriteSSRName_MaxParams bounds what one crafted published node
+// costs, the figure the insertion sort this replaced made quadratic. It runs
+// LAST because its 1.8 MB/op moved whatever followed it by +5% (measured
+// 2026-08-18 against the xray bodies) through the heap it leaves behind.
+func BenchmarkRewriteSSRName_MaxParams(b *testing.B) {
+	raw := ssrWideBenchLine(benchMaxQueryParams)
+	const newName = "[GEO:FI][IP:1.2.3.4] mifa-001"
+	if _, ok := subscription.RewriteSSRName(raw, newName); !ok {
+		b.Fatal("fixture must rewrite")
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		out, _ := subscription.RewriteSSRName(raw, newName)
+		sinkStr = out
 	}
 }

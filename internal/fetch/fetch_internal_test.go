@@ -147,6 +147,53 @@ func TestReadBodyDoesNotTrustAnAnnouncementPastTheCeiling(t *testing.T) {
 	}
 }
 
+// TestReadBodyUnannouncedIsBoundedAndExact covers what replaced io.LimitReader
+// on the path with nothing announced: the chunk chain is its own cap, and the
+// join is sized to the bytes that arrived. cap() is the observable — a body
+// inside the first chunk is handed back as that chunk, a longer one lands in an
+// exactly sized join, and one past the cap still stops on the caller's
+// detection byte.
+func TestReadBodyUnannouncedIsBoundedAndExact(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		limit   int64
+		body    int
+		wantLen int
+		wantCap int
+	}{
+		{"inside the first chunk", 10 << 20, 41704, 41704, unannouncedChunk},
+		{"one byte past it", 10 << 20, unannouncedChunk + 1, unannouncedChunk + 1, unannouncedChunk + 1},
+		{"past the cap inside the first chunk", 64, 200, 65, 65},
+		{
+			"past the cap a chunk later",
+			unannouncedChunk + 1000,
+			4 * unannouncedChunk,
+			unannouncedChunk + 1001,
+			unannouncedChunk + 1001,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := bytes.Repeat([]byte("y"), tc.body)
+			got, err := readBody(&chunkedReader{src: src, chunk: 4096}, tc.limit, 0)
+			if err != nil {
+				t.Fatalf("readBody: %v", err)
+			}
+			if !bytes.Equal(got, src[:tc.wantLen]) {
+				t.Fatalf("read %d bytes, want %d", len(got), tc.wantLen)
+			}
+			if cap(got) != tc.wantCap {
+				t.Fatalf("cap = %d, want %d: the chunk chain sized the read wrong", cap(got), tc.wantCap)
+			}
+		})
+	}
+}
+
 // TestGrowBodyBoundsTheCopyOverlap pins the transient, not the result: a growth
 // step copies, so the old buffer and the new one are live at once, and a step
 // landing just under the ceiling costs ~2x the cap in simultaneous bytes (20.98

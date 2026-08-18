@@ -382,3 +382,68 @@ func TestGuardBlocksLoopbackUnrestrictedAllows(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// BenchmarkValidatePublicHTTPSURL measures the SSRF gate one fetch pays, and the
+// pair measures what the string form costs over the parsed one: BytesWithType
+// validates the string and then hands the same string to
+// http.NewRequestWithContext, which parses it a second time.
+func BenchmarkValidatePublicHTTPSURL(b *testing.B) {
+	const raw = "https://example.com/sub/config.txt?token=abc"
+
+	b.Run("string", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if err := fetch.ValidatePublicHTTPSURL(raw); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	u, errParse := url.Parse(raw)
+	if errParse != nil {
+		b.Fatal(errParse)
+	}
+	b.Run("parsed", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if err := fetch.ValidatePublicParsedHTTPSURL(u); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkMaybeDecode measures what a compressed fetch pays before its first
+// body byte: the two guard wrappers plus gzip.NewReader's window and tables.
+func BenchmarkMaybeDecode(b *testing.B) {
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write(bytes.Repeat([]byte("203.0.113.0/24,DE,DE-BE,Berlin\n"), 256)); err != nil {
+		b.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		b.Fatal(err)
+	}
+	payload := gz.Bytes()
+	src := bytes.NewReader(payload)
+	resp := &http.Response{Body: io.NopCloser(src)}
+	out := make([]byte, 8<<10)
+
+	b.ReportAllocs()
+	for range b.N {
+		src.Reset(payload)
+		rc, err := fetch.MaybeDecode(resp, fetch.FileTypeGzip)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for err == nil {
+			_, err = rc.Read(out)
+		}
+		if !errors.Is(err, io.EOF) {
+			b.Fatal(err)
+		}
+		if closeErr := rc.Close(); closeErr != nil {
+			b.Fatal(closeErr)
+		}
+	}
+}

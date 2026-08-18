@@ -26,9 +26,14 @@ type SourceBody struct {
 // did — the worker never resolves a hostname twice. Country is filled at
 // publication only, from the annotation's own verdict.
 type Entry struct {
+	// Label is a view into Merge's keyArena on the payload-rewriter path (vmess,
+	// ssr), an owned string on the fragment path; Addr is always a view. The
+	// bytes stay valid either way, but a retained view pins its whole 1 KiB
+	// block, so anything outliving the cycle — a DeadCache above all — must copy
+	// what it keeps.
 	Label   string
 	Raw     string
-	Addr    string // lowercased server:port, the dead-cache key
+	Addr    string
 	IP      netip.Addr
 	Country string
 }
@@ -61,6 +66,7 @@ func Merge(bodies []SourceBody) []Entry {
 	// Reused parse input. Safe because relabelNode always returns a freshly
 	// built string, never a view into the line it was handed.
 	var lineBuf []byte
+	var keys keyArena
 	for _, src := range bodies {
 		kept := 0
 		for _, node := range src.Nodes {
@@ -83,18 +89,48 @@ func Merge(bodies []SourceBody) []Entry {
 			labelBuf = append(labelBuf, src.Name...)
 			labelBuf = append(labelBuf, '-')
 			labelBuf = appendPad3(labelBuf, kept+1)
-			label := string(labelBuf)
-			raw, relabeled := relabelNode(n, label)
+			raw, label, relabeled := relabelNode(n, labelBuf, &keys)
 			if !relabeled {
 				continue
 			}
-			key := string(scratch)
+			// One arena view serves both the dedupe key and Entry.Addr; scratch
+			// is about to be overwritten by the next node.
+			key := keys.intern(scratch)
 			seen[key] = struct{}{}
 			kept++
 			entries = append(entries, Entry{Label: label, Raw: raw, Addr: key, IP: node.IP})
 		}
 	}
 	return entries
+}
+
+// keyArena cuts each kept node's dedupe key, and the label a vmess or ssr node
+// cannot view out of its own line, from a shared block instead of allocating
+// each one: 574 fewer allocations on BenchmarkMerge, measured 2026-08-18.
+//
+// A full block is retired, never grown, so append can never move bytes an
+// outstanding view points at. A retained view pins its whole block, which is
+// why DeadCache.Block must copy the key it keeps.
+type keyArena struct{ buf []byte }
+
+// keyArenaBlock bounds both sides of the trade: one partly-filled block of
+// waste per Merge against one allocation per 1KiB interned rather than one per
+// string — ~745 blocks for the keys alone at production's 36342 merged nodes
+// (2026-08-15, ~21 B a key), with the labels riding in the same blocks.
+// Packing also beats the size class a short key rounds up to, so B/op falls: on
+// BenchmarkMerge, medians of -count=5 on 2026-08-18, 203831 B/1338 allocs with
+// no arena at all and 202575 B/764 here, against 209745 B/757 at 8KiB where the
+// waste has outgrown what it bought.
+const keyArenaBlock = 1 << 10
+
+func (a *keyArena) intern(key []byte) string {
+	if len(key) > cap(a.buf)-len(a.buf) {
+		a.buf = make([]byte, 0, max(keyArenaBlock, len(key)))
+	}
+	start := len(a.buf)
+	a.buf = append(a.buf, key...)
+
+	return ioutil.UnsafeString(a.buf[start:])
 }
 
 // parseOne parses the one node line a NodeResult carries. preprocess yields
@@ -164,22 +200,40 @@ func appendPad3(b []byte, v int) []byte {
 //
 // A payload neither rewriter can decode returns false, which drops the node:
 // a node that cannot carry the label cannot be mapped back from a probe.
-func relabelNode(n subscription.Node, label string) (string, bool) {
+//
+// The returned label is the string the Entry keeps: on the fragment path it is
+// a view into the relabeled line's tail, so a kept node pays nothing for it.
+// The payload rewriters re-encode the name and leave nothing to view, so their
+// label is cut from the keyArena instead: neither rewriter retains what it is
+// handed, and a kept Entry already pins a block of that arena through Addr.
+// The allocation it saves costs time, so it is a trade: two interleaved
+// -count=5 series, 2026-08-18, put BenchmarkMerge at 837 -> 764 allocs/op for
+// +1.6% and +2.0% ns/op (209470 here) and BenchmarkMergeSSR at 997 -> 924 for
+// +2.5% and +3.1% (151203). Merge runs once per cycle, so the allocations win.
+func relabelNode(n subscription.Node, label []byte, keys *keyArena) (raw, lbl string, ok bool) {
 	switch n.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
 	case subscription.SchemeVmess:
-		return subscription.RewriteVmessName(n.Raw, label)
+		lbl = keys.intern(label)
+		raw, ok = subscription.RewriteVmessName(n.Raw, lbl)
+
+		return raw, lbl, ok
 	case subscription.SchemeSSR:
-		return subscription.RewriteSSRName(n.Raw, label)
+		lbl = keys.intern(label)
+		raw, ok = subscription.RewriteSSRName(n.Raw, lbl)
+
+		return raw, lbl, ok
 	}
-	raw := n.Raw
+	uri := n.Raw
 	if n.FragmentIdx >= 0 {
-		raw = raw[:n.FragmentIdx]
+		uri = uri[:n.FragmentIdx]
 	}
-	// Single allocation for the joined "<raw>#<label>" string; the byte buffer
+	// Single allocation for the joined "<uri>#<label>" string; the byte buffer
 	// is not retained after conversion, so the zero-copy view is safe.
-	buf := make([]byte, 0, len(raw)+1+len(label))
-	buf = append(buf, raw...)
+	buf := make([]byte, 0, len(uri)+1+len(label))
+	buf = append(buf, uri...)
 	buf = append(buf, '#')
 	buf = append(buf, label...)
-	return ioutil.UnsafeString(buf), true
+	raw = ioutil.UnsafeString(buf)
+
+	return raw, raw[len(raw)-len(label):], true
 }

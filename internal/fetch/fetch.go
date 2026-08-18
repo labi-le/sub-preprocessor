@@ -83,6 +83,15 @@ const (
 	// announcement on GET /, which both instances serve, and a configured
 	// source above it pays only a bounded doubling chain per cycle.
 	maxEagerBody = 256 << 10
+	// unannouncedChunk is the first chunk a body that announced no length gets.
+	// One this size or under costs a single allocation and no join, where
+	// io.ReadAll's 512-byte start spent 15 on the corpus median body (41704 B,
+	// measured 2026-08-18). Nothing was announced, so this is also what a
+	// hostile peer costs per request: 5x under the announced ceiling above.
+	unannouncedChunk = 48 << 10
+	// maxStackChunks keeps the chunk headers off the heap. 24 chunks growing by
+	// half cover 1.6 GB, past the largest configured cap (geofeed's 256 MiB).
+	maxStackChunks = 24
 )
 
 var (
@@ -158,14 +167,14 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 //
 // hint is the announced body length, 0 or negative when the response did not
 // state one. Announced and at or under maxEagerBody it buys ONE exact
-// allocation where io.ReadAll starts at 512 bytes and grows geometrically,
-// spending ~2.3x the body across ~30 allocations on a 3 MB one; a larger
-// announcement is worth less, since the doubling below spends a chain of its
-// own. DisableCompression is what makes the header usable at all — a raw fetch
-// gets identity encoding, so ContentLength counts exactly the bytes read;
-// measured over the configured sources, 145 of the 147 answering 200 state one
-// and none of them disagreed with its own body; the 2 that state nothing frame
-// the response with HTTP/2 DATA frames instead.
+// allocation where readChunked spends 10 of them and 2.2x the body on a 3 MB
+// one (measured 2026-08-18); a larger announcement is worth less, since the
+// doubling below spends a chain of its own. DisableCompression is what makes
+// the header usable at all — a raw fetch gets identity encoding, so
+// ContentLength counts exactly the bytes read; measured over the configured
+// sources, 145 of the 147 answering 200 state one and none of them disagreed
+// with its own body; the 2 that state nothing frame the response with HTTP/2
+// DATA frames instead.
 //
 // The header is only a claim, and on GET / it is a claim by whoever chose
 // subscription_url, so it is trusted for maxEagerBody up front and past that
@@ -175,7 +184,7 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 // remainder rather than truncating. Only limit bounds what is read.
 func readBody(r io.Reader, limit, hint int64) ([]byte, error) {
 	if hint <= 0 || hint > limit {
-		return io.ReadAll(io.LimitReader(r, limit+1)) //nolint:wrapcheck // caller wraps
+		return readChunked(r, limit)
 	}
 
 	buf := make([]byte, min(hint, maxEagerBody)+1)
@@ -206,13 +215,12 @@ func readBody(r io.Reader, limit, hint int64) ([]byte, error) {
 // Growth copies, so old and new are live at once, and only the LAST allocation
 // may exceed half of limit+1: an announcement just under the cap that then
 // overruns otherwise lands a buffer next to the ceiling and peaks at ~2x it —
-// measured 20.98 MB under a 10 MiB cap against 15.74 MB with this clamp, where
-// io.ReadAll (go1.26.5, still the unannounced path) peaks at 33.97 MB building
-// its chunk list and copying it into a right-sized slice. The exact hint
-// landing survives below that half, which every configured source body of both
-// instances is (largest 4.31 MB), and no step is more than twice what has
-// arrived: half is only reachable from a buffer already a quarter of the
-// ceiling.
+// measured 20.98 MB under a 10 MiB cap against 15.74 MB with this clamp. Only
+// this path recopies at all: the unannounced one keeps its chunks and joins
+// them once, so it needs no such clamp. The exact hint landing survives below
+// that half, which every configured source body of both instances is (largest
+// 4.31 MB), and no step is more than twice what has arrived: half is only
+// reachable from a buffer already a quarter of the ceiling.
 func growBody(buf []byte, hint, limit int64) []byte {
 	// Every step but the last is clamped to this share of the ceiling, which is
 	// what bounds the peak at 1.5x rather than 2x: the pair that is briefly live
@@ -231,6 +239,60 @@ func growBody(buf []byte, hint, limit int64) []byte {
 	}
 	out := make([]byte, next)
 	copy(out, buf)
+	return out
+}
+
+// readChunked reads r with no announced length to go on: a fresh chunk per fill
+// instead of one buffer that doubles, so a byte is copied once at the join
+// rather than at every growth step. The chunk sizes are clamped so the total
+// never passes limit+1, the caller's overrun detector, as io.LimitReader
+// enforced it before.
+func readChunked(r io.Reader, limit int64) ([]byte, error) {
+	// Half, not double: the wider step overshoots into an unread tail and cost a
+	// measured +24% B/op at the corpus p90 body (2026-08-18).
+	const chunkGrowthDivisor = 2
+
+	// joinChunks only reads these, so the headers stay on the stack.
+	var headers [maxStackChunks][]byte
+	chunks := headers[:0]
+
+	ceiling := limit + 1
+	total := int64(0)
+	size := min(int64(unannouncedChunk), ceiling)
+	for {
+		chunk := make([]byte, size)
+		n := 0
+		for n < len(chunk) {
+			got, err := r.Read(chunk[n:])
+			n += got
+			if err != nil {
+				total += int64(n)
+				chunks = append(chunks, chunk[:n])
+				if errors.Is(err, io.EOF) {
+					return joinChunks(chunks, total), nil
+				}
+				return nil, err //nolint:wrapcheck // caller wraps
+			}
+		}
+		total += int64(n)
+		chunks = append(chunks, chunk)
+		if total >= ceiling {
+			return joinChunks(chunks, total), nil
+		}
+		size = min(size+size/chunkGrowthDivisor, ceiling-total)
+	}
+}
+
+// joinChunks copies the chain into one exactly sized slice. A body that fit in
+// the first chunk is already contiguous and pays nothing.
+func joinChunks(chunks [][]byte, total int64) []byte {
+	if len(chunks) == 1 {
+		return chunks[0]
+	}
+	out := make([]byte, 0, total)
+	for _, chunk := range chunks {
+		out = append(out, chunk...)
+	}
 	return out
 }
 
@@ -299,7 +361,7 @@ func ValidatePublicParsedHTTPSURL(u *url.URL) error {
 		return err
 	}
 	host := u.Hostname()
-	if addr, errAddr := netip.ParseAddr(host); errAddr == nil {
+	if addr, ok := parseIPHost(host); ok {
 		if !isPublicIP(addr) {
 			return errors.New(errNonPublicTarget)
 		}
@@ -316,6 +378,35 @@ func ValidatePublicParsedHTTPSURL(u *url.URL) error {
 		return errors.New(errNonCanonicalIPHost)
 	}
 	return nil
+}
+
+// parseIPHost is netip.ParseAddr with the failing call skipped where it can only
+// fail: ParseAddr allocates its error (measured 48 B, 2026-08-18) and every
+// configured source is a domain name. It dispatches on the first ':' or '.', so
+// a host with neither -- or one outside the IPv4 grammar -- has no other answer.
+func parseIPHost(host string) (netip.Addr, bool) {
+	if strings.IndexByte(host, ':') < 0 && !ipv4Shape(host) {
+		return netip.Addr{}, false
+	}
+	addr, err := netip.ParseAddr(host)
+	return addr, err == nil
+}
+
+// ipv4Shape reports whether host is digits and dots with at least one dot, which
+// is the whole of what netip's IPv4 parser accepts.
+func ipv4Shape(host string) bool {
+	dot := false
+	for i := range len(host) {
+		c := host[i]
+		if c == '.' {
+			dot = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return dot
 }
 
 // numericIPHost reports whether host is an IPv4 address written in one of the

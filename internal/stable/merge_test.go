@@ -3,6 +3,7 @@ package stable_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -296,5 +297,74 @@ func TestMergePlaceholderDoesNotShadowRealNode(t *testing.T) {
 	}
 	if entries[0].Label != "beta-001" || entries[0].Addr != "192.0.2.1:443" {
 		t.Errorf("got %+v, want the beta node on the shared server:port", entries[0])
+	}
+}
+
+// TestMergeAddrsSurviveArenaBlockBoundaries walks past the first arena block
+// Entry.Addr views into. Recycling a filled block in place — the obvious "we
+// already own this buffer" shortcut — rewrites the bytes every earlier Addr
+// still points at, and no other test in this file reaches a second block, so
+// nothing else in the suite can see it. Letting a block GROW instead is not the
+// hazard: append leaves the abandoned array untouched.
+func TestMergeAddrsSurviveArenaBlockBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const nodes = 2000 // ~19 bytes a key, so ~37 keyArenaBlock blocks
+	var (
+		body strings.Builder
+		want = make([]string, 0, nodes)
+	)
+	for i := range nodes {
+		addr := fmt.Sprintf("198.51.%d.%d:8443", i/256, i%256)
+		body.WriteString("vless://a1b2c3d4-0000-4000-8000-000000000001@" + addr + "#n\n")
+		want = append(want, addr)
+	}
+
+	entries := stable.Merge([]stable.SourceBody{sourceBody("alpha", body.String())})
+
+	if len(entries) != nodes {
+		t.Fatalf("got %d entries, want %d", len(entries), nodes)
+	}
+	for i, w := range want {
+		if entries[i].Addr != w {
+			t.Fatalf("entry %d: Addr = %q, want %q", i, entries[i].Addr, w)
+		}
+	}
+}
+
+// TestMergeVmessLabelsSurviveArenaBlockBoundaries covers the other arena view a
+// kept Entry holds: a vmess node has no relabeled line tail for its Label to
+// point at, so relabelNode interns the label beside the dedupe key. Handing back
+// the caller's reused label buffer instead — the shortcut interning exists to
+// refuse — makes every Label read the last node's, which no single-vmess-node
+// case in this file can see, and the run walks past the first arena block so a
+// block recycled in place cannot hide behind it either.
+func TestMergeVmessLabelsSurviveArenaBlockBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const nodes = 600 // ~24 arena bytes a node (key plus label), so ~14 blocks
+	var body strings.Builder
+	for i := range nodes {
+		doc := fmt.Sprintf(`{"add":"198.51.%d.%d","port":"8443","ps":"Original","id":"uuid"}`, i/256, i%256)
+		body.WriteString("vmess://" + base64.StdEncoding.EncodeToString([]byte(doc)) + "\n")
+	}
+
+	entries := stable.Merge([]stable.SourceBody{sourceBody("alpha", body.String())})
+
+	if len(entries) != nodes {
+		t.Fatalf("got %d entries, want %d", len(entries), nodes)
+	}
+	for i, e := range entries {
+		label := fmt.Sprintf("alpha-%03d", i+1)
+		if e.Label != label {
+			t.Fatalf("entry %d: Label = %q, want %q", i, e.Label, label)
+		}
+		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(e.Raw, "vmess://"))
+		if err != nil {
+			t.Fatalf("entry %d: %v", i, err)
+		}
+		if want := `"ps":"` + label + `"`; !strings.Contains(string(payload), want) {
+			t.Fatalf("entry %d: payload %q missing %s", i, payload, want)
+		}
 	}
 }

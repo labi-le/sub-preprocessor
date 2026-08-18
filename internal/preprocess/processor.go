@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geo"
 	"domains.lst/sub-preprocessor/internal/geofeed"
+	"domains.lst/sub-preprocessor/internal/ioutil"
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/resolver"
 	"domains.lst/sub-preprocessor/internal/subscription"
@@ -293,23 +293,49 @@ func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.
 	s.annotator.Annotate(ctx, s.buf, &s.tagBuf, AnnotateRequest{Node: node, IP: ip})
 }
 
-// sliceSink collects survivors for a caller that annotates later.
+// sliceSink collects survivors for a caller that annotates later. arena packs
+// their line bytes back to back, so a body costs a handful of allocations
+// instead of one per node; byteBound is what is left of the upper bound on
+// those bytes.
 type sliceSink struct {
-	nodes []NodeResult
+	nodes     []NodeResult
+	arena     []byte
+	byteBound int
 }
 
-// emit clones the node line. subscription.Parse hands out views into the
-// source body, and that body is released when the call returns — a retained
-// view would pin the whole subscription for as long as the node lives.
 func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Addr) {
-	s.nodes = append(s.nodes, NodeResult{Raw: strings.Clone(node.Raw), IP: ip})
+	s.nodes = append(s.nodes, NodeResult{Raw: s.intern(node.Raw), IP: ip})
 }
+
+// intern copies line into the arena and returns a view over the copy:
+// subscription.Parse hands out views into the source body, and that body dies
+// with the call. The copy needs no second one — the chunk is only ever appended
+// to PAST the bytes a returned string covers, and that string's own pointer
+// keeps the chunk reachable. Overflow starts a FRESH chunk rather than growing
+// this one, which would move the live bytes and strand each string alone.
+func (s *sliceSink) intern(line string) string {
+	if len(line) > cap(s.arena)-len(s.arena) {
+		s.arena = make([]byte, 0, max(min(arenaChunk, s.byteBound), len(line)))
+	}
+	start := len(s.arena)
+	s.arena = append(s.arena, line...)
+	s.byteBound -= len(line)
+
+	return ioutil.UnsafeString(s.arena[start:])
+}
+
+// arenaChunk trades allocation count against two wastes pulling opposite ways:
+// bytes abandoned at a chunk boundary, and the final chunk's tail, which the
+// worker holds until the merge. Measured 2026-08-18 on the two shipped shapes:
+// halving it costs ~65% more allocs/op, and doubling it takes the filtering
+// shape's B/op from 1.7% over its pre-arena baseline to 6.4%.
+const arenaChunk = 8192
 
 // sizer is a sink that can be told how many nodes may follow. Only the
 // collecting sink implements it — bufferSink renders into a buffer its caller
 // owns and sizes.
 type sizer interface {
-	reserve(nodes int)
+	reserve(nodes, byteBound int)
 }
 
 // reserve sizes the survivor slice once, from a bound the parse loop already
@@ -317,10 +343,14 @@ type sizer interface {
 // 157-source corpus, every byte of it a copy of the slice's own tail. The bound
 // counts LINES, so it overshoots by whatever share of the body the IP stage
 // drops — see fit, which is what keeps that overshoot from being retained.
-func (s *sliceSink) reserve(nodes int) {
+//
+// byteBound sizes the arena's last chunk the same way, and a one-node source
+// gets an exactly sized chunk rather than a whole arenaChunk.
+func (s *sliceSink) reserve(nodes, byteBound int) {
 	if s.nodes == nil {
 		s.nodes = make([]NodeResult, 0, nodes)
 	}
+	s.byteBound = byteBound
 }
 
 // fit hands the survivors back without the reservation's unwritten tail, which
@@ -633,7 +663,9 @@ func (p *Processor) processBody(ctx context.Context, body []byte, pctx *Pipeline
 		return ErrTooManyNodes
 	}
 	if s, ok := pctx.sink.(sizer); ok {
-		s.reserve(min(lines, maxNodeHint))
+		// The same count bounds the survivor BYTES: node lines are disjoint
+		// slices of the body, and none of them holds one of its separators.
+		s.reserve(min(lines, maxNodeHint), len(body)-lines+1)
 	}
 	pctx.Stats.Unsupported += subscription.Parse(body, func(node subscription.Node) bool {
 		select {

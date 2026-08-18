@@ -66,10 +66,10 @@ func TestMetricsObserveRender(t *testing.T) {
 		"# TYPE stable_trace_moved_nodes gauge",
 		"stable_trace_moved_nodes 47",
 		// Distinct values per stage: a swap of two of the three reads fails here.
-		`stable_source_nodes_total{source="mifa"} 133`,
-		`stable_source_valid_nodes{source="mifa"} 20`,
-		`stable_source_tested_nodes{source="mifa"} 14`,
-		`stable_source_published_nodes{source="mifa"} 9`,
+		`stable_source_nodes_total{feed="mifa",owner="curated",source="mifa"} 133`,
+		`stable_source_valid_nodes{feed="mifa",owner="curated",source="mifa"} 20`,
+		`stable_source_tested_nodes{feed="mifa",owner="curated",source="mifa"} 14`,
+		`stable_source_published_nodes{feed="mifa",owner="curated",source="mifa"} 9`,
 		`stable_source_dropped_nodes{reason="geo",source="mifa"} 71`,
 		`stable_source_dropped_nodes{reason="cidr",source="mifa"} 33`,
 		`stable_kept_speed_mbps_bucket{le="5"} 1`,
@@ -113,6 +113,50 @@ func TestMetricsObserveRender(t *testing.T) {
 	}
 	if strings.Contains(out, `reason="unverified"`) {
 		t.Errorf("unverified is not a drop reason:\n%s", out)
+	}
+}
+
+// TestMetricsSourceOwnerLabels pins what the dashboard groups on. The crawler
+// mints tg-<slug>-<sha6> names, and the panels used to recover the channel and
+// the ownership from that string in PromQL; the exporter states both now, so a
+// missing label folds every crawled channel into one row rather than failing.
+func TestMetricsSourceOwnerLabels(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Sources: []stable.SourceReport{
+			{Name: "tg-genliberty-7e9b21", Total: 41, Valid: 32, Tested: 23, Filtered: 14, GeoDrop: 5},
+			{Name: "flat447", Total: 61, Valid: 52, Tested: 43, Filtered: 34, DNSDrop: 6},
+		},
+	})
+
+	out := render(t, m)
+	for _, want := range []string{
+		`stable_source_nodes_total{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 41`,
+		`stable_source_valid_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 32`,
+		`stable_source_tested_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 23`,
+		`stable_source_published_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 14`,
+		`stable_source_nodes_total{feed="flat447",owner="curated",source="flat447"} 61`,
+		`stable_source_valid_nodes{feed="flat447",owner="curated",source="flat447"} 52`,
+		`stable_source_tested_nodes{feed="flat447",owner="curated",source="flat447"} 43`,
+		`stable_source_published_nodes{feed="flat447",owner="curated",source="flat447"} 34`,
+		`stable_source_dropped_nodes{reason="geo",source="tg-genliberty-7e9b21"} 5`,
+		`stable_source_dropped_nodes{reason="dns",source="flat447"} 6`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Drops are 7 of every 11 per-source samples and nothing reads them by
+	// owner, so the family stays at source+reason on purpose.
+	for line := range strings.SplitSeq(out, "\n") {
+		if !strings.HasPrefix(line, "stable_source_dropped_nodes{") {
+			continue
+		}
+		if strings.Contains(line, "feed=") || strings.Contains(line, "owner=") {
+			t.Errorf("drop series carries a derived label: %q", line)
+		}
 	}
 }
 

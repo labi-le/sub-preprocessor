@@ -28,12 +28,9 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/srcname"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
-
-// managedPrefix marks sources this crawler owns. Sources without it (hand-added
-// private subscriptions) are never touched.
-const managedPrefix = "tg-"
 
 const (
 	classifyConcurrency = 8
@@ -45,24 +42,14 @@ const (
 )
 
 var (
-	urlRe    = regexp.MustCompile(`https://[^\s"'<>\p{Z}]+`) // \p{Z}: URLs never contain unicode whitespace (e.g. &nbsp; adjacent to a link)
 	cursorRe = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
 	trimSet  = ".,;:!?)]}'\""
-	// inlineRe matches raw proxy URIs pasted directly in channel messages.
-	// Alternation order is not load-bearing: Go's leftmost-first alternation
-	// still backtracks, so "ss" cannot shadow "ssr://" — the whole pattern,
-	// "://" included, has to match. http/https/socks* are absent on purpose:
-	// parseNode rejects only the PORTLESS form, so a
-	// "https://example.com:8443/docs" pasted in a message IS a valid node, and
-	// harvesting those would turn every documentation link a channel posts into
-	// a proxy.
-	inlineRe = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls|mierus)://[^\s"'<>]+`)
 )
 
 // legacyNameRe matches the pre-attribution managed name form tg-<sha10>. Such
 // names carry no origin info, so they are upgraded to the channel-attributed
 // form the first time the URL is rediscovered in a channel.
-var legacyNameRe = regexp.MustCompile(`^tg-[0-9a-f]{10}$`)
+var legacyNameRe = regexp.MustCompile("^" + srcname.ManagedPrefix + "[0-9a-f]{10}$")
 
 // Options configures a crawl run.
 type Options struct {
@@ -364,7 +351,7 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 	rr := recheckResult{managedURL: map[string]bool{}}
 	var pending []string
 	for _, s := range pf.Subscriptions.Sources {
-		if !strings.HasPrefix(s.Name, managedPrefix) {
+		if !strings.HasPrefix(s.Name, srcname.ManagedPrefix) {
 			continue
 		}
 		if s.Body != "" {
@@ -413,7 +400,7 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 			// Inline (Body) sources are regenerated fresh each cycle by
 			// RunOnce; drop the stale one here so it is not double-counted.
 			continue
-		case strings.HasPrefix(s.Name, managedPrefix):
+		case strings.HasPrefix(s.Name, srcname.ManagedPrefix):
 			all[s.URL] = struct{}{}
 			existing[s.URL] = s.Name
 		default:
@@ -543,7 +530,7 @@ const (
 func managedCount(pf privateFile) int {
 	n := 0
 	for _, s := range pf.Subscriptions.Sources {
-		if s.Body == "" && strings.HasPrefix(s.Name, managedPrefix) {
+		if s.Body == "" && strings.HasPrefix(s.Name, srcname.ManagedPrefix) {
 			n++
 		}
 	}
@@ -611,7 +598,7 @@ func sourceName(u, existingName, channel string, used map[string]bool) string {
 	}
 	if slug := channelSlug(channel); slug != "" {
 		sum := sha256.Sum256([]byte(u))
-		cand := managedPrefix + slug + "-" + hex.EncodeToString(sum[:])[:6]
+		cand := srcname.ManagedPrefix + slug + "-" + hex.EncodeToString(sum[:])[:6]
 		if !used[cand] {
 			return cand
 		}
@@ -718,32 +705,6 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 	return live, unknown
 }
 
-// extractURLs returns every https URL in an already-unescaped HTML page,
-// stripped of trailing punctuation. Links appear both in href attributes and as
-// plain text inside <pre> blocks, so it scans the whole page.
-func extractURLs(page string) []string {
-	matches := urlRe.FindAllString(page, -1)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		out = append(out, strings.TrimRight(m, trimSet))
-	}
-	return out
-}
-
-// extractInlineNodes returns every raw proxy URI (vless://, vmess://, ss://,
-// ssr://, trojan://, tuic://, hysteria://, hysteria2://, hy2://, anytls://,
-// mierus://) pasted directly in a channel page, stripped of trailing
-// punctuation. Unlike extractURLs these are node URIs, not subscription links,
-// and the caller has already HTML-unescaped page.
-func extractInlineNodes(page string) []string {
-	matches := inlineRe.FindAllString(page, -1)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		out = append(out, strings.TrimRight(m, trimSet))
-	}
-	return out
-}
-
 // buildInlineSource parses the raw inline URIs collected this cycle into nodes,
 // dedupes them by lowercased "server:port" (first wins, mirroring stable.Merge),
 // caps the survivors to opts.InlineMax, and packs the kept node URIs into a
@@ -768,7 +729,7 @@ func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
 		return source{}, 0, false
 	}
 	body := base64.StdEncoding.EncodeToString([]byte(strings.Join(kept, "\n")))
-	return source{Name: managedPrefix + "inline", Body: body}, len(kept), true
+	return source{Name: srcname.ManagedPrefix + "inline", Body: body}, len(kept), true
 }
 
 // pageCursor returns the smallest message id on a t.me/s page, used as the
@@ -844,7 +805,7 @@ func isNoiseHost(host string) bool {
 
 func managedName(u string) string {
 	sum := sha256.Sum256([]byte(u))
-	return managedPrefix + hex.EncodeToString(sum[:])[:10]
+	return srcname.ManagedPrefix + hex.EncodeToString(sum[:])[:10]
 }
 
 func loadPrivate(path string) (privateFile, error) {

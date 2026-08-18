@@ -1,0 +1,233 @@
+package crawl //nolint:testpackage // holds the unexported page scanners to their reference patterns
+
+import (
+	"html"
+	"math/rand/v2"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// The scanners in extract.go replaced these two patterns, so the patterns stay
+// here as the specification they are held to: TestExtractorsMatchTheirRegexps
+// runs both sides over the same corpus, and BenchmarkExtractURLs prices the
+// difference in ONE binary rather than across two relinked trees. Editing a
+// scanner without editing its pattern is what the test is for; editing both the
+// same way is not, so a change to what may be harvested belongs in a fixture
+// with a named case, not here.
+var (
+	urlReRef    = regexp.MustCompile(`https://[^\s"'<>\p{Z}]+`)
+	inlineReRef = regexp.MustCompile(`\b(?:vless|vmess|ss|ssr|trojan|tuic|hysteria2|hysteria|hy2|anytls|mierus)://[^\s"'<>]+`)
+)
+
+// extractCorpusTokens are glued together at random to build pages. They are the
+// boundaries the scanners can get wrong: every stop character of both classes,
+// \v and NUL (which are NOT stops), unicode separators, invalid UTF-8, scheme
+// substrings that must not match, and entity shapes html decodes by its own
+// rules.
+var extractCorpusTokens = []string{
+	"https://", "http://", "HTTPS://", "https:/", "://",
+	"ss://", "ssr://", "vless://", "vmess://", "hy2://", "hysteria://", "hysteria2://",
+	"anytls://", "mierus://", "trojan://", "tuic://", "socks5://", "xss://", "_ss://", "2hy2://",
+	"host.example", "/path", "?q=1", ":443", "#frag", "%20", "a", "Z", "9", "-", "_", "/",
+	" ", "\t", "\n", "\r", "\f", "\v", "\x00", "\u00a0", "\u2028", "\u2029", "\u202f", "\u3000",
+	"\"", "'", "<", ">", ".", ",", ";", ":", "!", "?", ")", "]", "}",
+	"&amp;", "&AMP;", "&amp", "&ampx", "&lt;", "&gt;", "&quot;", "&apos;", "&nbsp;",
+	"&#39;", "&#34;", "&#x41;", "&#38", "&#", "&#;", "&#xZZ;", "&notin;", "&not", "&", "&;",
+	"&NotEqualTilde;", "&nGg;", "&#0;", "&#x110000;", "&#x85;", "&#128512;", "é", "\xff\xfe",
+	"<pre>", "</pre>", "vless://uuid@192.0.2.1:443?type=tcp&amp;security=tls#n",
+}
+
+func randomExtractCorpus(t *testing.T) []string {
+	t.Helper()
+	// Fixed seed: a differential failure has to be reproducible from the test
+	// name alone, and a fresh corpus every run would report a different one.
+	rng := rand.New(rand.NewPCG(0x5eed, 0xc0ffee))
+	const (
+		pages     = 4000
+		maxTokens = 24
+	)
+	out := make([]string, 0, pages)
+	for range pages {
+		var sb strings.Builder
+		for range rng.IntN(maxTokens) + 1 {
+			sb.WriteString(extractCorpusTokens[rng.IntN(len(extractCorpusTokens))])
+		}
+		out = append(out, sb.String())
+	}
+	return out
+}
+
+func extractCorpus(t *testing.T) []string {
+	t.Helper()
+	corpus := randomExtractCorpus(t)
+	corpus = append(corpus, benchPages()...)
+	corpus = append(corpus, benchInlinePages()...)
+	return append(corpus, benchNoisePages()...)
+}
+
+func extractURLsRe(page string) []string {
+	matches := urlReRef.FindAllString(page, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, strings.TrimRight(m, trimSet))
+	}
+	return out
+}
+
+func extractInlineNodesRe(page string) []string {
+	matches := inlineReRef.FindAllString(page, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, strings.TrimRight(m, trimSet))
+	}
+	return out
+}
+
+func TestExtractorsMatchTheirRegexps(t *testing.T) {
+	for _, page := range extractCorpus(t) {
+		if got, want := extractURLs(page), extractURLsRe(page); !equalStrings(got, want) {
+			t.Fatalf("extractURLs(%q) = %q, urlReRef gives %q", page, got, want)
+		}
+		if got, want := extractInlineNodes(page), extractInlineNodesRe(page); !equalStrings(got, want) {
+			t.Fatalf("extractInlineNodes(%q) = %q, inlineReRef gives %q", page, got, want)
+		}
+	}
+}
+
+// TestUnescapeIntoMatchesHTML holds the buffered unescape to html.UnescapeString
+// over the same corpus, which is the whole of its correctness: unescapeInto owns
+// only where an entity ENDS, and hands every reference it does not spell out
+// back to html.
+func TestUnescapeIntoMatchesHTML(t *testing.T) {
+	var buf []byte
+	for _, page := range extractCorpus(t) {
+		got, next := unescapeInto(buf, page)
+		buf = next
+		if want := html.UnescapeString(page); got != want {
+			t.Fatalf("unescapeInto(%q) = %q, html.UnescapeString gives %q", page, got, want)
+		}
+	}
+}
+
+// TestUnescapeIntoReusesOneBuffer pins the reuse the harvest depends on: a
+// second page must not grow the buffer a first page of the same size sized.
+func TestUnescapeIntoReusesOneBuffer(t *testing.T) {
+	first := strings.Repeat("a&amp;b", 1000)
+	second := strings.Repeat("c&lt;d", 1000)
+	_, buf := unescapeInto(nil, first)
+	grown := cap(buf)
+	text, buf := unescapeInto(buf, second)
+	if cap(buf) != grown {
+		t.Fatalf("second page grew the buffer %d -> %d", grown, cap(buf))
+	}
+	if want := html.UnescapeString(second); text != want {
+		t.Fatalf("reused buffer gave %q, want %q", text, want)
+	}
+}
+
+// TestAppendInlineNodesCopiesOutOfTheScratch: the accumulator outlives the
+// scratch text the nodes were scanned from, so a node that still aliased it
+// would read the NEXT page after harvestPages moved on.
+func TestAppendInlineNodesCopiesOutOfTheScratch(t *testing.T) {
+	const (
+		node = "vless://uuid@192.0.2.1:443#n"
+		page = "<pre>" + node + "</pre>"
+	)
+	text, buf := unescapeInto(nil, "&amp;"+page)
+	got := appendInlineNodes(nil, text)
+	if len(got) != 1 || got[0] != node {
+		t.Fatalf("appendInlineNodes = %q, want [%q]", got, node)
+	}
+	if _, reused := unescapeInto(buf, strings.Repeat("&amp;z", len(page))); len(reused) == 0 {
+		t.Fatal("fixture did not reuse the buffer")
+	}
+	if got[0] != node {
+		t.Fatalf("node became %q after the buffer was reused, want %q", got[0], node)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// BenchmarkExtractURLs prices the scan against the pattern it replaced on one
+// benchPages page: same input, same binary, one delta.
+func BenchmarkExtractURLs(b *testing.B) {
+	page := benchPages()[0]
+	for _, tc := range []struct {
+		name    string
+		extract func(string) []string
+	}{
+		{"scan", extractURLs},
+		{"regexp", extractURLsRe},
+	} {
+		if got := tc.extract(page); len(got) != benchLinkRepeats {
+			b.Fatalf("%s yields %d urls, want benchLinkRepeats = %d", tc.name, len(got), benchLinkRepeats)
+		}
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				benchURLSink = tc.extract(page)
+			}
+		})
+	}
+}
+
+// BenchmarkExtractInlineNodes is BenchmarkExtractURLs for the node scan, on the
+// entity-carrying inline page, already unescaped as the harvest hands it over.
+func BenchmarkExtractInlineNodes(b *testing.B) {
+	page := html.UnescapeString(benchInlinePages()[0])
+	for _, tc := range []struct {
+		name    string
+		extract func(string) []string
+	}{
+		{"scan", extractInlineNodes},
+		{"regexp", extractInlineNodesRe},
+	} {
+		if got := tc.extract(page); len(got) != benchInlineNodes {
+			b.Fatalf("%s yields %d nodes, want benchInlineNodes = %d", tc.name, len(got), benchInlineNodes)
+		}
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				benchURLSink = tc.extract(page)
+			}
+		})
+	}
+}
+
+// BenchmarkUnescapePage prices one 52 KiB page carrying benchInlineNodes
+// entities: buffered against html.UnescapeString, whose two copies of the page
+// are what a harvest paid per page.
+func BenchmarkUnescapePage(b *testing.B) {
+	page := benchInlinePages()[0]
+	if !strings.Contains(page, "&") {
+		b.Fatal("fixture carries no entity, so neither side copies anything")
+	}
+	b.Run("buffered", func(b *testing.B) {
+		var buf []byte
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			benchTextSink, buf = unescapeInto(buf, page)
+		}
+	})
+	b.Run("html", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			benchTextSink = html.UnescapeString(page)
+		}
+	})
+}

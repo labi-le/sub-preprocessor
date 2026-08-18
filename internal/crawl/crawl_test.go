@@ -22,6 +22,7 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/srcname"
 )
 
 func TestExtractURLs(t *testing.T) {
@@ -51,9 +52,9 @@ func TestExtractURLs(t *testing.T) {
 	}
 }
 
-// TestExtractorsTakeAnUnescapedPage pins the contract that let the
-// html.UnescapeString move out of the scans and into harvestPages: page 0 feeds
-// both of them, so a scan that unescapes for itself copies that page twice.
+// TestExtractorsTakeAnUnescapedPage pins the contract that let the unescape move
+// out of the scans and into harvestPages: page 0 feeds both of them, so a scan
+// that unescapes for itself copies that page twice.
 func TestExtractorsTakeAnUnescapedPage(t *testing.T) {
 	t.Parallel()
 
@@ -773,8 +774,8 @@ func TestExtractInlineNodes(t *testing.T) {
 		`mierus://u:pw@h8.example?port=2999&protocol=TCP#mi ` +
 		`escaped vless://u@h.example:443?x=1&amp;y=2#e ` +
 		`just prose with a classy word and no proxies here ` +
-		// A portful http/socks URI parses as a Node, so only inlineRe keeps a
-		// client-setup snippet out of the harvest; both must stay uncaptured.
+		// A portful http/socks URI parses as a Node, so only isInlineScheme keeps
+		// a client-setup snippet out of the harvest; both must stay uncaptured.
 		`set your client to socks5://127.0.0.1:1080 or read https://example.com:8443/docs ` +
 		// scheme-substring tokens must NOT be captured (boundary guard).
 		`pass://foo access://bar class://baz`
@@ -952,9 +953,9 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 	for i := range pf.Subscriptions.Sources {
 		s := &pf.Subscriptions.Sources[i]
 		switch {
-		case s.Name == managedPrefix+"inline":
+		case s.Name == srcname.ManagedPrefix+"inline":
 			inline = s
-		case strings.HasPrefix(s.Name, managedPrefix):
+		case strings.HasPrefix(s.Name, srcname.ManagedPrefix):
 			if managed != nil {
 				t.Fatalf("want exactly one managed url source, got %+v", pf.Subscriptions.Sources)
 			}
@@ -2443,8 +2444,8 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 	if got.URL != subURL {
 		t.Errorf("managed URL = %q, want %q", got.URL, subURL)
 	}
-	if !strings.HasPrefix(got.Name, managedPrefix+"forumchat-") {
-		t.Errorf("name = %q, want it attributed to the bare chat (%sforumchat-<sha6>)", got.Name, managedPrefix)
+	if !strings.HasPrefix(got.Name, srcname.ManagedPrefix+"forumchat-") {
+		t.Errorf("name = %q, want it attributed to the bare chat (%sforumchat-<sha6>)", got.Name, srcname.ManagedPrefix)
 	}
 	if strings.Contains(got.Name, "1310") {
 		t.Errorf("name = %q; a permanent name must not carry the topic id", got.Name)

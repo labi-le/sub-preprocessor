@@ -308,10 +308,10 @@ func benchCollectSurvivors(b *testing.B, bodies [][]byte, wantKept int) {
 	defer p.resolver.PutResolvedMap(resolved)
 	ctx := context.Background()
 
-	dead := 0
+	dead, tail := 0, 0
 	b.ReportAllocs()
 	for b.Loop() {
-		kept, deadCap := 0, 0
+		kept, deadCap, tailCap := 0, 0, 0
 		for _, body := range bodies {
 			clear(resolved)
 			stats := Stats{}
@@ -329,13 +329,15 @@ func benchCollectSurvivors(b *testing.B, bodies [][]byte, wantKept int) {
 			nodes := sink.fit()
 			kept += len(nodes)
 			deadCap += cap(nodes) - len(nodes)
+			tailCap += cap(sink.arena) - len(sink.arena)
 		}
 		if kept != wantKept {
 			b.Fatalf("kept = %d, want %d", kept, wantKept)
 		}
-		dead = deadCap
+		dead, tail = deadCap, tailCap
 	}
 	b.ReportMetric(float64(dead)*float64(unsafe.Sizeof(NodeResult{})), "deadB/cycle")
+	b.ReportMetric(float64(tail), "tailB/cycle")
 }
 
 func benchShapeBodies(sources, lines, junk, kept int) ([][]byte, int) {

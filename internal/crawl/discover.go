@@ -3,7 +3,6 @@ package crawl
 import (
 	"cmp"
 	"context"
-	"html"
 	"regexp"
 	"strings"
 	"time"
@@ -239,6 +238,15 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	return extractChannels(pages, n.ref.slug)
 }
 
+// gateVerdict is the verdict candidate gave one rejected URL, memoized for the
+// rest of the page it was found on. candidate is a pure function of the URL, so
+// a repost within one page needs no second parse.
+type gateVerdict struct {
+	raw    string
+	reason rejectReason
+	err    error
+}
+
 // harvestPages pulls the subscription candidates out of a channel's scraped
 // pages. Candidates come from every page, inline nodes only from the newest:
 // a pasted node decays with the age of its message (12 of 162 alive at <=1d
@@ -257,13 +265,37 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 // posts and pages.
 func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
+	var scratch []byte
 	for i, p := range pages {
-		// Once per page, not once per extractor: page 0 feeds both scans, and
-		// UnescapeString copies the whole page whenever it finds an '&'.
-		text := html.UnescapeString(p)
+		// One unescape per page feeds both scans, and one scratch feeds every
+		// page of the channel: text aliases scratch, so everything kept below
+		// is copied out of it.
+		text, buf := unescapeInto(scratch, p)
+		scratch = buf
+		// Reset per page: last.raw points into text, which the next page's
+		// unescape overwrites.
+		var last gateVerdict
 		for _, raw := range extractURLs(text) {
+			// Both dedupes cover the GATE, not just the clone below: candidate
+			// parses raw and its validator parses the host, 2 allocations and
+			// 192 B a call (BenchmarkCandidate/accept, 2026-08-18), while a page
+			// reposting one link 20 times asked the same question 20 times.
+			// cand answers it for an accepted link, last for the rejected one a
+			// post repeats — and rej still sees every occurrence, so its dedupe
+			// and its untracked counter are untouched. It cannot answer this
+			// itself: its verdicts are cycle-wide, and a link one channel could
+			// not classify must still be tried in the next (see
+			// TestRejectSummaryExcludesACandidateAcceptedElsewhere).
+			if _, dup := cand[raw]; dup {
+				continue
+			}
+			if raw == last.raw {
+				rej.record(channel, raw, last.reason, 0, last.err)
+				continue
+			}
 			ok, reason, err := candidate(raw)
 			if !ok {
+				last = gateVerdict{raw: raw, reason: reason, err: err}
 				rej.record(channel, raw, reason, 0, err)
 				continue
 			}
@@ -272,24 +304,14 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 			// which puts every live URL in the cycle-wide live map scanChannel
 			// returns to RunOnce for mergeManaged, so an accepted key outlives
 			// this page by the whole cycle. extractURLs hands out sub-slices of
-			// text (urlRe.FindAllString returns s[a:b], then strings.TrimRight
-			// narrows without copying), so an uncloned 40-byte key keeps its
-			// entire page reachable — up to maxPageBytes,
-			// 8 MiB. That is what a string sub-slice IS, not a measurement. The
-			// pin predates the reject map and is not what that fix removed.
-			//
-			// Guarded like record's dedupe rather than written blind: the same
-			// link recurs across posts and pages, so a blind insert pays a copy
-			// per OCCURRENCE where this pays one per DISTINCT url. The
-			// difference an extra lookup buys back is arithmetic, not a sample —
-			// a page repeating one link 20 times pays 20 copies against 1.
-			// BenchmarkHarvestPages prices both halves.
-			if _, dup := cand[raw]; !dup {
-				cand[strings.Clone(raw)] = struct{}{}
-			}
+			// text, so an uncloned 40-byte key keeps its entire page reachable
+			// — up to maxPageBytes, 8 MiB. That is what a string sub-slice IS,
+			// not a measurement. The pin predates the reject map and is not
+			// what that fix removed.
+			cand[strings.Clone(raw)] = struct{}{}
 		}
 		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = append(*inline, extractInlineNodes(text)...)
+			*inline = appendInlineNodes(*inline, text)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
 			}

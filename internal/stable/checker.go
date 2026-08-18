@@ -44,6 +44,14 @@ type Blocklist interface {
 }
 
 // DeadCache skips re-probing recently-dead nodes; a nil DeadCache disables it.
+//
+// Neither method may retain key. The checker passes Entry.Addr, a view into
+// Merge's key arena; the bytes stay valid, but a retained view pins its whole
+// 1 KiB block (see keyArena) for the jittered [3h, 4.5h) a DeadCache holds an
+// entry, so an implementation that remembers the key MUST remember a copy.
+// Asking the caller to allocate instead cost one string per merged node —
+// 36342 of them per cycle at the 2026-08-15 production shape — to spare the
+// far smaller set that actually probes dead.
 type DeadCache interface {
 	Blocked(key string) bool
 	Block(key string) error

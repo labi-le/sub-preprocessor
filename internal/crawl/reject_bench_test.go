@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
+
 	"domains.lst/sub-preprocessor/internal/fetch"
 )
 
@@ -35,6 +37,8 @@ var (
 	benchReasonSink rejectReason
 	errBenchSink    error
 	benchCandSink   map[string]struct{}
+	benchURLSink    []string
+	benchTextSink   string
 )
 
 const (
@@ -82,13 +86,18 @@ func benchLink(i int) string {
 	return "https://sub.example.com/api/v1/client/subscribe/" + fmt.Sprintf("%016x", i)
 }
 
+// benchNoiseLink returns a distinct benchLinkBytes-long t.me link, which
+// candidate turns down at its noise-host gate with no error to wrap.
+func benchNoiseLink(i int) string {
+	return "https://t.me/somechannel/repost/archive/message/" + fmt.Sprintf("%016x", i)
+}
+
 // benchPages builds benchPageCount pages of exactly benchPageBytes, each
 // carrying ONE distinct link reposted benchLinkRepeats times among filler that
-// contains no URL and no HTML entity. The entity matters more than it looks:
-// html.UnescapeString copies only when it finds an '&', so this fixture prices
-// the scan with the copy designed out of it — measured 0 B/op here against
-// 114714 B/op (2 allocs) for the same 52 KiB carrying entities. Pricing the
-// unescape is benchInlinePages' job, not this one's.
+// contains no URL and no HTML entity. The entity matters more than it looks: the
+// unescape copies only when it finds an '&', so this fixture prices the scan with
+// the copy designed out of it — BenchmarkUnescapePage prices the copy itself, and
+// benchInlinePages is what pays for one.
 func benchPages() []string {
 	pages := make([]string, benchPageCount)
 	for i := range pages {
@@ -108,13 +117,34 @@ func benchPages() []string {
 	return pages
 }
 
+// benchNoisePages mirrors benchPages with a link that fails candidate's
+// noise-host gate, which is the repost shape a real page carries most of.
+func benchNoisePages() []string {
+	pages := make([]string, benchPageCount)
+	for i := range pages {
+		link := benchNoiseLink(i)
+		var sb strings.Builder
+		sb.Grow(benchPageBytes)
+		filler := strings.Repeat("x", (benchPageBytes-benchLinkRepeats*(len(link)+2))/benchLinkRepeats)
+		for range benchLinkRepeats {
+			sb.WriteString(filler)
+			sb.WriteByte(' ')
+			sb.WriteString(link)
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(strings.Repeat("x", benchPageBytes-sb.Len()))
+		pages[i] = sb.String()
+	}
+	return pages
+}
+
 // benchInlinePages mirrors benchPages for the inline harvest, which is the
 // other half of what a scraped page costs and the half no fixture priced until
 // the harvest was restricted to page 1: with the scan now off pages 2..N, a
 // regression in it moves nothing unless something benchmarks it. Entities are
-// deliberate — they are what makes html.UnescapeString copy a page. harvestPages
-// unescapes each page once and the node scan runs on page 1 alone, so this
-// fixture prices six copies plus one node scan, not seven copies.
+// deliberate — they are what makes the unescape copy a page. harvestPages fills
+// one scratch per call and the node scan runs on page 1 alone, so this fixture
+// prices six unescapes into one buffer plus one node scan.
 func benchInlinePages() []string {
 	pages := make([]string, benchPageCount)
 	for i := range pages {
@@ -164,14 +194,16 @@ func candidatePreReason(raw string) bool {
 	return fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(raw)) == nil
 }
 
-// harvestPagesBlind is harvestPages with the dedupe guard dropped: it clones on
-// every occurrence instead of every distinct URL. Everything else is the shipped
-// body, so the two benchmarks differ in that one branch. The receiver is a
-// parameter deliberately — this is not a method the package ships.
+// harvestPagesBlind is harvestPages with the dedupe dropped: it asks candidate
+// and clones on every occurrence instead of every distinct URL. Everything else
+// is the shipped body, so the two benchmarks differ in that one branch. The
+// receiver is a parameter deliberately — this is not a method the package ships.
 func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
 	cand := map[string]struct{}{}
+	var scratch []byte
 	for i, p := range pages {
-		text := html.UnescapeString(p)
+		text, buf := unescapeInto(scratch, p)
+		scratch = buf
 		for _, raw := range extractURLs(text) {
 			ok, reason, err := candidate(raw)
 			if !ok {
@@ -181,7 +213,7 @@ func harvestPagesBlind(c *Crawler, pages []string, inline *[]string, rej *reject
 			cand[strings.Clone(raw)] = struct{}{}
 		}
 		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = append(*inline, extractInlineNodes(text)...)
+			*inline = appendInlineNodes(*inline, text)
 			if len(*inline) > maxInlineAccum {
 				*inline = (*inline)[:maxInlineAccum]
 			}
@@ -292,62 +324,92 @@ func BenchmarkCandidatePreReason(b *testing.B) {
 	}
 }
 
-// BenchmarkHarvestPages prices the dedupe guard in front of the accepted key's
-// strings.Clone: guarded is the shipped harvestPages, blind clones per
-// occurrence. The clone itself is not optional — extractURLs returns sub-slices,
-// so an uncloned key holds its whole page for the cycle — and the guard is what
-// keeps its cost per DISTINCT url instead of per repost.
+// BenchmarkHarvestPages prices the dedupe in front of the accepted key's
+// strings.Clone and of candidate itself: guarded is the shipped harvestPages,
+// blind asks and clones per occurrence. Neither the clone nor the parse is
+// optional — extractURLs returns sub-slices, so an uncloned key holds its whole
+// page for the cycle — and the dedupe is what keeps both per DISTINCT url
+// instead of per repost.
 //
 // The inline case runs the shipped harvest over pages carrying pasted nodes and
-// HTML entities, which is what a real page costs: html.UnescapeString then
-// copies each page, and the node scan runs on page 1 alone. Putting that scan
-// back on every page shows up here as six copies instead of one. It
-// is a regression watch on its own fixture, not a third point on the
-// guarded/blind comparison.
+// HTML entities, which is what a real page costs: the unescape copies each page
+// into the harvest's scratch, and the node scan runs on page 1 alone. Putting
+// that scan back on every page shows up here as six node buffers instead of one.
+// The noise case is the other repost shape, a link the gates turn down with a
+// real rejects behind it. Both are regression watches on their own fixtures, not
+// further points on the guarded/blind comparison.
 func BenchmarkHarvestPages(b *testing.B) {
 	pages := benchPages()
-	for _, p := range pages {
-		if len(p) != benchPageBytes {
-			b.Fatalf("page is %d B, want benchPageBytes = %d", len(p), benchPageBytes)
-		}
-	}
-	// What the harvest allocates is one clone of the key extractURLs hands it,
-	// so the key ITSELF is checked, not merely how many came back: filler that
-	// stopped being separated from a link, or a urlRe that started keeping the
-	// trailing text, would leave the count right and reprice every B/op here.
-	links := extractURLs(html.UnescapeString(pages[0]))
-	if len(links) != benchLinkRepeats {
-		b.Fatalf("page yields %d urls, want benchLinkRepeats = %d", len(links), benchLinkRepeats)
-	}
-	for _, got := range links {
-		if got != benchLink(0) || len(got) != benchLinkBytes {
-			b.Fatalf("page yields %q (%d B), want the %d B link %q",
-				got, len(got), benchLinkBytes, benchLink(0))
-		}
-	}
+	checkRepostPages(b, pages, benchLink(0))
 
 	inlinePages := benchInlinePages()
 	if got := len(extractInlineNodes(html.UnescapeString(inlinePages[0]))); got != benchInlineNodes {
 		b.Fatalf("inline page yields %d nodes, want benchInlineNodes = %d", got, benchInlineNodes)
 	}
 
+	noisePages := benchNoisePages()
+	checkRepostPages(b, noisePages, benchNoiseLink(0))
+	checkNoiseGate(b, noisePages[0])
+
 	for _, tc := range []struct {
 		name    string
 		crawler *Crawler
 		pages   []string
 		harvest func(*Crawler, []string, *[]string, *rejects, string) map[string]struct{}
+		// record threads a real rejects, per iteration as a cycle does, so the
+		// reject bookkeeping a rejected repost pays is inside the figure.
+		record bool
 	}{
-		{"guarded", &Crawler{}, pages, (*Crawler).harvestPages},
-		{"blind", &Crawler{}, pages, harvestPagesBlind},
-		{"inline", &Crawler{opts: Options{InlineEnabled: true}}, inlinePages, (*Crawler).harvestPages},
+		{"guarded", &Crawler{}, pages, (*Crawler).harvestPages, false},
+		{"blind", &Crawler{}, pages, harvestPagesBlind, false},
+		{"inline", &Crawler{opts: Options{InlineEnabled: true}}, inlinePages, (*Crawler).harvestPages, false},
+		{"noise", &Crawler{}, noisePages, (*Crawler).harvestPages, true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
 				var inline []string
-				benchCandSink = tc.harvest(tc.crawler, tc.pages, &inline, nil, "benchchannel")
+				var rej *rejects
+				if tc.record {
+					rej = newRejects(zerolog.Nop())
+				}
+				benchCandSink = tc.harvest(tc.crawler, tc.pages, &inline, rej, "benchchannel")
 			}
 		})
+	}
+}
+
+// checkRepostPages fails b unless every page is benchPageBytes long and page 0
+// still carries benchLinkRepeats copies of link. The key ITSELF is checked, not
+// merely how many came back: filler that stopped being separated from a link, or
+// a scan that started keeping the trailing text, would leave the count right and
+// reprice every B/op here.
+func checkRepostPages(b *testing.B, pages []string, link string) {
+	b.Helper()
+	for _, p := range pages {
+		if len(p) != benchPageBytes {
+			b.Fatalf("page is %d B, want benchPageBytes = %d", len(p), benchPageBytes)
+		}
+	}
+	links := extractURLs(html.UnescapeString(pages[0]))
+	if len(links) != benchLinkRepeats {
+		b.Fatalf("page yields %d urls, want benchLinkRepeats = %d", len(links), benchLinkRepeats)
+	}
+	for _, got := range links {
+		if got != link || len(got) != benchLinkBytes {
+			b.Fatalf("page yields %q (%d B), want the %d B link %q", got, len(got), benchLinkBytes, link)
+		}
+	}
+}
+
+// checkNoiseGate fails b unless the noise fixture still takes candidate's
+// noise-host gate, which is the branch it exists to price.
+func checkNoiseGate(b *testing.B, page string) {
+	b.Helper()
+	for _, raw := range extractURLs(html.UnescapeString(page)) {
+		if ok, reason, err := candidate(raw); ok || reason != rejectNoiseHost || err != nil {
+			b.Fatalf("candidate(%q) = %v %q %v, want false %q <nil>", raw, ok, reason, err, rejectNoiseHost)
+		}
 	}
 }

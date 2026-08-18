@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/common/convert"
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
@@ -74,15 +77,27 @@ func deadTCPAddr(t *testing.T) string {
 	return addr
 }
 
-// precheckProxy exposes only Addr, the one method filterReachable reads now
-// that the TCP verdict is taken in parseProxies. The embedded nil interface
-// panics on anything else, which pins that read set.
-type precheckProxy struct {
-	mihomo.Proxy
-	addr string
+// probeNodesOf wraps already-parsed proxies as the positions the fold walks,
+// for a test that starts from proxies rather than from a payload.
+func probeNodesOf(pxs []mihomo.Proxy) []probeNode {
+	nodes := make([]probeNode, len(pxs))
+	for i, px := range pxs {
+		nodes[i] = probeNode{proxy: px}
+	}
+
+	return nodes
 }
 
-func (p *precheckProxy) Addr() string { return p.addr }
+// precheckNodes are the positions filterReachable reads, one per address, all
+// of them TCP-dialled unless the caller says otherwise.
+func precheckNodes(addrs ...string) []probeNode {
+	nodes := make([]probeNode, len(addrs))
+	for i, addr := range addrs {
+		nodes[i] = probeNode{addr: addr, tcpServer: true}
+	}
+
+	return nodes
+}
 
 // refusedAddrs returns n DISTINCT addresses the kernel refuses. Every
 // 127.0.0.0/8 address is local on Linux and port 1 is privileged, so no
@@ -216,17 +231,75 @@ func vlessXHTTPLine(addr, security, alpn, name string) string {
 	return "vless://" + benchUUID + "@" + addr + "?" + q + "#" + name
 }
 
+// testProbeNodes derives the probe positions for a payload exactly as Probe
+// does, converter included.
+func testProbeNodes(t *testing.T, payload string) []probeNode {
+	t.Helper()
+
+	mappings, err := convert.ConvertsV2Ray([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return probeNodes(mappings)
+}
+
+// dialsAddrOverTCP is dialsServerOverTCP keyed on the PARSED adapter type, the
+// form the verdict took while the parse still preceded the pre-check. It is the
+// authority the mapping-keyed switch is checked against, so a mistyped dispatch
+// key cannot condemn a node that reaches its server over UDP.
+func dialsAddrOverTCP(typ mihomo.AdapterType, mapping map[string]any) bool {
+	switch typ { //nolint:exhaustive // mirrors dialsServerOverTCP's default
+	case mihomo.Vless, mihomo.Vmess, mihomo.Trojan, mihomo.Shadowsocks,
+		mihomo.ShadowsocksR, mihomo.Socks5, mihomo.Http, mihomo.AnyTLS:
+		return !dialsServerOverQUIC(mapping)
+	default:
+		return false
+	}
+}
+
+// assertNodesMatchTheAdapter checks the reorder's whole premise: what probeNodes
+// reads off a mapping is what the adapter it may now skip would have answered.
+// An unreadable endpoint is not a defect but must cost the speedup, which the
+// verdict comparison is what catches.
+func assertNodesMatchTheAdapter(t *testing.T, payload string, nodes []probeNode) {
+	t.Helper()
+
+	mappings, err := convert.ConvertsV2Ray([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != len(nodes) {
+		t.Fatalf("converted %d mappings for %d positions", len(mappings), len(nodes))
+	}
+	for i, mapping := range mappings {
+		px, parseErr := adapter.ParseProxy(mapping)
+		if parseErr != nil {
+			t.Fatalf("ParseProxy(%v): %v", mapping, parseErr)
+		}
+		t.Cleanup(func() { _ = px.Close() })
+		if got := nodes[i].label; got != entryLabel(px) {
+			t.Errorf("position %d: label = %q, the adapter answers %q", i, got, entryLabel(px))
+		}
+		if got := nodes[i].addr; got != "" && got != px.Addr() {
+			t.Errorf("position %d: addr = %q, the adapter dials %q", i, got, px.Addr())
+		}
+		if got, want := nodes[i].tcpServer, dialsAddrOverTCP(px.Type(), mapping); got != want {
+			t.Errorf("position %d %v: tcp verdict = %v, want %v", i, px.Type(), got, want)
+		}
+	}
+}
+
 // The TCP verdict must come from the transport the raw mapping selects, not
-// from the adapter type: one mihomo.Vless carries both an ordinary TCP dial and
-// xhttp's QUIC mode, where the only dial is ListenPacket over UDP and the TCP
-// closure is never invoked. Condemning such a node costs it a URL test, a
+// from the adapter type: one vless mapping carries both an ordinary TCP dial
+// and xhttp's QUIC mode, where the only dial is ListenPacket over UDP and the
+// TCP closure is never invoked. Condemning such a node costs it a URL test, a
 // zero-success fold and deadcache.ttl in the dead cache.
 //
-// Going through parseProxies rather than calling the predicate directly is what
-// proves the two keys survive convert AND that every line here is one mihomo
-// really parses: an unparsable line would shift the index alignment, which the
-// length check catches.
-func TestParseProxiesKeysTheTCPVerdictOnTheTransport(t *testing.T) {
+// Going through the converter rather than calling the predicate directly is
+// what proves the two keys survive convert, and the adapter comparison that
+// every line here is one mihomo really parses.
+func TestProbeNodesKeyTheTCPVerdictOnTheTransport(t *testing.T) {
 	t.Parallel()
 
 	const h, p = "203.0.113.7", "443"
@@ -255,25 +328,96 @@ func TestParseProxiesKeysTheTCPVerdictOnTheTransport(t *testing.T) {
 		t.Run(c.desc, func(t *testing.T) {
 			t.Parallel()
 
-			pxs, tcpServer, err := precheckProber(t).parseProxies([]byte(c.line))
-			if err != nil {
-				t.Fatal(err)
+			nodes := testProbeNodes(t, c.line)
+			if len(nodes) != 1 {
+				t.Fatalf("converted %d mappings, want 1", len(nodes))
 			}
-			if len(pxs) != 1 || len(tcpServer) != 1 {
-				t.Fatalf("parsed %d proxies and %d verdicts, want 1 and 1", len(pxs), len(tcpServer))
+			if nodes[0].tcpServer != c.want {
+				t.Errorf("%q: tcp verdict = %v, want %v", nodes[0].label, nodes[0].tcpServer, c.want)
 			}
-			if tcpServer[0] != c.want {
-				t.Errorf("%v %q: tcp verdict = %v, want %v", pxs[0].Type(), pxs[0].Name(), tcpServer[0], c.want)
-			}
+			assertNodesMatchTheAdapter(t, c.line, nodes)
 		})
 	}
 }
 
-// The verdict slice is appended only for a mapping mihomo actually builds, so an
-// unparsable line BETWEEN two nodes is what catches an off-by-one: misalign the
-// two and the QUIC-only node inherits its neighbour's verdict and is condemned
-// unprobed.
-func TestParseProxiesAlignsTheVerdictAcrossAnUnparsableNode(t *testing.T) {
+// numericPortVmessLine renders the vmess link a standard v2rayN client emits,
+// whose base64 JSON carries "port" as a NUMBER: convert copies that value
+// straight out of a json.Decoder (common/convert/converter.go:275), so the
+// mapping holds a float64 where every other scheme holds a string.
+func numericPortVmessLine(host string, port int, name string) string {
+	node := fmt.Sprintf(`{"v":"2","ps":%q,"add":%q,"port":%d,`+
+		`"id":%q,"aid":"0","net":"tcp","type":"none","tls":"","scy":"auto"}`,
+		name, host, port, benchUUID)
+
+	return "vmess://" + base64.StdEncoding.EncodeToString([]byte(node))
+}
+
+// mappingPort decodes three shapes and the corpus drove one: every vmess
+// fixture writes the port as a plain decimal string, so neither the float64
+// branch the v2rayN link takes nor the base prefix ParseInt's base 0 accepts
+// reached a test. Both feed the endpoint the pre-check DIALS, and tcpServer
+// stays true either way, so a truncation or a wrong base condemns a live node
+// unprobed and dead-caches it for deadcache.ttl.
+func TestProbeNodesReadEveryPortShapeMihomoDoes(t *testing.T) {
+	t.Parallel()
+
+	const h = "203.0.113.11"
+	for _, c := range []struct {
+		desc string
+		line string
+		want string
+	}{
+		{"port as a JSON number", numericPortVmessLine(h, 443, "float-port"), net.JoinHostPort(h, "443")},
+		// mihomo reads an octal prefix, so 0755 is port 493 for both sides.
+		{"port with a base prefix", benchVlessLine(h, "0755", "octal-port"), net.JoinHostPort(h, "493")},
+	} {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+
+			nodes := testProbeNodes(t, c.line)
+			if len(nodes) != 1 {
+				t.Fatalf("converted %d mappings, want 1", len(nodes))
+			}
+			if nodes[0].addr != c.want {
+				t.Errorf("addr = %q, want %q", nodes[0].addr, c.want)
+			}
+			assertNodesMatchTheAdapter(t, c.line, nodes)
+		})
+	}
+}
+
+// The third shape, a top-level int, is one mihomo's decoder accepts
+// (common/structure/structure.go:135) and no payload can drive here: convert
+// emits an int port for the mieru port list alone (converter.go:682), and
+// dialsServerOverTCP does not judge mieru, so probeAddr is never called for it.
+// It stays because adding a TCP-dialled type to that switch would make the
+// branch live in one line, and the mapping is built by hand to keep the same
+// authority over it.
+func TestProbeAddrReadsAnIntPortLikeTheAdapter(t *testing.T) {
+	t.Parallel()
+
+	mapping := map[string]any{
+		"name": "int-port", "type": "vmess", "server": "203.0.113.12",
+		"port": 8443, "uuid": benchUUID, "alterId": 0, "cipher": "auto",
+	}
+	addr, addressable := probeAddr(mapping)
+	if !addressable {
+		t.Fatal("probeAddr refused a mapping the adapter reads")
+	}
+	px, err := adapter.ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = px.Close() })
+	if addr != px.Addr() {
+		t.Errorf("addr = %q, the adapter dials %q", addr, px.Addr())
+	}
+}
+
+// Positions are the CONVERTER's, so a mapping mihomo refuses holds its own slot
+// rather than shifting its neighbours: misalign them and the QUIC-only node
+// inherits the verdict beside it and is condemned unprobed.
+func TestProbeNodesKeepPositionsAcrossAnUnparsableNode(t *testing.T) {
 	t.Parallel()
 
 	const h, p = "203.0.113.9", "443"
@@ -286,17 +430,20 @@ func TestParseProxiesAlignsTheVerdictAcrossAnUnparsableNode(t *testing.T) {
 		vlessXHTTPLine(addr, "tls", "h3", "quic-only"),
 	}, "\n")
 
-	pxs, tcpServer, err := precheckProber(t).parseProxies([]byte(payload))
-	if err != nil {
-		t.Fatal(err)
+	nodes := testProbeNodes(t, payload)
+	want := []probeNode{
+		{label: "tcp-first", addr: addr, tcpServer: true},
+		{label: "unparsable", addr: addr, tcpServer: true},
+		// No endpoint: the pre-check will not dial this position, so probeNodes
+		// never derives one.
+		{label: "quic-only"},
 	}
-	want := map[string]bool{"tcp-first": true, "quic-only": false}
-	if len(pxs) != len(want) || len(tcpServer) != len(pxs) {
-		t.Fatalf("parsed %d proxies and %d verdicts, want %d of each", len(pxs), len(tcpServer), len(want))
+	if len(nodes) != len(want) {
+		t.Fatalf("converted %d mappings, want %d", len(nodes), len(want))
 	}
-	for i, px := range pxs {
-		if tcpServer[i] != want[px.Name()] {
-			t.Errorf("%q: tcp verdict = %v, want %v", px.Name(), tcpServer[i], want[px.Name()])
+	for i, w := range want {
+		if nodes[i] != w {
+			t.Errorf("position %d = %+v, want %+v", i, nodes[i], w)
 		}
 	}
 }
@@ -309,16 +456,11 @@ func TestFilterReachableSparesWhatItMayNotJudge(t *testing.T) {
 	t.Parallel()
 
 	dead := deadTCPAddr(t)
-	pxs := []mihomo.Proxy{
-		&precheckProxy{addr: liveTCPAddr(t)},
-		&precheckProxy{addr: dead},
-		&precheckProxy{addr: dead},
-		&precheckProxy{addr: dead},
-	}
-	tcpServer := []bool{true, true, false, true}
+	nodes := precheckNodes(liveTCPAddr(t), dead, dead, dead)
+	nodes[2].tcpServer = false
 
 	live, condemned := precheckProber(t).
-		filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+		filterReachable(context.Background(), zerolog.Nop(), nodes)
 	if want := []int{0, 2}; !slices.Equal(live, want) {
 		t.Errorf("live = %v, want %v", live, want)
 	}
@@ -377,6 +519,144 @@ func TestProbeNeverURLTestsACondemnedNode(t *testing.T) {
 	}
 }
 
+// The pre-check runs BEFORE the parse, so a condemned node costs no adapter
+// object. What makes that observable is a node mihomo REFUSES sitting on a
+// refused endpoint: parsed first it is dropped as unparsable and vanishes from
+// the result map behind a warn, condemned first it never reaches the parser and
+// reports the verdict the pre-check actually reached.
+//
+// Which of the two zero-success stages it lands in is deliberate: the pre-check
+// judged its endpoint, and the endpoint is entirely the mapping's.
+func TestProbeNeverParsesACondemnedNode(t *testing.T) {
+	t.Parallel()
+
+	live := liveTCPAddr(t)
+	host, port, err := net.SplitHostPort(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Join([]string{
+		// convert emits a mapping for this and adapter.ParseProxy then refuses
+		// it: "unknown method: nope".
+		"ss://nope:pass@" + deadTCPAddr(t) + "#condemned",
+		benchVlessLine(host, port, "probed"),
+	}, "\n")
+
+	var buf bytes.Buffer
+	logger := zerolog.New(zerolog.SyncWriter(&buf))
+	p, err := NewMihomoProber(config.CheckConfig{
+		Rounds:         1,
+		Concurrency:    1,
+		Timeout:        200 * time.Millisecond,
+		TestURL:        "http://127.0.0.1:1/",
+		ExpectedStatus: "204",
+	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := p.Probe(context.Background(), []byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res["condemned"]; got != (ProbeResult{Stage: StageCondemned}) {
+		t.Errorf("condemned node = %+v, want a zero-success entry at stage condemned", got)
+	}
+	if _, ok := res["probed"]; !ok {
+		t.Errorf("the reachable node must still be probed; results = %+v", res)
+	}
+	if strings.Contains(buf.String(), "skipped unparsable proxies") {
+		t.Errorf("a condemned mapping reached the parser; log: %s", buf.String())
+	}
+}
+
+// The probe path publishes four things per cycle: the result map SelectSurvivors
+// reads, the payload BuildPayload renders from it, the stage histogram the
+// exporter counts and the pre-check's own account. All four are pinned here for
+// one fixed pool, so no reordering inside Probe can move a count silently.
+//
+// rounds and maxFail are 0, so no round runs and every label the prober NAMES
+// survives selection: the membership of the result map is then visible in the
+// published bytes, which no loadable config can be — max_fail is bounded to
+// [0, rounds), so a zero-success node is always dropped, as the last assertion
+// pins. The fixtures sit on refusedAddrs' network, which no concurrent test can
+// bind, so every verdict below is fixed without a listener.
+func TestProbeExpositionForAFixedPool(t *testing.T) {
+	t.Parallel()
+
+	ssLine := func(addr, name string) string {
+		return "ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:secret")) +
+			"@" + addr + "#" + name
+	}
+	entries := []Entry{
+		{Label: "src-001", Raw: benchVlessLine("127.0.1.1", "1", "src-001")},
+		{Label: "src-002", Raw: vlessXHTTPLine("127.0.1.2:1", "tls", "h3", "src-002")},
+		{Label: "src-003", Raw: "hy2://auth@127.0.1.3:1#src-003"},
+		{Label: "src-004", Raw: benchVmessLine("127.0.1.4", "1", "src-004")},
+		{Label: "src-005", Raw: mieruLine("127.0.1.5", "src-005", [2]string{"1", "TCP"})},
+		{Label: "src-006", Raw: ssLine("127.0.1.6:1", "src-006")},
+		// TCP-typed, refused AND unparsable, the one combination the reorder
+		// moves: the pre-check condemns its endpoint before mihomo ever gets to
+		// refuse the mapping, so it reports condemned where the eager parse
+		// dropped it into the unknown bucket, and its endpoint joins Dialled.
+		{Label: "src-007", Raw: "ss://nope:pass@127.0.1.7:1#src-007"},
+		// Unparsable but NOT condemned: hysteria2 reaches its server over UDP,
+		// so the pre-check may not judge it, mihomo then refuses the mapping
+		// ("missing obfs password", adapter/outbound/hysteria2.go:146-148) and
+		// it stays out of the result map exactly as it did when every mapping
+		// was parsed up front.
+		{Label: "src-008", Raw: "hy2://auth@127.0.1.8:1?obfs=salamander#src-008"},
+	}
+	payload := entriesPayload(entries)
+
+	p, err := NewMihomoProber(config.CheckConfig{Timeout: time.Second, ExpectedStatus: "204"},
+		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Probe(context.Background(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the three TCP-dialled nodes are condemned: xhttp-over-h3 and
+	// hysteria2 reach their server over UDP and mieru is unlisted, so the
+	// pre-check may not judge them.
+	wantRes := map[string]ProbeResult{
+		"src-001": {Stage: StageCondemned},
+		"src-002": {Stage: StageUnknown},
+		"src-003": {Stage: StageUnknown},
+		"src-004": {Stage: StageCondemned},
+		"src-005": {Stage: StageUnknown},
+		"src-006": {Stage: StageCondemned},
+		"src-007": {Stage: StageCondemned},
+	}
+	if !maps.Equal(res, wantRes) {
+		t.Errorf("probe results = %+v, want %+v", res, wantRes)
+	}
+	// A partial literal on purpose: the histogram must carry no key for a stage
+	// nobody reached, which an exhaustive one cannot express.
+	wantStages := map[ProbeStage]int{StageCondemned: 4, StageUnknown: 4} //nolint:exhaustive // see above
+	if got := probeStages(entries, res); !maps.Equal(got, wantStages) {
+		t.Errorf("probeStages = %v, want %v", got, wantStages)
+	}
+	if got, want := p.PrecheckReport(),
+		(PrecheckReport{State: PrecheckRan, Dialled: 4, Refused: 4}); got != want {
+		t.Errorf("PrecheckReport() = %+v, want %+v", got, want)
+	}
+	survivors := SelectSurvivors(entries, res, 0, 0, 0)
+	// Every node but the unparsable one, which is named by nobody.
+	if got, want := BuildPayload(context.Background(), nil, survivors),
+		entriesPayload(entries[:len(entries)-1]); !bytes.Equal(got, want) {
+		t.Errorf("published payload = %q, want %q", got, want)
+	}
+	// Nothing config.Load accepts publishes any of them: rounds >= 1 and
+	// max_fail < rounds (CheckConfig.validate), so rounds-0 > max_fail always.
+	if got := SelectSurvivors(entries, res, 5, 4, 1000); len(got) != 0 {
+		t.Errorf("selection kept %d zero-success nodes; no loadable config may publish one", len(got))
+	}
+}
+
 // If nearly every dial is refused the fault is far likelier to be ours than the
 // pool's, and believing it writes the WHOLE probed set into the dead cache for
 // deadcache.ttl — three cycles at the shipped 3h against a 1h interval. So the
@@ -406,25 +686,19 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 		t.Run(c.desc, func(t *testing.T) {
 			t.Parallel()
 
-			pxs := make([]mihomo.Proxy, 0, total)
+			addrs := make([]string, 0, total)
 			for range c.live {
-				pxs = append(pxs, &precheckProxy{addr: liveTCPAddr(t)})
+				addrs = append(addrs, liveTCPAddr(t))
 			}
-			for _, addr := range refusedAddrs(total - c.live) {
-				pxs = append(pxs, &precheckProxy{addr: addr})
-			}
-			tcpServer := make([]bool, total)
-			for i := range tcpServer {
-				tcpServer[i] = true
-			}
+			addrs = append(addrs, refusedAddrs(total-c.live)...)
 
 			p := precheckProber(t)
-			live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+			live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), precheckNodes(addrs...))
 			if len(condemned) != c.wantCondemned {
 				t.Errorf("condemned %d of %d, want %d", len(condemned), total, c.wantCondemned)
 			}
 			if len(live)+len(condemned) != total {
-				t.Errorf("live %d + condemned %d != %d parsed proxies", len(live), len(condemned), total)
+				t.Errorf("live %d + condemned %d != %d probe positions", len(live), len(condemned), total)
 			}
 			// A tripped breaker condemns nobody, which is also what a pool of
 			// reachable servers looks like: the state is the only thing that
@@ -527,15 +801,10 @@ func TestFilterReachableFailsOpenOnAnUnresolvableName(t *testing.T) {
 
 	// .invalid resolves for nobody (RFC 6761), so the dial fails at the lookup
 	// and no SYN leaves the machine.
-	pxs := []mihomo.Proxy{
-		&precheckProxy{addr: "no-such-host.invalid:443"},
-		&precheckProxy{addr: deadTCPAddr(t)},
-		&precheckProxy{addr: liveTCPAddr(t)},
-	}
-	tcpServer := []bool{true, true, true}
+	nodes := precheckNodes("no-such-host.invalid:443", deadTCPAddr(t), liveTCPAddr(t))
 
 	p := precheckProber(t)
-	live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+	live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), nodes)
 	if want := []int{0, 2}; !slices.Equal(live, want) {
 		t.Errorf("live = %v, want %v: an unresolvable name proves nothing about the endpoint", live, want)
 	}
@@ -558,25 +827,18 @@ func TestFilterReachableBreakerIgnoresUnjudgedEndpoints(t *testing.T) {
 	t.Parallel()
 
 	const unresolvable = 99
-	pxs := make([]mihomo.Proxy, 0, precheckBreakerMin+1+unresolvable)
-	for _, addr := range refusedAddrs(precheckBreakerMin + 1) {
-		pxs = append(pxs, &precheckProxy{addr: addr})
-	}
+	addrs := refusedAddrs(precheckBreakerMin + 1)
 	for i := range unresolvable {
-		pxs = append(pxs, &precheckProxy{addr: fmt.Sprintf("no-such-host-%d.invalid:443", i)})
-	}
-	tcpServer := make([]bool, len(pxs))
-	for i := range tcpServer {
-		tcpServer[i] = true
+		addrs = append(addrs, fmt.Sprintf("no-such-host-%d.invalid:443", i))
 	}
 
 	p := precheckProber(t)
-	_, condemned := p.filterReachable(context.Background(), zerolog.Nop(), pxs, tcpServer)
+	_, condemned := p.filterReachable(context.Background(), zerolog.Nop(), precheckNodes(addrs...))
 	if len(condemned) != 0 {
 		t.Errorf("condemned %d endpoints, want 0: the breaker must fire on the judged share", len(condemned))
 	}
 	want := PrecheckReport{
-		State: PrecheckTripped, Dialled: len(pxs), Refused: precheckBreakerMin + 1, Unresolved: unresolvable,
+		State: PrecheckTripped, Dialled: len(addrs), Refused: precheckBreakerMin + 1, Unresolved: unresolvable,
 	}
 	if got := p.PrecheckReport(); got != want {
 		t.Errorf("PrecheckReport() = %+v, want %+v", got, want)

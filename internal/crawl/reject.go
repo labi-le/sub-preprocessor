@@ -147,9 +147,9 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 		r.untracked++
 		return
 	}
-	// Clone: rawURL is a sub-slice of the unescaped page harvestPages scanned.
-	// urlRe.FindAllString returns s[a:b] and strings.TrimRight narrows without
-	// copying — so a 40-byte key kept for the
+	// Clone: rawURL is a sub-slice of the page text harvestPages scanned, which
+	// is a shared scratch buffer the next page overwrites — and even were it
+	// not, a 40-byte key kept for the
 	// whole cycle would keep its entire page reachable (up to maxPageBytes,
 	// 8 MiB) until scan returns. A cloned key costs its own length and nothing
 	// else, whatever the page size.
