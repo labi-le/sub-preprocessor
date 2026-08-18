@@ -103,21 +103,38 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
   alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
   yield. What the number cannot tell you is which 500: seeds are walked in Go map order
-  (`discover.go:78`), so the truncation point is arbitrary within one cycle's fresh pool.
+  (`scan`'s `for slug, s := range seeds`, `discover.go:101`), so the truncation point is
+  arbitrary within one cycle's fresh pool.
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
 
 ## What a managed source name means
 
 A crawler-written source is named `tg-<channel-slug>-<sha6>` by `sourceName`
-(`internal/crawl/crawl.go:608`): `tg-` marks the source as MANAGED and so eligible for
-rewrite or prune (`managedPrefix`, `crawl.go:36`), the slug is the Telegram channel folded
-into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and
-`sha6` is the first 6 hex of the sha256 of the SUBSCRIPTION URL. `tg-seyedng-1444c8` reads
-"one of the subscriptions the crawler found in @seyedng".
+(`internal/crawl/crawl.go:595`): `tg-` marks the source as MANAGED and so eligible for
+rewrite or prune (`srcname.ManagedPrefix`, `internal/srcname/srcname.go:12`), the slug is the
+Telegram channel folded into the config alphabet by `channelSlug` (lowercase, `_` to `-`,
+capped at 24 bytes), and `sha6` is the first 6 hex of the sha256 of the SUBSCRIPTION URL.
+`tg-seyedng-1444c8` reads "one of the subscriptions the crawler found in @seyedng".
 
+- **The name is where three Prometheus labels come from, and one function splits it.**
+  `srcname.Split` (`internal/srcname/srcname.go:22`) is what the exporter calls, so each of the
+  four per-source counters (`stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}`)
+  carries the name three ways. `source` is the name VERBATIM — `tg-seyedng-1444c8`, prefix,
+  slug and hash. `feed` is the middle of it: `tg-` and any trailing `-<sha6>` removed, so
+  every URL of one channel shares one `feed` (`seyedng`) while a curated name is its own
+  `feed`, unchanged. `owner` is `crawler` when the prefix is there and `curated` when it is
+  not, which makes `owner="crawler"` exactly WRITE AUTHORITY over `config/private.yaml` — the
+  same predicate the rewrite and prune paths apply, and still not a claim about Telegram.
+  The two managed shapes with no channel need no exception: `tg-inline` and a legacy
+  `tg-<10 hex>` lose the prefix and keep the rest — `inline` and `96c4d7c7a7` — there being no
+  `-<sha6>` tail to strip. `stable_source_dropped_nodes` is the one family carrying neither
+  label — `source` and `reason` only — so per-source drops stay a question you ask by name.
+  `source` is also the label a human wants: it is the `name:` key in `config/private.yaml` or
+  `config/sources.yaml`, which the recovery recipe below greps, while `feed` is several names'
+  worth of rows folded together and greps as nothing.
 - **The URL is not the name, and the decisive reason is that the name is PUBLISHED.**
-  `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:82-86`), and that
+  `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:85-89`), and that
   label is what a client ends up displaying — though it is not the whole node name. Under
   the shipped config the `annotate` chain writes `[GEO:xx]` into that name and the stable
   worker prepends its own `[SPD:<n>M] ` ahead of THAT, in that order and not the reverse
@@ -127,7 +144,7 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
   in that slot would hand every private or paid panel link to everyone who fetches the
   list. The second reason is merely mechanical and would not save it on its own: the
   config source-name alphabet is `^[a-z0-9-]+$` (`internal/config/config.go:115`, mirrored
-  for the crawler's own write-back at `crawl.go:867`), and `:` `/` `.` `?` all fall
+  for the crawler's own write-back at `crawl.go:828`), and `:` `/` `.` `?` all fall
   outside it.
 - **The hash is there because a channel is not a source.** One channel routinely publishes
   several distinct subscription URLs, so the slug alone is not unique. Counted over
@@ -174,16 +191,17 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
 - **The name → URL mapping exists in exactly one place: the `name:`/`url:` pair in
   `config/private.yaml`.** One line recovers the link behind a row in Grafana or a node in
   the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`. Repair the
-  token first, because every wrong form misses SILENTLY instead of failing. Off panel 8, put
-  back the `tg-` its display-only strip removed. Off the published list, drop the trailing
-  numeric index `Merge` appends (`internal/stable/merge.go:82-86`; `appendPad3` pads to a
+  token first, because every wrong form misses SILENTLY instead of failing. A dashboard `source`
+  column is already the verbatim name and needs no repair; panel 20's `feed` column is not a name
+  and greps as nothing, being the slug several names share. Off the published list, drop the
+  trailing numeric index `Merge` appends (`internal/stable/merge.go:85-89`; `appendPad3` pads to a
   minimum of three digits, not to a width, so the index can be longer). Then grep both
   overlays rather than reasoning about which file owns the name: `private.yaml` holds the
   managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
   rest. Names are unique across both (`validateSources`, `internal/config/config.go:1432`).
 - **`tg-<10 hex>` is the other managed shape and carries no channel at all.** It is not
-  merely historical: `legacyNameRe` (`crawl.go:65`) matches it and `managedName`
-  (`crawl.go:845`) still MINTS it — for a URL discovered with no usable channel slug, and
+  merely historical: `legacyNameRe` (`crawl.go:52`) matches it and `managedName`
+  (`crawl.go:806`) still MINTS it — for a URL discovered with no usable channel slug, and
   for the (never observed, ~2^-24) case where the attributed candidate is already taken.
   `sourceName` upgrades a legacy name to the attributed form the first time the URL turns
   up in a channel, and that is the only rewrite it ever performs: an already-attributed
@@ -192,5 +210,5 @@ into the config alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 b
   live checker instead of cancelling it, and only shutdown calls `Stop`
   (`docs/guides/design.md:100`). Prod carried one legacy name on 2026-08-15,
   `tg-96c4d7c7a7`. The crawler's own inline harvest is a third shape, the fixed
-  `tg-inline` (`crawl.go:771`), which carries a `body:` and not a `url:`, so there is
+  `tg-inline` (`crawl.go:732`), which carries a `body:` and not a `url:`, so there is
   nothing behind it to look up.

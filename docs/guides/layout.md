@@ -25,7 +25,8 @@
 - `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate
 - `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay (instance 1 only)
 - `internal/log` — zerolog setup, runtime level changes, the `ctxlog.Op` child-logger helper
-- `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `geofeed`, `subscription` and `stable`
+- `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `crawl`, `geofeed`, `preprocess`, `subscription` and `stable`
+- `internal/srcname` — the managed-source-name convention (`ManagedPrefix`, `Split`): the `tg-` ownership rule shared by `crawl`, which mints the names, and `metrics`, which renders them as the `feed`/`owner` labels
 
 ## Project layout
 
