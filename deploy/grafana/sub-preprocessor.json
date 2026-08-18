@@ -422,7 +422,7 @@
     {
       "id": 20,
       "type": "table",
-      "title": "Top source groups: channels folded, everything else as-is (last cycle)",
+      "title": "Top source feeds by owner (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -455,8 +455,8 @@
           },
           "instant": true,
           "format": "table",
-          "legendFormat": "{{channel}}",
-          "expr": "sum by (channel) (label_replace(label_replace(stable_source_nodes_total{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+          "legendFormat": "{{feed}} {{owner}}",
+          "expr": "sum by (feed, owner) (stable_source_nodes_total{job=\"$job\"}) and on(feed, owner) topk(25, sum by (feed, owner) (stable_source_valid_nodes{job=\"$job\"}))"
         },
         {
           "refId": "B",
@@ -466,8 +466,8 @@
           },
           "instant": true,
           "format": "table",
-          "legendFormat": "{{channel}}",
-          "expr": "topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+          "legendFormat": "{{feed}} {{owner}}",
+          "expr": "topk(25, sum by (feed, owner) (stable_source_valid_nodes{job=\"$job\"}))"
         },
         {
           "refId": "C",
@@ -477,8 +477,8 @@
           },
           "instant": true,
           "format": "table",
-          "legendFormat": "{{channel}}",
-          "expr": "sum by (channel) (label_replace(label_replace(stable_source_tested_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+          "legendFormat": "{{feed}} {{owner}}",
+          "expr": "sum by (feed, owner) (stable_source_tested_nodes{job=\"$job\"}) and on(feed, owner) topk(25, sum by (feed, owner) (stable_source_valid_nodes{job=\"$job\"}))"
         },
         {
           "refId": "D",
@@ -488,8 +488,8 @@
           },
           "instant": true,
           "format": "table",
-          "legendFormat": "{{channel}}",
-          "expr": "sum by (channel) (label_replace(label_replace(stable_source_published_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")) and on(channel) topk(25, sum by (channel) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"channel\", \"$1\", \"source\", \"^(.*)$\"), \"channel\", \"$1\", \"source\", \"^(tg-[a-z0-9-]+)-[0-9a-f]{6}$\")))"
+          "legendFormat": "{{feed}} {{owner}}",
+          "expr": "sum by (feed, owner) (stable_source_published_nodes{job=\"$job\"}) and on(feed, owner) topk(25, sum by (feed, owner) (stable_source_valid_nodes{job=\"$job\"}))"
         }
       ],
       "transformations": [
@@ -498,48 +498,47 @@
           "options": {
             "mode": "columns",
             "keepLabels": [
-              "channel"
+              "feed",
+              "owner"
             ]
           }
         },
         {
-          "id": "joinByField",
+          "id": "filterFieldsByName",
           "options": {
-            "byField": "channel",
-            "mode": "outer"
+            "exclude": {
+              "names": [
+                "Time"
+              ]
+            }
           }
+        },
+        {
+          "id": "merge",
+          "options": {}
         },
         {
           "id": "organize",
           "options": {
-            "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 2": true,
-              "Time 3": true,
-              "Time 4": true,
-              "job": true,
-              "instance": true,
-              "__name__": true
-            },
+            "excludeByName": {},
             "renameByName": {
-              "channel": "group",
               "Value #A": "yielded",
               "Value #B": "valid",
               "Value #C": "kept",
               "Value #D": "filtered"
             },
             "indexByName": {
-              "channel": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "Value #D": 4
+              "feed": 0,
+              "owner": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5
             }
           }
         }
       ],
-      "description": "Per-source counts summed by group, top 25 ranked on valid: tg-<slug>-<sha6> names fold into one tg-<slug> row while every other name stands alone. Rows therefore mix folded channels with curated names and the tg- prefix is all that separates them; the column reads group but its PromQL label is channel."
+      "description": "Per-source counts summed by feed and owner, top 25 ranked on valid. Columns: feed, owner (crawler or curated), then yielded, valid, kept, filtered from nodes_total, valid_nodes, tested_nodes, published_nodes. Both labels come from the exporter, so no name is parsed here."
     },
     {
       "id": 8,
@@ -578,7 +577,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "label_replace(stable_source_nodes_total{job=\"$job\",source=~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source=~\"tg-.*\"}), \"source\", \"$1\", \"source\", \"tg-(.*)\")"
+          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
         },
         {
           "refId": "B",
@@ -589,7 +588,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "label_replace(topk(25, stable_source_valid_nodes{job=\"$job\",source=~\"tg-.*\"}), \"source\", \"$1\", \"source\", \"tg-(.*)\")"
+          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
         },
         {
           "refId": "C",
@@ -600,7 +599,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "label_replace(stable_source_tested_nodes{job=\"$job\",source=~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source=~\"tg-.*\"}), \"source\", \"$1\", \"source\", \"tg-(.*)\")"
+          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
         },
         {
           "refId": "D",
@@ -611,7 +610,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "label_replace(stable_source_published_nodes{job=\"$job\",source=~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source=~\"tg-.*\"}), \"source\", \"$1\", \"source\", \"tg-(.*)\")"
+          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
         }
       ],
       "transformations": [
@@ -642,7 +641,9 @@
               "Time 4": true,
               "job": true,
               "instance": true,
-              "__name__": true
+              "__name__": true,
+              "feed": true,
+              "owner": true
             },
             "renameByName": {
               "Value #A": "yielded",
@@ -660,7 +661,7 @@
           }
         }
       ],
-      "description": "Top 25 crawler-managed sources (source=~\"tg-.*\", tg- stripped for display) ranked on valid: yielded/valid/kept/filtered are nodes_total/valid_nodes/tested_nodes/published_nodes. valid is pre-merge and kept post-merge, so dedup shrinks kept \u2014 and this table is not comparable row-for-row with the curated one beside it."
+      "description": "Top 25 crawler-managed sources (owner=\"crawler\") ranked on valid, names verbatim: yielded/valid/kept/filtered are nodes_total/valid_nodes/tested_nodes/published_nodes. valid is pre-merge and kept post-merge, so dedup shrinks kept \u2014 and this table is not comparable row-for-row with the curated one beside it."
     },
     {
       "id": 22,
@@ -699,7 +700,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "stable_source_nodes_total{job=\"$job\",source!~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source!~\"tg-.*\"})"
+          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         },
         {
           "refId": "B",
@@ -710,7 +711,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",source!~\"tg-.*\"})"
+          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         },
         {
           "refId": "C",
@@ -721,7 +722,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "stable_source_tested_nodes{job=\"$job\",source!~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source!~\"tg-.*\"})"
+          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         },
         {
           "refId": "D",
@@ -732,7 +733,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{source}}",
-          "expr": "stable_source_published_nodes{job=\"$job\",source!~\"tg-.*\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",source!~\"tg-.*\"})"
+          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         }
       ],
       "transformations": [
@@ -763,7 +764,9 @@
               "Time 4": true,
               "job": true,
               "instance": true,
-              "__name__": true
+              "__name__": true,
+              "feed": true,
+              "owner": true
             },
             "renameByName": {
               "Value #A": "yielded",
@@ -781,12 +784,12 @@
           }
         }
       ],
-      "description": "Top 25 hand-curated sources (source!~\"tg-.*\") ranked on valid, names verbatim, same columns as the crawler table. Not comparable row-for-row with it: the curated overlay merges first and Merge is first-wins, so kept and filtered here are inflated against it."
+      "description": "Top 25 hand-curated sources (owner=\"curated\") ranked on valid, names verbatim, same columns as the crawler table. Not comparable row-for-row with it: the curated overlay merges first and Merge is first-wins, so kept and filtered here are inflated against it."
     },
     {
       "id": 21,
       "type": "table",
-      "title": "Ownership split: crawler-managed vs hand-curated (last cycle)",
+      "title": "Ownership split: crawler vs curated (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -820,7 +823,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{owner}}",
-          "expr": "count by (owner) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+          "expr": "count by (owner) (stable_source_valid_nodes{job=\"$job\"})"
         },
         {
           "refId": "B",
@@ -831,7 +834,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{owner}}",
-          "expr": "sum by (owner) (label_replace(label_replace(stable_source_nodes_total{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+          "expr": "sum by (owner) (stable_source_nodes_total{job=\"$job\"})"
         },
         {
           "refId": "C",
@@ -842,7 +845,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{owner}}",
-          "expr": "sum by (owner) (label_replace(label_replace(stable_source_valid_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+          "expr": "sum by (owner) (stable_source_valid_nodes{job=\"$job\"})"
         },
         {
           "refId": "D",
@@ -853,7 +856,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{owner}}",
-          "expr": "sum by (owner) (label_replace(label_replace(stable_source_tested_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+          "expr": "sum by (owner) (stable_source_tested_nodes{job=\"$job\"})"
         },
         {
           "refId": "E",
@@ -864,7 +867,7 @@
           "instant": true,
           "format": "table",
           "legendFormat": "{{owner}}",
-          "expr": "sum by (owner) (label_replace(label_replace(stable_source_published_nodes{job=\"$job\"}, \"owner\", \"hand-curated\", \"source\", \".*\"), \"owner\", \"crawler-managed\", \"source\", \"tg-.*\"))"
+          "expr": "sum by (owner) (stable_source_published_nodes{job=\"$job\"})"
         }
       ],
       "transformations": [
@@ -916,7 +919,7 @@
           }
         }
       ],
-      "description": "Both owner sides summed into two rows \u2014 crawler-managed (source=~\"tg-.*\") vs hand-curated \u2014 with the tables' columns plus a count of sources that reported last cycle. filtered is ATTRIBUTION, not contribution: the curated overlay merges first and Merge is first-wins, so a shared node is credited to the curated row."
+      "description": "Both owner sides summed into two rows \u2014 the exporter's owner label, crawler vs curated \u2014 with the tables' columns plus a count of sources that reported last cycle. filtered is ATTRIBUTION, not contribution: the curated overlay merges first and Merge is first-wins, so a shared node is credited to the curated row."
     },
     {
       "id": 15,
@@ -1398,7 +1401,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Probe outcome by stage",
-      "description": "Where the probe ended for each node probed, stacked to close over probed: condemned (the TCP pre-check refused the server, no URL test spent), connect, fetch, passed, unknown (no result at all \u2014 its proxies would not parse). A condemned node is also dead-cached for hours, so it leaves the next few cycles' probed count.",
+      "description": "Where the probe ended for each node probed, stacked to close over probed: condemned (the TCP pre-check refused the server, no URL test spent), connect, fetch, passed, unknown (no result at all \u2014 its mapping did not parse and its endpoint was never condemned). A condemned node is also dead-cached for hours, so it leaves the next few cycles' probed count.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
