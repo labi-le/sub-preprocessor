@@ -209,7 +209,14 @@ type TraceReport struct {
 // 64308 / 32284 / 2972 on vassago. The dedupe dominates; the dead cache is
 // only the largest term no per-source series exposes.
 type SourceReport struct {
-	Name         string
+	Name string
+	// Managed and Feed are the entry's own ownership and attribution, copied
+	// from its config entry: neither may be re-derived from Name, which
+	// carries no structure a reader is allowed to trust. Feed is empty where
+	// there was no channel to record, such as the mint that saw no origin;
+	// ownership does not enter it, and a curated entry may carry one.
+	Managed      bool
+	Feed         string
 	Total        int
 	Valid        int
 	Tested       int

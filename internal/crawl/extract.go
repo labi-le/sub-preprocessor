@@ -2,6 +2,7 @@ package crawl
 
 import (
 	"html"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -32,19 +33,87 @@ var stopByte = [utf8.RuneSelf]bool{
 // literal prefix plus a negated class. TestExtractorsMatchTheirRegexps holds
 // this scan equal to that pattern.
 func extractURLs(page string) []string {
-	out := make([]string, 0, strings.Count(page, urlScheme))
+	return appendURLs(make([]string, 0, strings.Count(page, urlScheme)), page)
+}
+
+// appendURLs is extractURLs over a caller-owned slice: the harvest scans a page
+// one message at a time and reuses one slice across them, so attributing URLs
+// per message costs no allocation per message.
+func appendURLs(dst []string, page string) []string {
 	for pos := 0; ; {
 		i := strings.Index(page[pos:], urlScheme)
 		if i < 0 {
-			return out
+			return dst
 		}
 		body := pos + i + len(urlScheme)
 		end := urlEnd(page, body)
 		if end > body { // the class is one-or-more, so a bare scheme is no match
-			out = append(out, strings.TrimRight(page[pos+i:end], trimSet))
+			dst = append(dst, strings.TrimRight(page[pos+i:end], trimSet))
 		}
 		pos = end
 	}
+}
+
+// dataPost bounds one message: it is the only per-message identity a scraped
+// page carries. pageCursor reads the same attribute off the RAW page, whose
+// offsets — and, where a page escapes its own markup, whose attributes — are not
+// those of the unescaped text the scanners are given, so attribution is computed
+// here on the text extractURLs actually reads.
+const dataPost = `data-post="`
+
+// nextMessage splits text at the first message boundary: seg precedes it and so
+// belongs to the message already being read, id is the boundary's message id,
+// and tail resumes at the attribute's VALUE, so no byte extractURLs could
+// harvest is skipped. A zero id ends the walk.
+//
+// A value that is not "<chat>/<digits>" is no boundary and stays inside seg,
+// which is the shape cursorRe demands of the same attribute.
+func nextMessage(text string) (seg string, id uint64, tail string) {
+	for pos := 0; ; {
+		i := strings.Index(text[pos:], dataPost)
+		if i < 0 {
+			return text, 0, ""
+		}
+		val := pos + i + len(dataPost)
+		q := strings.IndexByte(text[val:], '"')
+		if q < 0 {
+			return text, 0, ""
+		}
+		if post := postID(text[val : val+q]); post != 0 {
+			return text[:pos+i], post, text[val:]
+		}
+		pos = val
+	}
+}
+
+// postID returns the message id of a data-post value, or 0 for a value that
+// carries none. Taking the LAST segment mirrors cursorRe's greedy
+// `[^"]+/(\d+)`, so a forum's three-segment form yields its message id rather
+// than its topic.
+//
+// Deliberately narrower than the digit run cursorRe accepts: a leading zero and
+// a run too wide for uint64 are refused as no boundary, exactly as a
+// non-numeric tail is. What stays injective is the digit run onto its uint64,
+// not the value onto the name: the last-segment rule above gives "chan/12" and
+// "chat/7/12" the same id, which mergeManaged's used set absorbs. The refusals
+// stop "chan/007" minting the chan-7 that "chan/7" already owns. Telegram
+// emits neither shape; a hostile page can. ParseUint at base 10 takes no sign
+// and no underscore, so it is the whole of the digit check as well as the
+// conversion — one pass over the run.
+func postID(val string) uint64 {
+	i := strings.LastIndexByte(val, '/')
+	if i <= 0 {
+		return 0
+	}
+	digits := val[i+1:]
+	if digits == "" || digits[0] == '0' {
+		return 0
+	}
+	id, err := strconv.ParseUint(digits, decimalBase, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 // extractInlineNodes returns every raw proxy URI pasted directly in a channel

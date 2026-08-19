@@ -571,6 +571,15 @@ type SubscriptionSource struct {
 	// URIs) in place of a fetched URL. When set, the source is filtered directly
 	// without any HTTP fetch. Used by the crawler's inline-node harvest.
 	Body string `yaml:"body,omitempty"`
+	// Managed marks an entry the crawler minted and may therefore prune.
+	// Absent means hand-added, so forgetting the field shelters a source
+	// instead of exposing it.
+	Managed bool `yaml:"managed"`
+	// Feed is the channel a harvested source came from, written by the crawler
+	// because a name cannot be folded back onto it. Curated entries may set it
+	// too; unlike Managed it grants nothing, it only groups. Empty means the
+	// source names itself.
+	Feed string `yaml:"feed,omitempty"`
 }
 
 type privateConfig struct {
@@ -998,7 +1007,10 @@ func Load(path string) (Config, error) {
 			return Config{}, unmarshalErr
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
-		if validateErr := cfg.Subscriptions.validateSources(); validateErr != nil {
+		// This is the only merge whose entries may carry the mark; each
+		// git-tracked file refuses it as it loads, so position is not what
+		// separates them.
+		if validateErr := cfg.Subscriptions.validateSources(""); validateErr != nil {
 			return Config{}, fmt.Errorf("private config: %w", validateErr)
 		}
 	case errors.Is(readErr, fs.ErrNotExist):
@@ -1012,17 +1024,36 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// sourcesOverlayFile is the git-tracked curated overlay, named in the error that
+// refuses a crawler mark in it.
+const sourcesOverlayFile = "sources.yaml"
+
+// errManagedInCuratedFile is the one wording for a refused mark, so the message
+// does not depend on which gate caught it.
+func errManagedInCuratedFile(file, name string) error {
+	return fmt.Errorf("subscriptions.sources.%s: managed: true is the crawler's own mark and belongs in private.yaml; %s and config.yaml are curated", name, file)
+}
+
 // mergeSourcesOverlay appends subscription sources from a sibling sources.yaml
 // (curated sources kept out of config.yaml) to cfg. A missing file is fine; a
 // read or parse error fails loudly, mirroring the private.yaml overlay so a
 // permission/I/O problem never silently drops the curated sources.
 func mergeSourcesOverlay(dir string, cfg *Config) error {
-	b, err := os.ReadFile(filepath.Join(dir, "sources.yaml"))
+	b, err := os.ReadFile(filepath.Join(dir, sourcesOverlayFile))
 	switch {
 	case err == nil:
 		var overlay privateConfig
 		if unmarshalErr := decodeStrict("sources config", b, &overlay); unmarshalErr != nil {
 			return unmarshalErr
+		}
+		// The rule travels with the file rather than with Load's statement
+		// order: an overlay merged after private.yaml would meet no other gate,
+		// and refusing before the append also keeps the blame on the entries
+		// this file actually carried.
+		for _, src := range overlay.Subscriptions.Sources {
+			if src.Managed {
+				return errManagedInCuratedFile(sourcesOverlayFile, src.Name)
+			}
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, overlay.Subscriptions.Sources...)
 	case errors.Is(err, fs.ErrNotExist):
@@ -1423,15 +1454,24 @@ func (s *SubscriptionsConfig) Validate() error {
 	if err := s.Check.validate(); err != nil {
 		return err
 	}
-	return s.validateSources()
+	return s.validateSources(sourcesOverlayFile)
 }
 
 // validateSources checks the merged source list alone. Load re-runs it after
 // merging an overlay, so the error it blames on that overlay is always about
 // entries the overlay actually contributed.
-func (s *SubscriptionsConfig) validateSources() error {
+//
+// curatedFile names the git-tracked origin of these entries, and is empty only
+// once the crawler's private.yaml is merged, where managed: true is the whole
+// point. This is the second gate on the mark: mergeSourcesOverlay refuses it in
+// the file it loads, so a curated overlay stays policed wherever it is appended,
+// and this pass covers config.yaml's own list as well.
+func (s *SubscriptionsConfig) validateSources(curatedFile string) error {
 	seen := make(map[string]struct{}, len(s.Sources))
 	for _, src := range s.Sources {
+		if curatedFile != "" && src.Managed {
+			return errManagedInCuratedFile(curatedFile, src.Name)
+		}
 		if !sourceNameRe.MatchString(src.Name) {
 			return fmt.Errorf("subscriptions.sources: invalid name %q", src.Name)
 		}

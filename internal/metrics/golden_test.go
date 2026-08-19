@@ -40,10 +40,13 @@ func goldenSpeeds() []int {
 
 // goldenCases exercise every branch of the renderer: the nil-report page, a
 // full cycle, and the degraded one where each guarded series is absent or
-// explicitly zero. Between them every source-name shape, both owners, all seven
-// drop reasons with zeros among them, every histogram bound, a label value
-// needing each of the three escapes, one that is not valid UTF-8, and floats on
-// both sides of the exponent switch reach the wire.
+// explicitly zero. Between them every name shape, both owners -- a curated name
+// shaped exactly like a minted one among them, since the fields and not the name
+// decide -- a feed that is recorded and a feed that falls back to the name, all
+// seven drop reasons with zeros among them, every histogram bound, a label value
+// needing each of the three escapes in the feed and in the name independently,
+// one that is not valid UTF-8, and floats on both sides of the exponent switch
+// reach the wire.
 func goldenCases() []goldenCase {
 	full := &stable.CycleReport{
 		SourcesOK: 6, SourcesTotal: 7,
@@ -66,17 +69,33 @@ func goldenCases() []goldenCase {
 		},
 		Sources: []stable.SourceReport{
 			{
-				Name: "tg-genliberty-7e9b21", Total: 412, Valid: 388, Tested: 201, Filtered: 96,
+				Name: "genliberty-3631", Managed: true, Feed: "genliberty",
+				Total: 412, Valid: 388, Tested: 201, Filtered: 96,
 				DNSDrop: 3, GeoDrop: 0, CIDRDrop: 5, ASNDrop: 0,
 				GeoBlockDrop: 11, IPv6Drop: 0, Unsupported: 7,
 			},
 			{
-				Name: "tg-inline", Total: 40, Valid: 39, Tested: 30, Filtered: 12,
+				// The second URL of the same post: it shares the feed above,
+				// which is the whole point of recording the slug.
+				Name: "genliberty-3631-7e9b21", Managed: true, Feed: "genliberty",
+				Total: 88, Valid: 80, Tested: 44, Filtered: 20,
+				DNSDrop: 2, GeoDrop: 6, CIDRDrop: 0, ASNDrop: 0,
+				GeoBlockDrop: 0, IPv6Drop: 0, Unsupported: 0,
+			},
+			{
+				Name: "genliberty-1444c8", Managed: true, Feed: "genliberty",
+				Total: 17, Valid: 16, Tested: 9, Filtered: 3,
+			},
+			{
+				Name: "inline", Managed: true, Total: 40, Valid: 39, Tested: 30, Filtered: 12,
 				DNSDrop: 0, GeoDrop: 1, CIDRDrop: 0, ASNDrop: 2,
 				GeoBlockDrop: 0, IPv6Drop: 4, Unsupported: 0,
 			},
 			{
-				Name: "tg-96c4d7c7a7", Total: 1, Valid: 1, Tested: 1, Filtered: 1,
+				Name: "96c4d7c7a7", Managed: true, Total: 1, Valid: 1, Tested: 1, Filtered: 1,
+			},
+			{
+				Name: "seyedng-4102", Total: 6, Valid: 6, Tested: 5, Filtered: 5,
 			},
 			{
 				Name: "flat447", Total: 9000, Valid: 8000, Tested: 1234567, Filtered: 900,
@@ -84,7 +103,8 @@ func goldenCases() []goldenCase {
 				GeoBlockDrop: 7, IPv6Drop: 7, Unsupported: 7,
 			},
 			{
-				Name: "quote\"back\\slash\nnewline", Total: 5, Valid: 4, Tested: 3, Filtered: 2,
+				Name: "quote\"back\\slash\nnewline", Feed: "esc\"aped\\feed\nvalue",
+				Total: 5, Valid: 4, Tested: 3, Filtered: 2,
 				DNSDrop: 1, Unsupported: 1,
 			},
 			{

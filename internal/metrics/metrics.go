@@ -16,7 +16,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"domains.lst/sub-preprocessor/internal/srcname"
 	"domains.lst/sub-preprocessor/internal/stable"
 )
 
@@ -50,7 +49,7 @@ const (
 	labelStage  = "stage"
 )
 
-// Who minted a source name: the crawler owns the srcname.ManagedPrefix ones,
+// Who owns a source: the crawler mints and prunes the managed ones,
 // everything else is hand-added to the config.
 const (
 	ownerCrawler = "crawler"
@@ -311,11 +310,11 @@ func writeSources(w *exposition, sources []stable.SourceReport) {
 	labels := make([]byte, 0, sourceLabelBytes(sources))
 	ends := make([]int, len(sources))
 	for i, s := range sources {
-		feed, managed := srcname.Split(s.Name)
 		owner := ownerCurated
-		if managed {
+		if s.Managed {
 			owner = ownerCrawler
 		}
+		feed := sourceFeed(s)
 		// Sorted as the label map was: feed, owner, source.
 		labels = appendLabelEsc(labels, labelFeed, feed)
 		labels = append(labels, ',')
@@ -325,7 +324,7 @@ func writeSources(w *exposition, sources []stable.SourceReport) {
 		ends[i] = len(labels)
 	}
 
-	help(w, "stable_source_nodes_total", "gauge", "Nodes each source yielded before filtering last cycle. source is the verbatim config key; feed and owner are derived from it, owner=crawler for a crawler-minted name and curated for a hand-added one.")
+	help(w, "stable_source_nodes_total", "gauge", "Nodes each source yielded before filtering last cycle. source is the verbatim config key; owner and feed are the entry's own fields, never re-derived from the name -- owner=crawler when the crawler minted the entry and curated when it was hand-added, feed the channel it was minted from, or the name itself where no channel was recorded.")
 	for i, s := range sources {
 		sample(w, "stable_source_nodes_total", sourceLabels(labels, ends, i), float64(s.Total))
 	}
@@ -371,16 +370,28 @@ func sourceLabels(arena []byte, ends []int, i int) []byte {
 	return arena[ends[i-1]:ends[i]]
 }
 
-// sourceLabelBytes estimates the arena -- feed is a slice of the name, so a
-// source costs its name twice plus labelSyntaxBytes. It is not a ceiling: a
-// name carrying a byte appendLabelValue escapes, or one that is not valid
-// UTF-8, renders wider than it measures (`a"b` measures 39 and renders 41,
-// "\xff" measures 35 and renders 57 -- 2026-08-18). The regrow is safe because
-// ends holds lengths, not pointers into the arena.
+// sourceFeed is the feed label's value. An entry with no recorded channel names
+// itself -- typically the mint that saw no origin, though ownership does not
+// enter it: a curated entry may set feed too.
+func sourceFeed(s stable.SourceReport) string {
+	if s.Feed != "" {
+		return s.Feed
+	}
+	return s.Name
+}
+
+// sourceLabelBytes estimates the arena: a source costs its name, its feed and
+// labelSyntaxBytes. It is not a ceiling -- a name carrying a byte
+// appendLabelValue escapes, or one that is not valid UTF-8, renders wider than
+// it measures (`a"b` measures 39 and renders 41, "\xff" measures 35 and renders
+// 57 -- 2026-08-18). The regrow is safe because ends holds lengths, not
+// pointers into the arena.
+// Only 4096 B of BenchmarkWriteSources' 12288 B drop is this estimate; the rest
+// is the fixture's shorter names (docs/guides/benchmarks.md).
 func sourceLabelBytes(sources []stable.SourceReport) int {
 	n := 0
 	for _, s := range sources {
-		n += len(s.Name) + len(s.Name) + labelSyntaxBytes
+		n += len(s.Name) + len(sourceFeed(s)) + labelSyntaxBytes
 	}
 	return n
 }

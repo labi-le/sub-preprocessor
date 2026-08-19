@@ -487,3 +487,57 @@ func TestSourceStageCountsSeparateTheTwoCuts(t *testing.T) {
 			got.Valid, got.Tested, got.Filtered)
 	}
 }
+
+// labelProber passes exactly the one label it is named after, which is all a
+// cycle needs to publish and reach the Reporter.
+type labelProber string
+
+func (p labelProber) Probe(context.Context, []byte) (map[string]ProbeResult, error) {
+	return map[string]ProbeResult{string(p): {Successes: 5, MeanMs: 100}}, nil
+}
+
+func (labelProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestSourceReportCarriesOwnershipFromConfig walks the seam the owner and feed
+// labels ride: config entry -> fetchSources -> CycleReport -> Reporter. Both are
+// COPIED, never re-derived from the name, and a dropped assignment fails
+// nothing on its own -- it renders every crawled source curated and every feed
+// row its own name, and the exporter's tests cannot see it because they build
+// SourceReport directly. Hence the curated half: it wears a minted name and
+// must still arrive unmarked and unattributed.
+func TestSourceReportCarriesOwnershipFromConfig(t *testing.T) {
+	t.Parallel()
+
+	rec := &cycleRecorder{}
+	c := NewChecker(CheckerSpec{
+		Sources: []config.SubscriptionSource{
+			{
+				Name: "genliberty-3631", Managed: true, Feed: "genliberty",
+				Body: benchVlessLine("192.0.2.1", "443", "n"),
+			},
+			{Name: "seyedng-4102", Body: benchVlessLine("192.0.2.2", "443", "m")},
+		},
+		Interval:      time.Hour,
+		Rounds:        5,
+		MaxAvgMs:      1000,
+		SourceTimeout: time.Minute,
+		Prober:        labelProber("genliberty-3631-001"),
+	}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rec.last == nil {
+		t.Fatal("a published cycle must reach the Reporter")
+	}
+	byName := make(map[string]SourceReport, len(rec.last.Sources))
+	for _, s := range rec.last.Sources {
+		byName[s.Name] = s
+	}
+	if got, ok := byName["genliberty-3631"]; !ok || !got.Managed || got.Feed != "genliberty" {
+		t.Errorf("managed source reported as %+v, want Managed true and Feed %q", got, "genliberty")
+	}
+	if got, ok := byName["seyedng-4102"]; !ok || got.Managed || got.Feed != "" {
+		t.Errorf("hand-added source reported as %+v, want Managed false and no Feed", got)
+	}
+}

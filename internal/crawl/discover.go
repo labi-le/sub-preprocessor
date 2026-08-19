@@ -65,6 +65,13 @@ type scanNode struct {
 	configured bool
 }
 
+// origin is where a harvested URL was first seen this cycle. Both fields are
+// zero on the recheck-revival path, which sees no channel at all.
+type origin struct {
+	Slug string // channel slug, "" when unknown
+	Post uint64 // Telegram message id, 0 when unknown
+}
+
 // scan performs a relevance-gated breadth-first crawl of the channel repost
 // graph. Seeds are the configured channels plus every remembered productive
 // channel (st), all crawled at depth 0 and always expanded; a newly discovered
@@ -74,9 +81,9 @@ type scanNode struct {
 // MaxDepth. Channels that yield a live sub are recorded into st (bounded by
 // maxProductive) so they become seeds on future cycles, surviving
 // days when their recent pages carry no live sub. Returns every live
-// subscription URL found, mapped to the channel that first yielded it.
-func (c *Crawler) scan(ctx context.Context, st *state) (map[string]string, []string) {
-	live := map[string]string{}
+// subscription URL found, mapped to the origin that first yielded it.
+func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []string) {
+	live := map[string]origin{}
 	var inline []string
 	discovered := 0
 	var cursors cursorStats
@@ -201,7 +208,7 @@ func (c *Crawler) reportCursors(cs cursorStats) {
 // scanChannel scrapes one channel, classifies its candidate URLs into live,
 // records productivity in st, and returns the referenced channels to expand
 // into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]string, inline *[]string, cs *cursorStats, rej *rejects) []string {
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) []string {
 	pages, cursorLost := c.scrapeChannel(ctx, n.ref, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
@@ -214,14 +221,18 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	}
 
 	cand := c.harvestPages(pages, inline, rej, n.ref.slug)
-	found, _ := c.classifyAll(ctx, keys(cand), rej, n.ref.slug)
+	found, _ := c.classifyAll(ctx, keys(cand), rej, n.ref.slug, cand)
 	for u := range found {
-		// First discoverer wins: BFS visits seeds before discovered channels,
-		// so attribution prefers the operator-configured origin. The bare slug
-		// is the origin, not the ref: a managed source name is permanent, and a
-		// topic id is not part of the chat's identity.
+		// First discoverer wins: BFS visits seeds before discovered channels, so
+		// attribution prefers the operator-configured origin. The slug stays
+		// bare because a topic id is not part of the chat's identity; the post
+		// id beside it is per URL, from the message it was harvested in.
+		//
+		// The slug is rejoined here rather than carried per candidate: within
+		// one channel it is this one string, and cand holding a copy of it per
+		// URL is what put the harvest's B/op above HEAD's past ~30 candidates.
 		if _, ok := live[u]; !ok {
-			live[u] = n.ref.slug
+			live[u] = origin{Slug: n.ref.slug, Post: cand[u]}
 		}
 	}
 	if len(found) > 0 {
@@ -259,23 +270,60 @@ type gateVerdict struct {
 // channel once the budget is spent, the truncation catches the single append
 // that overshoots it, because one page can carry more URIs than the whole cap.
 //
-// Every URL the candidate gates turn down is recorded against channel, so a link
-// dropped before it was ever fetched is as visible as one that failed to
+// Every URL the candidate gates turn down is recorded against its origin, so a
+// link dropped before it was ever fetched is as visible as one that failed to
 // classify. rej dedupes, which matters here: the same link is repeated across
 // posts and pages.
-func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]struct{} {
-	cand := map[string]struct{}{}
-	var scratch []byte
+//
+// Attribution is per message: a page is walked as the messages data-post
+// separates it into, and a URL takes the id of the one it sits in. A URL ahead
+// of the first message belongs to the page's own chrome and keeps a zero post,
+// the same id a page carrying no data-post at all yields.
+//
+// Only the id is returned. Every candidate of one call comes from the channel
+// argument, so a full origin per URL would store that one slug len(cand) times;
+// scanChannel rejoins it when it copies a live URL into the cycle-wide map,
+// where the slug does vary.
+func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, channel string) map[string]uint64 {
+	cand := map[string]uint64{}
+	var (
+		scratch []byte
+		urls    []string
+	)
 	for i, p := range pages {
 		// One unescape per page feeds both scans, and one scratch feeds every
 		// page of the channel: text aliases scratch, so everything kept below
 		// is copied out of it.
 		text, buf := unescapeInto(scratch, p)
 		scratch = buf
-		// Reset per page: last.raw points into text, which the next page's
-		// unescape overwrites.
-		var last gateVerdict
-		for _, raw := range extractURLs(text) {
+		urls = harvestPage(text, origin{Slug: channel}, cand, urls, rej)
+		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
+			*inline = appendInlineNodes(*inline, text)
+			if len(*inline) > maxInlineAccum {
+				*inline = (*inline)[:maxInlineAccum]
+			}
+		}
+	}
+	return cand
+}
+
+// harvestPage gates one page's URLs into cand under the id of the message they
+// sit in, and hands the URL slice back so the next page reuses it: the
+// per-message scans share that one slice, so segmenting a page allocates
+// nothing at all. o arrives with the post the page's chrome gets and carries
+// the channel for the reject log, which wants the whole origin.
+func harvestPage(text string, o origin, cand map[string]uint64, urls []string, rej *rejects) []string {
+	// Sized off the whole page, so no message can grow the slice.
+	if n := strings.Count(text, urlScheme); cap(urls) < n {
+		urls = make([]string, 0, n)
+	}
+	// Reset per page: last.raw points into text, which the next page's unescape
+	// overwrites.
+	var last gateVerdict
+	for rest := text; rest != ""; {
+		seg, post, tail := nextMessage(rest)
+		urls = appendURLs(urls[:0], seg)
+		for _, raw := range urls {
 			// Both dedupes cover the GATE, not just the clone below: candidate
 			// parses raw and its validator parses the host, 2 allocations and
 			// 192 B a call (BenchmarkCandidate/accept, 2026-08-18), while a page
@@ -290,34 +338,29 @@ func (c *Crawler) harvestPages(pages []string, inline *[]string, rej *rejects, c
 				continue
 			}
 			if raw == last.raw {
-				rej.record(channel, raw, last.reason, 0, last.err)
+				rej.record(o, raw, last.reason, 0, last.err)
 				continue
 			}
 			ok, reason, err := candidate(raw)
 			if !ok {
 				last = gateVerdict{raw: raw, reason: reason, err: err}
-				rej.record(channel, raw, reason, 0, err)
+				rej.record(o, raw, reason, 0, err)
 				continue
 			}
 			// Clone for the same reason rejects.record does, and the accepted
 			// key is the longer-lived of the two: keys(cand) feeds classifyAll,
 			// which puts every live URL in the cycle-wide live map scanChannel
 			// returns to RunOnce for mergeManaged, so an accepted key outlives
-			// this page by the whole cycle. extractURLs hands out sub-slices of
+			// this page by the whole cycle. appendURLs hands out sub-slices of
 			// text, so an uncloned 40-byte key keeps its entire page reachable
 			// — up to maxPageBytes, 8 MiB. That is what a string sub-slice IS,
-			// not a measurement. The pin predates the reject map and is not
-			// what that fix removed.
-			cand[strings.Clone(raw)] = struct{}{}
+			// not a measurement. The pin predates the reject map and is not what
+			// that fix removed. The VALUE needs no such copy: it is a number.
+			cand[strings.Clone(raw)] = o.Post
 		}
-		if i == 0 && c.opts.InlineEnabled && len(*inline) < maxInlineAccum {
-			*inline = appendInlineNodes(*inline, text)
-			if len(*inline) > maxInlineAccum {
-				*inline = (*inline)[:maxInlineAccum]
-			}
-		}
+		o.Post, rest = post, tail
 	}
-	return cand
+	return urls
 }
 
 // scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a

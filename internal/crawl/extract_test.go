@@ -147,6 +147,135 @@ func TestAppendInlineNodesCopiesOutOfTheScratch(t *testing.T) {
 	}
 }
 
+// TestNextMessageWalksDataPostBoundaries pins what counts as a boundary: the id
+// shape is cursorRe's, and an attribute carrying none leaves its text with the
+// message before it rather than opening one.
+//
+// The last two are the narrowing a numeric id buys. postID refuses a leading
+// zero and a run too wide for uint64 rather than round either into an id, so
+// the digit run stays injective onto its uint64: "chan/007" would otherwise
+// mint the chan-7 that "chan/7" already owns, and a 25-digit run the name of
+// whatever it wrapped to. Telegram emits neither; a hostile page can. The
+// value-to-name mapping is deliberately not injective -- the channel post and
+// forum rows below both pin 12 -- and mergeManaged's used set absorbs that.
+func TestNextMessageWalksDataPostBoundaries(t *testing.T) {
+	t.Parallel()
+	const wide = "1234567890123456789012345"
+	for _, tc := range []struct {
+		name      string
+		text      string
+		seg, tail string
+		id        uint64
+	}{
+		{"no attribute", "<div>a</div>", "<div>a</div>", "", 0},
+		{"channel post", `a<div data-post="chan/12">b`, "a<div ", `chan/12">b`, 12},
+		{"forum three segments", `a data-post="chat/7/12">b`, "a ", `chat/7/12">b`, 12},
+		{"non-numeric tail", `a data-post="chan/x">b`, `a data-post="chan/x">b`, "", 0},
+		{"no chat segment", `a data-post="/12">b`, `a data-post="/12">b`, "", 0},
+		{"unterminated value", `a data-post="chan/12`, `a data-post="chan/12`, "", 0},
+		{"past a bad attribute", `a data-post="chan/x" data-post="chan/9">b`, `a data-post="chan/x" `, `chan/9">b`, 9},
+		{"leading zero", `a data-post="chan/007">b`, `a data-post="chan/007">b`, "", 0},
+		{"signed", `a data-post="chan/+12">b`, `a data-post="chan/+12">b`, "", 0},
+		{"wider than uint64", `a data-post="chan/` + wide + `">b`, `a data-post="chan/` + wide + `">b`, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seg, id, tail := nextMessage(tc.text)
+			if seg != tc.seg || id != tc.id || tail != tc.tail {
+				t.Fatalf("nextMessage(%q) = %q %d %q, want %q %d %q",
+					tc.text, seg, id, tail, tc.seg, tc.id, tc.tail)
+			}
+		})
+	}
+}
+
+// TestHarvestAttributesThroughEscapedMarkup is the offset hazard: pageCursor
+// reads the RAW page while the harvest scans the unescaped text, so an entity
+// ahead of a boundary shifts every later offset, and an escaped attribute is a
+// boundary in one string and not in the other. Attribution follows the scanner,
+// which is why the last url here carries a post the cursor cannot see.
+func TestHarvestAttributesThroughEscapedMarkup(t *testing.T) {
+	t.Parallel()
+	const (
+		chrome = "https://sub.example/chrome"
+		first  = "https://sub.example/first"
+		second = "https://sub.example/second"
+		third  = "https://sub.example/third"
+	)
+	page := `<a href="` + chrome + `">c</a><div>me &amp; you</div>` +
+		`<div data-post="chan/100"><a href="` + first + `">a</a>` +
+		`<a href="` + second + `">b</a></div>` +
+		`<div data-post=&quot;chan/200&quot;><a href="` + third + `">d</a></div>`
+
+	var inline []string
+	cand := (&Crawler{}).harvestPages([]string{page}, &inline, nil, "chan")
+	want := map[string]uint64{
+		chrome: 0,
+		first:  100,
+		second: 100,
+		third:  200,
+	}
+	if len(cand) != len(want) {
+		t.Fatalf("harvested %v, want %d urls", cand, len(want))
+	}
+	for u, w := range want {
+		if got, ok := cand[u]; !ok || got != w {
+			t.Errorf("%s attributed to post %d (present %t), want %d", u, got, ok, w)
+		}
+	}
+	if got := pageCursor(page); got != "100" {
+		t.Fatalf("pageCursor = %q, want 100: the escaped boundary exists only in the unescaped text, so attribution computed on the raw page would misplace %s", got, third)
+	}
+}
+
+// TestHarvestAttributesEachPageToItsOwnPost pins attribution across the page
+// loop: every URL carries the id of the message it sits in, and a URL ahead of
+// a page's first boundary carries none.
+//
+// It can no longer fail the way it was written to fail. origin.Post used to be
+// a sub-slice of the one unescape scratch every page of a channel reuses, so
+// page 0's id re-read as page 1's digits; a uint64 aliases nothing, and no
+// fixture can reach a state the type forbids. Two things it does still catch,
+// both checked by mutation: a segment attributed to the message it OPENS
+// rather than the one it closes, and an id carried between pages over a shared
+// buffer — this fixture on a tree whose Post is a sub-slice again reports 999
+// for page 0. The equal lengths are what make that second one bite, so they
+// are asserted rather than assumed.
+//
+// It does not catch an origin merely hoisted out of harvestPages' loop:
+// harvestPage's walk ends every page on a boundary-less tail, which zeroes the
+// post before the next page starts.
+func TestHarvestAttributesEachPageToItsOwnPost(t *testing.T) {
+	t.Parallel()
+	page := func(id, path string) string {
+		return `<a href="https://sub.example/` + path + `-chrome">c</a>` +
+			`<div data-post="chan/` + id + `">me &amp; you` +
+			`<a href="https://sub.example/` + path + `">a</a></div>`
+	}
+	pages := []string{page("100", "aaaa"), page("999", "bbbb")}
+	if len(pages[0]) != len(pages[1]) {
+		t.Fatalf("fixture pages are %d and %d bytes: page 1 only lands on page 0's digits when they match",
+			len(pages[0]), len(pages[1]))
+	}
+
+	var inline []string
+	cand := (&Crawler{}).harvestPages(pages, &inline, nil, "chan")
+	want := map[string]uint64{
+		"https://sub.example/aaaa-chrome": 0,
+		"https://sub.example/aaaa":        100,
+		"https://sub.example/bbbb-chrome": 0,
+		"https://sub.example/bbbb":        999,
+	}
+	if len(cand) != len(want) {
+		t.Fatalf("harvested %v, want %d urls", cand, len(want))
+	}
+	for u, w := range want {
+		if got, ok := cand[u]; !ok || got != w {
+			t.Errorf("%s attributed to post %d (present %t), want %d", u, got, ok, w)
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

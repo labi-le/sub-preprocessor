@@ -18,7 +18,9 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +30,6 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
-	"domains.lst/sub-preprocessor/internal/srcname"
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
@@ -46,10 +47,26 @@ var (
 	trimSet  = ".,;:!?)]}'\""
 )
 
-// legacyNameRe matches the pre-attribution managed name form tg-<sha10>. Such
-// names carry no origin info, so they are upgraded to the channel-attributed
-// form the first time the URL is rediscovered in a channel.
-var legacyNameRe = regexp.MustCompile("^" + srcname.ManagedPrefix + "[0-9a-f]{10}$")
+// legacyManagedPrefix is what every crawler-minted name wore before ownership
+// became a field. It is the adoption trigger for UNMARKED entries only: a marked
+// one has already been adopted, and a slug may itself begin with it.
+const legacyManagedPrefix = "tg-"
+
+const (
+	// attributedTailHex sizes the per-URL discriminator on an attributed name:
+	// <slug>-<sha6>, and <slug>-<postid>-<sha6> for the second and later URL of
+	// one post, which is a container rather than a URL.
+	attributedTailHex = 6
+	// unattributedNameHex sizes the whole of a name minted with no origin at
+	// all, which is what managedName builds and unattributedNameRe matches.
+	unattributedNameHex = 10
+)
+
+// unattributedNameRe matches managedName's form. Such a name carries no origin,
+// so it is the one existing name the mint may replace once a channel is known.
+// The literal repeats unattributedNameHex: composing the pattern from the
+// constant costs an import and reads worse than the shape it describes.
+var unattributedNameRe = regexp.MustCompile("^[0-9a-f]{10}$")
 
 // Options configures a crawl run.
 type Options struct {
@@ -70,12 +87,26 @@ type source struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url,omitempty"`
 	Body string `yaml:"body,omitempty"`
+	// Feed is the channel slug the entry was minted from, carried as data
+	// because a name cannot be parsed back into slug plus discriminator: the
+	// slug may itself end in a dash-separated digit run (channelSlug folds "_"
+	// to "-", so free_vpn_2026 becomes free-vpn-2026).
+	Feed string `yaml:"feed,omitempty"`
+	// Managed is the whole of the crawler's write authority over an entry.
+	// Absent means hand-added and sheltered, so an operator who forgets the
+	// field is safe by default; omitempty is what keeps it out of their entry.
+	Managed bool `yaml:"managed,omitempty"`
 }
 
 type privateFile struct {
 	Subscriptions struct {
 		Sources []source `yaml:"sources"`
 	} `yaml:"subscriptions"`
+	// adopted reports that the load migrated legacy names (adoptLegacyNames).
+	// The merge compares its output against this snapshot, which the migration
+	// already rewrote, so without this flag a cycle that had nothing else to do
+	// would call the file unchanged and never write the migration out.
+	adopted bool
 }
 
 // Crawler runs crawl cycles.
@@ -280,11 +311,21 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
-			next = append(next, s)
-			inlineCount = n
+			// A hand-added entry is never renamed, and the duplicate would make
+			// validatePrivate refuse this write and every later one.
+			if slices.ContainsFunc(next, func(e source) bool { return e.Name == s.Name }) {
+				c.logger.Warn().Str("source", s.Name).
+					Msg("a hand-added entry holds the inline aggregate's name; skipping the inline harvest rather than writing a duplicate")
+			} else {
+				next = append(next, s)
+				inlineCount = n
+			}
 		}
 	}
-	if sameSources(pf.Subscriptions.Sources, next) {
+	// pf.adopted first: the migration rewrote the very snapshot this compares
+	// against, so an otherwise idle cycle would call the file unchanged and
+	// leave the corpus prefixed forever.
+	if !pf.adopted && sameSources(pf.Subscriptions.Sources, next) {
 		// A merge that reproduces the file exactly proposes no deletion at all,
 		// which withdraws any earlier bulk-prune proposal — otherwise six quiet
 		// hours would leave that refusal standing to authorize whatever the
@@ -347,11 +388,14 @@ func (r recheckResult) dark(discovered int) bool {
 // transport (DNS, timeout, TLS, read), answered a transient status (403, 408,
 // 425, 429, any 5xx) or answered 2xx with no node at all lands in unknown, since
 // none of those show the subscription is gone; see classifyAll.
-func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]string) recheckResult {
+func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]origin) recheckResult {
 	rr := recheckResult{managedURL: map[string]bool{}}
 	var pending []string
 	for _, s := range pf.Subscriptions.Sources {
-		if !strings.HasPrefix(s.Name, srcname.ManagedPrefix) {
+		// The field, not the name: a minted name is now indistinguishable from
+		// a hand-added one, and rechecking someone else's source would hand the
+		// prune a verdict on an entry the crawler may not delete.
+		if !s.Managed {
 			continue
 		}
 		if s.Body != "" {
@@ -364,17 +408,17 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 			pending = append(pending, s.URL)
 		}
 	}
-	// nil recorder: these are existing managed sources, not candidates this
-	// cycle discovered, and their fate is already reported by checked/revived
-	// and the prune decision.
-	relive, unknown := c.classifyAll(ctx, pending, nil, "")
+	// nil recorder, no channel and no ids: these are existing managed sources,
+	// not candidates this cycle discovered, and their fate is already reported
+	// by checked/revived and the prune decision.
+	relive, unknown := c.classifyAll(ctx, pending, nil, "", nil)
 	rr.unknown = unknown
 	rr.checked = len(pending)
 	rr.revived = len(relive)
 	for u := range relive {
 		// Revived by recheck, not seen in a channel this cycle: origin unknown.
 		if _, ok := live[u]; !ok {
-			live[u] = ""
+			live[u] = origin{}
 		}
 	}
 	return rr
@@ -391,30 +435,37 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 // applied here, the single funnel every candidate URL passes through, so a
 // blocked source cannot re-enter from the re-loaded file, from rediscovery in
 // a channel, or from a recheck reviving it.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string) {
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string) {
 	all := map[string]struct{}{}
-	existing := map[string]string{}
+	existing := map[string]source{}
+	// Every name the file already holds is spoken for, whoever owns it:
+	// <slug>-<postid> is per-POST, so without this a second URL of one post takes
+	// the name sourceName then returns verbatim to its incumbent, and the
+	// duplicate makes validatePrivate refuse the write on every later cycle too.
+	used := make(map[string]bool, len(pf.Subscriptions.Sources))
 	for _, s := range pf.Subscriptions.Sources {
 		switch {
-		case s.Body != "":
-			// Inline (Body) sources are regenerated fresh each cycle by
-			// RunOnce; drop the stale one here so it is not double-counted.
+		case s.Body != "" && s.Managed:
+			// Only the crawler's own aggregate is regenerated by RunOnce; drop
+			// the stale one so it is not double-counted. Nobody regenerates a
+			// hand-added body source, so it falls through to the shelter.
 			continue
-		case strings.HasPrefix(s.Name, srcname.ManagedPrefix):
+		// The field is the authority: a name says nothing about who owns the
+		// entry, so switching on one would put hand-added sources under the
+		// crawler's prune and let its own entries be sheltered by a rename.
+		case s.Managed:
 			all[s.URL] = struct{}{}
-			existing[s.URL] = s.Name
+			existing[s.URL] = s
+			used[s.Name] = true
 		default:
+			// Sheltered because the field is absent, which is now the whole
+			// test: an unmarked entry is nobody's but the operator's.
 			kept = append(kept, s)
+			used[s.Name] = true
 		}
 	}
 	for u := range live {
 		all[u] = struct{}{}
-	}
-	// Hand-added names occupy the namespace too; a channel-attributed name may
-	// never collide with them.
-	used := map[string]bool{}
-	for _, s := range kept {
-		used[s.Name] = true
 	}
 	// Deterministic naming order so a hash-fallback on collision is stable
 	// across cycles (map iteration order is randomized).
@@ -450,9 +501,7 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 			c.logger.Warn().Err(err).Str("url", u).Msg("dropping managed source the service would refuse to load")
 			continue
 		}
-		name := sourceName(u, existing[u], live[u], used)
-		used[name] = true
-		managed = append(managed, source{Name: name, URL: u})
+		managed = append(managed, mintSource(u, existing[u], live[u], used))
 	}
 	if blockedDropped > 0 {
 		c.logger.Info().Int("blocked", blockedDropped).Msg("managed sources withheld by the channels.yaml blocked list")
@@ -462,13 +511,32 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]string, rr rechec
 	return kept, managed, deleted
 }
 
+// mintSource is what one retained URL becomes. prev is the entry the cycle-start
+// file held for it, zero for a URL the crawler has never named. The feed follows
+// the name, changing exactly when it does, so an entry rediscovered in another
+// channel keeps both rather than half of each.
+//
+// The minted name joins used, so the next URL of the same post cannot take it
+// too. That set is mergeManaged's, seeded from every name the cycle-start file
+// held and filled in sorted-URL order: the order is what makes which URL of a
+// post gets the plain <slug>-<postid> stable across cycles.
+func mintSource(u string, prev source, o origin, used map[string]bool) source {
+	name := sourceName(u, prev.Name, o, used)
+	feed := prev.Feed
+	if name != prev.Name {
+		feed = channelSlug(o.Slug)
+	}
+	used[name] = true
+	return source{Name: name, URL: u, Feed: feed, Managed: true}
+}
+
 // retainManaged decides whether one managed URL survives the cycle. A definitive
 // not-live verdict prunes at once; an undetermined one prunes only after the
 // retirement window has run out on it (state.ageManaged), because a panel can
 // serve a placeholder or an empty pool for a cycle. A source that appeared in the
 // re-loaded file mid-cycle was never checked and is kept. prune is the cycle's
 // decision, not opts.Prune — a cycle that learned nothing prunes nothing.
-func retainManaged(u string, live map[string]string, rr recheckResult, prune bool) bool {
+func retainManaged(u string, live map[string]origin, rr recheckResult, prune bool) bool {
 	if _, isLive := live[u]; isLive {
 		return true
 	}
@@ -491,7 +559,7 @@ func retainManaged(u string, live map[string]string, rr recheckResult, prune boo
 // evidence behind each. It saves the state itself: the streak is this cycle's
 // only record that these sources were observed at all, and every path from the
 // merge on may return without another save.
-func (c *Crawler) trackLiveness(st *state, managed map[string]bool, live map[string]string) map[string]bool {
+func (c *Crawler) trackLiveness(st *state, managed map[string]bool, live map[string]origin) map[string]bool {
 	now := time.Now()
 	stale := st.ageManaged(managed, live, now)
 	for u := range stale {
@@ -525,12 +593,18 @@ const (
 )
 
 // managedCount counts the managed URL sources of a private file: the corpus the
-// prune floor protects. Inline (Body) sources are regenerated every cycle and
-// hand-added ones are never touched, so neither belongs in the comparison.
+// prune floor protects, and the denominator allowShrink's ratio divides by.
+// Inline (Body) sources are regenerated every cycle and hand-added ones are
+// never touched, so neither belongs in the comparison.
+//
+// It counts the field: a name test here would read 0 the moment the prefix went,
+// and a 0 denominator collapses allowShrink to its absolute arm, so every drop
+// over bulkPruneMinDrop would wait for a second cycle to confirm it and
+// private.yaml would quietly stop being written in between.
 func managedCount(pf privateFile) int {
 	n := 0
 	for _, s := range pf.Subscriptions.Sources {
-		if s.Body == "" && strings.HasPrefix(s.Name, srcname.ManagedPrefix) {
+		if s.Body == "" && s.Managed {
 			n++
 		}
 	}
@@ -584,23 +658,35 @@ func (c *Crawler) persistState(st state) {
 	}
 }
 
-// sourceName picks the managed name for url u. An already-attributed name is
-// kept verbatim: a rename churns private.yaml and relabels every published
-// node, and buys nothing. It does NOT restart the worker -- Controller.Apply
-// swaps the spec the next cycle reads (docs/guides/design.md) -- so the cost is
-// the churn, not an interrupted cycle. A legacy hash-only name upgrades to the
-// channel-attributed form tg-<slug>-<sha6> the first time the URL is seen in a
-// channel; on a (never observed, ~2^-24) name collision or when no channel is
-// known, the legacy hash form is used so the name stays valid and unique.
-func sourceName(u, existingName, channel string, used map[string]bool) string {
-	if existingName != "" && !legacyNameRe.MatchString(existingName) {
+// sourceName picks the managed name for url u: <slug>-<postid> for a URL
+// harvested from a known post, <slug>-<postid>-<sha6> for the second and later
+// URL of one post (a post is a container, not a URL), <slug>-<sha6> when the
+// channel is known but the post is not, and a bare hash when neither is.
+//
+// An existing name is kept verbatim, because a rename churns private.yaml and
+// relabels every published node (merge.go derives <source>-NNN) and buys
+// nothing. The one exception is the bare-hash form, which names no origin: that
+// upgrades the first time the URL is seen in a channel. On the (never observed,
+// ~2^-24) collision the bare hash is used, so a name stays valid and unique
+// whatever the origin says.
+//
+// Every candidate form is assembled in one stack buffer, so the id and the hash
+// are formatted into the name the mint was allocating anyway; the reject log
+// calls this per rejected URL.
+func sourceName(u, existingName string, o origin, used map[string]bool) string {
+	if existingName != "" && !unattributedNameRe.MatchString(existingName) {
 		return existingName
 	}
-	if slug := channelSlug(channel); slug != "" {
-		sum := sha256.Sum256([]byte(u))
-		cand := srcname.ManagedPrefix + slug + "-" + hex.EncodeToString(sum[:])[:6]
-		if !used[cand] {
-			return cand
+	var buf [maxSlug + 1 + maxPostDigits + 1 + attributedTailHex]byte
+	if stem := appendChannelSlug(buf[:0], o.Slug); len(stem) > 0 {
+		if o.Post != 0 {
+			stem = strconv.AppendUint(append(stem, '-'), o.Post, decimalBase)
+			if !used[string(stem)] {
+				return string(stem)
+			}
+		}
+		if cand := appendURLHash(append(stem, '-'), u, attributedTailHex); !used[string(cand)] {
+			return string(cand)
 		}
 	}
 	if existingName != "" {
@@ -609,30 +695,41 @@ func sourceName(u, existingName, channel string, used map[string]bool) string {
 	return managedName(u)
 }
 
+const (
+	// maxSlug caps a normalized channel slug.
+	maxSlug = 24
+	// maxPostDigits is the decimal width of a uint64 message id.
+	maxPostDigits = 20
+	decimalBase   = 10
+)
+
 // channelSlug normalizes a Telegram channel slug into the config source-name
 // alphabet (^[a-z0-9-]+$): lowercase, "_" folded to "-", anything else dropped,
-// runs of "-" collapsed, capped at 24 bytes. Empty result means the channel is
-// unusable for attribution.
+// runs of "-" collapsed, capped at maxSlug bytes. Empty result means the
+// channel is unusable for attribution.
 func channelSlug(ch string) string {
-	const maxSlug = 24
-	b := make([]byte, 0, len(ch))
-	for i := 0; i < len(ch) && len(b) < maxSlug; i++ {
+	return string(appendChannelSlug(make([]byte, 0, len(ch)), ch))
+}
+
+func appendChannelSlug(dst []byte, ch string) []byte {
+	start := len(dst)
+	for i := 0; i < len(ch) && len(dst)-start < maxSlug; i++ {
 		r := ch[i]
 		switch {
 		case r >= 'A' && r <= 'Z':
-			b = append(b, r+'a'-'A')
+			dst = append(dst, r+'a'-'A')
 		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
-			b = append(b, r)
+			dst = append(dst, r)
 		case r == '_' || r == '-':
-			if len(b) > 0 && b[len(b)-1] != '-' {
-				b = append(b, '-')
+			if len(dst) > start && dst[len(dst)-1] != '-' {
+				dst = append(dst, '-')
 			}
 		}
 	}
-	for len(b) > 0 && b[len(b)-1] == '-' {
-		b = b[:len(b)-1]
+	for len(dst) > start && dst[len(dst)-1] == '-' {
+		dst = dst[:len(dst)-1]
 	}
-	return string(b)
+	return dst
 }
 
 // classifyAll classifies urls with bounded concurrency, returning the set that
@@ -643,11 +740,14 @@ func channelSlug(ch string) string {
 // or a 2xx carrying no node — is undetermined, because callers prune on the
 // absence of both verdicts.
 //
-// Every URL that does not end up live is reported to rej, attributed to channel.
-// rej is nil for the recheck pass: those URLs are existing managed sources, not
-// candidates discovered this cycle, and folding them into the discovery summary
-// would mix two populations under one total.
-func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, channel string) (live, unknown map[string]bool) {
+// Every URL that does not end up live is reported to rej under the origin it was
+// harvested from: one call spans a whole channel, so the slug is that channel's
+// and the id is looked up per URL. rej is nil for the recheck pass: those URLs
+// are existing managed sources, not candidates discovered this cycle, and
+// folding them into the discovery summary would mix two populations under one
+// total; slug is empty and posts nil with it, which is the zero origin that
+// pass has always recorded.
+func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, slug string, posts map[string]uint64) (live, unknown map[string]bool) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
 	var mu sync.Mutex
@@ -666,6 +766,7 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 			// guards the result maps is what makes the fan-out safe.
 			mu.Lock()
 			defer mu.Unlock()
+			o := origin{Slug: slug, Post: posts[u]}
 			if err != nil {
 				var statusErr *classify.StatusError
 				if !errors.As(err, &statusErr) || !statusErr.Gone() {
@@ -674,9 +775,9 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 					unknown[u] = true
 				}
 				if statusErr != nil {
-					rej.record(channel, u, rejectStatus, statusErr.Code, nil)
+					rej.record(o, u, rejectStatus, statusErr.Code, nil)
 				} else {
-					rej.record(channel, u, rejectFetch, 0, err)
+					rej.record(o, u, rejectFetch, 0, err)
 				}
 				return
 			}
@@ -692,12 +793,12 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 				// delivered as 403 or 503, is already undetermined. A panel
 				// whose pool is momentarily empty looks identical.
 				unknown[u] = true
-				rej.record(channel, u, rejectNodeless, 0, nil)
+				rej.record(o, u, rejectNodeless, 0, nil)
 			case classify.ReasonExpired:
 				// The only 2xx answer that proves the subscription is over,
 				// because the origin itself advertised the expiry. It joins
 				// neither set, so it prunes.
-				rej.record(channel, u, rejectExpired, 0, nil)
+				rej.record(o, u, rejectExpired, 0, nil)
 			}
 		}(u)
 	}
@@ -705,11 +806,16 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 	return live, unknown
 }
 
+// inlineSourceName is the one managed name that is not minted from a URL: the
+// inline source has neither, being an aggregate of node URIs across messages and
+// channels, which is also why it carries no Feed.
+const inlineSourceName = "inline"
+
 // buildInlineSource parses the raw inline URIs collected this cycle into nodes,
 // dedupes them by lowercased "server:port" (first wins, mirroring stable.Merge),
 // caps the survivors to opts.InlineMax, and packs the kept node URIs into a
-// single base64 Body under the managed "tg-inline" source. It returns ok=false
-// when no usable inline node was found.
+// single base64 Body under the managed inline source. It returns ok=false when
+// no usable inline node was found.
 func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
 	seen := make(map[string]struct{}, len(uris))
 	var kept []string
@@ -729,7 +835,7 @@ func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
 		return source{}, 0, false
 	}
 	body := base64.StdEncoding.EncodeToString([]byte(strings.Join(kept, "\n")))
-	return source{Name: srcname.ManagedPrefix + "inline", Body: body}, len(kept), true
+	return source{Name: inlineSourceName, Body: body, Managed: true}, len(kept), true
 }
 
 // pageCursor returns the smallest message id on a t.me/s page, used as the
@@ -803,9 +909,18 @@ func isNoiseHost(host string) bool {
 	return host == "telesco.pe" || strings.HasSuffix(host, ".telesco.pe")
 }
 
-func managedName(u string) string {
+// managedName is the name for a managed source with no origin at all: a bare
+// hash of the URL, unique by construction and stable across cycles.
+func managedName(u string) string { return urlHash(u, unattributedNameHex) }
+
+// urlHash is the first n (even) hex digits of sha256(u). Only the bytes those
+// digits need are encoded, so the result does not hold a 64-byte backing array
+// alive for six characters.
+func urlHash(u string, n int) string { return string(appendURLHash(nil, u, n)) }
+
+func appendURLHash(dst []byte, u string, n int) []byte {
 	sum := sha256.Sum256([]byte(u))
-	return srcname.ManagedPrefix + hex.EncodeToString(sum[:])[:10]
+	return hex.AppendEncode(dst, sum[:n/2])
 }
 
 func loadPrivate(path string) (privateFile, error) {
@@ -820,7 +935,119 @@ func loadPrivate(path string) (privateFile, error) {
 	if unmarshalErr := yaml.Unmarshal(b, &pf); unmarshalErr != nil {
 		return pf, fmt.Errorf("unmarshal private.yaml: %w", unmarshalErr)
 	}
+	adoptLegacyNames(&pf)
 	return pf, nil
+}
+
+// adoptLegacyNames migrates the corpus off the tg- prefix, once. Its gate is
+// the shape behind the prefix, not the prefix (needsAdoption says why), and it
+// recovers Feed only where that shape carries a slug. Every phase downstream
+// then tests the field alone, and a marked entry is never adopted again.
+// Renaming churns private.yaml and relabels every published node with it
+// (merge.go derives <source>-NNN); that is this migration's accepted one-time
+// cost. It is not the crawler's only rename: sourceName upgrades a bare-hash
+// name to the attributed form at the same cost, under its own rule.
+//
+// The name it lands on comes from adoptedName, which may have to fall back: a
+// duplicate would fail validatePrivate, so the crawler would refuse to write the
+// file at all, this cycle and every later one. Feed is recovered from the
+// stripped name rather than from whatever name won, because a fallback hash
+// names no channel and the slug it replaced was never ambiguous.
+func adoptLegacyNames(pf *privateFile) {
+	if !slices.ContainsFunc(pf.Subscriptions.Sources, needsAdoption) {
+		return
+	}
+	pf.adopted = true
+	taken := make(map[string]struct{}, len(pf.Subscriptions.Sources))
+	for _, s := range pf.Subscriptions.Sources {
+		if !needsAdoption(s) {
+			taken[s.Name] = struct{}{}
+		}
+	}
+	for i := range pf.Subscriptions.Sources {
+		s := &pf.Subscriptions.Sources[i]
+		if !needsAdoption(*s) {
+			continue
+		}
+		stripped := s.Name[len(legacyManagedPrefix):]
+		name, ok := adoptedName(*s, stripped, taken)
+		if !ok {
+			continue
+		}
+		taken[name] = struct{}{}
+		s.Name, s.Feed, s.Managed = name, legacyFeed(stripped), true
+	}
+}
+
+// adoptedName is the name one legacy entry migrates to; !ok means every form it
+// may take is already spoken for.
+//
+// The strip is the name the corpus keeps. A collision falls to the URL hash,
+// per-URL unique and also the one form the mint may replace later, so that entry
+// self-heals into <slug>-<postid> on its next rediscovery. Two prefixed entries
+// sharing one URL collide there too, and the hash of the name being migrated
+// separates them, being distinct wherever the file's names were. Nothing
+// guarantees they are — validatePrivate runs on the write, not the read — so an
+// entry duplicated outright can exhaust the chain, and is then left as it stands:
+// that file already held two identical names and was already unloadable, and a
+// name minted from nothing would hide the operator's duplicate rather than fix
+// it. The forms are tried in order and only when needed: the corpus is thousands
+// of entries and the first form answers for all but a handful. stripped is never
+// empty, every shape needsAdoption accepts leaving something behind the prefix.
+func adoptedName(s source, stripped string, taken map[string]struct{}) (string, bool) {
+	if _, dup := taken[stripped]; !dup {
+		return stripped, true
+	}
+	byURL := managedName(s.URL)
+	if _, dup := taken[byURL]; !dup {
+		return byURL, true
+	}
+	byName := urlHash(s.Name, unattributedNameHex)
+	if _, dup := taken[byName]; !dup {
+		return byName, true
+	}
+	return "", false
+}
+
+// needsAdoption reports that one entry is a pre-cutover mint the migration has
+// still to claim. The mark is the record that it was claimed, so a marked entry
+// is never read again: channelSlug folds "_" to "-", so the channel tg_vpn slugs
+// to tg-vpn and every name minted from it wears a prefix it never carried as
+// authority.
+//
+// The prefix alone cannot be the trigger either, for the same reason from the
+// other side: the mint still produces those names, so an unmarked tg-vpn-123 is
+// a post-cutover entry whose operator left the field off, and seizing it would
+// put a hand-added source under the prune — the one failure this wave exists to
+// remove. So the rest of the name must also wear a shape the pre-cutover mint
+// actually produced: slug + "-" + 6 hex (legacyFeed), the bare hash
+// (unattributedNameRe), or the inline aggregate, which is named and not derived.
+// A hand-added name that genuinely wears one of those shapes is adopted too, and
+// nothing can tell the two apart: before the cutover that shape WAS the mark.
+func needsAdoption(s source) bool {
+	if s.Managed || !strings.HasPrefix(s.Name, legacyManagedPrefix) {
+		return false
+	}
+	rest := s.Name[len(legacyManagedPrefix):]
+	return rest == inlineSourceName || legacyFeed(rest) != "" || unattributedNameRe.MatchString(rest)
+}
+
+// legacyFeed recovers the channel slug from a pre-field managed name, which was
+// exactly slug + "-" + 6 lowercase hex with no post segment. That one known tail
+// is what makes the strip sound here where a general fold is not: a slug may
+// itself end in a dash-separated digit run. A bare-hash name yields "", having
+// never named an origin.
+func legacyFeed(name string) string {
+	const tail = 6
+	if len(name) < tail+2 || name[len(name)-tail-1] != '-' {
+		return ""
+	}
+	for i := len(name) - tail; i < len(name); i++ {
+		if c := name[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return name[:len(name)-tail-1]
 }
 
 // sourceNameRe mirrors config's source-name alphabet; a name outside it makes
@@ -917,7 +1144,7 @@ func sameSources(a, b []source) bool {
 	return true
 }
 
-func keys(m map[string]struct{}) []string {
+func keys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

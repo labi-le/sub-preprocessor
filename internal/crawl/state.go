@@ -139,7 +139,7 @@ const (
 //
 // Callers must skip a cycle that learned nothing (recheckResult.dark): its
 // not-live answers are a crawler-side fault, not evidence about any source.
-func (s *state) ageManaged(managed map[string]bool, live map[string]string, now time.Time) (stale map[string]bool) {
+func (s *state) ageManaged(managed map[string]bool, live map[string]origin, now time.Time) (stale map[string]bool) {
 	for u := range s.Managed {
 		if !managed[u] {
 			delete(s.Managed, u)

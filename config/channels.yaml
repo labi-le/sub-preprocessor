@@ -25,11 +25,13 @@ channels:
   - mifa_world/1310   # measured 2026-08-14: forum topic, publishes a NEW 24h link daily; its /s/ preview carries zero messages, and 19 of the 20 links on the topic are the panel's own "больше неактуальны" list
   - razlo4ka7/39   # measured 2026-08-14: the group's only subscription topic of 9; 296 inline endpoints and 13 candidates at comments_limit=200, 68 endpoints new against the 159 configured sources, and absent from every other seed's depth-1 frontier so BFS cannot reach it
 
-# Subscription URLs the crawler must never manage. Deleting a tg-* source from
-# private.yaml by hand does not stick: the next cycle rediscovers the URL in a
-# channel, or a recheck finds it still live, and re-adds it. Listing it here is
-# the only way to retire one for good. Matched verbatim against the harvested
-# URL; re-read every cycle like the channel list above.
+# Subscription URLs the crawler must never manage. Hand-deleting one of its own
+# entries from private.yaml does not stick: the next cycle rediscovers the URL
+# in a channel, or a recheck finds it still live, and re-adds it. The field
+# decides whose entry it is -- one carrying "managed: true" is the crawler's and
+# comes back, one without it is yours and is never rewritten or pruned. Listing
+# the URL here is the only way to retire a managed entry for good. Matched
+# verbatim against the harvested URL; re-read every cycle like the channels above.
 # Two shapes end up here. A duplicate of a curated source (the crawler mirror
 # of a URL sources.yaml already carries), and a panel endpoint whose body is a
 # single placeholder node: an all-zero credential on the unspecified address,

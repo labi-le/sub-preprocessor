@@ -25,7 +25,6 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
-	"domains.lst/sub-preprocessor/internal/srcname"
 )
 
 // The fixture covers two of candidate's three pre-fetch gates (noise host, and a
@@ -114,6 +113,9 @@ type cycleResult struct {
 // fixtureCrawler wires a page and classifier into a network-free crawler whose
 // private.yaml starts with one hand-added source, two managed sources the cycle
 // proves dead (one by status, one by advertised expiry) and one it cannot judge.
+// The managed three carry `managed: true` and nothing else marks them: ownership
+// is the field, and one of them is deliberately unattributed (no feed) because
+// the origin-less form has to keep working.
 func fixtureCrawler(t *testing.T, logger zerolog.Logger, page string, seen *[]string, mu *sync.Mutex) (*Crawler, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -122,12 +124,17 @@ func fixtureCrawler(t *testing.T, logger zerolog.Logger, page string, seen *[]st
 		"  sources:\n" +
 		"    - name: hand-added\n" +
 		"      url: https://hand.example/sub\n" +
-		"    - name: tg-0123456789\n" +
+		"    - name: abc0123456\n" +
 		"      url: " + fixGone + "\n" +
-		"    - name: tg-keep-aaaaaa\n" +
+		"      managed: true\n" +
+		"    - name: keep-aaaaaa\n" +
 		"      url: " + fixTransient + "\n" +
-		"    - name: tg-exp-bbbbbb\n" +
-		"      url: " + fixExpired + "\n"
+		"      feed: keep\n" +
+		"      managed: true\n" +
+		"    - name: exp-bbbbbb\n" +
+		"      url: " + fixExpired + "\n" +
+		"      feed: exp\n" +
+		"      managed: true\n"
 	if err := os.WriteFile(priv, []byte(seed), 0o644); err != nil {
 		t.Fatalf("write private.yaml: %v", err)
 	}
@@ -202,14 +209,14 @@ func TestRunOnceCandidateOutcomesAreByteStable(t *testing.T) {
 	res := runCycle(t, fixturePage)
 	wantClassified := []string{
 		fixDead,
-		fixExpired, fixExpired, // discovered, and rechecked as tg-exp-bbbbbb
-		fixGone, fixGone, // discovered, and rechecked as tg-0123456789
+		fixExpired, fixExpired, // discovered, and rechecked as exp-bbbbbb
+		fixGone, fixGone, // discovered, and rechecked as abc0123456
 		fixLive,
 		fixNodeless,
 		fixPanel,
 		fixRaw,
 		fixRedirect,
-		fixTransient, fixTransient, // discovered, and rechecked as tg-keep-aaaaaa
+		fixTransient, fixTransient, // discovered, and rechecked as keep-aaaaaa
 	}
 	slices.Sort(wantClassified)
 	if !slices.Equal(res.classified, wantClassified) {
@@ -224,10 +231,14 @@ func TestRunOnceCandidateOutcomesAreByteStable(t *testing.T) {
     sources:
         - name: hand-added
           url: https://hand.example/sub
-        - name: tg-chan-3d9dfd
+        - name: chan-3d9dfd
           url: https://live.example/sub?payload=SECRETPAYLOAD1234
-        - name: tg-keep-aaaaaa
+          feed: chan
+          managed: true
+        - name: keep-aaaaaa
           url: https://transient.example/sub
+          feed: keep
+          managed: true
 `
 	if string(got) != want {
 		t.Fatalf("private.yaml changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -290,20 +301,20 @@ func TestRejectLinePerReason(t *testing.T) {
 }
 
 // TestRejectLineCarriesTheMergeSourceName: the identifier on a reject line is
-// what correlates it to a private.yaml entry, since the line carries no path
-// and no query. It is checked twice — against an independently computed
-// tg-<slug>-<sha6>, and against sourceName itself — so neither a drifting log
+// what correlates it to a private.yaml entry, since the line carries no path and
+// no query. It is checked twice — against an independently computed
+// <slug>-<sha6>, and against sourceName itself — so neither a drifting log
 // format nor a drifting naming rule can pass unnoticed.
 //
-// The slug is this channel's, not necessarily the discoverer's: a URL first
-// seen in another channel is named for that one by the merge. The sha6 suffix
-// is channel-independent and is what actually correlates.
+// The slug is this channel's, not necessarily the discoverer's: a URL first seen
+// in another channel is named for that one by the merge. The sha6 suffix is
+// channel-independent and is what actually correlates.
 func TestRejectLineCarriesTheMergeSourceName(t *testing.T) {
 	t.Parallel()
 
 	lines := runCycle(t, fixturePage).lines
 	sum := sha256.Sum256([]byte(fixNodeless))
-	want := srcname.ManagedPrefix + fixChannel + "-" + hex.EncodeToString(sum[:])[:6]
+	want := fixChannel + "-" + hex.EncodeToString(sum[:])[:6]
 
 	var found string
 	for _, l := range withMsg(lines, "candidate rejected") {
@@ -314,8 +325,48 @@ func TestRejectLineCarriesTheMergeSourceName(t *testing.T) {
 	if found != want {
 		t.Fatalf("source = %q, want %q", found, want)
 	}
-	if got := sourceName(fixNodeless, "", fixChannel, nil); got != want {
+	if got := sourceName(fixNodeless, "", origin{Slug: fixChannel}, nil); got != want {
 		t.Fatalf("sourceName = %q, want %q: the log no longer reuses the merge's naming", got, want)
+	}
+}
+
+// TestRejectLineKeepsThePostOutOfTheName: a known post id rides its own field and
+// never the name. <slug>-<post> names a POST, and a post routinely carries
+// several links, so a rejected candidate named that way would log the name of
+// whichever sibling link of that post the merge accepted — a false match, worse
+// than none. The per-URL sha6 keeps the identifier the URL's own. An unknown
+// post leaves the field out, because the zero id logged as post=0 would read as
+// message 0.
+func TestRejectLineKeepsThePostOutOfTheName(t *testing.T) {
+	t.Parallel()
+
+	const post = 3631
+	var buf bytes.Buffer
+	newRejects(zerolog.New(&buf)).record(origin{Slug: fixChannel, Post: post}, fixNodeless, rejectNodeless, 0, nil)
+
+	var line map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line); err != nil {
+		t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
+	}
+	sum := sha256.Sum256([]byte(fixNodeless))
+	if want := fixChannel + "-" + hex.EncodeToString(sum[:])[:6]; line["source"] != want {
+		t.Errorf("source = %v, want the per-URL %q", line["source"], want)
+	}
+	if line["post"] != float64(post) {
+		t.Errorf("post = %v, want %d on its own numeric field", line["post"], post)
+	}
+	if line["channel"] != fixChannel {
+		t.Errorf("channel = %v, want %q", line["channel"], fixChannel)
+	}
+
+	buf.Reset()
+	newRejects(zerolog.New(&buf)).record(origin{Slug: fixChannel}, fixNodeless, rejectNodeless, 0, nil)
+	var postless map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &postless); err != nil {
+		t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
+	}
+	if got, ok := postless["post"]; ok {
+		t.Errorf("origin with no post logged post = %v, want the field absent", got)
 	}
 }
 
@@ -481,7 +532,7 @@ func assertRealErrorSurvives(t *testing.T, name, raw string, err error, want []s
 	t.Helper()
 
 	var buf bytes.Buffer
-	newRejects(zerolog.New(&buf)).record(fixChannel, raw, rejectFetch, 0, err)
+	newRejects(zerolog.New(&buf)).record(origin{Slug: fixChannel}, raw, rejectFetch, 0, err)
 	line := buf.String()
 	for _, secret := range append(secrets, mustPath(t, raw)) {
 		if strings.Contains(line, secret) {
@@ -718,7 +769,7 @@ func TestRecheckDoesNotEnterTheDiscoverySummary(t *testing.T) {
 	t.Parallel()
 
 	lines := runCycle(t, fixturePage).lines
-	// tg-keep-aaaaaa's URL is rechecked and answers 503; it is also a discovered
+	// keep-aaaaaa's URL is rechecked and answers 503; it is also a discovered
 	// candidate, so exactly one line — the discovery one — may mention it.
 	n := 0
 	for _, l := range withMsg(lines, "candidate rejected") {
@@ -753,7 +804,7 @@ func TestRejectKeyDoesNotPinThePage(t *testing.T) {
 	}
 
 	rej := newRejects(zerolog.Nop())
-	rej.record("chan", urls[0], rejectInvalidURL, 0, nil)
+	rej.record(origin{Slug: "chan"}, urls[0], rejectInvalidURL, 0, nil)
 
 	var key string
 	for k := range rej.verdict {
@@ -817,7 +868,7 @@ func TestRejectTrackingIsBounded(t *testing.T) {
 	var buf bytes.Buffer
 	rej := newRejects(zerolog.New(&buf))
 	for i := range maxRejectTracked + over {
-		rej.record("chan", fmt.Sprintf("https://10.0.0.1/sub/%d", i), rejectInvalidURL, 0, nil)
+		rej.record(origin{Slug: "chan"}, fmt.Sprintf("https://10.0.0.1/sub/%d", i), rejectInvalidURL, 0, nil)
 	}
 	if len(rej.verdict) != maxRejectTracked {
 		t.Fatalf("tracked %d urls, want the bound of %d", len(rej.verdict), maxRejectTracked)

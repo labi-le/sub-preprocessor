@@ -628,6 +628,8 @@ func (c *Checker) fetchSources(
 		bodies = append(bodies, r.body)
 		reports = append(reports, SourceReport{
 			Name:         spec.Sources[i].Name,
+			Managed:      spec.Sources[i].Managed,
+			Feed:         spec.Sources[i].Feed,
 			Total:        r.stats.Total,
 			Valid:        r.stats.Kept,
 			DNSDrop:      r.stats.DNSDrop,

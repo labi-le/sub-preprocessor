@@ -22,7 +22,6 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/classify"
 	"domains.lst/sub-preprocessor/internal/fetch"
-	"domains.lst/sub-preprocessor/internal/srcname"
 )
 
 func TestExtractURLs(t *testing.T) {
@@ -103,7 +102,7 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 		logger: zerolog.Nop(),
 	}
 	live, unknown := c.classifyAll(context.Background(),
-		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, "")
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, "", nil)
 
 	if !live["https://live.example/sub"] || len(live) != 1 {
 		t.Errorf("live = %v, want exactly the live URL", live)
@@ -148,7 +147,7 @@ func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, "")
+	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, "", nil)
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL served a node", live)
@@ -189,7 +188,7 @@ func TestClassifyAllBoundsConcurrency(t *testing.T) {
 	for i := range cap(urls) {
 		urls = append(urls, fmt.Sprintf("https://h%d.example/sub", i))
 	}
-	live, unknown := c.classifyAll(context.Background(), urls, nil, "")
+	live, unknown := c.classifyAll(context.Background(), urls, nil, "", nil)
 	if len(live) != len(urls) || len(unknown) != 0 {
 		t.Fatalf("live=%d unknown=%d, want %d/0", len(live), len(unknown), len(urls))
 	}
@@ -231,14 +230,14 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{
 		{Name: "hand-added", URL: urlHand},
-		{Name: managedName(urlLive), URL: urlLive},
-		{Name: managedName(urlDead), URL: urlDead},
-		{Name: managedName(urlErr), URL: urlErr},
-		{Name: managedName(urlGone), URL: urlGone},
-		{Name: managedName(urlNodeless), URL: urlNodeless},
+		{Name: managedName(urlLive), URL: urlLive, Managed: true},
+		{Name: managedName(urlDead), URL: urlDead, Managed: true},
+		{Name: managedName(urlErr), URL: urlErr, Managed: true},
+		{Name: managedName(urlGone), URL: urlGone, Managed: true},
+		{Name: managedName(urlNodeless), URL: urlNodeless, Managed: true},
 	}
 
-	live := map[string]string{}
+	live := map[string]origin{}
 	rr := c.recheckManaged(context.Background(), pf, live)
 	next, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
 
@@ -299,7 +298,7 @@ func TestClassifyAllTreatsTransientStatusAsUnknown(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), urls, nil, "")
+	live, unknown := c.classifyAll(context.Background(), urls, nil, "", nil)
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL answered 2xx", live)
@@ -348,10 +347,10 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 	}
 	var pf privateFile
 	for _, u := range []string{urlLive, urlRateLimited, urlDeploying, urlBlocked, urlNotFound} {
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 
-	live := map[string]string{}
+	live := map[string]origin{}
 	rr := c.recheckManaged(context.Background(), pf, live)
 	_, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
 
@@ -373,9 +372,9 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 }
 
 // TestMergeRetainsMidCycleAdditions covers the lost-update guard: a managed
-// (tg-*) source that appears in the re-loaded private.yaml but was absent from
-// the cycle-start snapshot was never checked this cycle and must be retained,
-// even with pruning enabled.
+// source that appears in the re-loaded private.yaml but was absent from the
+// cycle-start snapshot was never checked this cycle and must be retained, even
+// with pruning enabled.
 func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	t.Parallel()
 
@@ -384,9 +383,9 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 
 	// Re-loaded file contains a managed source unknown to the cycle snapshot.
 	var pf privateFile
-	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew}}
+	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew, Managed: true}}
 
-	next, managed, _ := c.mergeManaged(pf, map[string]string{}, recheckResult{}, true, nil)
+	next, managed, _ := c.mergeManaged(pf, map[string]origin{}, recheckResult{}, true, nil)
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -472,67 +471,138 @@ func TestChannelSlug(t *testing.T) {
 	}
 }
 
-// TestSourceNameAttribution covers the naming rules: new URLs get the
-// channel-attributed form, attributed names are stable, legacy hash names
-// upgrade once a channel is known, and a collision falls back to the hash form.
+// TestSourceNameAttribution covers the naming rules: a URL harvested from a known
+// post is named for it, the second URL of that post takes a per-URL tail, a
+// channel with no post falls back to that tail alone, an attributed name is never
+// rewritten, the origin-less bare hash upgrades once an origin is known, and a
+// collision falls back to the bare hash.
 func TestSourceNameAttribution(t *testing.T) {
 	t.Parallel()
 
-	const u = "https://host.example/sub"
-	nameRe := regexp.MustCompile(`^tg-vpn-channel-[0-9a-f]{6}$`)
+	const (
+		u    = "https://host.example/sub"
+		u2   = "https://host.example/other"
+		post = 3631
+		attr = "vpn-channel-3631"
+	)
+	seen := origin{Slug: "VPN_Channel", Post: post}
+	hashRe := regexp.MustCompile(`^vpn-channel-[0-9a-f]{6}$`)
 
-	got := sourceName(u, "", "VPN_Channel", map[string]bool{})
-	if !nameRe.MatchString(got) {
-		t.Fatalf("new url name = %q, want tg-vpn-channel-<sha6>", got)
+	if got := sourceName(u, "", seen, map[string]bool{}); got != attr {
+		t.Fatalf("new url name = %q, want %q", got, attr)
 	}
 
-	// Attributed names never change, even when rediscovered elsewhere.
-	if kept := sourceName(u, got, "other_channel", map[string]bool{}); kept != got {
-		t.Errorf("attributed name changed on rediscovery: %q -> %q", got, kept)
+	// A post is a container, not a URL: the second link in one post cannot have
+	// the post's name, so it takes the per-URL hash beside it.
+	second := sourceName(u2, "", seen, map[string]bool{attr: true})
+	if want := attr + "-" + urlHash(u2, 6); second != want {
+		t.Fatalf("second url of one post = %q, want %q", second, want)
 	}
 
-	// Legacy hash names upgrade when the URL is seen in a channel...
-	if up := sourceName(u, managedName(u), "VPN_Channel", map[string]bool{}); !nameRe.MatchString(up) {
-		t.Errorf("legacy name not upgraded: %q", up)
-	}
-	// ...but stay when the origin is unknown this cycle.
-	if same := sourceName(u, managedName(u), "", map[string]bool{}); same != managedName(u) {
-		t.Errorf("legacy name changed without a channel: %q", same)
+	// Channel known, post not — the revival path, which sees no post at all.
+	noPost := sourceName(u, "", origin{Slug: "VPN_Channel"}, map[string]bool{})
+	if !hashRe.MatchString(noPost) {
+		t.Fatalf("postless name = %q, want vpn-channel-<sha6>", noPost)
 	}
 
-	// A name collision falls back to the unique hash form.
-	used := map[string]bool{got: true}
-	if fb := sourceName(u, "", "VPN_Channel", used); fb != managedName(u) {
+	// No form is ever rewritten, whatever the URL is rediscovered under: a
+	// rename relabels every published node and buys nothing.
+	elsewhere := origin{Slug: "other_channel", Post: 77}
+	for _, name := range []string{attr, second, noPost} {
+		if kept := sourceName(u, name, elsewhere, map[string]bool{}); kept != name {
+			t.Errorf("attributed name changed on rediscovery: %q -> %q", name, kept)
+		}
+	}
+
+	// The bare hash is the one exception, naming no origin: it upgrades once an
+	// origin is known...
+	if up := sourceName(u, managedName(u), seen, map[string]bool{}); up != attr {
+		t.Errorf("bare hash not upgraded: %q, want %q", up, attr)
+	}
+	// ...and stays when nothing is known this cycle.
+	if same := sourceName(u, managedName(u), origin{}, map[string]bool{}); same != managedName(u) {
+		t.Errorf("bare hash changed without an origin: %q", same)
+	}
+
+	// Both attributed forms taken: the bare hash keeps the name unique.
+	both := map[string]bool{attr: true, attr + "-" + urlHash(u, 6): true}
+	if fb := sourceName(u, "", seen, both); fb != managedName(u) {
 		t.Errorf("collision fallback = %q, want %q", fb, managedName(u))
 	}
 
 	// Every produced form satisfies the config source-name alphabet.
 	re := regexp.MustCompile(`^[a-z0-9-]+$`)
-	for _, n := range []string{got, managedName(u)} {
+	for _, n := range []string{attr, second, noPost, managedName(u)} {
 		if !re.MatchString(n) {
 			t.Errorf("name %q violates ^[a-z0-9-]+$", n)
 		}
 	}
 }
 
-// TestMergeUpgradesLegacyName proves the end-to-end rename: a legacy-named
-// managed source rediscovered in a channel this cycle is rewritten under its
-// attributed name, keeping exactly one entry for the URL.
-func TestMergeUpgradesLegacyName(t *testing.T) {
+// TestMergeUpgradesBareHashName proves the end-to-end upgrade: a bare-hash
+// managed source rediscovered in a post this cycle is rewritten under the
+// attributed name AND gains the feed with it, keeping one entry for the URL.
+func TestMergeUpgradesBareHashName(t *testing.T) {
 	t.Parallel()
 
 	const u = "https://host.example/sub"
 	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
 	var pf privateFile
-	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u}}
+	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u, Managed: true}}
 
-	live := map[string]string{u: "VPN_Channel"}
+	live := map[string]origin{u: {Slug: "VPN_Channel", Post: 3631}}
 	next, managed, _ := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
 	if len(next) != 1 || len(managed) != 1 {
 		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
 	}
-	if want := regexp.MustCompile(`^tg-vpn-channel-[0-9a-f]{6}$`); !want.MatchString(managed[0].Name) {
-		t.Errorf("name = %q, want attributed form", managed[0].Name)
+	if managed[0].Name != "vpn-channel-3631" {
+		t.Errorf("name = %q, want the post-attributed form vpn-channel-3631", managed[0].Name)
+	}
+	if managed[0].Feed != "vpn-channel" {
+		t.Errorf("feed = %q, want vpn-channel: the name and the feed are minted together", managed[0].Feed)
+	}
+}
+
+// TestMergeReservesExistingManagedNames: <slug>-<postid> is per-POST, so two URLs
+// of one post compete for one name. The incumbent's is returned verbatim by
+// sourceName, so unless the merge reserves it a newcomer sorting ahead takes that
+// exact string, and the duplicate stops private.yaml being written for good.
+func TestMergeReservesExistingManagedNames(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlNew       = "https://a.example/sub"
+		urlIncumbent = "https://b.example/sub"
+		attributed   = "chan-3631"
+	)
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{{Name: attributed, URL: urlIncumbent, Feed: "chan", Managed: true}}
+
+	o := origin{Slug: "chan", Post: 3631}
+	live := map[string]origin{urlNew: o, urlIncumbent: o}
+	rr := recheckResult{managedURL: map[string]bool{urlIncumbent: true}}
+	next, managed, deleted := c.mergeManaged(pf, live, rr, true, nil)
+	if len(deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", deleted)
+	}
+	byURL := map[string]source{}
+	for _, s := range managed {
+		byURL[s.URL] = s
+	}
+	if len(byURL) != 2 {
+		t.Fatalf("managed = %+v, want one entry per url", managed)
+	}
+	if got := byURL[urlIncumbent]; got.Name != attributed || got.Feed != "chan" {
+		t.Errorf("incumbent = %+v, want it still named %q with feed chan", got, attributed)
+	}
+	want := attributed + "-" + urlHash(urlNew, attributedTailHex)
+	if got := byURL[urlNew]; got.Name != want || got.Feed != "chan" {
+		t.Errorf("newcomer = %+v, want name %q with feed chan", got, want)
+	}
+	pf.Subscriptions.Sources = next
+	if err := validatePrivate(pf); err != nil {
+		t.Fatalf("the merge produced a file no cycle can write: %v", err)
 	}
 }
 
@@ -563,13 +633,28 @@ func TestSameSources(t *testing.T) {
 	}
 
 	// Sources differing only in Body must be detected as different.
-	bodyA := []source{{Name: "tg-inline", Body: "AAAA"}}
-	bodyB := []source{{Name: "tg-inline", Body: "BBBB"}}
+	bodyA := []source{{Name: inlineSourceName, Body: "AAAA", Managed: true}}
+	bodyB := []source{{Name: inlineSourceName, Body: "BBBB", Managed: true}}
 	if sameSources(bodyA, bodyB) {
 		t.Error("sources differing only in Body must differ")
 	}
+
+	// And only in ownership. Adoption is not what this catches: it rewrites Name
+	// and Feed too, and both sides of RunOnce's gate are post-adoption anyway,
+	// which is what pf.adopted exists for. This is the comparator's own
+	// invariant: the mark is part of an entry's identity.
+	if sameSources(a, []source{{Name: "x", URL: "u1", Managed: true}, {Name: "y", URL: "u2"}}) {
+		t.Error("sources differing only in Managed must differ")
+	}
+	if sameSources(a, []source{{Name: "x", URL: "u1", Feed: "chan"}, {Name: "y", URL: "u2"}}) {
+		t.Error("sources differing only in Feed must differ")
+	}
 }
 
+// TestPrivateRoundTripPreservesUnmanaged: a write followed by a load must return
+// the same set, ownership and attribution included — the fields are the crawler's
+// only memory of both, and a load that dropped them would shelter its own entries
+// and hand the operator's to the prune.
 func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
 	t.Parallel()
 
@@ -577,7 +662,7 @@ func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{
 		{Name: "my-private", URL: "https://example.com/sub"},
-		{Name: "tg-abc123", URL: "https://is.wepogp.gay/x?payload=abc"},
+		{Name: "chan-abc123", URL: "https://is.wepogp.gay/x?payload=abc", Feed: "chan", Managed: true},
 	}
 	if err := writePrivate(path, pf); err != nil {
 		t.Fatalf("writePrivate: %v", err)
@@ -588,6 +673,173 @@ func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
 	}
 	if !sameSources(pf.Subscriptions.Sources, got.Subscriptions.Sources) {
 		t.Fatalf("roundtrip mismatch: %+v", got.Subscriptions.Sources)
+	}
+	if raw, readErr := os.ReadFile(path); readErr != nil {
+		t.Fatalf("read private.yaml: %v", readErr)
+	} else if strings.Contains(string(raw), "managed: false") {
+		t.Errorf("a hand-added entry was written a managed key:\n%s", raw)
+	}
+}
+
+// TestRunOnceAdoptsLegacyNames is the migration, end to end: a private.yaml
+// holding prefixed entries beside a hand-added one comes out of one cycle with
+// the prefix gone, ownership and feed written, and the hand-added entry not
+// touched in any field. The cycle finds nothing new and deletes nothing, which
+// is the point — the adoption alone has to be enough to earn the write, or the
+// corpus stays prefixed forever.
+func TestRunOnceAdoptsLegacyNames(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlAttributed = "https://attributed.example/sub"
+		urlHashOnly   = "https://hashonly.example/sub"
+		urlHand       = "https://hand.example/sub"
+		seed          = "subscriptions:\n  sources:\n" +
+			"    - name: hand-added\n      url: " + urlHand + "\n" +
+			"    - name: tg-chan-aaaaaa\n      url: " + urlAttributed + "\n" +
+			"    - name: tg-abc0123456\n      url: " + urlHashOnly + "\n"
+	)
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(priv, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	c := &Crawler{
+		opts:   Options{PrivatePath: priv, Prune: true},
+		client: pageFetcher{},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+	c.RunOnce(context.Background())
+
+	raw, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	if strings.Contains(string(raw), "tg-") {
+		t.Fatalf("a prefixed name survived the cycle:\n%s", raw)
+	}
+	var pf privateFile
+	if unmarshalErr := yaml.Unmarshal(raw, &pf); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+	got := map[string]source{}
+	for _, s := range pf.Subscriptions.Sources {
+		got[s.URL] = s
+	}
+	if len(got) != 3 {
+		t.Fatalf("want all three entries kept, got %+v", pf.Subscriptions.Sources)
+	}
+
+	// The attributed name keeps its hash tail forever — post ids are only for
+	// names minted after the cutover — and its slug becomes the feed.
+	if s := got[urlAttributed]; s.Name != "chan-aaaaaa" || s.Feed != "chan" || !s.Managed {
+		t.Errorf("adopted entry = %+v, want name chan-aaaaaa, feed chan, managed", s)
+	}
+	// A hash-only name named no channel, so there is no feed to recover.
+	if s := got[urlHashOnly]; s.Name != "abc0123456" || s.Feed != "" || !s.Managed {
+		t.Errorf("adopted hash-only entry = %+v, want name abc0123456, no feed, managed", s)
+	}
+	if s := got[urlHand]; s.Name != "hand-added" || s.Feed != "" || s.Managed {
+		t.Errorf("hand-added entry = %+v, want it untouched and unmarked", s)
+	}
+	if strings.Contains(string(raw), "managed: false") {
+		t.Errorf("the sheltered entry was written a managed key:\n%s", raw)
+	}
+}
+
+// TestLoadPrivateAdoptionAvoidsACollision: stripping the prefix can land on a
+// name the file already holds, and a duplicate makes validatePrivate refuse the
+// write — this cycle and every later one, since the load would re-collide every
+// time. The bare hash is unique by construction, so the adopted entry takes it
+// and, naming no origin, upgrades on its next rediscovery. The channel it came
+// from was never in doubt, though, so the feed is recovered from the stripped
+// name and survives the fallback the name could not.
+func TestLoadPrivateAdoptionAvoidsACollision(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlAdopted = "https://adopted.example/sub"
+		seed       = "subscriptions:\n  sources:\n" +
+			"    - name: chan-aaaaaa\n      url: https://curated.example/sub\n" +
+			"    - name: tg-chan-aaaaaa\n      url: " + urlAdopted + "\n"
+	)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	pf, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(pf.Subscriptions.Sources) != 2 {
+		t.Fatalf("sources = %+v, want both entries", pf.Subscriptions.Sources)
+	}
+	if got := pf.Subscriptions.Sources[0]; got.Name != "chan-aaaaaa" || got.Managed {
+		t.Errorf("curated entry = %+v, want it untouched and unmarked", got)
+	}
+	got := pf.Subscriptions.Sources[1]
+	if got.Name != managedName(urlAdopted) || !got.Managed {
+		t.Errorf("adopted entry = %+v, want the bare hash %q and managed", got, managedName(urlAdopted))
+	}
+	if got.Feed != "chan" {
+		t.Errorf("adopted entry feed = %q, want chan: the fallback renamed it, it did not unlearn its channel", got.Feed)
+	}
+	if writeErr := validatePrivate(pf); writeErr != nil {
+		t.Errorf("the adopted file is unwritable: %v", writeErr)
+	}
+}
+
+// TestLoadPrivateAdoptionIsOneShot: the mark, not the name, records that an entry
+// has been adopted. channelSlug folds "_" to "-", so the channel tg_vpn slugs to
+// tg-vpn, and reading the name re-adopts what that channel mints on every load:
+// another forced write, another rename, and the recorded feed erased.
+func TestLoadPrivateAdoptionIsOneShot(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlLegacy = "https://legacy.example/sub"
+		urlMinted = "https://minted.example/sub"
+		seed      = "subscriptions:\n  sources:\n" +
+			"    - name: tg-tg-vpn-1444c8\n      url: " + urlLegacy + "\n" +
+			"    - name: tg-vpn-123\n      url: " + urlMinted +
+			"\n      feed: tg-vpn\n      managed: true\n"
+	)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+	want := []source{
+		{Name: "tg-vpn-1444c8", URL: urlLegacy, Feed: "tg-vpn", Managed: true},
+		{Name: "tg-vpn-123", URL: urlMinted, Feed: "tg-vpn", Managed: true},
+	}
+
+	first, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if !first.adopted {
+		t.Fatal("the unmarked prefixed entry was not adopted")
+	}
+	if !slices.Equal(first.Subscriptions.Sources, want) {
+		t.Fatalf("first load = %+v, want %+v", first.Subscriptions.Sources, want)
+	}
+	if writeErr := writePrivate(path, first); writeErr != nil {
+		t.Fatalf("writePrivate: %v", writeErr)
+	}
+
+	second, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("second loadPrivate: %v", err)
+	}
+	if second.adopted {
+		t.Errorf("the migration re-fired: %+v", second.Subscriptions.Sources)
+	}
+	if !slices.Equal(second.Subscriptions.Sources, want) {
+		t.Errorf("second load = %+v, want the file unchanged", second.Subscriptions.Sources)
 	}
 }
 
@@ -828,7 +1080,7 @@ func (f pageFetcher) page(_ context.Context, u string) (string, error) {
 
 // TestRunOnceHarvestsInlineNodes drives a full cycle against a stub fetcher: the
 // single scraped page carries four inline URIs, two of which collide on
-// server:port. With InlineMax=2 the crawler writes a tg-inline source whose
+// server:port. With InlineMax=2 the crawler writes an inline source whose
 // base64 Body holds the first two distinct nodes (dedup first-wins, then cap).
 func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 	t.Parallel()
@@ -873,23 +1125,26 @@ func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 
 	var inline *source
 	for i := range pf.Subscriptions.Sources {
-		if pf.Subscriptions.Sources[i].Name == "tg-inline" {
+		if pf.Subscriptions.Sources[i].Name == inlineSourceName {
 			inline = &pf.Subscriptions.Sources[i]
 		}
 	}
 	if inline == nil {
-		t.Fatalf("no tg-inline source written: %+v", pf.Subscriptions.Sources)
+		t.Fatalf("no inline source written: %+v", pf.Subscriptions.Sources)
 	}
 	if inline.URL != "" {
-		t.Errorf("tg-inline source must have empty URL, got %q", inline.URL)
+		t.Errorf("inline source must have empty URL, got %q", inline.URL)
+	}
+	if !inline.Managed {
+		t.Error("the inline source is minted every cycle, so it must carry managed: true")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(inline.Body)
 	if err != nil {
-		t.Fatalf("tg-inline Body is not valid base64: %v", err)
+		t.Fatalf("inline Body is not valid base64: %v", err)
 	}
 	want := "vless://a@1.1.1.1:443#n1\nvless://c@2.2.2.2:443#n2"
 	if string(decoded) != want {
-		t.Fatalf("tg-inline Body = %q, want %q", decoded, want)
+		t.Fatalf("inline Body = %q, want %q", decoded, want)
 	}
 }
 
@@ -953,9 +1208,9 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 	for i := range pf.Subscriptions.Sources {
 		s := &pf.Subscriptions.Sources[i]
 		switch {
-		case s.Name == srcname.ManagedPrefix+"inline":
+		case s.Name == inlineSourceName:
 			inline = s
-		case strings.HasPrefix(s.Name, srcname.ManagedPrefix):
+		case s.Managed:
 			if managed != nil {
 				t.Fatalf("want exactly one managed url source, got %+v", pf.Subscriptions.Sources)
 			}
@@ -963,18 +1218,18 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 		}
 	}
 	if inline == nil {
-		t.Fatalf("no tg-inline source written: %+v", pf.Subscriptions.Sources)
+		t.Fatalf("no inline source written: %+v", pf.Subscriptions.Sources)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(inline.Body)
 	if err != nil {
-		t.Fatalf("tg-inline Body is not valid base64: %v", err)
+		t.Fatalf("inline Body is not valid base64: %v", err)
 	}
 	body := string(decoded)
 	if !strings.Contains(body, newest) {
-		t.Errorf("tg-inline Body = %q, want it to carry the newest page's node %q", body, newest)
+		t.Errorf("inline Body = %q, want it to carry the newest page's node %q", body, newest)
 	}
 	if strings.Contains(body, older) {
-		t.Errorf("tg-inline Body = %q, must not carry the older page's node %q", body, older)
+		t.Errorf("inline Body = %q, must not carry the older page's node %q", body, older)
 	}
 
 	if managed == nil {
@@ -983,12 +1238,70 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 	if managed.URL != subURL {
 		t.Errorf("managed source URL = %q, want the older page's link %q", managed.URL, subURL)
 	}
-	if nameRe := regexp.MustCompile(`^tg-chan-[0-9a-f]{6}$`); !nameRe.MatchString(managed.Name) {
-		t.Errorf("managed source name = %q, want the tg-<slug>-<sha6> form sourceName produces", managed.Name)
+	// The older page carries no data-post, so the link has no post to be named
+	// for and takes the per-URL hash instead.
+	if nameRe := regexp.MustCompile(`^chan-[0-9a-f]{6}$`); !nameRe.MatchString(managed.Name) {
+		t.Errorf("managed source name = %q, want the <slug>-<sha6> form sourceName produces", managed.Name)
+	}
+	if managed.Feed != "chan" {
+		t.Errorf("managed source feed = %q, want chan", managed.Feed)
 	}
 }
 
-// hasInlineSource reports whether a tg-inline source exists in private.yaml.
+// TestRunOnceAttributesBothLinksOfOnePost: a post is a container, not a URL, so
+// the two links in one message cannot share its name. The first in sorted-URL
+// order takes <slug>-<postid> and the second takes the per-URL hash beside it —
+// sorted, because mergeManaged names in that order (sort.Strings) and a
+// randomized order would hand the bare form to whichever URL won the map.
+func TestRunOnceAttributesBothLinksOfOnePost(t *testing.T) {
+	t.Parallel()
+
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	const (
+		post   = "3631"
+		urlOne = "https://a.example/sub"
+		urlTwo = "https://b.example/sub"
+	)
+	page := `<div class="tgme_widget_message_wrap" data-post="chan/` + post + `">` +
+		`<a href="` + urlOne + `">one</a> <a href="` + urlTwo + `">two</a></div>`
+
+	c := &Crawler{
+		opts:   Options{Channels: []string{"chan"}, PrivatePath: priv, Pages: 1},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+	c.RunOnce(context.Background())
+
+	pf, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	got := map[string]source{}
+	for _, s := range pf.Subscriptions.Sources {
+		got[s.URL] = s
+	}
+	if len(got) != 2 {
+		t.Fatalf("want both links of the post managed, got %+v", pf.Subscriptions.Sources)
+	}
+	if s := got[urlOne]; s.Name != "chan-"+post || s.Feed != "chan" || !s.Managed {
+		t.Errorf("first link = %+v, want name chan-%s, feed chan, managed", s, post)
+	}
+	if want := "chan-" + post + "-" + urlHash(urlTwo, 6); got[urlTwo].Name != want {
+		t.Errorf("second link name = %q, want %q", got[urlTwo].Name, want)
+	}
+	if s := got[urlTwo]; s.Feed != "chan" || !s.Managed {
+		t.Errorf("second link = %+v, want feed chan and managed", s)
+	}
+}
+
+// hasInlineSource reports whether an inline source exists in private.yaml.
 func hasInlineSource(t *testing.T, priv string) bool {
 	t.Helper()
 	b, err := os.ReadFile(priv)
@@ -1000,7 +1313,7 @@ func hasInlineSource(t *testing.T, priv string) bool {
 		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
 	}
 	for i := range pf.Subscriptions.Sources {
-		if pf.Subscriptions.Sources[i].Name == "tg-inline" {
+		if pf.Subscriptions.Sources[i].Name == inlineSourceName {
 			return true
 		}
 	}
@@ -1008,7 +1321,7 @@ func hasInlineSource(t *testing.T, priv string) bool {
 }
 
 // TestRunOnceInlineDisabled: with InlineEnabled=false the crawler must not write
-// a tg-inline source even though the scraped page carries inline URIs.
+// an inline source even though the scraped page carries inline URIs.
 func TestRunOnceInlineDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -1037,12 +1350,219 @@ func TestRunOnceInlineDisabled(t *testing.T) {
 	c.RunOnce(context.Background())
 
 	if hasInlineSource(t, priv) {
-		t.Fatal("tg-inline source written despite InlineEnabled=false")
+		t.Fatal("inline source written despite InlineEnabled=false")
+	}
+}
+
+// TestRunOnceYieldsInlineNameToHandAddedEntry: after the cutover `inline` is an
+// ordinary name -- ownership is the field, not the name -- so an operator may
+// hold it. A hand-added entry named `inline` is sheltered into kept, and an
+// aggregate appended beside it would make validatePrivate refuse the duplicate
+// on this cycle and on every later one: the discovery lost, the file never
+// written again. The crawler yields the name instead, because a hand-added entry
+// is never renamed: it skips the inline harvest, says so at WARN, finishes the
+// cycle, and converges.
+func TestRunOnceYieldsInlineNameToHandAddedEntry(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlHand    = "https://hand.example/sub"
+		urlNew     = "https://new.example/sub"
+		mintedName = "chan-3631"
+	)
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	seed := "subscriptions:\n  sources:\n" +
+		"    - name: " + inlineSourceName + "\n      url: " + urlHand + "\n"
+	if err := os.WriteFile(priv, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	page := `<div class="tgme_widget_message_wrap" data-post="chan/3631">` +
+		`<a href="` + urlNew + `">sub</a> vless://a@1.1.1.1:443#n1</div>`
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         1,
+			InlineEnabled: true,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	c.RunOnce(context.Background())
+
+	if strings.Contains(logBuf.String(), "write private.yaml failed") {
+		t.Fatalf("the cycle refused to write the file it merged:\n%s", logBuf.String())
+	}
+	got := sourcesByName(t, priv)
+	hand, held := got[inlineSourceName]
+	if !held {
+		t.Fatalf("the operator's entry is gone: %+v", got)
+	}
+	if want := (source{Name: inlineSourceName, URL: urlHand}); hand != want {
+		t.Errorf("operator's entry = %+v, want %+v unrenamed and untouched", hand, want)
+	}
+	if _, minted := got[mintedName]; !minted {
+		t.Errorf("the discovery was lost to the skipped aggregate: %+v", got)
+	}
+	if !hasWarnNaming(logBuf.String(), inlineSourceName) {
+		t.Errorf("no WARN naming the entry that holds the name:\n%s", logBuf.String())
+	}
+
+	// The yield has to be stable, not merely survivable: a cycle that proposes
+	// the same file must report no change rather than rewrite it forever.
+	logBuf.Reset()
+	c.RunOnce(context.Background())
+	if !strings.Contains(logBuf.String(), "no change") {
+		t.Errorf("second cycle did not converge:\n%s", logBuf.String())
+	}
+}
+
+// hasWarnNaming reports whether one zerolog line is a warning carrying
+// source=name, so a test can pin the level and the subject together instead of
+// finding them on two unrelated lines.
+func hasWarnNaming(logs, name string) bool {
+	for line := range strings.SplitSeq(logs, "\n") {
+		if strings.Contains(line, `"level":"warn"`) && strings.Contains(line, `"source":"`+name+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// sourcesByName loads private.yaml keyed by name, refusing a duplicate: that is
+// the one file no later cycle can write.
+func sourcesByName(t *testing.T, priv string) map[string]source {
+	t.Helper()
+	pf, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	got := map[string]source{}
+	for _, s := range pf.Subscriptions.Sources {
+		if _, dup := got[s.Name]; dup {
+			t.Fatalf("duplicate name %q written: %+v", s.Name, pf.Subscriptions.Sources)
+		}
+		got[s.Name] = s
+	}
+	return got
+}
+
+// aggregateNodes decodes the inline aggregate's Body back into the node URIs it
+// packs.
+func aggregateNodes(t *testing.T, got map[string]source) string {
+	t.Helper()
+	agg, ok := got[inlineSourceName]
+	if !ok {
+		t.Fatalf("no inline aggregate written: %+v", got)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(agg.Body)
+	if err != nil {
+		t.Fatalf("aggregate Body is not valid base64: %v", err)
+	}
+	return string(decoded)
+}
+
+// TestRunOnceSheltersHandAddedBodySource: an unmarked `body:` entry is an inline
+// payload the operator pasted, a documented shape (config.SubscriptionSource),
+// and nobody regenerates it -- so the merge must drop only the crawler's own
+// aggregate, which carries the field. The cycle mints a source and writes its own
+// aggregate too, so the shelter is proven against a write that really happens;
+// the terminal counts prove the sheltered entry is carried once, and a second
+// cycle over a changed page proves the aggregate is still the one thing dropped.
+func TestRunOnceSheltersHandAddedBodySource(t *testing.T) {
+	t.Parallel()
+
+	const (
+		handName  = "my-pasted-nodes"
+		handNode  = "vless://u@9.9.9.9:443#hand"
+		urlNew    = "https://new.example/sub"
+		minted    = "chan-3631"
+		firstNode = "vless://a@1.1.1.1:443#n1"
+		laterNode = "vless://b@2.2.2.2:443#n2"
+		chanPage  = "https://t.me/s/chan"
+	)
+	handBody := base64.StdEncoding.EncodeToString([]byte(handNode))
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	seed := "subscriptions:\n  sources:\n" +
+		"    - name: " + handName + "\n      body: " + handBody + "\n"
+	if err := os.WriteFile(priv, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	post := func(node string) string {
+		return `<div class="tgme_widget_message_wrap" data-post="chan/3631">` +
+			`<a href="` + urlNew + `">sub</a> ` + node + `</div>`
+	}
+	pages := map[string]string{chanPage: post(firstNode)}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:      []string{"chan"},
+			PrivatePath:   priv,
+			Pages:         1,
+			InlineEnabled: true,
+		},
+		client: pageFetcher{pages: pages},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+
+	c.RunOnce(context.Background())
+
+	got := sourcesByName(t, priv)
+	hand, held := got[handName]
+	if !held {
+		t.Fatalf("the operator's body source was deleted: %+v", got)
+	}
+	if want := (source{Name: handName, Body: handBody}); hand != want {
+		t.Errorf("operator's entry = %+v, want %+v written back unchanged", hand, want)
+	}
+	if _, ok := got[minted]; !ok {
+		t.Fatalf("no source minted, so the shelter was not tested against a write: %+v", got)
+	}
+	if nodes := aggregateNodes(t, got); nodes != firstNode {
+		t.Errorf("aggregate = %q, want this cycle's harvest %q alone", nodes, firstNode)
+	}
+	// Counted once: three entries written, one managed URL source, one node in
+	// the aggregate. A sheltered body entry is none of the crawler's tallies.
+	if !strings.Contains(logBuf.String(), `"managed":1`) ||
+		!strings.Contains(logBuf.String(), `"inline":1`) ||
+		!strings.Contains(logBuf.String(), `"total":3`) {
+		t.Errorf("terminal counts double-count or lose the sheltered entry:\n%s", logBuf.String())
+	}
+
+	pages[chanPage] = post(laterNode)
+	logBuf.Reset()
+	c.RunOnce(context.Background())
+
+	got = sourcesByName(t, priv)
+	if nodes := aggregateNodes(t, got); nodes != laterNode {
+		t.Errorf("aggregate = %q after a changed page, want %q: the stale one was sheltered instead of dropped", nodes, laterNode)
+	}
+	// The aggregate has no URL, so reaching the merge's URL gate would both log
+	// a spurious refusal and put it in deleted, inflating the prune floor's drop.
+	if strings.Contains(logBuf.String(), "dropping managed source") {
+		t.Errorf("the stale aggregate reached the URL gate instead of being dropped by the merge:\n%s", logBuf.String())
+	}
+	if want := (source{Name: handName, Body: handBody}); got[handName] != want {
+		t.Errorf("operator's entry = %+v after a second cycle, want %+v", got[handName], want)
+	}
+	if !strings.Contains(logBuf.String(), `"total":3`) {
+		t.Errorf("the second cycle did not write the same three entries:\n%s", logBuf.String())
 	}
 }
 
 // TestRunOnceNoInlineNodes: inline harvesting is on but the pages carry zero
-// proxy URIs, so buildInlineSource returns ok=false and no tg-inline is written.
+// proxy URIs, so buildInlineSource returns ok=false and no inline is written.
 func TestRunOnceNoInlineNodes(t *testing.T) {
 	t.Parallel()
 
@@ -1072,7 +1592,7 @@ func TestRunOnceNoInlineNodes(t *testing.T) {
 	c.RunOnce(context.Background())
 
 	if hasInlineSource(t, priv) {
-		t.Fatal("tg-inline source written despite no inline nodes")
+		t.Fatal("inline source written despite no inline nodes")
 	}
 }
 
@@ -1088,7 +1608,7 @@ func TestRunOnceRefusesBulkPrune(t *testing.T) {
 	for i := range total {
 		u := fmt.Sprintf("https://p%02d.example/sub", i)
 		urls = append(urls, u)
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	priv := filepath.Join(t.TempDir(), "private.yaml")
 	if err := writePrivate(priv, pf); err != nil {
@@ -1139,7 +1659,7 @@ func TestRunOnceKeepsNodeless200PrunesGone(t *testing.T) {
 	)
 	var pf privateFile
 	for _, u := range []string{urlLive, urlPortal, urlNotFound} {
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	priv := filepath.Join(t.TempDir(), "private.yaml")
 	if err := writePrivate(priv, pf); err != nil {
@@ -1203,7 +1723,7 @@ func TestRunOnceStaleRefusalCannotAuthorizeADifferentPrune(t *testing.T) {
 	for i := range total {
 		u := fmt.Sprintf("https://s%02d.example/sub", i)
 		urls = append(urls, u)
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	dir := t.TempDir()
 	priv := filepath.Join(dir, "private.yaml")
@@ -1265,7 +1785,7 @@ func TestRunOnceNoChangeWithdrawsBulkPruneRecord(t *testing.T) {
 	var pf privateFile
 	for i := range total {
 		u := fmt.Sprintf("https://q%02d.example/sub", i)
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	dir := t.TempDir()
 	priv := filepath.Join(dir, "private.yaml")
@@ -1363,7 +1883,7 @@ func TestRunOnceDarkCycleWritesNothing(t *testing.T) {
 	var pf privateFile
 	for i := range total {
 		u := fmt.Sprintf("https://d%02d.example/sub", i)
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	priv := filepath.Join(t.TempDir(), "private.yaml")
 	if err := writePrivate(priv, pf); err != nil {
@@ -1410,7 +1930,7 @@ func newRetireFixture(t *testing.T, urls []string, nodeless map[string]bool, see
 
 	var pf privateFile
 	for _, u := range urls {
-		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u})
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{Name: managedName(u), URL: u, Managed: true})
 	}
 	dir := t.TempDir()
 	f := retireFixture{
@@ -1907,7 +2427,7 @@ func TestWritePrivateRefusesUnloadableSource(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "private.yaml")
 	var pf privateFile
-	pf.Subscriptions.Sources = []source{{Name: "tg-abc123", URL: "https://10.0.0.5/sub"}}
+	pf.Subscriptions.Sources = []source{{Name: "abc123", URL: "https://10.0.0.5/sub", Managed: true}}
 
 	if err := writePrivate(path, pf); err == nil {
 		t.Fatal("writePrivate must refuse a source with a non-public literal-IP host")
@@ -2380,7 +2900,7 @@ func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
 	if got := strings.Count(logged, `"channel":"forumchat`); got != 1 {
 		t.Errorf("forumchat scanned %d times, want 1 (log: %s)", got, logged)
 	}
-	if live[subURL] != "forumchat" {
+	if live[subURL].Slug != "forumchat" {
 		t.Errorf("live = %v, want %s attributed to the bare chat", live, subURL)
 	}
 }
@@ -2444,8 +2964,8 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 	if got.URL != subURL {
 		t.Errorf("managed URL = %q, want %q", got.URL, subURL)
 	}
-	if !strings.HasPrefix(got.Name, srcname.ManagedPrefix+"forumchat-") {
-		t.Errorf("name = %q, want it attributed to the bare chat (%sforumchat-<sha6>)", got.Name, srcname.ManagedPrefix)
+	if !strings.HasPrefix(got.Name, "forumchat-") {
+		t.Errorf("name = %q, want it attributed to the bare chat (forumchat-<sha6>)", got.Name)
 	}
 	if strings.Contains(got.Name, "1310") {
 		t.Errorf("name = %q; a permanent name must not carry the topic id", got.Name)
@@ -2454,5 +2974,353 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 	st := loadState(statePath, zerolog.Nop())
 	if _, ok := st.Productive["forumchat/1310"]; !ok {
 		t.Errorf("productive memory = %+v, want the seed remembered with its topic", st.Productive)
+	}
+}
+
+const (
+	migrationChannels   = 46
+	migrationEntries    = 463
+	migrationOwned      = 456
+	migrationSheltered  = 7
+	migrationOriginless = 2
+)
+
+type feedFanout struct {
+	slug string
+	urls int
+}
+
+// migrationFanout is the fan-out the pre-cutover corpus carried: 46 channels, 26
+// of them with more than one URL, 450 attributed names in all
+// (docs/guides/sources.md, reading of 2026-08-18). The slugs are shapes rather
+// than channels — one begins with the legacy prefix, several end in a
+// dash-digit run, one ends in six hex characters — because those are the names a
+// parsing fold gets wrong.
+func migrationFanout() []feedFanout {
+	fanout := []feedFanout{
+		{"feed-01", 75}, {"file-vpn-2", 43}, {"feed-03", 30}, {"feed-04", 26},
+		{"tg-vpn", 23}, {"feed-2026", 21}, {"feed-c0ffee", 20}, {"feed-08", 19},
+		{"feed-09", 18}, {"feed-10", 17}, {"feed-11", 16}, {"feed-12", 15},
+		{"collide-c", 14}, {"feed-14", 13}, {"feed-15", 12}, {"feed-16", 11},
+		{"collide-m", 10}, {"feed-18", 9}, {"feed-x-7", 8}, {"feed-20", 6},
+		{"feed-21", 5}, {"feed-22", 5}, {"feed-23", 4}, {"feed-24", 4},
+		{"feed-25", 3}, {"feed-26", 3},
+	}
+	for i := len(fanout) + 1; i <= migrationChannels; i++ {
+		fanout = append(fanout, feedFanout{slug: fmt.Sprintf("feed-%d", i), urls: 1})
+	}
+	return fanout
+}
+
+// migrationCorpus builds a pre-cutover private.yaml in the shape prod holds one
+// — the attributed fan-out, the hand-added unprefixed entries beside it, the
+// inline body entry, a legacy bare hash — and returns the file bytes with the
+// exact list one loadPrivate must produce from them. The awkward members every
+// other adoption test lacks are here: a slug that itself begins "tg-", curated
+// names ending in digits, two stripped names that land on a name the file already
+// holds (one hand-added, one already migrated), and the two prefixed names the
+// pre-cutover mint could never have produced — a bare "tg-" and an unmarked
+// post-cutover tg-vpn-123 — which must survive sheltered.
+func migrationCorpus(t *testing.T) (fileBytes []byte, want []source) {
+	t.Helper()
+
+	var pre privateFile
+	pre.Subscriptions.Sources = make([]source, 0, migrationEntries)
+	want = make([]source, 0, migrationEntries)
+	add := func(before, after source) {
+		pre.Subscriptions.Sources = append(pre.Subscriptions.Sources, before)
+		want = append(want, after)
+	}
+	keep := func(s source) { add(s, s) }
+
+	keep(source{Name: "commsub", URL: "https://hand.example/sub"})
+	for _, ch := range migrationFanout() {
+		for i := range ch.urls {
+			u := fmt.Sprintf("https://%s.example/sub/%d", ch.slug, i)
+			name := ch.slug + "-" + urlHash(u, attributedTailHex)
+			add(source{Name: legacyManagedPrefix + name, URL: u},
+				source{Name: name, URL: u, Feed: ch.slug, Managed: true})
+		}
+	}
+
+	keep(source{Name: legacyManagedPrefix, URL: "https://bare.example/sub"})
+
+	dupHand := "https://collide-c.example/sub/dup"
+	dupHandName := "collide-c-" + urlHash(dupHand, attributedTailHex)
+	add(source{Name: legacyManagedPrefix + dupHandName, URL: dupHand},
+		source{Name: managedName(dupHand), URL: dupHand, Feed: "collide-c", Managed: true})
+	keep(source{Name: dupHandName, URL: "https://hand.example/collide"})
+
+	dupOwned := "https://collide-m.example/sub/dup"
+	dupOwnedName := "collide-m-" + urlHash(dupOwned, attributedTailHex)
+	add(source{Name: legacyManagedPrefix + dupOwnedName, URL: dupOwned},
+		source{Name: managedName(dupOwned), URL: dupOwned, Feed: "collide-m", Managed: true})
+	keep(source{Name: dupOwnedName, URL: "https://collide-m.example/sub/other", Feed: "collide-m", Managed: true})
+
+	hashOnly := "https://hashonly.example/sub"
+	add(source{Name: legacyManagedPrefix + "a1b2c3d4e5", URL: hashOnly},
+		source{Name: "a1b2c3d4e5", URL: hashOnly, Managed: true})
+
+	body := base64.StdEncoding.EncodeToString([]byte("vless://node@203.0.113.7:443"))
+	add(source{Name: legacyManagedPrefix + inlineSourceName, Body: body},
+		source{Name: inlineSourceName, Body: body, Managed: true})
+
+	keep(source{Name: "feed-01-4021", URL: "https://feed-01.example/sub/post", Feed: "feed-01", Managed: true})
+	for _, n := range []string{"flat447", "file-vpn-2", "fastnodes-fi"} {
+		keep(source{Name: n, URL: "https://" + n + ".example/sub"})
+	}
+	keep(source{Name: "tg-vpn-123", URL: "https://tg-vpn.example/sub/template"})
+
+	if len(want) != migrationEntries {
+		t.Fatalf("fixture holds %d entries, want %d", len(want), migrationEntries)
+	}
+	b, err := yaml.Marshal(pre)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	return b, want
+}
+
+// TestMigrationOverACorpusFixture runs the one-time adoption over that corpus:
+// every other adoption test builds two or three entries by hand, which cannot
+// show that the whole file survives one load, stays writable, and settles.
+func TestMigrationOverACorpusFixture(t *testing.T) {
+	t.Parallel()
+
+	fileBytes, want := migrationCorpus(t)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, fileBytes, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	first, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if !first.adopted {
+		t.Fatal("the corpus was not marked adopted, so an idle cycle would never write the migration out")
+	}
+	got := first.Subscriptions.Sources
+	if len(got) != len(want) {
+		t.Fatalf("kept %d entries, want all %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if err = validatePrivate(first); err != nil {
+		t.Fatalf("the migrated corpus is unwritable: %v", err)
+	}
+	checkMigratedShape(t, got)
+
+	if err = writePrivate(path, first); err != nil {
+		t.Fatalf("writePrivate: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the written file: %v", err)
+	}
+	second, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("second loadPrivate: %v", err)
+	}
+	if second.adopted {
+		t.Error("the migration re-fired on the file it had just written")
+	}
+	if !slices.Equal(second.Subscriptions.Sources, want) {
+		t.Errorf("second load = %+v, want the written list", second.Subscriptions.Sources)
+	}
+	if err = writePrivate(path, second); err != nil {
+		t.Fatalf("second writePrivate: %v", err)
+	}
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read the written file: %v", err)
+	}
+	if !bytes.Equal(written, again) {
+		t.Error("a later cycle rewrote the migrated file")
+	}
+	if n := managedCount(second); n != migrationOwned-1 {
+		t.Errorf("managedCount = %d, want %d: every owned entry but the inline body", n, migrationOwned-1)
+	}
+}
+
+// checkMigratedShape holds the properties the corpus must have after adoption:
+// ownership on exactly the crawler's entries, a recovered feed wherever the old
+// name named a channel, and nothing left for a second migration to claim.
+func checkMigratedShape(t *testing.T, got []source) {
+	t.Helper()
+
+	owned, withFeed, sheltered := 0, 0, 0
+	feeds := make(map[string]struct{}, migrationChannels)
+	for _, s := range got {
+		if needsAdoption(s) {
+			t.Errorf("%q would be adopted again on the next load", s.Name)
+		}
+		if !s.Managed {
+			sheltered++
+			if s.Feed != "" {
+				t.Errorf("sheltered %q was written feed %q", s.Name, s.Feed)
+			}
+			continue
+		}
+		owned++
+		if s.Feed != "" {
+			withFeed++
+			feeds[s.Feed] = struct{}{}
+		}
+	}
+	if owned != migrationOwned {
+		t.Errorf("managed entries = %d, want %d", owned, migrationOwned)
+	}
+	if sheltered != migrationSheltered {
+		t.Errorf("sheltered entries = %d, want %d", sheltered, migrationSheltered)
+	}
+	if owned-withFeed != migrationOriginless {
+		t.Errorf("managed entries without a feed = %d, want %d: the legacy bare hash and the "+
+			"inline body, the only two adopted names that never named a channel", owned-withFeed, migrationOriginless)
+	}
+	if len(feeds) != migrationChannels {
+		t.Errorf("recovered feeds = %d, want one per channel (%d)", len(feeds), migrationChannels)
+	}
+	for _, n := range []string{"commsub", "flat447", "file-vpn-2", "fastnodes-fi", legacyManagedPrefix, "tg-vpn-123"} {
+		i := slices.IndexFunc(got, func(s source) bool { return s.Name == n })
+		if i < 0 {
+			t.Errorf("sheltered %q was lost", n)
+			continue
+		}
+		if got[i].Managed || got[i].Feed != "" {
+			t.Errorf("sheltered %q = %+v, want it untouched and unmarked", n, got[i])
+		}
+	}
+}
+
+// TestMigrationCrashBeforeTheWrite: adoption happens in memory and writePrivate
+// replaces the file only through an fsynced temp and a rename, so the window
+// between them can lose the migration but cannot publish half of it. A lost
+// write costs one replay; a refused one leaves the previous file intact.
+func TestMigrationCrashBeforeTheWrite(t *testing.T) {
+	t.Parallel()
+
+	fileBytes, want := migrationCorpus(t)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, fileBytes, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	first, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read the fixture: %v", err)
+	}
+	if !bytes.Equal(onDisk, fileBytes) {
+		t.Fatal("the load itself touched private.yaml, so a crash could expose a partial migration")
+	}
+	if err = os.WriteFile(path+".tmp", []byte("subscriptions:\n  sources:\n    - name: trunc"), 0o600); err != nil {
+		t.Fatalf("plant a crashed write's temp file: %v", err)
+	}
+	replay, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("replay loadPrivate: %v", err)
+	}
+	if !replay.adopted || !slices.Equal(replay.Subscriptions.Sources, want) {
+		t.Error("the next cycle did not reproduce the lost migration")
+	}
+
+	if err = writePrivate(path, first); err != nil {
+		t.Fatalf("writePrivate: %v", err)
+	}
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the written file: %v", err)
+	}
+	doomed := first
+	doomed.Subscriptions.Sources = append(slices.Clone(first.Subscriptions.Sources), first.Subscriptions.Sources[0])
+	if writeErr := writePrivate(path, doomed); writeErr == nil {
+		t.Error("writePrivate published a duplicate name")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read the written file: %v", err)
+	}
+	if !bytes.Equal(good, after) {
+		t.Error("the refused write damaged the file it declined to replace")
+	}
+}
+
+// TestLoadPrivateAdoptionSeparatesTwoEntriesOnOneURL: two legacy entries can name
+// one URL after a hand edit, and if both strip onto names the file already holds
+// they both fall to the same per-URL hash. That duplicate would make
+// validatePrivate refuse the write on this and every later cycle, so the second
+// falls further, onto the hash of the name being migrated.
+func TestLoadPrivateAdoptionSeparatesTwoEntriesOnOneURL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shared = "https://shared.example/sub"
+		seed   = "subscriptions:\n  sources:\n" +
+			"    - name: dup-a1b2c3\n      url: https://hand.example/one\n" +
+			"    - name: dup-d4e5f6\n      url: https://hand.example/two\n" +
+			"    - name: tg-dup-a1b2c3\n      url: " + shared + "\n" +
+			"    - name: tg-dup-d4e5f6\n      url: " + shared + "\n"
+	)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	pf, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if err = validatePrivate(pf); err != nil {
+		t.Fatalf("the adopted file is unwritable: %v", err)
+	}
+	first, second := pf.Subscriptions.Sources[2], pf.Subscriptions.Sources[3]
+	if first.Name != managedName(shared) || !first.Managed || first.Feed != "dup" {
+		t.Errorf("first adopted entry = %+v, want the per-URL hash %q, managed, feed dup", first, managedName(shared))
+	}
+	want := urlHash("tg-dup-d4e5f6", unattributedNameHex)
+	if second.Name != want || !second.Managed || second.Feed != "dup" {
+		t.Errorf("second adopted entry = %+v, want the migrated name's hash %q, managed, feed dup", second, want)
+	}
+}
+
+// TestLoadPrivateSheltersPostCutoverNames: the mint still produces tg- names,
+// because channelSlug folds "_" to "-" and the channel tg_vpn slugs to tg-vpn. An
+// operator who copies such an entry as a template and leaves the field off must
+// keep it: adopting on the prefix alone would seize the entry, mark it managed and
+// hand it to the prune, which is the failure this wave exists to remove. Only a
+// name wearing a shape the pre-cutover mint produced is claimed.
+func TestLoadPrivateSheltersPostCutoverNames(t *testing.T) {
+	t.Parallel()
+
+	const seed = "subscriptions:\n  sources:\n" +
+		"    - name: tg-vpn-123\n      url: https://template.example/sub\n" +
+		"    - name: tg-\n      url: https://bare.example/sub\n" +
+		"    - name: tg-notahash\n      url: https://hand.example/sub\n"
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+
+	pf, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if pf.adopted {
+		t.Error("the migration fired on a file holding no pre-cutover mint, forcing a write every cycle")
+	}
+	for _, s := range pf.Subscriptions.Sources {
+		if s.Managed || s.Feed != "" {
+			t.Errorf("entry %+v was claimed by the crawler", s)
+		}
+	}
+	if got := pf.Subscriptions.Sources[0].Name; got != "tg-vpn-123" {
+		t.Errorf("name = %q, want tg-vpn-123 kept verbatim", got)
 	}
 }

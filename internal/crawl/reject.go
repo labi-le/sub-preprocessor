@@ -135,8 +135,10 @@ func newRejects(logger zerolog.Logger) *rejects {
 
 // record notes one rejected candidate and, until the cap, logs it. code is the
 // HTTP status for rejectStatus and 0 otherwise; err carries the detail for
-// rejectFetch and rejectInvalidURL.
-func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, err error) {
+// rejectFetch and rejectInvalidURL. Both of o's fields are zero on the recheck
+// path, which sees no channel at all. A zero post is logged as no post at all,
+// because post=0 would read as a real message.
+func (r *rejects) record(o origin, rawURL string, reason rejectReason, code int, err error) {
 	if r == nil {
 		return
 	}
@@ -167,16 +169,20 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 
 	u, parseErr := url.Parse(rawURL)
 	ev := r.logger.Info().
-		Str("channel", channel).
-		// The name sourceName would give this URL if this channel were its
-		// discoverer — no existing name and no used-name set, which is exactly
-		// a never-accepted candidate's state, and reading a nil map is legal.
-		// A URL first discovered elsewhere gets a different slug there, so it
-		// is the channel-independent sha6 suffix that correlates this line to a
-		// private.yaml entry. Either way no credential is in it.
-		Str("source", sourceName(rawURL, "", channel, nil)).
+		Str("channel", o.Slug).
+		// The name the mint would give this URL from this channel with no post
+		// id: per-URL unique, and no existing name or used-name set, which is
+		// exactly a never-accepted candidate's state (a nil map reads legally).
+		// The post is deliberately withheld from the name and logged as its own
+		// field — <slug>-<post> names a POST, so a rejected link would log the
+		// name of whichever sibling link of that post was accepted, which is a
+		// false match, not a weak one. No credential is in either.
+		Str("source", sourceName(rawURL, "", origin{Slug: o.Slug}, nil)).
 		Str("host", logHost(u)).
 		Str("reason", string(reason))
+	if o.Post != 0 {
+		ev = ev.Uint64("post", o.Post)
+	}
 	if code != 0 {
 		ev = ev.Int("status", code)
 	}
@@ -203,7 +209,7 @@ func (r *rejects) record(channel, rawURL string, reason rejectReason, code int, 
 // live in another is not a rejection — the cycle adopted it — so it is dropped
 // from the counts here. Its per-candidate line still stands: that line records
 // what one channel's fetch actually answered, which is true and is the point.
-func (r *rejects) report(live map[string]string) {
+func (r *rejects) report(live map[string]origin) {
 	if r == nil {
 		return
 	}
@@ -254,7 +260,7 @@ func (r *rejects) report(live map[string]string) {
 // there is no query at all. The observed
 // is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo is the same shape with the
 // token as the FIRST segment, so keeping a prefix of the path would not help
-// either. Nothing is lost: the tg-<slug>-<sha6> on the same line is the exact
+// either. Nothing is lost: the <slug>-<sha6> on the same line is the exact
 // identity, and the host is the part an operator recognizes.
 //
 // url.URL keeps userinfo in User, so Host cannot carry credentials that way.

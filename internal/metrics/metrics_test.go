@@ -116,32 +116,46 @@ func TestMetricsObserveRender(t *testing.T) {
 	}
 }
 
-// TestMetricsSourceOwnerLabels pins what the dashboard groups on. The crawler
-// mints tg-<slug>-<sha6> names, and the panels used to recover the channel and
-// the ownership from that string in PromQL; the exporter states both now, so a
-// missing label folds every crawled channel into one row rather than failing.
+// TestMetricsSourceOwnerLabels pins what the dashboard groups on. Both labels
+// are the entry's own fields, and no label is derived by decomposing a name --
+// the feed fallback copies it whole -- so a crawled source keeps its channel
+// row even when its name carries a post id, a collision shard or no channel at
+// all, and a hand-added source shaped exactly like a minted one --
+// seyedng-4102 below -- still renders curated and unfolded.
 func TestMetricsSourceOwnerLabels(t *testing.T) {
 	t.Parallel()
 
 	m := metrics.New()
 	m.Observe(stable.CycleReport{
 		Sources: []stable.SourceReport{
-			{Name: "tg-genliberty-7e9b21", Total: 41, Valid: 32, Tested: 23, Filtered: 14, GeoDrop: 5},
+			{
+				Name: "genliberty-3631", Managed: true, Feed: "genliberty",
+				Total: 41, Valid: 32, Tested: 23, Filtered: 14, GeoDrop: 5,
+			},
+			{
+				Name: "genliberty-3631-7e9b21", Managed: true, Feed: "genliberty",
+				Total: 11, Valid: 10, Tested: 9, Filtered: 8,
+			},
+			{Name: "96c4d7c7a7", Managed: true, Total: 3, Valid: 3, Tested: 2, Filtered: 1},
 			{Name: "flat447", Total: 61, Valid: 52, Tested: 43, Filtered: 34, DNSDrop: 6},
+			{Name: "seyedng-4102", Total: 7, Valid: 6, Tested: 5, Filtered: 4},
 		},
 	})
 
 	out := render(t, m)
 	for _, want := range []string{
-		`stable_source_nodes_total{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 41`,
-		`stable_source_valid_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 32`,
-		`stable_source_tested_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 23`,
-		`stable_source_published_nodes{feed="genliberty",owner="crawler",source="tg-genliberty-7e9b21"} 14`,
+		`stable_source_nodes_total{feed="genliberty",owner="crawler",source="genliberty-3631"} 41`,
+		`stable_source_valid_nodes{feed="genliberty",owner="crawler",source="genliberty-3631"} 32`,
+		`stable_source_tested_nodes{feed="genliberty",owner="crawler",source="genliberty-3631"} 23`,
+		`stable_source_published_nodes{feed="genliberty",owner="crawler",source="genliberty-3631"} 14`,
+		`stable_source_nodes_total{feed="genliberty",owner="crawler",source="genliberty-3631-7e9b21"} 11`,
+		`stable_source_nodes_total{feed="96c4d7c7a7",owner="crawler",source="96c4d7c7a7"} 3`,
 		`stable_source_nodes_total{feed="flat447",owner="curated",source="flat447"} 61`,
 		`stable_source_valid_nodes{feed="flat447",owner="curated",source="flat447"} 52`,
 		`stable_source_tested_nodes{feed="flat447",owner="curated",source="flat447"} 43`,
 		`stable_source_published_nodes{feed="flat447",owner="curated",source="flat447"} 34`,
-		`stable_source_dropped_nodes{reason="geo",source="tg-genliberty-7e9b21"} 5`,
+		`stable_source_nodes_total{feed="seyedng-4102",owner="curated",source="seyedng-4102"} 7`,
+		`stable_source_dropped_nodes{reason="geo",source="genliberty-3631"} 5`,
 		`stable_source_dropped_nodes{reason="dns",source="flat447"} 6`,
 	} {
 		if !strings.Contains(out, want) {
@@ -155,7 +169,7 @@ func TestMetricsSourceOwnerLabels(t *testing.T) {
 			continue
 		}
 		if strings.Contains(line, "feed=") || strings.Contains(line, "owner=") {
-			t.Errorf("drop series carries a derived label: %q", line)
+			t.Errorf("drop series carries a per-source label it must not: %q", line)
 		}
 	}
 }

@@ -898,7 +898,7 @@ func TestValidateBodySource(t *testing.T) {
 	}{
 		{
 			name:    "body source with empty url accepted",
-			sources: "subscriptions:\n  sources:\n    - name: tg-inline\n      body: dmxlc3M6Ly91QDEuMS4xLjE6NDQzI2E=\n",
+			sources: "subscriptions:\n  sources:\n    - name: inline\n      body: dmxlc3M6Ly91QDEuMS4xLjE6NDQzI2E=\n",
 			wantErr: false,
 		},
 		{
@@ -929,6 +929,34 @@ func TestValidateBodySource(t *testing.T) {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
 		})
+	}
+}
+
+// TestValidateInlineSourceShape loads the entry the crawler actually writes for
+// its inline-node harvest: a body, no URL, and the mark that makes it prunable,
+// which is only legal in private.yaml -- so this shape cannot be reached from
+// TestValidateBodySource's curated fixtures.
+func TestValidateInlineSourceShape(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: inline\n      body: dmxlc3M6Ly91QDEuMS4xLjE6NDQzI2E=\n      managed: true\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the inline entry must load: %v", err)
+	}
+	src := cfg.Subscriptions.Sources[0]
+	if src.Name != "inline" || !src.Managed || src.URL != "" || src.Feed != "" {
+		t.Fatalf("inline entry decoded wrong: %+v", src)
 	}
 }
 
@@ -1024,6 +1052,100 @@ func TestLoadOverlayStrictness(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "interval") {
 		t.Fatalf("error %q does not name the offending overlay key", err)
+	}
+}
+
+// TestLoadRejectsManagedInGitTrackedSources: managed is the crawler's write
+// authority over an entry -- it makes it prune-eligible -- so a git-tracked file
+// may not claim it. Accepting it there would let one cycle delete a hand-added
+// source, and the error has to name the file that must be edited. feed is the
+// counterexample that keeps the rule about authority and not about crawler
+// vocabulary: it only groups, so a curated entry may carry one.
+func TestLoadRejectsManagedInGitTrackedSources(t *testing.T) {
+	t.Parallel()
+
+	const (
+		base    = "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+		managed = "subscriptions:\n  sources:\n    - name: curated-one\n      url: https://a.example.com/s\n      managed: true\n"
+	)
+
+	for _, file := range []string{"config.yaml", "sources.yaml"} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		content := base
+		if file == "config.yaml" {
+			content += managed
+		} else if err := os.WriteFile(filepath.Join(dir, file), []byte(managed), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := config.Load(path)
+		if err == nil {
+			t.Fatalf("%s: managed: true must be rejected in a git-tracked file", file)
+		}
+		if !strings.Contains(err.Error(), "sources.yaml") || !strings.Contains(err.Error(), "curated-one") {
+			t.Fatalf("%s: error %q names neither the curated file nor the source", file, err)
+		}
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	curated := "subscriptions:\n  sources:\n    - name: curated-one\n      url: https://a.example.com/s\n      feed: somechannel\n"
+	if err := os.WriteFile(filepath.Join(dir, "sources.yaml"), []byte(curated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("a curated entry may name its feed: %v", err)
+	}
+	if cfg.Subscriptions.Sources[0].Feed != "somechannel" {
+		t.Fatalf("curated feed not carried: %+v", cfg.Subscriptions.Sources[0])
+	}
+}
+
+// TestLoadCarriesOwnershipFromPrivateOverlay: private.yaml is the crawler's own
+// file, so managed: true is accepted there and must survive the strict decode
+// together with the feed it was minted from. An entry without the key decodes to
+// false, which is what shelters a hand-added source from the prune.
+func TestLoadCarriesOwnershipFromPrivateOverlay(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := "geo:\n  geofeed:\n    sources:\n      - url: https://example.com/geofeed.csv.gz\n        type: gzip\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: seyedng-3631\n      url: https://a.example.com/s\n      managed: true\n      feed: seyedng\n" +
+		"    - name: hand-added\n      url: https://b.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("private.yaml may declare managed: %v", err)
+	}
+	if len(cfg.Subscriptions.Sources) != 2 {
+		t.Fatalf("sources not merged: %+v", cfg.Subscriptions.Sources)
+	}
+	if !cfg.Subscriptions.Sources[0].Managed {
+		t.Fatalf("managed: true not carried: %+v", cfg.Subscriptions.Sources[0])
+	}
+	if cfg.Subscriptions.Sources[1].Managed {
+		t.Fatalf("an absent managed key must decode to false: %+v", cfg.Subscriptions.Sources[1])
+	}
+	if cfg.Subscriptions.Sources[0].Feed != "seyedng" {
+		t.Fatalf("feed not carried: %+v", cfg.Subscriptions.Sources[0])
+	}
+	if cfg.Subscriptions.Sources[1].Feed != "" {
+		t.Fatalf("an absent feed key must decode empty: %+v", cfg.Subscriptions.Sources[1])
 	}
 }
 
