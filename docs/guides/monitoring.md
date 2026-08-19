@@ -123,14 +123,16 @@ vendor the dashboard into the nixos repo.
 - **"Top sources" is a PAIR of tables split by owner, and the split is not an invitation to read
   them side by side.** Panel 8 (x=0 y=20) takes `{owner="crawler"}`, panel 22 (x=12 y=20, the new
   one) takes `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set;
-  panel 21 sums both sides full-width beneath them. `owner` is an EXPORTER label now, not a regex
-  over the name: the four per-source counters carry `feed` and `owner` beside `source`
-  (`writeSources`, `internal/metrics/metrics.go:306`), derived once per source by `srcname.Split`
-  (`internal/srcname/srcname.go:22`) — which the crawler never calls; what the two sides share is
-  `srcname.ManagedPrefix`, not the splitter — so a panel, an ad-hoc query and an alert cannot
-  disagree about who owns a source. Alone among the five, `stable_source_dropped_nodes` still
-  carries `source` and `reason` (`metrics.go:348`, samples at :357-362).
-  Both tables show `source` VERBATIM, `tg-` prefix included: no query rewrites a label any more,
+  panel 21 sums both sides full-width beneath them. `owner` is an EXPORTER label, and behind it a
+  FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
+  beside `source` (`writeSources`, `internal/metrics/metrics.go:305`), read once per source off
+  `SourceReport.Managed` (`:313-316`) and `.Feed` (`:317`, via `sourceFeed` at `:373-380`) — the
+  entry's own fields, carried through `internal/stable/report.go:218-219` from the config entry
+  (`checker.go:631-632`) and written by the crawler at mint, so a panel, an ad-hoc query and an
+  alert cannot disagree about who owns a source and nothing anywhere parses a name to decide.
+  Alone among the five, `stable_source_dropped_nodes` still
+  carries `source` and `reason` (`metrics.go:347`, samples at :349-361).
+  Both tables show `source` VERBATIM: no query rewrites a label any more,
   so the `and on(source)` gate and the `joinByField` transformation see the SAME string, and that
   string is the `private.yaml` / `sources.yaml` key. `feed` and `owner` DO reach these two tables,
   as ordinary columns and once per joined frame, so both panels drop them in `organize`'s
@@ -139,19 +141,23 @@ vendor the dashboard into the nixos repo.
   That exclusion is the ONLY guard: the `labelsToFields` step ahead of it is inert, because with
   `format: "table"` the Prometheus datasource hands Grafana every label as a plain string FIELD
   and that transformation passes through any field carrying no labels of its own (measured against
-  `@grafana/data` 10.4.19 on the shipped transformation arrays, 2026-08-18). The prefix is WRITE
-  AUTHORITY over `config/private.yaml` — `crawl.go:354` rechecks only prefixed sources, `:406`
-  preserves non-prefixed entries verbatim, and `:533` counts only prefixed ones so bulk-prune can
+  `@grafana/data` 10.4.19 on the shipped transformation arrays, 2026-08-18). `managed: true` is
+  WRITE AUTHORITY over `config/private.yaml` — `recheckManaged` (`crawl.go:391`) re-classifies
+  only marked entries (`:398`), `mergeManaged`'s ownership switch (`:447`) passes an unmarked entry
+  through verbatim (`:463`), and `managedCount` (`:604`) counts only marked ones so bulk-prune can
   never delete a hand-added source — and `owner="crawler"` is that same predicate, read off the
-  exposition instead of re-derived per query. Row counts across the two are NOT comparable
-  evidence of anything: measured on `:9091`, job `sub-preprocessor`, 2026-08-16
-  12:45 +03:00, 439 of the sources reporting series were crawler-managed against 45 hand-curated,
+  exposition instead of re-derived per query. Each of those three reads the field for one stated
+  reason: a name test would report an empty corpus the moment the prefix went, and at
+  `managedCount` a zero denominator collapses the prune floor to its absolute arm.
+  Row counts across the two are NOT comparable evidence of anything: measured on `:9091`, job
+  `sub-preprocessor`, 2026-08-16 12:45 +03:00, 439 of the sources reporting series were
+  crawler-managed against 45 hand-curated,
   so panel 8's 25 rows are a 5.7% window on its side while panel 22's 25 cover 55.6% of its own.
   The crawler side grows hourly — the same count read 327 a day earlier — so take the live
   denominator from panel 3 (Sources OK / total), not a stamp here.
   **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
   `config.Load` merges the curated `config/sources.yaml` overlay at
-  `internal/config/config.go:985` but appends the crawler's `private.yaml` only at :1000, and
+  `internal/config/config.go:994` but appends the crawler's `private.yaml` only at :1009, and
   `Merge` dedupes FIRST-WINS on lowercased `server:port` (`internal/stable/merge.go:82`).
   Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
   (`internal/stable/checker.go:613`) and reassembles them `for i, r := range results` (:623), so
@@ -159,10 +165,11 @@ vendor the dashboard into the nixos repo.
   node BEFORE any quality judgement, and panel 22's `kept` and `filtered` are inflated against
   panel 8's. Measured floor on the cycle behind those numbers (prod
   `config/.stable-snapshot.json`, `updated_at` 2026-08-16 09:16:16Z, whose 83/231 published split
-  matches Prometheus exactly): decoding `tg-inline`'s inline body (500 node URIs) and diffing
+  matches Prometheus exactly): decoding the inline harvest's body (500 node URIs; that source was
+  named `tg-inline` on the date measured and is named `inline` after the cutover) and diffing
   lowercased `server:port` against the published payload found 16 published nodes attributed to a
-  curated source that `tg-inline` ALSO yields — `fifthidea` 6, `mehrtat` 5, `bahemmat` 4,
-  `yafeisun` 1, at merged-slice config index 10, 2, 5 and 14 against `tg-inline` at 492 of 493,
+  curated source that the inline source ALSO yields — `fifthidea` 6, `mehrtat` 5, `bahemmat` 4,
+  `yafeisun` 1, at merged-slice config index 10, 2, 5 and 14 against it at 492 of 493,
   so the curated index is below the crawler one in all 16. Read `server:port` off BOTH sides with
   `subscription.Parse` — the call `Merge` uses to build `Entry.Addr` — and never off the URI text:
   `vmess` and legacy `ss`/`ssr` keep server and port inside a base64 payload, so a regex or a
@@ -170,27 +177,37 @@ vendor the dashboard into the nixos repo.
   (`bahemmat-481` at `165.140.216.142:443`, on both sides). A FLOOR, not the total: only 1 of the
   447 `private.yaml` entries carries an inline body (file at 2026-08-16 12:15 +03:00), the other
   446 being URLs the measurement did not fetch.
-  Two more things the pair will not tell you. On `sub-preprocessor-vassago` there are no `tg-*`
-  sources at all (52 configured, every one hand-curated, same instant), so no series there carries
+  Two more things the pair will not tell you. On `sub-preprocessor-vassago` no entry carries
+  `managed: true` (52 configured, every one hand-curated, same instant), so no series there carries
   `owner="crawler"` and panel 8 is EMPTY: all four targets return no series and Grafana renders
   "No data" — not rows of zeros.
   And the gap between `stable_sources_total` 493 and `stable_sources_ok` 484 at that instant is 9
   sources that FAILED TO FETCH that cycle, where `fetchSources` warns and `continue`s
   (`checker.go:625-626`); they emit no per-source series and appear in neither table. They are not
   dead, not pruned, not dropped from config, and the next cycle may fetch them fine.
-- **The feed breakdown (panel 20, "Top source feeds by owner") is two exporter LABELS now, not
-  a query, and its rows are still MIXED.** `feed` and `owner` ride the four per-source counters,
-  so panel 20 is `sum by (feed, owner) (<metric>{job="$job"})` and nothing is derived at query
-  time: `label_values(..., feed)` answers, the 28 `label_replace` calls across 13 targets that
-  folded the prefix are gone, and an alert that means a feed writes that same `sum by (feed,
-  owner)` instead of carrying a `label_replace` pair of its own. `srcname.Split` decides both
-  labels — strip `tg-`, then strip a trailing `-<sha6>` — so a crawler-minted name folds onto its
-  channel slug while a curated name is its own feed, verbatim. Group by the PAIR, never `by
-  (feed)` alone: a curated name equal to some channel's stripped slug would otherwise merge two
+- **The feed breakdown (panel 20, "Top source feeds by owner") is two exporter LABELS, both of
+  them fields, and its rows are still MIXED.** `feed` and `owner` ride the four per-source
+  counters, so panel 20 is `sum by (feed, owner) (<metric>{job="$job"})` and nothing is derived at
+  query time: `label_values(..., feed)` answers, the 28 `label_replace` calls across 13 targets
+  that folded the prefix are gone, and an alert that means a feed writes that same `sum by (feed,
+  owner)` instead of carrying a `label_replace` pair of its own. Neither label is computed at all
+  now: `owner` is `SubscriptionSource.Managed` and `feed` is `SubscriptionSource.Feed`
+  (`internal/config/config.go:577,582`), which the crawler writes at mint, so every URL of one
+  channel shares that channel's row and a curated entry, which normally sets no `feed`, falls back
+  to naming itself (`sourceFeed`, `metrics.go:373-380`). Group by the PAIR, never `by
+  (feed)` alone: a curated name equal to some channel's slug would otherwise merge two
   owners into one row.
-  The rows stay mixed, for a reason `owner` now makes legible rather than hides: `tg-inline`
-  (`crawl.go:732`) and the legacy `tg-96c4d7c7a7` (`legacyNameRe`, `crawl.go:52`) fold nothing
-  and name no channel, yet each is an `owner="crawler"` feed standing alone.
+  A fold over the NAME was the design until it was measured against the corpus and struck: one
+  trailing strip leaves the collision form `seyedng-3631-1444c8` on its post rather than its
+  channel, and a greedy strip mangles any slug ending in a digit run — `channelSlug` keeps digits
+  and folds `_` to `-`, and the corpus carries `file-vpn-2`, whose `file-vpn-2-1444c8` would strip
+  to `file-vpn` while `file-vpn-2-3631` must strip to `file-vpn-2`. Curated names share the minted
+  shape too: `wepogp-1` and `wepogp-4` would have collapsed onto a `wepogp` row no channel
+  produced. Attribution is therefore recorded, not recovered.
+  The rows stay mixed, for a reason `owner` now makes legible rather than hides: the inline
+  harvest (`inline`, `crawl.go:812`) records no channel and neither does a bare-hash name
+  (`unattributedNameRe`, `crawl.go:69`), so each falls back to naming itself, yet each is an
+  `owner="crawler"` feed standing alone.
   The figure to read here counts BUCKETS, not rows: all four targets are gated on `topk(25, sum
   by (feed, owner) (stable_source_valid_nodes{job="$job"}))`, so the table draws 25 rows out of
   however many `(feed, owner)` pairs reported. Measured on `:3020`, host clock 2026-08-18 00:58
@@ -209,31 +226,37 @@ vendor the dashboard into the nixos repo.
   and recording rules citing `stable_source_` (measured 2026-08-18 +0300). For how many sources
   are configured, read `stable_sources_total` — panel 3, top of the same dashboard — rather than
   counting a config file; it is published per cycle, so it trails a config edit by a cycle.
-- **The crawler-managed vs hand-curated split is an exporter LABEL over the name prefix, and its
+- **The crawler-managed vs hand-curated split is an exporter LABEL over a FIELD, and its
   `published` column measures ATTRIBUTION, not contribution.** The discriminator is
   `owner="crawler"` / `owner="curated"`, rendered once per source rather than matched per query:
-  `srcname.Split` (`internal/srcname/srcname.go:22`) reads the prefix and `writeSources`
-  (`internal/metrics/metrics.go:306`) writes the verdict beside the verbatim `source` and the
-  folded `feed`, so a panel, an ad-hoc query and an alert share ONE definition instead of three
-  regexes each. Underneath it is still a NAME PREFIX: `srcname.ManagedPrefix`
-  (`internal/srcname/srcname.go:12`), whose comment fixes the axis as OWNERSHIP rather than
-  provenance: it "marks the sources the crawler owns; anything else is a hand-added subscription
-  it never touches." The crawler mints names through that same constant (seven uses in
-  `internal/crawl`, two of them mints), so the label cannot drift from the write rule it reports.
-  So do not read it as "telegram": `tg-inline` (`crawl.go:732`) is crawler-managed but is
-  harvested raw node URIs rather than a channel, and the legacy `^tg-[0-9a-f]{10}$` form
-  (`legacyNameRe`, `crawl.go:52`)
-  is managed too — measured on `:9091` 2026-08-16 12:45 +03:00, the managed side was 439 names
-  reporting series: 437 channel-attributed, 1 `tg-inline` and 1 legacy (`tg-96c4d7c7a7`). Nor is
+  `writeSources` (`internal/metrics/metrics.go:305`) reads `SourceReport.Managed` (`:313-316`) and
+  writes the verdict beside the verbatim `source` and the recorded `feed`, so a panel, an ad-hoc
+  query and an alert share ONE definition instead of three regexes each. Underneath it is
+  `SubscriptionSource.Managed` (`internal/config/config.go:577`), whose comment fixes the axis as
+  OWNERSHIP rather than provenance: it "marks an entry the crawler minted and may therefore
+  prune. Absent means hand-added, so forgetting the field shelters a source instead of exposing
+  it." The crawler sets that field on every entry it mints and tests it on every entry it may
+  touch, so the label cannot drift from the write rule it reports. Absent-means-sheltered is the
+  direction that matters: the old prefix rule was equally forgiving, and two gates refuse the
+  mark on a git-tracked entry so a curated file cannot claim it by accident: `mergeSourcesOverlay`
+  (`config.go:1041`) inside `sources.yaml` before the append (`:1053-1057`), and `validateSources`
+  (`:1469`) over the merged list (`:1472-1473`), which is what also covers `config.yaml`.
+  So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:812`) is
+  crawler-managed but is harvested raw node URIs rather than a channel, and a bare-hash name
+  (`unattributedNameRe`, `crawl.go:69`)
+  is managed too — measured on `:9091` 2026-08-16 12:45 +03:00, before the cutover, the managed
+  side was 439 names reporting series: 437 channel-attributed, 1 inline and 1 bare hash. Nor is
   it a file boundary: `private.yaml` held 447 entries at 2026-08-16 12:15 +03:00, one of them
-  (`commsub`) hand-added without the prefix, and it lands on the curated side.
+  (`commsub`) hand-added, and it lands on the curated side — then by having no prefix, now by
+  carrying no `managed:` line.
   Read the funnel across that split and the crawler looks worthless — 439 managed sources against
   45 curated, `valid` 227878 vs 57121, `published` 83 vs 231 (`:9091`, 2026-08-16 12:45 +03:00).
   **That conclusion does not follow**, for the attribution reason the panel 8 / 22 bullet above
-  measures: the curated overlay is merged first (`config.go:985` before :1000) and `Merge` dedupes
+  measures: the curated overlay is merged first (`config.go:994` before :1009) and `Merge` dedupes
   first-wins (`merge.go:82`), so a curated source claims every shared node before any quality
   judgement, and the floor measured on that cycle is 16 published nodes held by a curated source
-  that `tg-inline` also yields. Breadth says it from the other side: 29 managed sources published
+  that the inline harvest also yields. Breadth says it from the other side: 29 managed sources
+  published
   at least one node against 18 curated ones at the same instant, so the curated lead is volume per
   source, not reach. `tested` inverts one column earlier too (139 managed vs 493 curated), for the
   same reason — it is post-merge, so it is not the probe killing crawler nodes either.
@@ -267,7 +290,7 @@ vendor the dashboard into the nixos repo.
   module — leave it.
 - **Every IP-stage drop reason is emitted every cycle, so a zero is an answer on four of the
   seven.** `writeSources` builds a FIXED seven-entry table per source, never reading `filters:`
-  (`internal/metrics/metrics.go:351-354`, reason names at :304): `dns` (nothing resolved), `ipv6`
+  (`internal/metrics/metrics.go:350-353`, reason names at :303): `dns` (nothing resolved), `ipv6`
   (a non-IPv4 literal, unlooked-up), `geo` (country policy), `asn` (ASN deny-patterns), `cidr`
   (outside the allow-list), `geoblock` (host in the geoblock store), `unsupported`. A zero on the
   middle three is ambiguous — no filter, nothing to exclude, or broken — and each gate differs:
@@ -282,7 +305,7 @@ vendor the dashboard into the nixos repo.
   (2026-07-29) and `cidr` in `82e8ef3` (2026-08-09), so a range reaching back past either plots
   fewer series, and an absence there is not a zero. Worker cycles only: the on-demand `GET /`
   path runs the same IP-stage chain but samples nothing, every `stable_source_*` series coming
-  out of the cycle report (`internal/metrics/metrics.go:139`), so preprocessing done for an HTTP
+  out of the cycle report (`internal/metrics/metrics.go:138`), so preprocessing done for an HTTP
   request is invisible here.
 - **The through-node drops panel has three states, not two.** `apiFilter.apply` and
   `bandwidthFilter.apply` each assign a full `Dropped` map on the completing path — `{blocked,
@@ -290,13 +313,14 @@ vendor the dashboard into the nixos repo.
   either way — so a gate that ran clean emits a PRESENT ZERO. Every early return keeps the empty
   map from :98/:216 (`apiFilter` :99/:106/:110 — no usable key, nil outcomes, cancelled context;
   `bandwidthFilter` :219/:223), and `writeFilters` iterates only the keys present
-  (`internal/metrics/metrics.go:164`), so an inert gate writes NO SERIES though its
+  (`internal/metrics/metrics.go:163`), so an inert gate writes NO SERIES though its
   `filter_in`/`filter_kept` still land. Third: a gate dropped from `filters:` adds nothing, yet
   its old rows stop rather than vanish, so a long range still draws lines ending at that sample;
   the legend reduces with `last`, not `lastNotNull`, so its cell reads empty rather than frozen.
 - **The dead cache turns one condemnation into several cycles of missing funnel.** A node
   answering no round folds to `Successes: 0`, which `recordDead` blocks its `server:port` on
-  (`internal/stable/checker.go:685`); `filterDead` skips it for the TTL (:660). Both ship
+  (`internal/stable/checker.go:687`); `filterDead` skips it for the TTL (:659, the skip at
+  :662-663). Both ship
   `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:163` and :210,
   `config-vassago/config.yaml:65` and :77), and `jitteredTTL` stretches it by a uniform [1, 1.5)
   so the graveyard does not expire as one batch (`internal/stable/deadset.go:54-58`): [3h, 4.5h),
@@ -319,10 +343,10 @@ vendor the dashboard into the nixos repo.
   breaker, and every verdict but `verdictRefused` falls through to `live` (:600).
 - **Two counters render BEFORE the cycle report exists, and they are all a no-data page has.**
   `writeMetrics` emits `stable_cycles_total` and `stable_cycle_failures_total`
-  (`internal/metrics/metrics.go:110`, :111) BEFORE returning on a nil `m.last` (:113), so a worker
+  (`internal/metrics/metrics.go:109`, :110) BEFORE returning on a nil `m.last` (:112), so a worker
   yet to publish exports those two alone — the cold-start twin of the abort case above, and every
-  other panel's no-data state. `stable_last_success_timestamp_seconds` (:136) reads `m.lastAt`,
-  which only `Observe` sets (:77; `ObserveError` moves the counters alone, :83-88), so a no-data
+  other panel's no-data state. `stable_last_success_timestamp_seconds` (:135) reads `m.lastAt`,
+  which only `Observe` sets (:76; `ObserveError` moves the counters alone, :82-87), so a no-data
   publish-age tile means restart-before-first-publish, dead scrape or dead worker — only cycles/h
   parts them. `CyclePhases` (`internal/stable/report.go:67`) fixes the phase contents: the
   per-node IP stage (DNS, geo/asn/cidr) inside `fetch`, the through-node filters and the
@@ -338,13 +362,13 @@ vendor the dashboard into the nixos repo.
   `continuous-BlPu`, whose low end asserts nothing; a green-yellow-red palette would paint an
   empty panel green.
 - **The speed ladder is fixed, and only its average survives a cycle that measured nothing.**
-  `speedBuckets` is seven bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:25`), so a quantile
+  `speedBuckets` is seven bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:24`), so a quantile
   at the top bound means faster than 500, not a plateau. `keptSpeeds` skips a zero Mbps
   (`internal/stable/checker.go:321`), so an unmeasured cycle passes an empty slice and
-  `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:140`,
-  :410-411): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
-  NaN over all-zero buckets and the guarded max (:143) vanishes. `stable_kept_speed_min_mbps` is
-  exported (:142) and plotted by NO panel; the floor question is
+  `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:139`,
+  :421-422): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
+  NaN over all-zero buckets and the guarded max (:142) vanishes. `stable_kept_speed_min_mbps` is
+  exported (:141) and plotted by NO panel; the floor question is
   `stable_kept_speed_mbps_bucket{le="5"}`, unplotted too. `keptLatencies` keeps every survivor
   (`internal/stable/checker.go:331`), so `stable_kept_latency_ms_count` always equals
   `stable_kept_nodes` and that panel has no such trap.

@@ -85,7 +85,7 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   same-day nodes pass (7.4%). The crawler's managed URLs are 216 of 233 live (92.7%),
   none definitively dead, median in-service age 28.1 d over the 165 that carry a date.
 - **The difference is the ASSET, not the quality — so "chat nodes are junk" is the wrong
-  premise for a change here.** A ≤1 d chat node and a node a live `tg-*` subscription is
+  premise for a change here.** A ≤1 d chat node and a node a live crawler-managed subscription is
   serving right now are indistinguishable at that gate: 12/162 = 7.4% vs 17/200 = 8.5%,
   z=-0.38, p=0.70. What ages is the node, not the venue — which is why inline harvesting
   is restricted to each channel's NEWEST page instead of being switched off.
@@ -103,57 +103,168 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
   alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
   yield. What the number cannot tell you is which 500: seeds are walked in Go map order
-  (`scan`'s `for slug, s := range seeds`, `discover.go:101`), so the truncation point is
+  (`scan`'s `for slug, s := range seeds`, `discover.go:108`), so the truncation point is
   arbitrary within one cycle's fresh pool.
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
 
-## What a managed source name means
+## What a managed source entry means
 
-A crawler-written source is named `tg-<channel-slug>-<sha6>` by `sourceName`
-(`internal/crawl/crawl.go:595`): `tg-` marks the source as MANAGED and so eligible for
-rewrite or prune (`srcname.ManagedPrefix`, `internal/srcname/srcname.go:12`), the slug is the
-Telegram channel folded into the config alphabet by `channelSlug` (lowercase, `_` to `-`,
-capped at 24 bytes), and `sha6` is the first 6 hex of the sha256 of the SUBSCRIPTION URL.
-`tg-seyedng-1444c8` reads "one of the subscriptions the crawler found in @seyedng".
+A crawler-written source is named `<channel-slug>-<postid>` by `sourceName`
+(`internal/crawl/crawl.go:676`): the slug is the Telegram channel folded into the config name
+alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and `postid` is the
+decimal id of the Telegram message the URL was harvested from. `seyedng-3631` reads "the
+subscription the crawler found in @seyedng, post 3631".
 
-- **The name is where three Prometheus labels come from, and one function splits it.**
-  `srcname.Split` (`internal/srcname/srcname.go:22`) is what the exporter calls, so each of the
-  four per-source counters (`stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}`)
-  carries the name three ways. `source` is the name VERBATIM — `tg-seyedng-1444c8`, prefix,
-  slug and hash. `feed` is the middle of it: `tg-` and any trailing `-<sha6>` removed, so
-  every URL of one channel shares one `feed` (`seyedng`) while a curated name is its own
-  `feed`, unchanged. `owner` is `crawler` when the prefix is there and `curated` when it is
-  not, which makes `owner="crawler"` exactly WRITE AUTHORITY over `config/private.yaml` — the
-  same predicate the rewrite and prune paths apply, and still not a claim about Telegram.
-  The two managed shapes with no channel need no exception: `tg-inline` and a legacy
-  `tg-<10 hex>` lose the prefix and keep the rest — `inline` and `96c4d7c7a7` — there being no
-  `-<sha6>` tail to strip. `stable_source_dropped_nodes` is the one family carrying neither
-  label — `source` and `reason` only — so per-source drops stay a question you ask by name.
-  `source` is also the label a human wants: it is the `name:` key in `config/private.yaml` or
-  `config/sources.yaml`, which the recovery recipe below greps, while `feed` is several names'
-  worth of rows folded together and greps as nothing.
+The name is now a LABEL and nothing more. Everything a reader or the exporter needs to know
+about an entry sits beside it as data: `managed: true` says the crawler owns it and
+`feed: <slug>` says which channel it came from (`SubscriptionSource.Managed` and `.Feed`,
+`internal/config/config.go:577,582`). The crawler writes `managed: true` on every entry it mints.
+`feed:` it writes as the channel slug whenever the name is NEW and the origin named a channel; an
+entry whose name it keeps verbatim keeps the `feed:` it already had, and a mint that saw no usable
+slug records none (`mintSource`, `internal/crawl/crawl.go:523-530`). And `feed:` is not the
+crawler's alone: unlike `managed` it grants nothing and only groups, so a curated entry may set it
+too (`config.go:578-580`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
+and prune, so an operator who forgets the field is safe by default. `managed: true` in a
+git-tracked file is REFUSED twice,
+and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1041`) refuses it in
+`config/sources.yaml` before appending it (`:1053-1057`), so that overlay stays policed wherever
+it is merged, and `validateSources` (`:1469`) refuses it again over the merged list
+(`:1472-1473`), which is what covers `config.yaml`'s own entries. Both raise one wording,
+`errManagedInCuratedFile` (`:1033`). Only the pass after the `private.yaml` merge allows the
+mark (`:1013`), where it is the whole point. Three narrower name forms exist, each reachable
+exactly where its prefixed counterpart was reachable before: `<slug>-<postid>-<sha6>` when one
+post yields several URLs, `<slug>-<sha6>` when the slug is known but the origin post is not, and
+`<sha10>` when neither is — `sha6` and `sha10` being the first 6 and 10 hex of the sha256 of the
+SUBSCRIPTION URL. The inline harvest is the fixed name `inline` (`inlineSourceName`,
+`internal/crawl/crawl.go:812`) — the one entry the crawler writes whose name it derived from
+nothing, and therefore the one an operator can collide with by accident. It holds the aggregate of
+inline node URIs harvested across messages and channels, with `managed: true`, a `body:` and no
+`url:` (`buildInlineSource`, `crawl.go:838`). **Nothing reserves that name.** No validator refuses
+it to anyone — `inline` is a legal curated name and one that loads (`config_test.go:901`) — and
+before the cutover the `tg-` prefix on `tg-inline` announced the crawler's namespace where nothing
+announces it now. So the crawler YIELDS the name instead of owning it. Hand-add an entry called
+`inline` to `config/private.yaml` — with a `body:` or a `url:`, either way — and the merge shelters
+it like any other unmarked entry (`crawl.go:448,460-464`), and rather than append a duplicate beside
+it the crawler skips its own inline entry for that cycle, logging WARN `a hand-added entry holds the
+inline aggregate's name; skipping the inline harvest rather than writing a duplicate` and leaving
+`inline:0` on the `private.yaml updated` line whenever that cycle writes. Nothing else in the
+cycle changes — sources still merge, prune and get written — but that cycle's inline harvest is
+discarded, and every later cycle's too for as long as the name is held. The crawler does not rename
+your entry to take its name back, because a hand-added entry is never renamed; only deleting the
+entry by hand returns the name. The same name in a GIT-TRACKED file costs more and earns no
+warning, because the yield cannot reach it: the crawler reads `private.yaml`, `channels.yaml` and
+its own state file and nothing else (`crawl.go:928`, `channels.go:45`, `state.go:290`), so an entry
+in `config/sources.yaml` or in `config.yaml` itself is invisible to it. It cannot see the collision,
+appends `inline` to `private.yaml` as usual, and the MERGED list then carries the name twice — which
+`validateSources("")` refuses (`config.go:1013,1478-1479`) and `config.Load` turns into
+`private config: subscriptions.sources: duplicate name "inline"`, so the service does not start
+until one of the two entries goes. Reserving the literal name in config validation was weighed and
+refused: it would fail files that load today, and it would put authority back into a string, which
+is the very thing `managed:` replaced.
+
+That last hazard is the general one, and `inline` is only its most reachable case. Inside
+`private.yaml` the MINTED forms are already safe: `mergeManaged` seeds `used` from every name the
+file holds, hand-added ones included (`crawl.go:445-465`), and `sourceName` consults it before
+returning a candidate (`crawl.go:684,688`), so an operator holding `seyedng-3631` makes the crawler
+mint `seyedng-3631-<sha6>` instead of colliding — it yields there too. But `used` is seeded from
+`private.yaml` ALONE, and the crawler opens no other source file, so a curated name in
+`config/sources.yaml` is invisible to the mint. Curated names do wear the minted shape: the shipped
+overlay carries `wepogp-1` and `wepogp-4` (`config/sources.yaml:91,93`), and vassago's carries
+`kort0881-vless-042` and `kreemchek-26` (`config-vassago/sources.yaml:248,200`, read 2026-08-19).
+Should the crawler ever mint the same string from a channel and post of those digits, the merged
+list carries it twice and `config.Load` fails exactly as above — a start-up failure, not a lost
+harvest. So when you name a curated entry `<word>-<digits>` you are naming it in the mint's own
+alphabet, and only the two files staying disjoint keeps it safe.
+
+Names minted before the cutover were ADOPTED, not re-derived: the migration stripped `tg-`,
+set `managed: true` and backfilled `feed:` from the name it was stripping. The prefix alone does
+not trigger it, and could not, because the prefix is not a mark even here: `channelSlug` folds
+`_` to `-`, so the channel `tg_vpn` slugs to `tg-vpn` and every name minted from it — `tg-vpn-123`
+— legitimately begins `tg-` while being nobody's migration. So `needsAdoption`
+(`crawl.go:1027`) requires the rest of the name to wear a shape the pre-cutover mint actually
+produced as well: `inline`, a `-` plus 6-hex tail `legacyFeed` can read a slug off (`crawl.go:1040`),
+or a bare 10 hex (`unattributedNameRe`, `crawl.go:69`). An unmarked `tg-vpn-123` wears none of the
+three, so it stays SHELTERED like any other unmarked entry — the merge writes it back verbatim
+(`crawl.go:463`) — rather than being seized into the prune. The mark settles the crawler's own
+side: a marked entry is never read again (`crawl.go:1028`), so a real `tg-vpn-123456` is safe by
+its field. An UNMARKED name wearing one of those shapes is adopted, and nothing can tell it from a
+pre-cutover mint: a 6-digit post id is also 6 hex digits, so a hand-added `tg-vpn-123456` is
+exactly what an attributed mint looked like and is claimed as slug `vpn` plus hash, where
+`tg-vpn-123` is too short to be. That is by construction and not a miss — before the cutover the
+shape WAS the mark, and no entry records which side wrote it. So a dated reading
+below naming `tg-dailyv2ry` names `dailyv2ry` now, and an adopted `<slug>-<sha6>` keeps that
+hash tail forever — post-id attribution reaches only names minted after the cutover, since a
+rename churns `private.yaml` and relabels every published node. The backfill is sound where a
+general rule is not, and that distinction is the whole design: an attributed pre-cutover name was
+exactly `tg-` + slug + `-` + 6 hex with no post segment, so ONE known tail comes off
+unambiguously, while the two unattributed shapes it also adopts — the bare hash and `inline` —
+record no channel and are left naming themselves.
+
+- **All three Prometheus labels are read, none is parsed.** Each of the four per-source
+  counters (`stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}`) carries
+  `source`, `feed` and `owner`. `source` is the `name:` VERBATIM — `seyedng-3631`, slug and
+  post id. `feed` is the `feed:` field, or the name when the field is absent — `sourceFeed` tests
+  `Feed != ""` and nothing else (`internal/metrics/metrics.go:376-380`), so ownership does not
+  enter it. The origin-less `<sha10>` form and any entry that set no `feed:` therefore name
+  themselves, while a curated entry that DID set one keeps it (`config.go:578-580`, asserted by
+  `config_test.go:1099-1109` and rendered as `owner="curated"` beside a divergent feed at
+  `internal/metrics/testdata/exposition.golden:119`). Every URL of one channel shares
+  one `feed` (`seyedng`) whatever tail its own name carries. `owner` is `crawler` when the
+  entry carries `managed: true` and `curated` when it does not, which makes `owner="crawler"`
+  exactly WRITE AUTHORITY over `config/private.yaml` — the same field the rewrite and prune
+  paths read, and still not a claim about Telegram.
+- **Attribution is a field because it cannot be recovered from a name, and nothing downstream of
+  the write can reconstruct it.** A fold that strips one trailing hash leaves the collision
+  form on its post rather than its channel — `seyedng-3631-1444c8` would answer `seyedng-3631`
+  — so each post that yielded several URLs gets a bucket of its own. How often that happens is
+  UNMEASURED, and 26 of 46 channels carrying more than one URL does not bound it: that reading
+  counts URLs per CHANNEL, over a corpus whose names carried no post segment at all (see the
+  collision-form bullet below). The argument needs no frequency — one collision-form name is one
+  wrong row, and nothing in the fold tells it from a correct one. A greedy or repeated strip
+  fixes that and breaks worse, on a channel this corpus already carries: `channelSlug` folds `_`
+  to `-` and keeps digits, so the second-largest channel in the reading below has the slug
+  `file-vpn-2`, and `file-vpn-2-1444c8` strips down to `file-vpn` while `file-vpn-2-3631` — a
+  post id — must strip to `file-vpn-2`. The two are indistinguishable as strings. Nothing in a
+  name says which trailing digit run was the slug's own. Curated
+  names share the minted shape too: counted over both shipped overlays 2026-08-18, `wepogp-1`
+  and `wepogp-4` (`config/sources.yaml:91,93`) would collapse onto one `wepogp` row that no
+  channel produced, and six of vassago's 52 names do the same — `kort0881-vless-042` and
+  `-041` onto `kort0881-vless`, `kreemchek-26` onto `kreemchek`. So the mint writes the slug
+  down at the one moment it has it, and no reader guesses.
+  `stable_source_dropped_nodes` is the one family carrying neither `feed` nor `owner` —
+  `source` and `reason` only — so per-source drops stay a question you ask by name.
 - **The URL is not the name, and the decisive reason is that the name is PUBLISHED.**
-  `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:85-89`), and that
+  `Merge` labels every node `<source>-NNN` (`internal/stable/merge.go:88-91`), and that
   label is what a client ends up displaying — though it is not the whole node name. Under
   the shipped config the `annotate` chain writes `[GEO:xx]` into that name and the stable
   worker prepends its own `[SPD:<n>M] ` ahead of THAT, in that order and not the reverse
   (`internal/rewrite/rewrite.go:15`), so the speed tag lands leftmost. All 172 lines
   fetched from `/stable.txt` on prod 2026-08-15 17:23Z are in that order; one of them ends
-  `#[SPD:54M] [GEO:GB] tg-hiddifycode-03a8d8-002` — tags first, source label last. A URL
+  `#[SPD:54M] [GEO:GB] hiddifycode-03a8d8-002` — tags first, source label last. A URL
   in that slot would hand every private or paid panel link to everyone who fetches the
   list. The second reason is merely mechanical and would not save it on its own: the
-  config source-name alphabet is `^[a-z0-9-]+$` (`internal/config/config.go:115`, mirrored
-  for the crawler's own write-back at `crawl.go:828`), and `:` `/` `.` `?` all fall
-  outside it.
-- **The hash is there because a channel is not a source.** One channel routinely publishes
-  several distinct subscription URLs, so the slug alone is not unique. Counted over
-  `config/private.yaml` as the crawler left it at 17:20Z on 2026-08-15: 357 `name:`
-  entries, of which 354 carry the attributed `tg-<slug>-<sha6>` shape and 3 do not:
-  `commsub` (this file's only hand-named entry), one legacy `tg-<10 hex>`
-  (`tg-96c4d7c7a7`) and `tg-inline`. Only those 354 have a channel to map, and they land
-  on 46 distinct channels, 26 of which carry more than one URL. An hour earlier the same
-  four counts read 350 / 347 / 45 / 25.
+  config source-name alphabet is `^[a-z0-9-]+$` (`sourceNameRe`,
+  `internal/config/config.go:115`, mirrored for the crawler's own write-back by its own
+  `sourceNameRe` at `internal/crawl/crawl.go:1055`), and `:` `/` `.` `?` all fall outside it.
+- **The collision form exists because neither a channel nor a post is a source.** One
+  channel routinely publishes several distinct subscription URLs, so the slug alone is not
+  unique — and a post is a container too, so the post id does not settle it: one message
+  carrying two panel links is two sources. Only the URL is per-source, which is why the
+  second and later URL of one post take `<slug>-<postid>-<sha6>`, `sha6` being per-URL
+  unique by construction. Counted over `config/private.yaml` as the crawler left it at
+  17:20Z on 2026-08-15, before the cutover: 357 `name:` entries, of which 354 carried the
+  attributed `tg-<slug>-<sha6>` shape and 3 did not: `commsub` (this file's only hand-named
+  entry), one legacy `tg-<10 hex>` (`tg-96c4d7c7a7`) and `tg-inline`. Only those 354 had a
+  channel to map, and they landed on 46 distinct channels, 26 of which carried more than one
+  URL. An hour earlier the same four counts read 350 / 347 / 45 / 25. That 26-of-46
+  measures that a CHANNEL is not a source, which is why the name carries a post id at all;
+  it is not a reading of the collision form and could not have been one. The per-post
+  multiplicity that form exists for is UNMEASURED, not merely stale: every one of those 354
+  names carried `tg-<slug>-<sha6>` with no post segment, so how often ONE POST yields
+  several URLs was never derivable from that file, and no post-cutover name has been minted
+  against a live page — t.me has been unreachable since 2026-08-18 13:00. The form is
+  retained on the argument this bullet opens with, not on a count.
 - **Read every count in this section as a dated reading, never a constant.** The crawler
   adds sources every hour: `stable_sources_total` went 230 → 396 over the fourteen days
   to 2026-08-15 17:23Z, so any total here is stale within hours. That metric is the live
@@ -165,50 +276,61 @@ capped at 24 bytes), and `sha6` is the first 6 hex of the sha256 of the SUBSCRIP
   loaded (`stable_last_success_timestamp_seconds`), while the file on disk already held
   357 — the lag, in one arithmetic.
 - **Fan-out is real, but it counts LINKS, not panels.** The largest channels on prod
-  2026-08-15 17:20Z were 71 (`tg-dailyv2ry`), 42 (`tg-file-vpn-2`), 29 (`tg-proxytglte`),
-  27 (`tg-v2raytunsub`), 24 (`tg-hiddifycode`) and 23 (`tg-holost-vpn`) — 216 of the 354
+  2026-08-15 17:20Z were 71 (`dailyv2ry`), 42 (`file-vpn-2`), 29 (`proxytglte`),
+  27 (`v2raytunsub`), 24 (`hiddifycode`) and 23 (`holost-vpn`) — 216 of the 354
   attributed names in six channels. How many PANELS stand behind those names is decided by
   what the URLs return, not by how they look, and only a fetch settles it. All 165 URLs of
-  `tg-dailyv2ry`, `tg-file-vpn-2`, `tg-proxytglte` and `tg-holost-vpn`, fetched at 17:22Z
+  `dailyv2ry`, `file-vpn-2`, `proxytglte` and `holost-vpn`, fetched at 17:22Z
   on 2026-08-15 with the service's own User-Agent (`mihomo-geofeed-preprocessor/0.1`,
   `internal/fetch/fetch.go:20`), answered 200, and the URL misleads in both directions.
-  Eight of `tg-holost-vpn`'s 23 sit at eight different repository paths under one GitHub
+  Eight of `holost-vpn`'s 23 sit at eight different repository paths under one GitHub
   account (`Ai123999`) and return one byte-identical 33101-byte body, all with md5
   `2193975ecadf359d136da4658ca7a1e6` and 121 server endpoints each — so eight names are
-  one payload; two of `tg-proxytglte`'s 29 do the same at 3473 endpoints, differing only
-  in how the URL spells the git ref. Yet `tg-file-vpn-2`'s 42, one numbered catalogue on
+  one payload; two of `proxytglte`'s 29 do the same at 3473 endpoints, differing only
+  in how the URL spells the git ref. Yet `file-vpn-2`'s 42, one numbered catalogue on
   one host (`cyb-portal.com/CP-0NN`), return 42 distinct bodies at a mean pairwise Jaccard
-  of 0.027, and `tg-dailyv2ry`'s 71 one-shot pastes at `bin.mudfish.net/r/<id>` return 71
+  of 0.027, and `dailyv2ry`'s 71 one-shot pastes at `bin.mudfish.net/r/<id>` return 71
   distinct bodies at 0.054, 4322 distinct endpoints out of 8789 — separate drops, not
-  re-snapshots of one feed. Host counts do not rescue the guess either: `tg-proxytglte`'s
+  re-snapshots of one feed. Host counts do not rescue the guess either: `proxytglte`'s
   29 URLs are 8 hosts and 29 distinct paths, 20 of them on `raw.githubusercontent.com`.
-  What a URL does settle is sameness of service: 49 names spread over `tg-hiddifycode`,
-  `tg-v2raytunsub` and `tg-o00000000i` are ONE host on ONE path, separated only by a
+  What a URL does settle is sameness of service: 49 names spread over `hiddifycode`,
+  `v2raytunsub` and `o00000000i` are ONE host on ONE path, separated only by a
   `?payload=` credential on `is.wepogp.gay/bypass-hwid-lock-<id>` — 49 per-user accounts
   on a single panel. So the name promises exactly one thing and no more. Anything that
   ranks or budgets per NAME ranks per LINK — never per channel, and never per panel, where
-  a single operator can hold 49 of the rows.
+  a single operator can hold 49 of the rows. Those six are `feed` values, taken from the
+  file before the cutover stripped the prefix off every one of them.
 - **The name → URL mapping exists in exactly one place: the `name:`/`url:` pair in
   `config/private.yaml`.** One line recovers the link behind a row in Grafana or a node in
-  the published list: `grep -A1 'name: tg-seyedng-1444c8' config/private.yaml`. Repair the
+  the published list: `grep -A3 'name: seyedng-3631' config/private.yaml` — three lines of
+  context because the entry now carries `managed:` and `feed:` beside its `url:`, and those
+  two are the answer to "may I delete this" and "which channel is it". Repair the
   token first, because every wrong form misses SILENTLY instead of failing. A dashboard `source`
-  column is already the verbatim name and needs no repair; panel 20's `feed` column is not a name
-  and greps as nothing, being the slug several names share. Off the published list, drop the
-  trailing numeric index `Merge` appends (`internal/stable/merge.go:85-89`; `appendPad3` pads to a
+  column is already the verbatim name and needs no repair, and panel 20's `feed` column greps
+  too now that it is a field: `grep -c 'feed: seyedng$' config/private.yaml` counts that
+  channel's entries, which is the row the panel folded. Off
+  the published list, drop the
+  trailing numeric index `Merge` appends (`internal/stable/merge.go:88-91`; `appendPad3` pads to a
   minimum of three digits, not to a width, so the index can be longer). Then grep both
   overlays rather than reasoning about which file owns the name: `private.yaml` holds the
   managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
-  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1432`).
-- **`tg-<10 hex>` is the other managed shape and carries no channel at all.** It is not
-  merely historical: `legacyNameRe` (`crawl.go:52`) matches it and `managedName`
-  (`crawl.go:806`) still MINTS it — for a URL discovered with no usable channel slug, and
-  for the (never observed, ~2^-24) case where the attributed candidate is already taken.
-  `sourceName` upgrades a legacy name to the attributed form the first time the URL turns
+  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1478-1479`).
+- **`<10 hex>` is the other managed shape and carries no channel at all.** It is not
+  merely historical: `unattributedNameRe` matches it and the fallback mint still EMITS it — but only
+  ever for a URL the crawler has never named, since an entry that already carries a name gets it
+  back first (`crawl.go:692-693`). For such a URL the fallback fires either because it was
+  discovered with no usable channel slug, or because BOTH attributed candidates are already taken
+  (`crawl.go:684,688,695`) — a `sha6` collision at ~2^-24, never observed, or an operator holding
+  both `<slug>-<postid>` and `<slug>-<postid>-<sha6>` by hand, which the reservation paragraph above
+  covers and which no probability bounds.
+  `sourceName` upgrades a hash-only name to the attributed form the first time the URL turns
   up in a channel, and that is the only rewrite it ever performs: an already-attributed
   name is kept VERBATIM forever, because a rename churns `private.yaml` and relabels every
-  published node. It does NOT restart the stable worker: `Controller.Apply` reconfigures a
+  published node. That is also why the migration is not an exception to it: adoption rewrote
+  the prefix away once, under its own rule, and left every tail alone. It does NOT restart
+  the stable worker: `Controller.Apply` reconfigures a
   live checker instead of cancelling it, and only shutdown calls `Stop`
-  (`docs/guides/design.md:100`). Prod carried one legacy name on 2026-08-15,
-  `tg-96c4d7c7a7`. The crawler's own inline harvest is a third shape, the fixed
-  `tg-inline` (`crawl.go:732`), which carries a `body:` and not a `url:`, so there is
+  (`docs/guides/design.md:102`). Prod carried one hash-only name on 2026-08-15, then
+  `tg-96c4d7c7a7` and `96c4d7c7a7` after adoption. The crawler's own inline harvest is a
+  third shape, the fixed `inline`, which carries a `body:` and not a `url:`, so there is
   nothing behind it to look up.

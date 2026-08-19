@@ -11,7 +11,7 @@ flowchart TD
     CLS["classify - fetch link, is it a live subscription?"]
     STATE["crawler-state.json - productive channels become seeds"]
     CH --> SCAN --> CLS
-    CLS -->|live subscription| PRIV["private.yaml - tg-CHANNEL-HASH sources"]
+    CLS -->|live subscription| PRIV["private.yaml - SLUG-POSTID sources, managed + feed fields"]
     CLS -->|raw URIs in messages| PRIV
     CLS -->|productive channel| STATE
     STATE -. seeds .-> SCAN
@@ -19,7 +19,7 @@ flowchart TD
 
   %% ================= Source set =================
   CFG["config.yaml + sources.yaml - subscriptions.sources"]
-  SRC(["source set - url sources + inline tg-inline body"])
+  SRC(["source set - url sources + the inline source's body"])
   CFG --> SRC
   PRIV --> SRC
   PRIV -. hot-reload .-> SRC

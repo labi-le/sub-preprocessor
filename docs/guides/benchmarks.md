@@ -80,7 +80,8 @@
     `BenchmarkNormalizeParse_XrayJSON160Outbounds` 6750 -> 3067. `queryList`, an array-backed
     `url.Values`, replaced the map form on the ssr and xray paths, and a new display name is
     spliced over the old `ps` rather than marshalled from a decoded document.
-  - `internal/crawl` — `BenchmarkHarvestPages/guarded` 387 -> 21, `/inline` 43 -> 11 and
+  - `internal/crawl` — `BenchmarkHarvestPages/guarded` 387 -> 21 for this rewrite, then
+    21 -> 16 across the naming cutover that segmented the walk; `/inline` 43 -> 11 and
     691746 -> 60024 B/op. Hand-scanned URL and inline-node extraction plus `unescapeInto`,
     where the regexps and `html.UnescapeString` were. (`guarded` was recorded at 27 the day it
     landed and reads 21 here — which is why the AFTER column is a re-reading and not a record.)
@@ -92,7 +93,7 @@
     rendering into a renderer-owned one (5791 and 898 at that point), then the vmess splice one
     entry up, which `Merge` reaches through `subscription.RewriteVmessName` inside `relabelNode`
     (`merge.go:213-221`), then a `keyArena` cutting each dedupe key out of a 1 KiB block instead
-    of allocating it (`merge.go:110`), then `relabelNode` cutting the vmess/ssr label from that
+    of allocating it (`merge.go:114`), then `relabelNode` cutting the vmess/ssr label from that
     same arena (837 -> 764, 997 -> 924). **`Merge` is the worked example of why this is not a
     chain of deltas:** the same benchmark has four baselines, depending on when you asked.
   **`Merge` is on that list, so read the "untouched packages" enumeration above as relative
@@ -126,6 +127,202 @@
   in — `internal/subscription` in its own sub-bullet above, `internal/rewrite` in the
   pipeline note immediately before this one. **Do not attribute either figure to the
   function it names.**
+- **The naming cutover, 2026-08-18, crawl arms re-read 2026-08-19 (`-count=5` medians, this
+  machine, AMD Ryzen 7 9800X3D).** Four `/tmp` export trees, each relinked — HEAD `8c8ec21`, the
+  settled tree, the pre-retype tree carrying `origin.Post` as a string plus one post-id clone per
+  keeping message ("the clone tree" below), and the settled tree with only `sourceLabelBytes`
+  reverted. Every figure below was taken for this entry, and the crawl arms were taken twice, by
+  two runs that shared no export tree: every settled-column allocation figure reproduced exactly,
+  `segmented`'s settled ns/op did not repeat to the digit (see that bullet), and the HEAD
+  `segmented` row exists only because the fixture was ported into a HEAD export — done twice now,
+  to readings that disagree, the later one superseding (see that bullet). Where two readings
+  stand, both are named. **Then `cand`, the harvest's per-candidate map, narrowed from
+  `map[string]origin` to `map[string]uint64`, and every crawl B/op moved again**: each
+  `internal/crawl` figure below is a 2026-08-19 re-reading, of the shipped tree and of a
+  fifth export — `git archive 8c8ec21` carrying the new benchmark family as its only change —
+  both `go test -run XXX -bench BenchmarkHarvestPages -benchmem -count=5 ./internal/crawl/`. The
+  `1992 B` this entry quoted for `guarded` and `segmented` until then, together with the `/blind`
+  B/op increase it recorded, are RETRACTED. `/blind` read 27160 B — reproduced exactly on
+  2026-08-19, so that READING stands — but **the claim this entry hung on it, that 27160 is "HEAD's
+  own figure", is WITHDRAWN: the two 27160s were HEAD's faithful twin against this tree's DRIFTED
+  one, not one figure measured twice**. Corrected, `/blind` reads 25560 B / 244 allocs against
+  HEAD's 27160 / 249 (both 2026-08-19); it is apparatus rather than an arm of the shipped harvest,
+  and the bullet below is where all of it belongs. No arm in the package sits above HEAD, on either
+  half of agreement item 14.
+  `BenchmarkWriteSources` is untouched by that narrowing and stays a 2026-08-18 reading.
+  - **`BenchmarkWriteSources` 86016 -> 73728 B/op, 3 allocs/op either side — and the formula is
+    a THIRD of it, not the whole.** Holding the fixture at its new shape and reverting only
+    `sourceLabelBytes` to `2*len(s.Name) + labelSyntaxBytes` reads 77824 B/op, so 4096 B is
+    `internal/metrics/metrics.go`'s estimate (name + feed, where feed used to be a slice of the
+    name) and 8192 B is the benchmark fixture's own shorter names, which lost the `tg-` prefix
+    in the same patch: `tg-channel-456-d0c348` (21 B) became `channel42-3456` (14 B). The whole
+    12288 B is arena rounding, exactly: the request falls 36007 -> 30513 -> 27949 B and lands in
+    40960 -> 32768 -> 28672, the other two allocations (`ends`, the exposition buffer) unmoved
+    at 4096 and 40960. **Do not record this drop against the formula.**
+    Guarded since 2026-08-19 by `internal/metrics/alloc_test.go`, because until then nothing
+    was: `sourceLabelBytes` only sizes the arena and changes no exposition byte, so the golden
+    fixture cannot see it drift, and `make bench` tees its output without comparing it. Reducing
+    the estimate to `len(s.Name)` alone leaves `go test ./internal/metrics` green while the
+    reading goes 141824 B / 8 allocs, 65% above the HEAD this row is published as beating;
+    dropping only the `len(sourceFeed(s))` term reads 102400 B / 4 allocs, 19% above it (both
+    `-count=5`, 2026-08-19, five identical samples). Either blocks under item 14, and the guard
+    fails on both.
+  - **`BenchmarkHarvestPages` gained a `segmented` arm because no fixture carried a
+    `data-post`.** `benchPages`, `benchNoisePages` and `benchInlinePages` hold none, so
+    `nextMessage` returns on its first `strings.Index` miss and `harvestPage`'s message loop
+    runs once per page: every other figure here prices the UNSEGMENTED path, which is the path
+    the wave did not add. `benchSegmentedPages` is `benchPages` rearranged — same
+    `benchPageBytes`, `benchPageCount` and `benchLinkRepeats`, split into 20 messages of one
+    link each. **Every column below is that one fixture, and the HEAD column had to be ported
+    to get it**: HEAD has no `segmented` arm, so the fixture was carried into a HEAD export
+    (`discover.go` there diff-verified byte-identical to `8c8ec21`) and run — 16596 ns / 3448 B /
+    21 allocs, `-count=5` medians over samples 16593-16629, 2026-08-19, against the clone tree's
+    22175 ns / 2080 B / 22 allocs and the shipped tree's ~22500 ns / 1848 B / 16 allocs.
+    **The `16700 ns / 3424 B / 20 allocs` this bullet recorded for HEAD `segmented` until
+    2026-08-19 is RETRACTED, and the splice it warned about was its own**: 3424 B / 20 allocs is
+    what `BenchmarkHarvestPagesByDistinct`'s 6-distinct point reads on HEAD, one HARNESS
+    allocation below any table-driven arm (last bullet here), so that row crossed harnesses. The
+    3448 B / 21 allocs a review body reported for HEAD `segmented`, dismissed here as a copy of
+    `guarded`'s row, is what the export actually reads. HEAD `guarded` reads 15002 ns / 3448 B /
+    21 allocs on it (14990 the day it was first taken), so **`benchPages` and
+    `benchSegmentedPages` read IDENTICALLY on HEAD, as they do on the shipped tree**: the 24 B
+    and one allocation once called a fixture difference are neither.
+  - **Segmentation costs no allocation at all, and the arm equalling `/guarded` to the byte is
+    what says so.** Both read 1848 B / 16 allocs on the shipped tree, and both read 3448 / 21 on
+    HEAD, where nothing segments: the two fixtures are equal-cost by construction, so the
+    20-message walk the shipped tree adds costs no allocation. Agreement item 14 makes an
+    `allocs/op` increase blocking, and the clone tree's 22 was one: carrying the message id as a
+    sub-slice of the unescape scratch owed one copy per message that KEEPS a link, six on this
+    fixture. Retyping `origin.Post` to `uint64` removed the carrier rather than the copy —
+    `unsafe.Sizeof(origin{})` 32 -> 24, so nothing is left to alias — leaving this fixture's own
+    -5 (21 -> 16, the same -5 `guarded` takes) with no clone added back, and no increase to
+    record. The clone tree's 22 is that 16 plus one copy per message that keeps a link, six here;
+    HEAD's 21 is that 16 plus the five per-page URL slices the wave folded away. A page whose
+    messages mostly keep nothing never paid the clone; a page where every message keeps a link
+    paid one per message.
+  - **The review's segmented figures do not reproduce and the difference is the fixture.** The
+    performance pass measured 2096 B / 17 allocs and attributed one extra allocation to
+    segmentation; the same arm reads 2080 B / 22 with the string id and its clone, 1992 B / 16
+    without either on the then-settled tree, and 1848 B / 16 once `cand` narrowed further to
+    `map[string]uint64` — two changes apart, not one — so the boundary walk allocates nothing and
+    the review's `+1` belonged to its own throwaway fixture. Both numbers are honest readings of
+    different fixtures, which is why the arm is committed instead of quoted.
+  - **The wave's real cost is ns/op, on every arm, and it is the third full pass over each
+    page** (`strings.Count` for the slice, `strings.Index` for the boundary, then `appendURLs`),
+    plus `postID`'s `ParseUint` over every boundary that pass finds: `guarded` 14990 -> 17104 ->
+    17159 on `benchPages` and `segmented` 16700 -> 22175 -> ~22500 on `benchSegmentedPages`,
+    across HEAD, the clone tree and the pre-narrowing settled tree, all in one 2026-08-18 run. A
+    2026-08-19 reading of the two ENDPOINTS alone — one link of the HEAD export, one of the
+    shipped tree — puts the whole cutover at 15002 -> 17105 (+14.0%) and 16596 -> 22439 (+35.2%);
+    the 16700 in the chain above is that older run's ported HEAD reading of the same arm. The
+    retype's own share is the chain's middle-to-right step and is +0.3% and +1.2%, both read
+    within the single run that measured both of those trees — `strconv.ParseUint` over 120
+    boundaries an iteration where the clone tree handed back a sub-slice and parsed nothing. The
+    percentages are NOT recomputed across runs, and narrowing `cand` moved neither arm out of its
+    band: the shipped tree reads `guarded` 17105 and `segmented` 22439 (2026-08-19, five samples
+    spanning 17084-17175 and 22406-22539) against 17079 and 22452 on an independent same-day run,
+    so the settled `segmented` median stays quoted as ~22500 over a 22406-22590 spread and
+    `guarded`'s as ~17100. `noise` reads 20254 and `inline` 17251 on the shipped tree, but neither
+    was ever taken on the clone tree, so no retype share exists for them; their allocations were
+    taken on every tree. Allocations went the other way on every shipped arm — `guarded` and
+    `segmented` alike 3448 B / 21 allocs -> 1848 / 16, `noise` 5992 / 60 -> 3528 / 37, `inline`
+    unmoved at 60024 / 11 — and that -1600 B is the same flat saving
+    `BenchmarkHarvestPagesByDistinct` reads at all six distinct counts below. **`/blind` sat in
+    that list until 2026-08-19 and never belonged in it**: it runs a test-owned twin rather than
+    the shipped harvest, so it is not a shipped arm and its figure is not a reading of one. It has
+    the bullet immediately below to itself.
+  - **`/blind` is a TWIN's figure; the HEAD equality it used to report was two different
+    comparisons landing on one number, and correcting the twin moved it 27160 -> 25560 B/op and
+    249 -> 244 allocs/op.** The arm runs `harvestPagesBlind`
+    (`internal/crawl/reject_bench_test.go:276`), a test-owned mirror of `harvestPages` over
+    `harvestPage` with the dedupe dropped, so every byte it reports is a property of that mirror
+    and of nothing else. **On HEAD that mirror was FAITHFUL**: `8c8ec21`'s own shipped
+    `harvestPages` scanned each page through `extractURLs` (`discover.go:278` there), exactly as the
+    twin did, and that helper mints one `make([]string, 0, strings.Count(page, urlScheme))` per call
+    on both trees — an inline loop at `extract.go:34-35` on HEAD, which had no `appendURLs` at all,
+    and the `appendURLs` wrapper at `extract.go:35-36` here. There was no hoist on that tree to
+    mirror, so nothing was wrong with the twin as written. **The drift is this wave's**: it hoisted
+    one `urls` slice into `harvestPages` (`discover.go:291`, grown only when a page needs more at
+    `:317`) and left the twin scanning per page, so from that commit until
+    2026-08-19 the twin mirrored a body that had moved under it. **That is why `27160` read "either
+    side", and why calling it "HEAD's own figure" was wrong**: it was HEAD's faithful twin against
+    this tree's DRIFTED twin, landing on the same number because the twin's drift was exactly the
+    size of what the wave had saved. An arm that does not execute the changed code cannot report
+    that the change did nothing.
+    Corrected, the twin reads **25560 B / 244 allocs** on the shipped tree against **27160 / 249**
+    on an `8c8ec21` export — HEAD needs no backport, it carries this family and its own
+    `harvestPagesBlind` — both `-count=5` with all five samples identical, measured by
+    `agent://ReworkGuards` 2026-08-19 with `go test -count=5 -run '^$' -bench BenchmarkHarvestPages
+    -benchmem ./internal/crawl/`, the pre-fix figure taken on an export verified byte-identical to
+    the worktree. **Read the two deltas apart, because only one of them is a code win:**
+    - **WITHIN this tree, 27160 -> 25560 is the TWIN being corrected**, and no shipped line moved
+      for it — `guarded` and `segmented` 1848 / 16, `noise` 3528 / 37, `inline` 60024 / 11 and all
+      six curve points re-read unmoved in the same run. Book no code credit for that drop: the TEST
+      got honest.
+    - **ACROSS trees, 25560 against HEAD's 27160 IS the wave's hoist** — the same -1600 B / -5
+      allocs every other arm shows, the twin's five redundant 320 B header blocks, the 320 B x 5 the
+      FLAT-curve bullet below describes. So the old equality was HIDING a real win rather than
+      inventing one, and it stayed hidden for as long as the apparatus kept paying the exact cost
+      the wave had removed from the harvest. `/blind` sits 1600 B and 5 allocs BELOW HEAD, so
+      agreement item 14 is satisfied on it in the passing direction.
+    The pair's meaning moves with the figure: `/guarded` against `/blind` priced the dedupe PLUS
+    five slice mints only the drifted twin ever paid, and now prices **the dedupe alone** —
+    `candidate` and one `strings.Clone` per OCCURRENCE against per DISTINCT URL. **The lesson
+    generalises: a twin is faithful only to the tree it was written against** — this one was correct
+    the day it landed and was falsified by a change to the body it mirrors, in a file that change
+    never opened, and no assertion in the package caught it.
+  - **The axis the committed arms cannot express: the distinct-candidate curve.**
+    `BenchmarkHarvestPagesByDistinct` (`internal/crawl/reject_bench_test.go:539`) holds page
+    bytes, page count, occurrences per page and URL length, and varies only the repost factor, so
+    the single moving part is how many DISTINCT candidates the pages yield — and with it the size
+    of `cand`. At 6 / 12 / 24 / 30 / 60 / 120 distinct accepted candidates the shipped tree reads
+    **1824 / 3528 / 6952 / 10024 / 19752 / 38792 B/op** and 15 / 30 / 56 / 70 / 132 / 254
+    allocs/op, against HEAD `8c8ec21`'s 3424 / 5128 / 8552 / 11624 / 21352 / 40392 and
+    20 / 35 / 61 / 75 / 137 / 259 — both columns `-count=5` medians, 2026-08-19, this machine,
+    HEAD being that same export with this family backported as its only change. **-1600 B and
+    -5 allocs/op at every single point**, so the harvest is under HEAD on both halves of
+    agreement item 14 at every distinct count measured. Both columns reproduce
+    `agent://PostAsNumber`'s to the byte; that is a second RUN, not a second link, which is all
+    an allocation figure needs and is not offered as an ns control.
+  - **The mechanism is why that curve is FLAT, and it is the transferable part.** The saving is
+    one `[]string` per PAGE, not per candidate: at `8c8ec21` `extractURLs` minted
+    `make([]string, 0, strings.Count(page, urlScheme))` for every page (`extract.go:35` there),
+    where `harvestPages` now hoists one `urls` slice across the whole channel and `harvestPage`
+    grows it only when a page needs more (`discover.go:291` and `:317`). This fixture holds 20
+    occurrences per page at every point on the curve, so that slice is a 20-element header block —
+    320 B — and five of six pages stop allocating one: -5 allocations and -1600 B, whatever the
+    distinct count. Anything stored per KEY moves the other way and SCALES with it: a 24 B
+    `map[string]origin` value read -1456 B against HEAD at 6 distinct, crossed ABOVE HEAD between
+    24 and 30, and reached +6512 B (+16.1%) at 120 — on a tree whose `guarded` and `segmented`
+    arms both read 1992 B against HEAD's 3448 and so showed nothing at all
+    (`agent://PostAsNumber`, 2026-08-19). **A fixture that pins the key count cannot see a per-key
+    cost**, and every arm of `BenchmarkHarvestPages` is repost factor 20 — six distinct keys over
+    six pages, the most favourable shape such a cost can meet. `/guarded` and `/segmented` price
+    the flat win and MUST NOT be read as covering this axis; an item-14 reading on a per-candidate
+    value belongs on `BenchmarkHarvestPagesByDistinct`.
+  - **Do not splice the curve's 6-distinct point onto `/guarded`'s row: 24 B of the gap is the
+    benchmark's own.** The two run byte-identical pages — the family asserts that at repost factor
+    `benchLinkRepeats` or fails — and still read 1824 B / 15 allocs against 1848 / 16.
+    `BenchmarkHarvestPages` drives its arms through a `harvest` func field, so its per-iteration
+    `var inline []string` escapes and every arm pays a heap slice header, while the curve's direct
+    call keeps that variable on the stack: `go test -gcflags=-m` prints
+    `internal/crawl/reject_bench_test.go:518:9: moved to heap: inline` for the table loop and
+    nothing for `BenchmarkHarvestPagesByDistinct`'s. The same run prints two other heap moves in
+    this family, both built before `b.Run` and so outside every figure: the per-arm delivery
+    guard's `internal/crawl/reject_bench_test.go:446:3: moved to heap: probe`, which now lives in
+    `benchHarvestArm.check` (`:443-466`) rather than in the benchmark's own body, and
+    `internal/crawl/reject_bench_test.go:216:7: moved to heap: sb`, which is `benchInlinePages`'
+    builder escaping into `fmt.Fprintf` as it writes the inline arm's fixture. A fourth move,
+    `:339:6: moved to heap: parseErr` inside `benchCandidateCase.check`, belongs to the candidate
+    benchmarks rather than to this family. (All four anchors are 2026-08-19 `-m` output, re-run on
+    the reworked file; the `:463:9`, `:454:7` and `:502` this bullet cited until then named
+    constructs that have since moved between functions. Compiler output is quoted, never
+    renumbered by hand.) One 24 B
+    allocation, in the harness and not in the harvest, and it is there in BOTH trees: HEAD reads
+    3448 B / 21 allocs on its table arms against 3424 / 20 at 6 distinct, the shipped tree 1848 / 16
+    against 1824 / 15. The -1600 B and -5 allocs are the same figure whichever harness you read them
+    in, which is the only reason the two rows can be compared at all — and only after subtracting
+    that header, never by splicing the rows.
 - **The probe's parse moved behind the TCP pre-check (2026-08-18, this machine, `-count=5`
   medians unless stated).** `Probe` used to build a mihomo adapter object for every converted
   mapping and then let the pre-check condemn most of them unread; it now derives the pre-check's
@@ -145,6 +342,12 @@
     8817-node production probe set that is ~1610000 -> ~872000 allocations and ~172.8 -> ~92.1 MB
     per cycle, so ~739000 allocations and ~81 MB saved. Every B/op here is a median of a spread
     tens of bytes wide, while the allocation counts are exact and repeat.
+    **The timed body is the harness's own reassembly of `Probe`'s steps, not a call to `Probe`**:
+    it runs `convert.ConvertsV2Ray`, `probeNodes` and `parseLive` in sequence with `benchSpareEvery`
+    standing in for the pre-check (`internal/stable/hotpath_bench_test.go:240`), so the figure
+    prices exactly those three, and a step added to `Probe` anywhere else would not appear in it.
+    Nothing asserts that the sequence still matches `Probe`'s body — the same twin axis as `/blind`
+    above, UNCLOSED here, and the scaled `~739000 allocations and ~81 MB` inherits it.
     `BenchmarkSelectSurvivors` (73728 B/op, 1 alloc) and `BenchmarkMerge` (764 allocs/op, B/op
     flickering over the same 7-byte spread on both sides) are unmoved.
   - **That share is a NODE share, and the constant is now seeded from one.** The condemned share

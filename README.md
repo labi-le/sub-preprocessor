@@ -99,7 +99,7 @@ A background worker maintains one curated list from all configured sources.
 Every `subscriptions.interval` it:
 
 1. fetches every source in `subscriptions.sources` concurrently (a source is
-   either a `url` or an inline base64 `body`, e.g. the crawler's `tg-inline`
+   either a `url` or an inline base64 `body`, e.g. the crawler's `inline`
    harvest),
 2. runs each through the same IP-stage filter pipeline as `/`,
 3. merges and dedupes nodes by lowercased `server:port` (first source wins,
@@ -458,13 +458,20 @@ compose sidecar) that discovers new sources automatically:
   cycle confirms the loss,
 - additionally harvests **raw proxy URIs pasted directly in messages**
   (`vless://…` etc.) from each channel's **newest page only**, dedupes them,
-  and packs them into a single inline `tg-inline` source with a base64 `body`,
-- writes results to `config/private.yaml` as `tg-<channel>-<sha6>` sources
-  (the discovering channel's slug plus a short URL hash, so the origin of
-  every subscription is visible — including in `/stable.txt` node labels;
-  pre-attribution `tg-<sha10>` names upgrade on the next rediscovery) — an
-  overlay the service merges into `subscriptions.sources` and **hot-reloads**
-  on change.
+  and packs them into a single inline source named `inline` with a base64 `body`,
+- writes results to `config/private.yaml` as `<channel>-<postid>` sources — the
+  discovering channel's slug plus the id of the message the link was posted in,
+  so the origin of every subscription is visible, including in `/stable.txt`
+  node labels. A second link out of one post takes `<channel>-<postid>-<sha6>`,
+  a channel with no post id `<channel>-<sha6>`, and no usable channel at all a
+  bare `<sha10>` that upgrades on the next rediscovery in a channel,
+- marks each of those entries `managed: true` and records the channel as
+  `feed: <channel>`. Those two FIELDS, not the name, are what say the entry is
+  the crawler's to rewrite or prune and which channel it came from: an entry
+  without `managed` is hand-added and is never touched, so forgetting the field
+  is the safe direction, and the exporter reads both instead of parsing a name.
+  `private.yaml` is an overlay the service merges into `subscriptions.sources`
+  and **hot-reloads** on change.
 
 The inline harvest reads the newest page alone because a pasted node is a
 frozen `server:port` whose worth is the age of the message carrying it:
@@ -478,7 +485,7 @@ and a dormant channel still re-seeded from the 30-day state memory
 contributes a page of >30d nodes, which passed at 1 of 249. Subscription **links** are
 still taken from every page — a URL keeps serving fresh nodes, a `server:port`
 cannot refresh itself. What the older pages were worth is bounded above by
-what the whole source is worth: 25 to 40 of `tg-inline`'s 499 distinct
+what the whole source is worth: 25 to 40 of the `inline` source's 499 distinct
 `server:port` were absent from the sources that merge ahead of it, so ~93% of
 what it contributed was already in the list. A kept node's residency in the
 source also drops from ~6 pages of message scroll to ~1, which is the intended
@@ -487,13 +494,16 @@ reachability at a looser 8000 ms arm, not the gate above, which kills a node
 on latency before unreachability does).
 
 Every candidate that fails a gate or does not classify live gets one log line
-saying which channel it came from, which `tg-<slug>-<sha6>` source it would have
-been, and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
+saying which channel it came from, the `<slug>-<sha6>` name the mint would give it
+in that channel, and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
 `fetch-failed`, `nodeless-2xx` or `expired` — followed by one per-cycle summary
 counting each reason. These lines carry the host and nothing more of the URL:
 the credential lives in the query on some panels (`?payload=…`) and in the path
 on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
-a query at all), so only the `sha6` identifies which subscription it was. They
+a query at all), so only the `sha6` identifies which subscription it was. The post
+id is withheld from that name and logged beside it as its own field, because
+`<slug>-<postid>` names a post: a rejected link would otherwise carry the name of
+whichever sibling link of the same post was accepted. They
 are capped at 200 per cycle and the cycle reports how many it withheld; the
 summary counts stay complete regardless. Dedupe is what keeps them complete, and
 it is bounded in turn: past 20,000 distinct rejected URLs in one cycle the
@@ -605,7 +615,9 @@ Key sections:
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
-  `body`), `check.*`: URL-test prober params only (`rounds`, `timeout`,
+  `body`, plus the crawler's own `managed` and `feed`; `managed: true` is
+  refused in `config.yaml` and `sources.yaml`, which are curated by
+  definition), `check.*`: URL-test prober params only (`rounds`, `timeout`,
   `max_fail`, `max_avg_ms`, `concurrency`, `source_timeout`, `test_url`,
   `expected_status` in mihomo IntRanges syntax), and `snapshot_path` — where
   the published list is persisted so a restart serves it instead of `503`
