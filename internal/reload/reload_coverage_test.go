@@ -109,10 +109,15 @@ var reloadClassification = map[string]string{
 	// worker through GroupsChanged.
 	"groups": liveBoth,
 
-	"subscriptions.interval":              liveWorker,
-	"subscriptions.sources[].name":        liveWorker,
-	"subscriptions.sources[].url":         liveWorker,
-	"subscriptions.sources[].body":        liveWorker,
+	"subscriptions.interval":       liveWorker,
+	"subscriptions.sources[].name": liveWorker,
+	"subscriptions.sources[].url":  liveWorker,
+	"subscriptions.sources[].body": liveWorker,
+	// managed and feed ride the same path as the rest of the entry: the whole
+	// SubscriptionSource is handed to CheckerSpec, so a changed mark reaches the
+	// worker's next cycle and, through SourceReport, the owner and feed labels.
+	"subscriptions.sources[].managed":     liveWorker,
+	"subscriptions.sources[].feed":        liveWorker,
 	"subscriptions.check.rounds":          liveWorker,
 	"subscriptions.check.timeout":         liveWorker,
 	"subscriptions.check.max_fail":        liveWorker,
@@ -308,6 +313,8 @@ var keyMutators = map[string]func(*config.Config){
 		c.Subscriptions.Sources[0].URL = "https://beta.example.com/s"
 	},
 	"subscriptions.sources[].body":        func(c *config.Config) { c.Subscriptions.Sources[0].Body = "other" },
+	"subscriptions.sources[].managed":     func(c *config.Config) { c.Subscriptions.Sources[0].Managed = true },
+	"subscriptions.sources[].feed":        func(c *config.Config) { c.Subscriptions.Sources[0].Feed = "beta-feed" },
 	"subscriptions.check.rounds":          func(c *config.Config) { c.Subscriptions.Check.Rounds = 3 },
 	"subscriptions.check.timeout":         func(c *config.Config) { c.Subscriptions.Check.Timeout = time.Second },
 	"subscriptions.check.max_fail":        func(c *config.Config) { c.Subscriptions.Check.MaxFail = 2 },
