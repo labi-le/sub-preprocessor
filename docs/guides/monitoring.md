@@ -126,7 +126,7 @@ vendor the dashboard into the nixos repo.
   panel 21 sums both sides full-width beneath them. `owner` is an EXPORTER label, and behind it a
   FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
   beside `source` (`writeSources`, `internal/metrics/metrics.go:305`), read once per source off
-  `SourceReport.Managed` (`:313-316`) and `.Feed` (`:317`, via `sourceFeed` at `:373-380`) — the
+  `SourceReport.Managed` (`:313-316`) and `.Feed` (`:317`, via `sourceFeed` at `:376-380`) — the
   entry's own fields, carried through `internal/stable/report.go:218-219` from the config entry
   (`checker.go:631-632`) and written by the crawler at mint, so a panel, an ad-hoc query and an
   alert cannot disagree about who owns a source and nothing anywhere parses a name to decide.
@@ -142,9 +142,9 @@ vendor the dashboard into the nixos repo.
   `format: "table"` the Prometheus datasource hands Grafana every label as a plain string FIELD
   and that transformation passes through any field carrying no labels of its own (measured against
   `@grafana/data` 10.4.19 on the shipped transformation arrays, 2026-08-18). `managed: true` is
-  WRITE AUTHORITY over `config/private.yaml` — `recheckManaged` (`crawl.go:391`) re-classifies
-  only marked entries (`:398`), `mergeManaged`'s ownership switch (`:447`) passes an unmarked entry
-  through verbatim (`:463`), and `managedCount` (`:604`) counts only marked ones so bulk-prune can
+  WRITE AUTHORITY over `config/private.yaml` — `recheckManaged` (`crawl.go:386`) re-classifies
+  only marked entries (`:393`), `mergeManaged`'s ownership switch (`:451`) passes an unmarked entry
+  through verbatim (`:467`), and `managedCount` (`:613`) counts only marked ones so bulk-prune can
   never delete a hand-added source — and `owner="crawler"` is that same predicate, read off the
   exposition instead of re-derived per query. Each of those three reads the field for one stated
   reason: a name test would report an empty corpus the moment the prefix went, and at
@@ -194,7 +194,7 @@ vendor the dashboard into the nixos repo.
   now: `owner` is `SubscriptionSource.Managed` and `feed` is `SubscriptionSource.Feed`
   (`internal/config/config.go:577,582`), which the crawler writes at mint, so every URL of one
   channel shares that channel's row and a curated entry, which normally sets no `feed`, falls back
-  to naming itself (`sourceFeed`, `metrics.go:373-380`). Group by the PAIR, never `by
+  to naming itself (`sourceFeed`, `metrics.go:376-380`). Group by the PAIR, never `by
   (feed)` alone: a curated name equal to some channel's slug would otherwise merge two
   owners into one row.
   A fold over the NAME was the design until it was measured against the corpus and struck: one
@@ -205,8 +205,8 @@ vendor the dashboard into the nixos repo.
   shape too: `wepogp-1` and `wepogp-4` would have collapsed onto a `wepogp` row no channel
   produced. Attribution is therefore recorded, not recovered.
   The rows stay mixed, for a reason `owner` now makes legible rather than hides: the inline
-  harvest (`inline`, `crawl.go:812`) records no channel and neither does a bare-hash name
-  (`unattributedNameRe`, `crawl.go:69`), so each falls back to naming itself, yet each is an
+  harvest (`inline`, `crawl.go:835`) records no channel and neither does a bare-hash name
+  (`unattributedNameRe`, `crawl.go:63`), so each falls back to naming itself, yet each is an
   `owner="crawler"` feed standing alone.
   The figure to read here counts BUCKETS, not rows: all four targets are gated on `topk(25, sum
   by (feed, owner) (stable_source_valid_nodes{job="$job"}))`, so the table draws 25 rows out of
@@ -241,9 +241,9 @@ vendor the dashboard into the nixos repo.
   mark on a git-tracked entry so a curated file cannot claim it by accident: `mergeSourcesOverlay`
   (`config.go:1041`) inside `sources.yaml` before the append (`:1053-1057`), and `validateSources`
   (`:1469`) over the merged list (`:1472-1473`), which is what also covers `config.yaml`.
-  So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:812`) is
+  So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:835`) is
   crawler-managed but is harvested raw node URIs rather than a channel, and a bare-hash name
-  (`unattributedNameRe`, `crawl.go:69`)
+  (`unattributedNameRe`, `crawl.go:63`)
   is managed too — measured on `:9091` 2026-08-16 12:45 +03:00, before the cutover, the managed
   side was 439 names reporting series: 437 channel-attributed, 1 inline and 1 bare hash. Nor is
   it a file boundary: `private.yaml` held 447 entries at 2026-08-16 12:15 +03:00, one of them

@@ -92,7 +92,7 @@
     not one: `relabelNode` returning its label into the caller's buffer with `speedPrefix`
     rendering into a renderer-owned one (5791 and 898 at that point), then the vmess splice one
     entry up, which `Merge` reaches through `subscription.RewriteVmessName` inside `relabelNode`
-    (`merge.go:213-221`), then a `keyArena` cutting each dedupe key out of a 1 KiB block instead
+    (`merge.go:213-219`), then a `keyArena` cutting each dedupe key out of a 1 KiB block instead
     of allocating it (`merge.go:114`), then `relabelNode` cutting the vmess/ssr label from that
     same arena (837 -> 764, 997 -> 924). **`Merge` is the worked example of why this is not a
     chain of deltas:** the same benchmark has four baselines, depending on when you asked.
@@ -222,7 +222,7 @@
     band: the shipped tree reads `guarded` 17105 and `segmented` 22439 (2026-08-19, five samples
     spanning 17084-17175 and 22406-22539) against 17079 and 22452 on an independent same-day run,
     so the settled `segmented` median stays quoted as ~22500 over a 22406-22590 spread and
-    `guarded`'s as ~17100. `noise` reads 20254 and `inline` 17251 on the shipped tree, but neither
+    `guarded`'s as ~17100. `noise` read 20254 and `inline` 17251 on the measuring tree, but neither
     was ever taken on the clone tree, so no retype share exists for them; their allocations were
     taken on every tree. Allocations went the other way on every shipped arm — `guarded` and
     `segmented` alike 3448 B / 21 allocs -> 1848 / 16, `noise` 5992 / 60 -> 3528 / 37, `inline`
@@ -231,6 +231,13 @@
     that list until 2026-08-19 and never belonged in it**: it runs a test-owned twin rather than
     the shipped harvest, so it is not a shipped arm and its figure is not a reading of one. It has
     the bullet immediately below to itself.
+    The naming cutover has since moved `noise`, and only `noise`, because it is the one arm above
+    that executes code this wave changed: it reads 3432 B / 37 allocs with five identical samples
+    and a 19938 ns median over a 19903-19977 spread (2026-08-19, `go test -run '^$' -bench
+    'BenchmarkHarvestPages$' -benchmem -count=5`), the reject line now logging an 8-hex `urlid`
+    instead of minting a name it no longer has. The 3528 above is the earlier wave's endpoint
+    rather than a current reading, and `inline`'s 17251 stands: its path is untouched, so the
+    difference is the run-to-run variance this file's own rule refuses to recompute.
   - **`/blind` is a TWIN's figure; the HEAD equality it used to report was two different
     comparisons landing on one number, and correcting the twin moved it 27160 -> 25560 B/op and
     249 -> 244 allocs/op.** The arm runs `harvestPagesBlind`
@@ -257,7 +264,8 @@
     the worktree. **Read the two deltas apart, because only one of them is a code win:**
     - **WITHIN this tree, 27160 -> 25560 is the TWIN being corrected**, and no shipped line moved
       for it — `guarded` and `segmented` 1848 / 16, `noise` 3528 / 37, `inline` 60024 / 11 and all
-      six curve points re-read unmoved in the same run. Book no code credit for that drop: the TEST
+      six curve points re-read unmoved in the same run (that run's readings; the naming cutover
+      later took `noise` to 3432 / 37). Book no code credit for that drop: the TEST
       got honest.
     - **ACROSS trees, 25560 against HEAD's 27160 IS the wave's hoist** — the same -1600 B / -5
       allocs every other arm shows, the twin's five redundant 320 B header blocks, the 320 B x 5 the

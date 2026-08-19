@@ -460,11 +460,17 @@ compose sidecar) that discovers new sources automatically:
   (`vless://…` etc.) from each channel's **newest page only**, dedupes them,
   and packs them into a single inline source named `inline` with a base64 `body`,
 - writes results to `config/private.yaml` as `<channel>-<postid>` sources — the
-  discovering channel's slug plus the id of the message the link was posted in,
-  so the origin of every subscription is visible, including in `/stable.txt`
-  node labels. A second link out of one post takes `<channel>-<postid>-<sha6>`,
-  a channel with no post id `<channel>-<sha6>`, and no usable channel at all a
-  bare `<sha10>` that upgrades on the next rediscovery in a channel,
+  discovering channel's slug plus, where the post is known, the id of the message
+  the link was posted in, so the origin of every subscription is visible,
+  including in `/stable.txt` node labels. A later link out of one post takes
+  `<channel>-<postid>-2`, `-3` and so on, N being the lowest ordinal free in that
+  cycle rather than a position in the post: the bare `<channel>-<postid>` is only
+  OFFERED first, so a post whose stem is already taken starts at `-2` with its own
+  first URL. A channel with no post id counts from 1 instead — `<channel>-1`,
+  `-2`, … — no bare stem ever being minted for it; the two families share one
+  string space, so a `-N` tail does not say which of the two a name belongs to
+  (`docs/guides/sources.md` has the ambiguity); and only an unusable channel slug
+  falls to a bare `<sha10>` that upgrades on the next rediscovery in a channel,
 - marks each of those entries `managed: true` and records the channel as
   `feed: <channel>`. Those two FIELDS, not the name, are what say the entry is
   the crawler's to rewrite or prune and which channel it came from: an entry
@@ -494,16 +500,22 @@ reachability at a looser 8000 ms arm, not the gate above, which kills a node
 on latency before unreachability does).
 
 Every candidate that fails a gate or does not classify live gets one log line
-saying which channel it came from, the `<slug>-<sha6>` name the mint would give it
-in that channel, and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
+saying which channel it came from, a `urlid` — the first 8 hex of the sha256 of
+the URL — and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
 `fetch-failed`, `nodeless-2xx` or `expired` — followed by one per-cycle summary
 counting each reason. These lines carry the host and nothing more of the URL:
 the credential lives in the query on some panels (`?payload=…`) and in the path
 on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
-a query at all), so only the `sha6` identifies which subscription it was. The post
-id is withheld from that name and logged beside it as its own field, because
-`<slug>-<postid>` names a post: a rejected link would otherwise carry the name of
-whichever sibling link of the same post was accepted. They
+a query at all), so the `urlid` is what pins which subscription it was. It is no
+longer a source name and does not pretend to be one: the same link gets the same
+`urlid` in every cycle and from every channel, which is what makes one that keeps
+failing greppable, and the channel rides its own field beside it. It is per-URL
+but not unique: the cap means a cycle prints at most 200 of them, and `host` is
+what tells a colliding pair apart, since a pair from one channel shares the
+`channel` field. `routes.md` carries the odds and the population they are
+computed over. The post id is withheld and logged as its own
+field too, because `<slug>-<postid>` names a post: a rejected link would otherwise
+carry the name of whichever sibling link of the same post was accepted. They
 are capped at 200 per cycle and the cycle reports how many it withheld; the
 summary counts stay complete regardless. Dedupe is what keeps them complete, and
 it is bounded in turn: past 20,000 distinct rejected URLs in one cycle the
@@ -529,6 +541,12 @@ it mean what it says.
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
 for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
+`CRAWL_CURATED` is a comma-separated list of YAML files the crawler reads for
+NAMES ONLY — default `/config/sources.yaml,/config/config.yaml`, both of which
+may carry `subscriptions.sources` entries — so the mint does not take a name one
+of them already holds. A missing file is normal and silent; a read or parse
+failure warns naming that file and the cycle continues on the rest, minting
+without that file's names and so able to collide with them.
 
 There is also a one-shot `classify` subcommand:
 

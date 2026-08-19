@@ -79,7 +79,7 @@ findable.)
 **Why performance is its OWN pass.** A benchmark that moved is not a regression until the
 changed code is shown to be on its path. On that same change the benchmark that moved most
 was `BenchmarkParse_SkipsNonURILines`, which feeds 50 lines containing no `://`
-(`internal/subscription/subscription_bench_test.go:93`) — `parseNode` is never called, so it
+(`internal/subscription/subscription_bench_test.go:94`) — `parseNode` is never called, so it
 cannot execute one changed instruction and what moved was binary layout. Telling that apart
 from real cost takes a hybrid tree (new production code, old test files) and `go tool
 objdump` on the suspect functions. Without that pass the branch either ships a regression or
