@@ -422,7 +422,7 @@
     {
       "id": 20,
       "type": "table",
-      "title": "Top source feeds by owner (last cycle)",
+      "title": "Feeds (both owners): top 25 (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -538,12 +538,12 @@
           }
         }
       ],
-      "description": "Per-source counts summed by feed and owner, top 25 ranked on valid. Columns: feed, owner (crawler or curated), then yielded, valid, kept, filtered from nodes_total, valid_nodes, tested_nodes, published_nodes. Both labels come from the exporter, so no name is parsed here."
+      "description": "Per-source counts summed by feed and owner, top 25 ranked on valid. A feed is the channel an entry was minted from, or the entry's own name where none was recorded (metrics.go sourceFeed), so a row folds into one every source the channel it records minted, while an entry that records no channel is its own row -- every curated entry on either instance today, and on the crawler side the inline aggregate and any bare-hash mint. Read this table for the channel view; read it for one entry's total only after checking that entry sets feed. Columns: feed, owner (crawler or curated), then yielded, valid, kept, filtered from nodes_total, valid_nodes, tested_nodes, published_nodes. Both labels come from the exporter, so no name is parsed here."
     },
     {
       "id": 8,
       "type": "table",
-      "title": "Top sources: crawler-managed (last cycle)",
+      "title": "Crawler sources: top 25 (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -666,7 +666,7 @@
     {
       "id": 22,
       "type": "table",
-      "title": "Top sources: hand-curated (last cycle)",
+      "title": "Curated sources: top 25 (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

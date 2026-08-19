@@ -113,16 +113,16 @@ vendor the dashboard into the nixos repo.
   the first instance and 36109 vs 3825 on the second, so nine merged nodes in ten never reach
   the URL test at all and probe failure can account for at most the ~9% that did — read
   `stable_dead_skipped_nodes` against `stable_merged_nodes` before blaming a source's probe
-  results. The "Top sources" tables — panel 8 (`Top sources: crawler-managed (last cycle)`) and
-  panel 22 (`Top sources: hand-curated (last cycle)`) beside it — rename the four columns
+  results. The per-name source tables — panel 8 (`Crawler sources: top 25 (last cycle)`) and
+  panel 22 (`Curated sources: top 25 (last cycle)`) beside it — rename the four columns
   `yielded`/`valid`/`kept`/`filtered`, so their `kept` column is `stable_source_tested_nodes` and
   their `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
   means PUBLISHED. That collision is known and left standing: the global name is a wire format
   that panels and alerts already read, and renaming it to tidy a column label is a bigger break
   than the ambiguity.
-- **"Top sources" is a PAIR of tables split by owner, and the split is not an invitation to read
-  them side by side.** Panel 8 (x=0 y=20) takes `{owner="crawler"}`, panel 22 (x=12 y=20, the new
-  one) takes `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set;
+- **The per-name tables are a PAIR split by owner, and the split is not an invitation to read
+  them side by side.** Panel 8 (x=0 y=20) takes `{owner="crawler"}`, panel 22 (x=12 y=20) takes
+  `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set;
   panel 21 sums both sides full-width beneath them. `owner` is an EXPORTER label, and behind it a
   FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
   beside `source` (`writeSources`, `internal/metrics/metrics.go:305`), read once per source off
@@ -185,7 +185,7 @@ vendor the dashboard into the nixos repo.
   sources that FAILED TO FETCH that cycle, where `fetchSources` warns and `continue`s
   (`checker.go:625-626`); they emit no per-source series and appear in neither table. They are not
   dead, not pruned, not dropped from config, and the next cycle may fetch them fine.
-- **The feed breakdown (panel 20, "Top source feeds by owner") is two exporter LABELS, both of
+- **The feed breakdown (panel 20, "Feeds (both owners): top 25") is two exporter LABELS, both of
   them fields, and its rows are still MIXED.** `feed` and `owner` ride the four per-source
   counters, so panel 20 is `sum by (feed, owner) (<metric>{job="$job"})` and nothing is derived at
   query time: `label_values(..., feed)` answers, the 28 `label_replace` calls across 13 targets
@@ -372,7 +372,7 @@ vendor the dashboard into the nixos repo.
   `stable_kept_speed_mbps_bucket{le="5"}`, unplotted too. `keptLatencies` keeps every survivor
   (`internal/stable/checker.go:331`), so `stable_kept_latency_ms_count` always equals
   `stable_kept_nodes` and that panel has no such trap.
-- **A source you cannot find in a "Top" table is under the cutoff, and a feed's `valid` is an
+- **A source you cannot find in a `top 25` table is under the cutoff, and a feed's `valid` is an
   upper bound.** On the 2026-08-18 +0300 reading above (110 buckets, 25 drawn), 85 buckets went
   undrawn. Skew, not fan-out, decides placement — individually small URLs place no per-URL row
   yet rank high summed. Summing `valid` over a feed's own URLs double-counts every node several
