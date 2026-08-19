@@ -62,9 +62,11 @@ func runCrawl() {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("cmd", "crawl").Logger()
 
 	opts := crawl.Options{
-		Channels:      splitList(getenv("CRAWL_CHANNELS", "")),
-		ChannelsPath:  getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
-		PrivatePath:   getenv("CRAWL_PRIVATE", "/config/private.yaml"),
+		Channels:     splitList(getenv("CRAWL_CHANNELS", "")),
+		ChannelsPath: getenv("CRAWL_CHANNELS_FILE", "/config/channels.yaml"),
+		PrivatePath:  getenv("CRAWL_PRIVATE", "/config/private.yaml"),
+		// splitList splits on spaces too, so a path holding one cannot be passed.
+		CuratedPaths:  splitList(getenv("CRAWL_CURATED", "/config/sources.yaml,/config/config.yaml")),
 		Pages:         atoiDefault(getenv("CRAWL_PAGES", ""), defaultCrawlPages),
 		Prune:         boolDefault(getenv("CRAWL_PRUNE", ""), true),
 		MaxDepth:      intDefault(getenv("CRAWL_DEPTH", ""), defaultCrawlDepth),

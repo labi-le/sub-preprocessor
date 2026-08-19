@@ -432,9 +432,9 @@ type benchHarvestArm struct {
 	wantPost bool
 	// wantReject is how many verdicts a record arm's bookkeeping must hold — the
 	// same argument on the other side of the gate: dropping rej.record from
-	// harvestPage takes noise from 3528 B / 37 allocs to 1464 / 12 with every
-	// other guard green (measured 2026-08-19), so the arm that exists to price
-	// bookkeeping has to observe some.
+	// harvestPage takes noise from 3432 B / 37 allocs to 1464 / 12 with every
+	// other guard green (measured 2026-08-19, -benchmem -count=5 medians), so the
+	// arm that exists to price bookkeeping has to observe some.
 	wantReject int
 }
 

@@ -239,7 +239,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 
 	live := map[string]origin{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	next, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
+	next, managed, _, _ := c.mergeManaged(pf, live, rr, true, nil)
 
 	byURL := map[string]bool{}
 	for _, s := range next {
@@ -352,7 +352,7 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 
 	live := map[string]origin{}
 	rr := c.recheckManaged(context.Background(), pf, live)
-	_, managed, _ := c.mergeManaged(pf, live, rr, true, nil)
+	_, managed, _, _ := c.mergeManaged(pf, live, rr, true, nil)
 
 	kept := map[string]bool{}
 	for _, s := range managed {
@@ -385,7 +385,7 @@ func TestMergeRetainsMidCycleAdditions(t *testing.T) {
 	var pf privateFile
 	pf.Subscriptions.Sources = []source{{Name: managedName(urlNew), URL: urlNew, Managed: true}}
 
-	next, managed, _ := c.mergeManaged(pf, map[string]origin{}, recheckResult{}, true, nil)
+	next, managed, _, _ := c.mergeManaged(pf, map[string]origin{}, recheckResult{}, true, nil)
 	if len(next) != 1 || next[0].URL != urlNew {
 		t.Fatalf("next = %v, want the mid-cycle addition retained", next)
 	}
@@ -472,37 +472,58 @@ func TestChannelSlug(t *testing.T) {
 }
 
 // TestSourceNameAttribution covers the naming rules: a URL harvested from a known
-// post is named for it, the second URL of that post takes a per-URL tail, a
-// channel with no post falls back to that tail alone, an attributed name is never
-// rewritten, the origin-less bare hash upgrades once an origin is known, and a
-// collision falls back to the bare hash.
+// post is named for it, its later siblings queue behind it on ascending ordinals
+// from 2, a channel with no post starts that walk at 1, an attributed name is
+// never rewritten, the origin-less bare hash upgrades once an origin is known,
+// and an unusable slug is the one thing that still reaches the bare hash.
 func TestSourceNameAttribution(t *testing.T) {
 	t.Parallel()
 
 	const (
 		u    = "https://host.example/sub"
 		u2   = "https://host.example/other"
+		u3   = "https://host.example/third"
 		post = 3631
 		attr = "vpn-channel-3631"
 	)
 	seen := origin{Slug: "VPN_Channel", Post: post}
-	hashRe := regexp.MustCompile(`^vpn-channel-[0-9a-f]{6}$`)
 
 	if got := sourceName(u, "", seen, map[string]bool{}); got != attr {
 		t.Fatalf("new url name = %q, want %q", got, attr)
 	}
 
-	// A post is a container, not a URL: the second link in one post cannot have
-	// the post's name, so it takes the per-URL hash beside it.
+	// A post is a container, not a URL: the later links in one post cannot have
+	// the post's name, so they start at 2 — 1 would claim to be the first URL of
+	// a post whose first URL already holds the bare stem.
 	second := sourceName(u2, "", seen, map[string]bool{attr: true})
-	if want := attr + "-" + urlHash(u2, 6); second != want {
-		t.Fatalf("second url of one post = %q, want %q", second, want)
+	if second != attr+"-2" {
+		t.Fatalf("second url of one post = %q, want %q", second, attr+"-2")
+	}
+	third := sourceName(u3, "", seen, map[string]bool{attr: true, second: true})
+	if third != attr+"-3" {
+		t.Fatalf("third url of one post = %q, want %q", third, attr+"-3")
 	}
 
-	// Channel known, post not — the revival path, which sees no post at all.
-	noPost := sourceName(u, "", origin{Slug: "VPN_Channel"}, map[string]bool{})
-	if !hashRe.MatchString(noPost) {
-		t.Fatalf("postless name = %q, want vpn-channel-<sha6>", noPost)
+	// The walk passes every taken sibling rather than stopping at the first
+	// collision, so a post with a run of them still mints, and it mints past the
+	// single-digit ordinals an earlier cycle or an operator may hold.
+	taken := map[string]bool{attr: true}
+	for n := 2; n <= 11; n++ {
+		taken[fmt.Sprintf("%s-%d", attr, n)] = true
+	}
+	if got := sourceName(u2, "", seen, taken); got != attr+"-12" {
+		t.Fatalf("name minted beside eleven taken siblings = %q, want %q", got, attr+"-12")
+	}
+
+	// Channel known, post not — the revival path, which sees no post at all. No
+	// bare stem is ever offered there, so the walk starts at 1 instead.
+	postless := origin{Slug: "VPN_Channel"}
+	noPost := sourceName(u, "", postless, map[string]bool{})
+	if noPost != "vpn-channel-1" {
+		t.Fatalf("postless name = %q, want vpn-channel-1", noPost)
+	}
+	if got := sourceName(u2, "", postless, map[string]bool{noPost: true}); got != "vpn-channel-2" {
+		t.Fatalf("second postless name = %q, want vpn-channel-2", got)
 	}
 
 	// No form is ever rewritten, whatever the URL is rediscovered under: a
@@ -519,20 +540,26 @@ func TestSourceNameAttribution(t *testing.T) {
 	if up := sourceName(u, managedName(u), seen, map[string]bool{}); up != attr {
 		t.Errorf("bare hash not upgraded: %q, want %q", up, attr)
 	}
+	// ...onto an ordinal when the stem is spoken for, the one thing the sha6
+	// tail it replaces never depended on: the cycle's used set.
+	if up := sourceName(u, managedName(u), seen, map[string]bool{attr: true}); up != attr+"-2" {
+		t.Errorf("bare hash upgraded past a taken stem = %q, want %q", up, attr+"-2")
+	}
 	// ...and stays when nothing is known this cycle.
 	if same := sourceName(u, managedName(u), origin{}, map[string]bool{}); same != managedName(u) {
 		t.Errorf("bare hash changed without an origin: %q", same)
 	}
 
-	// Both attributed forms taken: the bare hash keeps the name unique.
-	both := map[string]bool{attr: true, attr + "-" + urlHash(u, 6): true}
-	if fb := sourceName(u, "", seen, both); fb != managedName(u) {
-		t.Errorf("collision fallback = %q, want %q", fb, managedName(u))
+	// A usable slug now always yields a free ordinal, so the bare hash is left
+	// for the URL with nothing to be attributed to: a channel that survives none
+	// of channelSlug's alphabet, post id or no post id.
+	if fb := sourceName(u, "", origin{Slug: "???", Post: post}, map[string]bool{}); fb != managedName(u) {
+		t.Errorf("unusable slug = %q, want the origin-less %q", fb, managedName(u))
 	}
 
 	// Every produced form satisfies the config source-name alphabet.
 	re := regexp.MustCompile(`^[a-z0-9-]+$`)
-	for _, n := range []string{attr, second, noPost, managedName(u)} {
+	for _, n := range []string{attr, second, third, noPost, managedName(u)} {
 		if !re.MatchString(n) {
 			t.Errorf("name %q violates ^[a-z0-9-]+$", n)
 		}
@@ -551,7 +578,7 @@ func TestMergeUpgradesBareHashName(t *testing.T) {
 	pf.Subscriptions.Sources = []source{{Name: managedName(u), URL: u, Managed: true}}
 
 	live := map[string]origin{u: {Slug: "VPN_Channel", Post: 3631}}
-	next, managed, _ := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
+	next, managed, _, _ := c.mergeManaged(pf, live, recheckResult{managedURL: map[string]bool{u: true}}, true, nil)
 	if len(next) != 1 || len(managed) != 1 {
 		t.Fatalf("next = %v managed = %v, want exactly one entry", next, managed)
 	}
@@ -582,7 +609,7 @@ func TestMergeReservesExistingManagedNames(t *testing.T) {
 	o := origin{Slug: "chan", Post: 3631}
 	live := map[string]origin{urlNew: o, urlIncumbent: o}
 	rr := recheckResult{managedURL: map[string]bool{urlIncumbent: true}}
-	next, managed, deleted := c.mergeManaged(pf, live, rr, true, nil)
+	next, managed, deleted, _ := c.mergeManaged(pf, live, rr, true, nil)
 	if len(deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", deleted)
 	}
@@ -596,7 +623,7 @@ func TestMergeReservesExistingManagedNames(t *testing.T) {
 	if got := byURL[urlIncumbent]; got.Name != attributed || got.Feed != "chan" {
 		t.Errorf("incumbent = %+v, want it still named %q with feed chan", got, attributed)
 	}
-	want := attributed + "-" + urlHash(urlNew, attributedTailHex)
+	want := attributed + "-2"
 	if got := byURL[urlNew]; got.Name != want || got.Feed != "chan" {
 		t.Errorf("newcomer = %+v, want name %q with feed chan", got, want)
 	}
@@ -1239,9 +1266,10 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 		t.Errorf("managed source URL = %q, want the older page's link %q", managed.URL, subURL)
 	}
 	// The older page carries no data-post, so the link has no post to be named
-	// for and takes the per-URL hash instead.
-	if nameRe := regexp.MustCompile(`^chan-[0-9a-f]{6}$`); !nameRe.MatchString(managed.Name) {
-		t.Errorf("managed source name = %q, want the <slug>-<sha6> form sourceName produces", managed.Name)
+	// for and takes the first free ordinal beside the slug, which on an empty
+	// file is 1.
+	if managed.Name != "chan-1" {
+		t.Errorf("managed source name = %q, want the postless chan-1 form sourceName produces", managed.Name)
 	}
 	if managed.Feed != "chan" {
 		t.Errorf("managed source feed = %q, want chan", managed.Feed)
@@ -1250,9 +1278,9 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 
 // TestRunOnceAttributesBothLinksOfOnePost: a post is a container, not a URL, so
 // the two links in one message cannot share its name. The first in sorted-URL
-// order takes <slug>-<postid> and the second takes the per-URL hash beside it —
-// sorted, because mergeManaged names in that order (sort.Strings) and a
-// randomized order would hand the bare form to whichever URL won the map.
+// order takes <slug>-<postid> and the second the ordinal beside it — sorted,
+// because mergeManaged names in that order (sort.Strings) and a randomized order
+// would hand the bare form to whichever URL won the map.
 func TestRunOnceAttributesBothLinksOfOnePost(t *testing.T) {
 	t.Parallel()
 
@@ -1293,7 +1321,7 @@ func TestRunOnceAttributesBothLinksOfOnePost(t *testing.T) {
 	if s := got[urlOne]; s.Name != "chan-"+post || s.Feed != "chan" || !s.Managed {
 		t.Errorf("first link = %+v, want name chan-%s, feed chan, managed", s, post)
 	}
-	if want := "chan-" + post + "-" + urlHash(urlTwo, 6); got[urlTwo].Name != want {
+	if want := "chan-" + post + "-2"; got[urlTwo].Name != want {
 		t.Errorf("second link name = %q, want %q", got[urlTwo].Name, want)
 	}
 	if s := got[urlTwo]; s.Feed != "chan" || !s.Managed {
@@ -2965,7 +2993,7 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 		t.Errorf("managed URL = %q, want %q", got.URL, subURL)
 	}
 	if !strings.HasPrefix(got.Name, "forumchat-") {
-		t.Errorf("name = %q, want it attributed to the bare chat (forumchat-<sha6>)", got.Name)
+		t.Errorf("name = %q, want it attributed to the bare chat, forumchat- and no topic", got.Name)
 	}
 	if strings.Contains(got.Name, "1310") {
 		t.Errorf("name = %q; a permanent name must not carry the topic id", got.Name)
@@ -2983,6 +3011,11 @@ const (
 	migrationOwned      = 456
 	migrationSheltered  = 7
 	migrationOriginless = 2
+	// legacyTailHex is the per-URL tail the PRE-CUTOVER mint appended. The mint
+	// stopped producing it — an ordinal took its place — but 454 live names wear
+	// it forever, so the adoption fixtures below are built with it and the
+	// stripping code stays.
+	legacyTailHex = 6
 )
 
 type feedFanout struct {
@@ -3037,7 +3070,7 @@ func migrationCorpus(t *testing.T) (fileBytes []byte, want []source) {
 	for _, ch := range migrationFanout() {
 		for i := range ch.urls {
 			u := fmt.Sprintf("https://%s.example/sub/%d", ch.slug, i)
-			name := ch.slug + "-" + urlHash(u, attributedTailHex)
+			name := ch.slug + "-" + urlHash(u, legacyTailHex)
 			add(source{Name: legacyManagedPrefix + name, URL: u},
 				source{Name: name, URL: u, Feed: ch.slug, Managed: true})
 		}
@@ -3046,13 +3079,13 @@ func migrationCorpus(t *testing.T) (fileBytes []byte, want []source) {
 	keep(source{Name: legacyManagedPrefix, URL: "https://bare.example/sub"})
 
 	dupHand := "https://collide-c.example/sub/dup"
-	dupHandName := "collide-c-" + urlHash(dupHand, attributedTailHex)
+	dupHandName := "collide-c-" + urlHash(dupHand, legacyTailHex)
 	add(source{Name: legacyManagedPrefix + dupHandName, URL: dupHand},
 		source{Name: managedName(dupHand), URL: dupHand, Feed: "collide-c", Managed: true})
 	keep(source{Name: dupHandName, URL: "https://hand.example/collide"})
 
 	dupOwned := "https://collide-m.example/sub/dup"
-	dupOwnedName := "collide-m-" + urlHash(dupOwned, attributedTailHex)
+	dupOwnedName := "collide-m-" + urlHash(dupOwned, legacyTailHex)
 	add(source{Name: legacyManagedPrefix + dupOwnedName, URL: dupOwned},
 		source{Name: managedName(dupOwned), URL: dupOwned, Feed: "collide-m", Managed: true})
 	keep(source{Name: dupOwnedName, URL: "https://collide-m.example/sub/other", Feed: "collide-m", Managed: true})
@@ -3322,5 +3355,215 @@ func TestLoadPrivateSheltersPostCutoverNames(t *testing.T) {
 	}
 	if got := pf.Subscriptions.Sources[0].Name; got != "tg-vpn-123" {
 		t.Errorf("name = %q, want tg-vpn-123 kept verbatim", got)
+	}
+}
+
+func writeCurated(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sources.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write sources.yaml: %v", err)
+	}
+	return path
+}
+
+// mergeWithCurated runs one cycle's merge over a fixed one-URL fixture, varying
+// only the curated path list, so the tests below compare like with like.
+func mergeWithCurated(t *testing.T, curatedPaths []string, o origin) ([]source, string) {
+	t.Helper()
+	const u = "https://host.example/sub"
+	var buf bytes.Buffer
+	c := &Crawler{opts: Options{Prune: true, CuratedPaths: curatedPaths}, logger: zerolog.New(&buf)}
+	_, managed, _, _ := c.mergeManaged(privateFile{}, map[string]origin{u: o}, recheckResult{}, true, nil)
+	return managed, buf.String()
+}
+
+// TestMergeAvoidsCuratedName pins the hazard the curated seeding exists for:
+// the overlay already holds names in the mint's own shape, and one duplicate
+// refuses the WHOLE merged config (config.go:1013), not the offending entry.
+// The stray `enabled` key is part of the test — the crawler reads names and
+// holds no opinion about the keys config.Load owns.
+func TestMergeAvoidsCuratedName(t *testing.T) {
+	t.Parallel()
+
+	const curated = "chan-3631"
+	path := writeCurated(t, "subscriptions:\n  sources:\n"+
+		"    - name: "+curated+"\n      url: https://curated.example/sub\n      enabled: true\n")
+
+	managed, _ := mergeWithCurated(t, []string{path}, origin{Slug: "chan", Post: 3631})
+	if len(managed) != 1 {
+		t.Fatalf("managed = %+v, want one entry", managed)
+	}
+	if managed[0].Name == curated {
+		t.Fatalf("minted the curated name %q; the next config load refuses every source", curated)
+	}
+	// The mint walked past the taken stem rather than giving up on the slug.
+	if !strings.HasPrefix(managed[0].Name, curated+"-") {
+		t.Errorf("name = %q, want a %q descendant", managed[0].Name, curated)
+	}
+}
+
+// TestMergeAvoidsCuratedNameWithoutAPost covers the post-unknown family, whose
+// first candidate is the small integer where hand-written names cluster
+// (config/sources.yaml holds wepogp-1 and wepogp-4, read 2026-08-19).
+func TestMergeAvoidsCuratedNameWithoutAPost(t *testing.T) {
+	t.Parallel()
+
+	const curated = "chan-1"
+	path := writeCurated(t, "subscriptions:\n  sources:\n    - name: "+curated+"\n")
+
+	managed, _ := mergeWithCurated(t, []string{path}, origin{Slug: "chan"})
+	if len(managed) != 1 {
+		t.Fatalf("managed = %+v, want one entry", managed)
+	}
+	if managed[0].Name == curated {
+		t.Fatalf("minted the curated name %q; the next config load refuses every source", curated)
+	}
+	if !strings.HasPrefix(managed[0].Name, "chan-") {
+		t.Errorf("name = %q, want it still attributed to chan", managed[0].Name)
+	}
+}
+
+// TestMergeAvoidsCuratedNameInEitherPath: CRAWL_CURATED names sources.yaml and
+// config.yaml, whose own subscriptions.sources list may hold names too, so a
+// name reserved by one file must be reserved by the other — validateSources
+// covers the whole merged list, and seeding one of the two would fail closed on
+// the whole config for a name the crawler could see.
+func TestMergeAvoidsCuratedNameInEitherPath(t *testing.T) {
+	t.Parallel()
+
+	const curated = "chan-3631"
+	o := origin{Slug: "chan", Post: 3631}
+	holder := "subscriptions:\n  sources:\n    - name: " + curated + "\n"
+	other := writeCurated(t, "subscriptions:\n  sources:\n    - name: unrelated-9\n")
+
+	inFirst, _ := mergeWithCurated(t, []string{writeCurated(t, holder), other}, o)
+	inSecond, _ := mergeWithCurated(t, []string{other, writeCurated(t, holder)}, o)
+	if len(inSecond) != 1 {
+		t.Fatalf("managed = %+v, want one entry", inSecond)
+	}
+	if inSecond[0].Name == curated {
+		t.Fatalf("minted %q held by the second path; the next config load refuses every source", curated)
+	}
+	if !slices.Equal(inFirst, inSecond) {
+		t.Errorf("the name's position in the list changed the mint: %+v then %+v", inFirst, inSecond)
+	}
+}
+
+// TestMergeCuratedSkipsMissingAndBlankPaths: neither an unmounted file nor an
+// empty entry (CRAWL_CURATED=",/config/config.yaml") is an error, and neither
+// may cost a later path its names.
+func TestMergeCuratedSkipsMissingAndBlankPaths(t *testing.T) {
+	t.Parallel()
+
+	const curated = "chan-3631"
+	o := origin{Slug: "chan", Post: 3631}
+	present := writeCurated(t, "subscriptions:\n  sources:\n    - name: "+curated+"\n")
+	missing := filepath.Join(t.TempDir(), "nope.yaml")
+
+	managed, logged := mergeWithCurated(t, []string{missing, "", present}, o)
+	if len(managed) != 1 {
+		t.Fatalf("managed = %+v, want one entry", managed)
+	}
+	if managed[0].Name == curated {
+		t.Fatalf("a missing file and a blank entry ahead of %s cost it its names", present)
+	}
+	if logged != "" {
+		t.Errorf("a missing file and a blank entry are normal, not warnings: %s", logged)
+	}
+}
+
+// TestMergeCuratedFileFailuresKeepTheCycle: a missing overlay is normal and a
+// malformed one must not stop discovery, so both yield what no curated file at
+// all yields — the malformed one loudly, because falling back to private-only
+// seeding is exactly what re-opens the collision hazard. What it must not do is
+// take the paths beside it down with it.
+func TestMergeCuratedFileFailuresKeepTheCycle(t *testing.T) {
+	t.Parallel()
+
+	o := origin{Slug: "chan", Post: 3631}
+	baseline, quiet := mergeWithCurated(t, nil, o)
+	if len(baseline) != 1 {
+		t.Fatalf("baseline = %+v, want one entry", baseline)
+	}
+	if quiet != "" {
+		t.Errorf("an unset curated path logged something: %s", quiet)
+	}
+
+	got, logged := mergeWithCurated(t, []string{filepath.Join(t.TempDir(), "nope.yaml")}, o)
+	if !slices.Equal(got, baseline) {
+		t.Errorf("a missing curated file changed the cycle: %+v, want %+v", got, baseline)
+	}
+	if logged != "" {
+		t.Errorf("a missing curated file is normal, not a warning: %s", logged)
+	}
+
+	broken := writeCurated(t, "subscriptions:\n  sources:\n    - name: [oops\n")
+	got, logged = mergeWithCurated(t, []string{broken}, o)
+	if !slices.Equal(got, baseline) {
+		t.Errorf("a malformed curated file changed the cycle: %+v, want %+v", got, baseline)
+	}
+	if !strings.Contains(logged, broken) || !strings.Contains(logged, "curated") {
+		t.Errorf("the parse failure was not reported with its path: %s", logged)
+	}
+
+	sound := writeCurated(t, "subscriptions:\n  sources:\n    - name: "+baseline[0].Name+"\n")
+	got, logged = mergeWithCurated(t, []string{broken, sound}, o)
+	if len(got) != 1 {
+		t.Fatalf("managed = %+v, want one entry", got)
+	}
+	if got[0].Name == baseline[0].Name {
+		t.Errorf("the malformed path cost %s its names: minted %q", sound, got[0].Name)
+	}
+	if !strings.Contains(logged, broken) {
+		t.Errorf("the parse failure was not reported with its path: %s", logged)
+	}
+}
+
+// TestRunOnceLogsCuratedCount: a mis-set CRAWL_CURATED disables the seeding in
+// silence, and this count on the cycle's terminal line is the only place 0
+// against a shipped overlay holding dozens becomes visible. Deduped across the
+// paths, because it reports the names the mint had to avoid, not the entries read.
+func TestRunOnceLogsCuratedCount(t *testing.T) {
+	t.Parallel()
+
+	priv := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+	first := writeCurated(t, "subscriptions:\n  sources:\n    - name: kept-1\n    - name: kept-2\n")
+	second := writeCurated(t, "subscriptions:\n  sources:\n    - name: kept-2\n    - name: kept-3\n")
+
+	var buf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:     []string{"chan"},
+			PrivatePath:  priv,
+			CuratedPaths: []string{first, "", second},
+			Pages:        1,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<div class="tgme_widget_message_wrap" data-post="chan/3631">` +
+				`<a href="https://new.example/sub">sub</a></div>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&buf),
+	}
+
+	c.RunOnce(context.Background())
+
+	var terminal string
+	for line := range strings.SplitSeq(buf.String(), "\n") {
+		if strings.Contains(line, "private.yaml updated") {
+			terminal = line
+		}
+	}
+	if terminal == "" {
+		t.Fatalf("the cycle wrote nothing, so the terminal line is untested:\n%s", buf.String())
+	}
+	if !strings.Contains(terminal, `"curated":3`) {
+		t.Errorf(`terminal line = %s, want "curated":3 (kept-2 counted once)`, terminal)
 	}
 }

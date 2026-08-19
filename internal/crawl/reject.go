@@ -106,6 +106,12 @@ const redactedPathError = "redacted: error names the candidate url path or query
 // lines, and counting is deliberately not capped.
 const maxRejectTracked = maxInlineAccum
 
+// urlIDHex sizes the per-URL correlator on a reject line. 8 rather than 6 because
+// the identifier it replaced was slug-SCOPED, so a bare 6 hex would have been a
+// regression in the one property the field has; two more characters buy a wider
+// margin than the old shape ever had. urlHash needs an even width. See record.
+const urlIDHex = 8
+
 // rejects accumulates, over one cycle, why each discovered candidate failed to
 // become a managed source. It is created per cycle by scan and threaded down the
 // discovery path; a nil *rejects records nothing, which is how recheckManaged
@@ -170,14 +176,24 @@ func (r *rejects) record(o origin, rawURL string, reason rejectReason, code int,
 	u, parseErr := url.Parse(rawURL)
 	ev := r.logger.Info().
 		Str("channel", o.Slug).
-		// The name the mint would give this URL from this channel with no post
-		// id: per-URL unique, and no existing name or used-name set, which is
-		// exactly a never-accepted candidate's state (a nil map reads legally).
-		// The post is deliberately withheld from the name and logged as its own
-		// field — <slug>-<post> names a POST, so a rejected link would log the
-		// name of whichever sibling link of that post was accepted, which is a
-		// false match, not a weak one. No credential is in either.
-		Str("source", sourceName(rawURL, "", origin{Slug: o.Slug}, nil)).
+		// A per-URL correlator, deliberately not a source name: the same link
+		// gets the same urlid in every cycle and from every channel, which is
+		// what makes one that keeps failing greppable across the whole log. The
+		// post stays out of it because <slug>-<post> names a POST, so a rejected
+		// link would otherwise wear the name of whichever sibling link of that
+		// post was accepted — a false match, not a weak one. Not unique, and the
+		// population is what a cycle PRINTS: the cap above returns before this
+		// event is built, so at most maxRejectLines ids exist per cycle — against
+		// 4.29e9 values, one colliding pair per ~216000 cycles, and 4.6e-8 that a
+		// GIVEN printed id strays onto another of the same cycle, the second being
+		// what a reader grepping one link is asking about. 8 hex rather than 6 is
+		// sized for the log's lifetime and not the cycle's: a month of hourly
+		// cycles at the cap expects 2.4 colliding pairs where 6 hex expects 618,
+		// and that ceiling is loose because a link which keeps failing keeps its
+		// id instead of adding to the population. host, not channel alone, is
+		// what separates a pair harvested from one channel. No credential is in
+		// either field.
+		Str("urlid", urlHash(rawURL, urlIDHex)).
 		Str("host", logHost(u)).
 		Str("reason", string(reason))
 	if o.Post != 0 {
@@ -260,8 +276,9 @@ func (r *rejects) report(live map[string]origin) {
 // there is no query at all. The observed
 // is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo is the same shape with the
 // token as the FIRST segment, so keeping a prefix of the path would not help
-// either. Nothing is lost: the <slug>-<sha6> on the same line is the exact
-// identity, and the host is the part an operator recognizes.
+// either. Little is lost: `urlid` on the same line is what pins WHICH url this
+// was, to within the collision odds record states, and the host is only the part
+// an operator recognizes.
 //
 // url.URL keeps userinfo in User, so Host cannot carry credentials that way.
 func logHost(u *url.URL) string {

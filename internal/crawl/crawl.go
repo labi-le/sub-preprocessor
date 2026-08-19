@@ -52,15 +52,9 @@ var (
 // one has already been adopted, and a slug may itself begin with it.
 const legacyManagedPrefix = "tg-"
 
-const (
-	// attributedTailHex sizes the per-URL discriminator on an attributed name:
-	// <slug>-<sha6>, and <slug>-<postid>-<sha6> for the second and later URL of
-	// one post, which is a container rather than a URL.
-	attributedTailHex = 6
-	// unattributedNameHex sizes the whole of a name minted with no origin at
-	// all, which is what managedName builds and unattributedNameRe matches.
-	unattributedNameHex = 10
-)
+// unattributedNameHex sizes the whole of a name minted with no origin at all,
+// which is what managedName builds and unattributedNameRe matches.
+const unattributedNameHex = 10
 
 // unattributedNameRe matches managedName's form. Such a name carries no origin,
 // so it is the one existing name the mint may replace once a channel is known.
@@ -73,6 +67,7 @@ type Options struct {
 	Channels      []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
 	ChannelsPath  string   // YAML file of seed channels, re-read each cycle for hot-reload
 	PrivatePath   string
+	CuratedPaths  []string      // YAML files of hand-written sources (CRAWL_CURATED), read for names the mint must avoid — never crawled
 	Pages         int           // t.me/s pages (~20 msgs each) to walk back per configured seed channel
 	Prune         bool          // drop managed sources proven no longer live
 	MaxDepth      int           // repost-recursion depth; 0 = only seed channels (no recursion)
@@ -307,7 +302,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// minutes to hours and an operator retiring a source expects the block to
 	// take effect on the write it is racing.
 	blocked := blockedSet(loadChannels(c.opts.ChannelsPath, c.logger).Blocked)
-	next, managed, deleted := c.mergeManaged(pf, live, rr, prune, blocked)
+	next, managed, deleted, curated := c.mergeManaged(pf, live, rr, prune, blocked)
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
@@ -348,7 +343,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// fault above, and without them the recheck population — the one that
 	// produces prunes — is invisible whenever it works.
 	c.logger.Info().Int("managed", len(managed)).Int("inline", inlineCount).Int("total", len(next)).
-		Int("rechecked", rr.checked).Int("revived", rr.revived).Msg("private.yaml updated")
+		Int("curated", curated).Int("rechecked", rr.checked).Int("revived", rr.revived).Msg("private.yaml updated")
 }
 
 // abortReason names why a cycle stopped early: its own budget (see cycleBudget)
@@ -428,21 +423,30 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 // set (deduped and sorted by name) and returns the full next source list, the
 // managed subset for logging, and deleted: the cycle-start managed URLs this
 // merge drops, in sorted order, which is both the size and the identity of the
-// deletion the prune floor rules on (see allowShrink). Which of the not-live
+// deletion the prune floor rules on (see allowShrink), and curated: how many
+// names the overlays reserved, which is the only way to see from a log that a
+// mis-set CRAWL_CURATED silently disabled the seeding. Which of the not-live
 // managed URLs survive is retainManaged's decision.
 //
 // blocked is the operator's retirement list (channels.yaml `blocked:`). It is
 // applied here, the single funnel every candidate URL passes through, so a
 // blocked source cannot re-enter from the re-loaded file, from rediscovery in
 // a channel, or from a recheck reviving it.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string) {
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string, curated int) {
 	all := map[string]struct{}{}
 	existing := map[string]source{}
 	// Every name the file already holds is spoken for, whoever owns it:
 	// <slug>-<postid> is per-POST, so without this a second URL of one post takes
 	// the name sourceName then returns verbatim to its incumbent, and the
 	// duplicate makes validatePrivate refuse the write on every later cycle too.
-	used := make(map[string]bool, len(pf.Subscriptions.Sources))
+	// Curated names too, though they live in files the crawler never writes:
+	// validateSources runs over the merged list, so one minted name equal to a
+	// curated one refuses the WHOLE config -- fatal at startup, silent at
+	// reload, where the live config freezes at the last good version.
+	// Only NEW collisions: an existing entry that already collides keeps its
+	// name, which sourceName returns verbatim.
+	used := curatedNames(c.opts.CuratedPaths, c.logger, len(pf.Subscriptions.Sources))
+	curated = len(used)
 	for _, s := range pf.Subscriptions.Sources {
 		switch {
 		case s.Body != "" && s.Managed:
@@ -467,8 +471,9 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr rechec
 	for u := range live {
 		all[u] = struct{}{}
 	}
-	// Deterministic naming order so a hash-fallback on collision is stable
-	// across cycles (map iteration order is randomized).
+	// Deterministic naming order so the ordinals are stable across cycles: it
+	// decides which URL of a post takes the bare stem and which sibling takes
+	// which N (map iteration order is randomized).
 	urls := make([]string, 0, len(all))
 	for u := range all {
 		urls = append(urls, u)
@@ -508,7 +513,7 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr rechec
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
-	return kept, managed, deleted
+	return kept, managed, deleted, curated
 }
 
 // mintSource is what one retained URL becomes. prev is the entry the cycle-start
@@ -517,9 +522,13 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr rechec
 // channel keeps both rather than half of each.
 //
 // The minted name joins used, so the next URL of the same post cannot take it
-// too. That set is mergeManaged's, seeded from every name the cycle-start file
-// held and filled in sorted-URL order: the order is what makes which URL of a
-// post gets the plain <slug>-<postid> stable across cycles.
+// too. That set is mergeManaged's, seeded from the curated overlays and every
+// name the cycle-start file held, then filled in sorted-URL order: that order is
+// what keeps the choice stable across cycles, deciding which URL of a post gets
+// the plain <slug>-<postid> and which sibling gets which ordinal beside it. A
+// name is therefore no longer a pure function of its URL but of the set it was
+// minted beside, so a corpus rebuilt after private.yaml is lost re-derives names
+// that shift wherever the URL set has changed.
 func mintSource(u string, prev source, o origin, used map[string]bool) source {
 	name := sourceName(u, prev.Name, o, used)
 	feed := prev.Feed
@@ -658,35 +667,46 @@ func (c *Crawler) persistState(st state) {
 	}
 }
 
-// sourceName picks the managed name for url u: <slug>-<postid> for a URL
-// harvested from a known post, <slug>-<postid>-<sha6> for the second and later
-// URL of one post (a post is a container, not a URL), <slug>-<sha6> when the
-// channel is known but the post is not, and a bare hash when neither is.
+// sourceName picks the managed name for url u: <slug>-<postid> where a known
+// post's bare stem is free, <slug>-<postid>-N where it is not (a post is a
+// container, not a URL), <slug>-N when the channel is known but the post is not,
+// and managedName's origin-less hash when the slug is unusable. N is the lowest
+// ordinal free in used, counting from 2 where a post id is known — the bare
+// <slug>-<postid> is offered to that post's first URL first, so a post whose
+// stem is already held starts its own first URL at -2 — and from 1 where none
+// is, no bare stem having been offered at all. The walk needs no cap:
+// every ordinal it rejects is one distinct name already in used, so it cannot
+// run past len(used)+1.
 //
 // An existing name is kept verbatim, because a rename churns private.yaml and
 // relabels every published node (merge.go derives <source>-NNN) and buys
 // nothing. The one exception is the bare-hash form, which names no origin: that
-// upgrades the first time the URL is seen in a channel. On the (never observed,
-// ~2^-24) collision the bare hash is used, so a name stays valid and unique
-// whatever the origin says.
+// upgrades the first time the URL is seen in a channel. A usable slug always
+// yields a free ordinal, so the two arms below the slug block are reached only
+// when the slug is empty.
 //
-// Every candidate form is assembled in one stack buffer, so the id and the hash
-// are formatted into the name the mint was allocating anyway; the reject log
-// calls this per rejected URL.
+// Every candidate is assembled in one stack buffer, wide enough that no ordinal
+// can spill it onto the heap: the mint allocates the name it returns and nothing
+// else.
 func sourceName(u, existingName string, o origin, used map[string]bool) string {
 	if existingName != "" && !unattributedNameRe.MatchString(existingName) {
 		return existingName
 	}
-	var buf [maxSlug + 1 + maxPostDigits + 1 + attributedTailHex]byte
+	var buf [maxSlug + 1 + maxPostDigits + 1 + maxOrdinalDigits]byte
 	if stem := appendChannelSlug(buf[:0], o.Slug); len(stem) > 0 {
+		ordinal := uint64(1)
 		if o.Post != 0 {
 			stem = strconv.AppendUint(append(stem, '-'), o.Post, decimalBase)
 			if !used[string(stem)] {
 				return string(stem)
 			}
+			ordinal = 2
 		}
-		if cand := appendURLHash(append(stem, '-'), u, attributedTailHex); !used[string(cand)] {
-			return string(cand)
+		stem = append(stem, '-')
+		for ; ; ordinal++ {
+			if cand := strconv.AppendUint(stem, ordinal, decimalBase); !used[string(cand)] {
+				return string(cand)
+			}
 		}
 	}
 	if existingName != "" {
@@ -700,7 +720,11 @@ const (
 	maxSlug = 24
 	// maxPostDigits is the decimal width of a uint64 message id.
 	maxPostDigits = 20
-	decimalBase   = 10
+	// maxOrdinalDigits sizes the sibling ordinal, which len(used)+1 bounds and
+	// nothing bounds statically. No corpus reaches 20 digits; the spare stack
+	// bytes cost nothing.
+	maxOrdinalDigits = maxPostDigits
+	decimalBase      = 10
 )
 
 // channelSlug normalizes a Telegram channel slug into the config source-name
@@ -915,12 +939,10 @@ func managedName(u string) string { return urlHash(u, unattributedNameHex) }
 
 // urlHash is the first n (even) hex digits of sha256(u). Only the bytes those
 // digits need are encoded, so the result does not hold a 64-byte backing array
-// alive for six characters.
-func urlHash(u string, n int) string { return string(appendURLHash(nil, u, n)) }
-
-func appendURLHash(dst []byte, u string, n int) []byte {
+// alive for the 8 or 10 digits the reject correlator and the mint pass.
+func urlHash(u string, n int) string {
 	sum := sha256.Sum256([]byte(u))
-	return hex.AppendEncode(dst, sum[:n/2])
+	return hex.EncodeToString(sum[:n/2])
 }
 
 func loadPrivate(path string) (privateFile, error) {
@@ -937,6 +959,56 @@ func loadPrivate(path string) (privateFile, error) {
 	}
 	adoptLegacyNames(&pf)
 	return pf, nil
+}
+
+// curatedFile is any file on CRAWL_CURATED as the crawler sees it: names, and
+// no opinion about the keys config.Load owns, so an unknown one is ignored
+// rather than rejected. config.yaml carries subscriptions.sources under that
+// same key path, so one struct reads both.
+type curatedFile struct {
+	Subscriptions struct {
+		Sources []struct {
+			Name string `yaml:"name"`
+		} `yaml:"sources"`
+	} `yaml:"subscriptions"`
+}
+
+// curatedNames is the mint's taken-name set seeded from the curated overlays,
+// unioned, with room for that many more (mergeManaged adds the cycle-start
+// file's). Nothing in the overlays is crawled; only their names are read. A
+// blank entry is skipped and a missing file is normal. A read or parse failure
+// warns and the remaining paths are still read: a typo in one file must not
+// stop discovery, and the cycle runs the collision risk for that file's names
+// instead -- which is why the failure is never silent.
+func curatedNames(paths []string, logger zerolog.Logger, room int) map[string]bool {
+	var names []string
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Warn().Err(err).Str("path", path).Msg("read curated sources failed; minting without that file's curated names")
+			}
+			continue
+		}
+		var cf curatedFile
+		if unmarshalErr := yaml.Unmarshal(b, &cf); unmarshalErr != nil {
+			logger.Warn().Err(unmarshalErr).Str("path", path).Msg("unmarshal curated sources failed; minting without that file's curated names")
+			continue
+		}
+		for _, s := range cf.Subscriptions.Sources {
+			if s.Name != "" {
+				names = append(names, s.Name)
+			}
+		}
+	}
+	used := make(map[string]bool, len(names)+room)
+	for _, name := range names {
+		used[name] = true
+	}
+	return used
 }
 
 // adoptLegacyNames migrates the corpus off the tg- prefix, once. Its gate is

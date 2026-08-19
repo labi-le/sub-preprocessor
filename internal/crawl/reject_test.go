@@ -231,7 +231,7 @@ func TestRunOnceCandidateOutcomesAreByteStable(t *testing.T) {
     sources:
         - name: hand-added
           url: https://hand.example/sub
-        - name: chan-3d9dfd
+        - name: chan-1
           url: https://live.example/sub?payload=SECRETPAYLOAD1234
           feed: chan
           managed: true
@@ -300,44 +300,78 @@ func TestRejectLinePerReason(t *testing.T) {
 	}
 }
 
-// TestRejectLineCarriesTheMergeSourceName: the identifier on a reject line is
-// what correlates it to a private.yaml entry, since the line carries no path and
-// no query. It is checked twice — against an independently computed
-// <slug>-<sha6>, and against sourceName itself — so neither a drifting log
-// format nor a drifting naming rule can pass unnoticed.
+// TestRejectLineCarriesTheURLCorrelator: the identifier on a reject line is all
+// that says WHICH subscription failed, since the line carries no path and no
+// query. The expectation is computed here from sha256 and hex rather than through
+// urlHash, so a drifting log format and a drifting correlator both fail instead
+// of agreeing with themselves.
 //
-// The slug is this channel's, not necessarily the discoverer's: a URL first seen
-// in another channel is named for that one by the merge. The sha6 suffix is
-// channel-independent and is what actually correlates.
-func TestRejectLineCarriesTheMergeSourceName(t *testing.T) {
+// The channel is NOT part of it — see TestRejectLineURLIDIsChannelIndependent —
+// and neither is the merge's naming: the mint's ordinal depends on the used-name
+// set of the cycle that runs it, and this call site has none.
+func TestRejectLineCarriesTheURLCorrelator(t *testing.T) {
 	t.Parallel()
 
 	lines := runCycle(t, fixturePage).lines
 	sum := sha256.Sum256([]byte(fixNodeless))
-	want := fixChannel + "-" + hex.EncodeToString(sum[:])[:6]
+	want := hex.EncodeToString(sum[:])[:8]
 
-	var found string
+	var found map[string]any
 	for _, l := range withMsg(lines, "candidate rejected") {
 		if l["host"] == "nodeless.example" {
-			found, _ = l["source"].(string)
+			found = l
 		}
 	}
-	if found != want {
-		t.Fatalf("source = %q, want %q", found, want)
+	if got, _ := found["urlid"].(string); got != want {
+		t.Fatalf("urlid = %q, want %q", got, want)
 	}
-	if got := sourceName(fixNodeless, "", origin{Slug: fixChannel}, nil); got != want {
-		t.Fatalf("sourceName = %q, want %q: the log no longer reuses the merge's naming", got, want)
+	if _, stale := found["source"]; stale {
+		t.Errorf("the retired `source` field is still emitted beside urlid")
 	}
 }
 
-// TestRejectLineKeepsThePostOutOfTheName: a known post id rides its own field and
-// never the name. <slug>-<post> names a POST, and a post routinely carries
-// several links, so a rejected candidate named that way would log the name of
-// whichever sibling link of that post the merge accepted — a false match, worse
-// than none. The per-URL sha6 keeps the identifier the URL's own. An unknown
-// post leaves the field out, because the zero id logged as post=0 would read as
-// message 0.
-func TestRejectLineKeepsThePostOutOfTheName(t *testing.T) {
+// TestRejectLineURLIDIsChannelIndependent pins the property the identifier exists
+// for and the one the retired <slug>-<sha6> form did not have: a link reposted
+// into two channels is ONE link, so a link that keeps failing is greppable by a
+// single token, while two links in one channel stay apart.
+func TestRejectLineURLIDIsChannelIndependent(t *testing.T) {
+	t.Parallel()
+
+	id := func(slug, rawURL string) string {
+		var buf bytes.Buffer
+		newRejects(zerolog.New(&buf)).record(origin{Slug: slug}, rawURL, rejectNodeless, 0, nil)
+		var line map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line); err != nil {
+			t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
+		}
+		got, ok := line["urlid"].(string)
+		if !ok || got == "" {
+			t.Fatalf("no urlid for %s in channel %s: %s", rawURL, slug, buf.String())
+		}
+		return got
+	}
+
+	here, elsewhere := id(fixChannel, fixNodeless), id("otherchan", fixNodeless)
+	if here != elsewhere {
+		t.Errorf("one url logged %q in channel %q and %q in otherchan; the correlator must not move with the channel",
+			here, fixChannel, elsewhere)
+	}
+	sum := sha256.Sum256([]byte(fixNodeless))
+	if want := hex.EncodeToString(sum[:])[:8]; here != want {
+		t.Errorf("urlid = %q, want %q", here, want)
+	}
+	if sibling := id(fixChannel, fixExpired); sibling == here {
+		t.Errorf("two distinct urls in one channel both logged urlid %q", here)
+	}
+}
+
+// TestRejectLineKeepsThePostOutOfTheURLID: a known post id rides its own field
+// and never the identifier. <slug>-<post> names a POST, and a post routinely
+// carries several links, so a rejected candidate identified that way would wear
+// the name of whichever sibling link of that post the merge accepted — a false
+// match, worse than none. An unknown post leaves the field out, because the zero
+// id logged as post=0 would read as message 0.
+func TestRejectLineKeepsThePostOutOfTheURLID(t *testing.T) {
 	t.Parallel()
 
 	const post = 3631
@@ -349,8 +383,8 @@ func TestRejectLineKeepsThePostOutOfTheName(t *testing.T) {
 		t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
 	}
 	sum := sha256.Sum256([]byte(fixNodeless))
-	if want := fixChannel + "-" + hex.EncodeToString(sum[:])[:6]; line["source"] != want {
-		t.Errorf("source = %v, want the per-URL %q", line["source"], want)
+	if want := hex.EncodeToString(sum[:])[:8]; line["urlid"] != want {
+		t.Errorf("urlid = %v, want the per-URL %q", line["urlid"], want)
 	}
 	if line["post"] != float64(post) {
 		t.Errorf("post = %v, want %d on its own numeric field", line["post"], post)

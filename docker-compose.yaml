@@ -51,6 +51,10 @@ services:
       # CRAWL_CHANNELS (comma/space list) still works as an extra override.
       - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
+      # Explicit because the default is invisible when wrong: the mint reads
+      # these two for names it must not take, and a broken mount would look
+      # exactly like a clean cycle.
+      - CRAWL_CURATED=/config/sources.yaml,/config/config.yaml
       - TZ=Europe/Moscow
       # - CRAWL_AT=04:00     # uncomment to run once daily at HH:MM instead of the hourly interval
       - CRAWL_INTERVAL=1h    # hourly poll of t.me/s (cheap; near-real-time enough)

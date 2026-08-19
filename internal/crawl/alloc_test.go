@@ -131,3 +131,64 @@ func TestHarvestPagesSegmentsWithoutAllocating(t *testing.T) {
 			messages, got)
 	}
 }
+
+// TestSourceNameAllocatesOnlyTheName pins the mint's cost to the one string it
+// returns. Every candidate is formatted into sourceName's stack buffer and probed
+// through a map index, so the count stays 1 however far the ordinal walk runs;
+// the long walk is the guard that matters, because a candidate built by
+// concatenation, a []byte-to-string conversion the compiler cannot elide, or a
+// buffer too narrow for the ordinal each turn the walk's length into
+// allocations. No shipped benchmark reaches sourceName since the reject log
+// stopped calling it, so this is the only place the figure is held.
+//
+// The second shape is the only arm that can see a narrowed buffer. sourceName's
+// array is exactly full at its worst case with no slack, so the everyday shape
+// spends 20 of the 66 bytes and keeps reporting one allocation with the bound cut
+// to a third of its width; maxSlug bytes of slug, a 20-digit post id and a
+// 3-digit ordinal spend 49 and spill the moment the bound stops being honest.
+func TestSourceNameAllocatesOnlyTheName(t *testing.T) {
+	const (
+		runs     = 100
+		siblings = 500
+		u        = "https://host.example/sub"
+		stem     = "vpn-channel-3631"
+		wideSlug = "abcdefghijklmnopqrstuvwx"
+	)
+	widePost := ^uint64(0)
+
+	// mint prices one name shape twice: the bare stem against an empty set, and
+	// the name the walk reaches past every sibling that stem has.
+	mint := func(o origin, bareName string) (bare, walked float64) {
+		used := map[string]bool{bareName: true}
+		for n := 2; n <= siblings; n++ {
+			used[bareName+"-"+strconv.Itoa(n)] = true
+		}
+		want := bareName + "-" + strconv.Itoa(siblings+1)
+		bare = testing.AllocsPerRun(runs, func() {
+			if got := sourceName(u, "", o, nil); got != bareName {
+				t.Fatalf("sourceName against an empty set = %q, want the bare stem %q", got, bareName)
+			}
+		})
+		walked = testing.AllocsPerRun(runs, func() {
+			if got := sourceName(u, "", o, used); got != want {
+				t.Fatalf("sourceName past %d taken siblings = %q, want %q", siblings-1, got, want)
+			}
+		})
+		return bare, walked
+	}
+
+	for _, shape := range []struct {
+		name     string
+		o        origin
+		bareName string
+	}{
+		{"everyday", origin{Slug: "VPN_Channel", Post: 3631}, stem},
+		{"buffer worst case", origin{Slug: wideSlug, Post: widePost}, wideSlug + "-" + strconv.FormatUint(widePost, 10)},
+	} {
+		bare, walked := mint(shape.o, shape.bareName)
+		if bare != 1 || walked != 1 {
+			t.Errorf("%s: sourceName allocates %.0f for the bare stem and %.0f walking %d taken siblings, want exactly 1 each",
+				shape.name, bare, walked, siblings-1)
+		}
+	}
+}
