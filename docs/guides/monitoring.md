@@ -392,6 +392,26 @@ vendor the dashboard into the nixos repo.
   MUST carry that selector, and a panel description MUST NOT name one config file as
   the authority for what ran — which filters exist depends on which instance `$job`
   selects.
+- **The crawler's five counters are label-less lifetime int64s with no dashboard panel, and
+  they are readable where nothing scrapes.** Rendered by `internal/metrics`' exposition helpers
+  and served by the CRAWLER process — not the preprocessor listener described above — at
+  `GET /metrics` on the optional `CRAWL_HTTP` trigger listener; a deployment without `CRAWL_HTTP`
+  reads the same five numbers off a per-cycle structured log line that every cycle which crawls emits. No Grafana
+  panel or Prometheus rule consumes them yet — documentation only, by decision. Semantics:
+  `stable_crawl_topic_pages_total` counts successful topic embed fetches (the denominator);
+  `stable_crawl_topic_live_total` those yielding at least one live subscription (the numerator);
+  `stable_crawl_topic_empty_total` embed pages that answered with a reachable body but zero
+  message wraps — a gone/private topic or an embed markup change;
+  `stable_crawl_topic_discovered_total` same-group carve-out edges admitted into the crawl queue;
+  `stable_crawl_group_empty_total` bare discovered groups whose `/s/` listing was reached and
+  empty with no topic hint available — the counted dead end.
+- **Two alarms ship with the five counters; both are fleet-shaped, never per-topic.** (1) The
+  empty ratio pinned near 1 while fetches keep rising ⇒ the embed markup changed and every topic
+  read is coming back silently empty — fired as a warn from the same per-cycle log line once at
+  least five topic pages were fetched in a cycle with zero live yields, the same fleet-shaped warn `reportCursors`
+  uses for lost listing cursors. (2) `stable_crawl_topic_discovered_total` stuck near zero over days ⇒ the
+  same-group carve-out is misfiring and intra-forum recursion is effectively dead — check that
+  before concluding the forums themselves dried up.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway

@@ -249,8 +249,8 @@
     on both trees — an inline loop at `extract.go:34-35` on HEAD, which had no `appendURLs` at all,
     and the `appendURLs` wrapper at `extract.go:35-36` here. There was no hoist on that tree to
     mirror, so nothing was wrong with the twin as written. **The drift is this wave's**: it hoisted
-    one `urls` slice into `harvestPages` (`discover.go:291`, grown only when a page needs more at
-    `:317`) and left the twin scanning per page, so from that commit until
+    one `urls` slice into `harvestPages` (`discover.go:375`, grown only when a page needs more at
+    `:404`) and left the twin scanning per page, so from that commit until
     2026-08-19 the twin mirrored a body that had moved under it. **That is why `27160` read "either
     side", and why calling it "HEAD's own figure" was wrong**: it was HEAD's faithful twin against
     this tree's DRIFTED twin, landing on the same number because the twin's drift was exactly the
@@ -296,7 +296,7 @@
     one `[]string` per PAGE, not per candidate: at `8c8ec21` `extractURLs` minted
     `make([]string, 0, strings.Count(page, urlScheme))` for every page (`extract.go:35` there),
     where `harvestPages` now hoists one `urls` slice across the whole channel and `harvestPage`
-    grows it only when a page needs more (`discover.go:291` and `:317`). This fixture holds 20
+    grows it only when a page needs more (`discover.go:375` and `:404`). This fixture holds 20
     occurrences per page at every point on the curve, so that slice is a 20-element header block —
     320 B — and five of six pages stop allocating one: -5 allocations and -1600 B, whatever the
     distinct count. Anything stored per KEY moves the other way and SCALES with it: a 24 B

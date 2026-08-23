@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"domains.lst/sub-preprocessor/internal/metrics"
 )
 
 const (
@@ -24,8 +26,10 @@ const (
 //	              is already running. The cycle runs in a background goroutine,
 //	              so the request never blocks on a full crawl.
 //	GET  /healthz liveness probe; always 200 "ok".
+//	GET  /metrics lifetime crawler counters in Prometheus text format; the
+//	              same numbers ride the per-cycle reportTopics log line.
 //
-// Other methods on /crawl return 405; unknown paths return 404. Only the
+// Other methods on these paths return 405; unknown paths return 404. Only the
 // stdlib net/http is used.
 func (c *Crawler) Serve(ctx context.Context, addr string) error {
 	srv := &http.Server{
@@ -84,6 +88,13 @@ func serveMux(ctx context.Context, c *Crawler) http.Handler {
 			return
 		}
 		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		metrics.CrawlHandler().ServeHTTP(w, r)
 	})
 	return mux
 }

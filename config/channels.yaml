@@ -10,7 +10,7 @@
 # the next cycle, no restart needed. Entries may be a bare slug, an @handle, or
 # a full t.me URL, and any of those may carry a trailing "/<topic>" to name a
 # forum topic inside a group (e.g. mifa_world/1310). A group has no t.me/s
-# preview at all, so without the topic the seed is unreadable, not merely empty.
+# preview at all. Discovered groups now settle empirically, like seeded ones: a bare discovered group with an empty listing and no topic is a counted dead end, and a discovered <slug>/<digits> hint settles through the same /s/-answer logic a seed's does.
 channels:
   - o00000000i
   - hiddifycode

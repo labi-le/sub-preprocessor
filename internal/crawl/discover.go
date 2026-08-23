@@ -6,15 +6,20 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"domains.lst/sub-preprocessor/internal/metrics"
 )
 
-// channelRe matches a t.me channel reference and captures the username slug and
-// any trailing query. Telegram usernames are 5-32 chars, start with a letter,
-// and contain only letters/digits/underscore. The host is anchored: it must be
-// preceded by the start of input or a non-hostname character, so hostnames that
-// merely end in "t.me" (e.g. shortcut.me) don't match; a scheme still works
-// because "/" is not a hostname character.
-var channelRe = regexp.MustCompile(`(?:^|[^a-zA-Z0-9.-])t\.me/([a-zA-Z][a-zA-Z0-9_]{4,31})(?:/\d+)?(\?[^\s"'<>]*)?`)
+// channelRe matches a t.me chat reference and captures the username slug, an
+// optional numeric second segment, and any trailing query. The second segment
+// is one shape for two things — a forum topic id or a post id — and stays
+// advisory until scrapeChat settles it on the /s/ answer. Telegram usernames
+// are 5-32 chars, start with a letter, and contain only letters/digits/
+// underscore. The host is anchored: it must be preceded by the start of input
+// or a non-hostname character, so hostnames that merely end in "t.me" (e.g.
+// shortcut.me) don't match; a scheme still works because "/" is not a hostname
+// character.
+var channelRe = regexp.MustCompile(`(?:^|[^a-zA-Z0-9.-])t\.me/([a-zA-Z][a-zA-Z0-9_]{4,31})(?:/(\d+))?(\?[^\s"'<>]*)?`)
 
 // reservedSlugs are t.me paths that are not channels.
 var reservedSlugs = map[string]bool{
@@ -39,9 +44,12 @@ const defaultMaxDiscovered = 200
 // here (the later dedupe + InlineMax cap still applies to the survivors).
 const maxInlineAccum = 20000
 
-// chanRef is one crawl target. topic carries a Telegram forum-topic id when the
-// seed named one: a group has no t.me/s/ preview at all (measured 2026-08-14:
-// 200 with zero message wraps), so the topic is what makes such a chat readable.
+// chanRef is one crawl target. topic carries a Telegram forum-topic id: a
+// group has no t.me/s/ preview at all (measured 2026-08-14: 200 with zero
+// message wraps), so the topic is what makes such a chat readable. Seeds name
+// one outright; discovered refs carry the numeric segment of a reposted link,
+// which may be a topic or a post id — either way scrapeChat settles it
+// empirically on the /s/ answer, costing a plain channel nothing.
 type chanRef struct {
 	slug  string
 	topic string
@@ -57,12 +65,16 @@ func (r chanRef) String() string {
 	return r.slug + "/" + r.topic
 }
 
-// scanNode is a channel queued for crawling at a given repost-graph depth.
+// scanNode is a chat queued for crawling at a given repost-graph depth.
 // configured marks an operator-supplied seed, which gets the full page budget.
+// carved marks a same-group carve-out child (see scanChannel): its admitting
+// identity is the full ref against topicsSeen instead of the slug against
+// visited, because its slug was by construction already visited.
 type scanNode struct {
 	ref        chanRef
 	depth      int
 	configured bool
+	carved     bool
 }
 
 // origin is where a harvested URL was first seen this cycle. Both fields are
@@ -75,19 +87,21 @@ type origin struct {
 // scan performs a relevance-gated breadth-first crawl of the channel repost
 // graph. Seeds are the configured channels plus every remembered productive
 // channel (st), all crawled at depth 0 and always expanded; a newly discovered
-// channel is expanded only when it itself yielded at least one live
-// subscription (thematic gate). Discovered (non-seed) visits are capped by
-// MaxChannels, or defaultMaxDiscovered when that is 0; recursion depth by
-// MaxDepth. Channels that yield a live sub are recorded into st (bounded by
-// maxProductive) so they become seeds on future cycles, surviving
-// days when their recent pages carry no live sub. Returns every live
-// subscription URL found, mapped to the origin that first yielded it.
+// chat is expanded only when it itself yielded at least one live subscription
+// (thematic gate). Discovered (non-seed) visits are capped by MaxChannels, or
+// defaultMaxDiscovered when that is 0; recursion depth by MaxDepth. Chats that
+// yield a live sub are recorded into st (bounded by maxProductive) so they
+// become seeds on future cycles, surviving days when their recent pages carry
+// no live sub. Returns every live subscription URL found, mapped to the origin
+// that first yielded it.
 func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []string) {
 	live := map[string]origin{}
 	var inline []string
 	discovered := 0
 	var cursors cursorStats
 	rej := newRejects(c.logger)
+
+	topicsBefore := metrics.Crawl.Stats()
 
 	seeds := c.buildSeeds(st)
 	if len(seeds) == 0 {
@@ -99,11 +113,15 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 	if maxDiscovered <= 0 {
 		maxDiscovered = defaultMaxDiscovered
 	}
-	// A chat's identity is its slug alone: a chat seeded with a forum topic and
-	// reposted without one is one target, and scraping it twice would also feed
-	// cursorStats a page-cursor loss the group's message-less t.me/s/ listing
-	// cannot help producing.
+	// A cross-channel discovery's identity is its slug alone: a chat seeded
+	// with a forum topic and reposted without one is one target, a permalink's
+	// digits ride as an advisory hint only, and scraping it twice would also
+	// feed cursorStats a page-cursor loss the group's message-less t.me/s/
+	// listing cannot help producing. Same-group carve-out children key by the
+	// full ref instead — their slug is by construction already visited — so a
+	// flood of permalinks for one topic still enqueues one entry.
 	visited := make(map[string]bool, len(seeds))
+	topicsSeen := make(map[string]bool, len(seeds))
 	queue := make([]scanNode, 0, len(seeds))
 	for slug, s := range seeds {
 		queue = append(queue, scanNode{ref: chanRef{slug: slug, topic: s.topic}, configured: s.configured})
@@ -112,26 +130,49 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		if visited[n.ref.slug] {
+		if !admitNode(n, visited, topicsSeen, &discovered, maxDiscovered) {
 			continue
 		}
-		if n.depth > 0 {
-			if discovered >= maxDiscovered {
-				continue
-			}
-			discovered++
-		}
-		visited[n.ref.slug] = true
 
 		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors, rej) {
-			if !visited[ch] {
-				queue = append(queue, scanNode{ref: chanRef{slug: ch}, depth: n.depth + 1})
+			if ch.carved {
+				if !topicsSeen[ch.ref.String()] {
+					queue = append(queue, ch)
+				}
+			} else if !visited[ch.ref.slug] {
+				queue = append(queue, ch)
 			}
 		}
 	}
 	c.reportCursors(cursors)
+	c.reportTopics(metrics.Crawl.Since(topicsBefore))
 	rej.report(live)
 	return live, inline
+}
+
+// admitNode applies the two admission identities and the shared discovery
+// budget, marking both maps on acceptance: a back-reference must die whichever
+// map its re-discoverer checks against, so the marks ride processing itself.
+func admitNode(n scanNode, visited, topicsSeen map[string]bool, discovered *int, maxDiscovered int) bool {
+	if n.carved {
+		if topicsSeen[n.ref.String()] {
+			return false
+		}
+	} else if visited[n.ref.slug] {
+		return false
+	}
+	if n.depth > 0 {
+		if *discovered >= maxDiscovered {
+			return false
+		}
+		*discovered++
+		if n.carved {
+			metrics.Crawl.TopicDiscovered.Add(1)
+		}
+	}
+	visited[n.ref.slug] = true
+	topicsSeen[n.ref.String()] = true
+	return true
 }
 
 // seedSpec is a depth-0 crawl target: the forum topic to read the chat through if a
@@ -205,16 +246,52 @@ func (c *Crawler) reportCursors(cs cursorStats) {
 		Msg("no channel yielded a page cursor; t.me markup likely changed and every channel was scraped one page deep")
 }
 
-// scanChannel scrapes one channel, classifies its candidate URLs into live,
-// records productivity in st, and returns the referenced channels to expand
-// into (nil when the thematic gate closes or the channel yielded no pages).
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) []string {
-	pages, cursorLost := c.scrapeChannel(ctx, n.ref, c.pagesFor(n))
+// topicAlarmMin is how many topic pages a cycle must have fetched before a
+// zero live yield among them is evidence of an embed markup break rather than
+// a run of genuinely dead topics.
+const topicAlarmMin = 5
+
+// reportTopics logs the cycle's forum-topic numbers and warns on the embed
+// analogue of reportCursors' fleet-wide loss: every fetched topic page coming
+// back without one live subscription means the discussion widget stopped
+// carrying what the harvest reads. Deployments without CRAWL_HTTP see the
+// counters only here.
+func (c *Crawler) reportTopics(ts metrics.CrawlStats) {
+	c.logger.Info().
+		Int("pages", int(ts.TopicPages)).
+		Int("live", int(ts.TopicLive)).
+		Int("empty", int(ts.TopicEmpty)).
+		Int("discovered", int(ts.TopicDiscovered)).
+		Int("groupEmpty", int(ts.GroupEmpty)).
+		Msg("forum topics scraped this cycle")
+	if ts.TopicPages >= topicAlarmMin && ts.TopicLive == 0 {
+		c.logger.Warn().Int("pages", int(ts.TopicPages)).
+			Msg("no topic page yielded a live subscription; t.me embed markup likely changed and every topic was read for nothing")
+	}
+}
+
+// scanChannel scrapes one chat, classifies its candidate URLs into live,
+// records productivity in st, and returns the referenced chats queued at the
+// next depth (nil when the thematic gate closes or the scrape yielded no
+// pages). A ref naming the scraped chat itself survives only the self-exclusion
+// carve-out below and comes back marked, so scan keys it against topicsSeen.
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) []scanNode {
+	pages, cursorLost, viaTopic, listingFailed := c.scrapeChat(ctx, n.ref, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
 		cs.lost++
 	} else if len(pages) > 1 {
 		cs.paged++
+	}
+	// A bare discovered group has nothing left once its listing came back
+	// without a message: count the dead end where discovery status is known.
+	// listingFailed is excluded on purpose — an unreachable host is a transport
+	// problem, not a dead chat — and visited keeps it to one attempt per cycle.
+	if n.depth > 0 && n.ref.topic == "" && !listingFailed &&
+		(len(pages) == 0 || !strings.Contains(pages[0], messageWrap)) {
+		metrics.Crawl.GroupEmpty.Add(1)
+		c.logger.Warn().Str("channel", n.ref.slug).
+			Msg("discovered group listing carried no message and the link named no topic")
 	}
 	if len(pages) == 0 {
 		return nil
@@ -236,17 +313,26 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 		}
 	}
 	if len(found) > 0 {
-		st.record(n.ref.String(), time.Now())
+		key := n.ref.slug
+		if viaTopic {
+			key = n.ref.String()
+		}
+		st.record(key, time.Now())
+	}
+	if viaTopic && len(found) > 0 {
+		metrics.Crawl.TopicLive.Add(1)
 	}
 	c.logger.Info().Str("channel", n.ref.String()).Int("depth", n.depth).
 		Int("pages", len(pages)).Int("subs", len(found)).Msg("scanned channel")
 
-	// Thematic gate: expand into referenced channels only from seeds or from
-	// channels that actually produced subscriptions.
+	// Thematic gate: expand into referenced chats only from seeds or from
+	// chats that actually produced subscriptions — a carve-out child faces
+	// this same gate at its own dequeue, not its parent's yield.
 	if n.depth >= c.opts.MaxDepth || (n.depth > 0 && len(found) == 0) {
 		return nil
 	}
-	return extractChannels(pages, n.ref.slug)
+
+	return childRefs(pages, n, viaTopic)
 }
 
 // gateVerdict is the verdict candidate gave one rejected URL, memoized for the
@@ -363,8 +449,8 @@ func harvestPage(text string, o origin, cand map[string]uint64, urls []string, r
 	return urls
 }
 
-// scrapeChannel returns the HTML of up to pages consecutive t.me/s pages for a
-// channel, walking backward via the ?before= cursor. Fetches are sequential,
+// scrapeChat returns the HTML of up to pages consecutive t.me/s pages for a
+// chat, walking backward via the ?before= cursor. Fetches are sequential,
 // which naturally rate-limits the crawler against t.me.
 //
 // The listing walk comes first even for a ref carrying a topic, because
@@ -372,13 +458,17 @@ func harvestPage(text string, o origin, cand map[string]uint64, urls []string, r
 // separates them: measured 2026-08-14, t.me/s/<channel> returns 20 message
 // wraps and 20 cursors per page while t.me/s/<group> returns none, and a
 // channel post's discussion embed returns one wrap — so the topic shape cannot
-// be the probe, it succeeds for both. A topic-carrying ref whose listing was
-// reached and carried no message is the group case: that empty listing and its
-// cursor outcome are dropped and the topic is read instead, which costs a
-// genuine forum seed one wasted fetch per cycle and a channel seed nothing.
-// A listing that never came back is not that case and does not fall back: a
-// transport or status error says nothing about the seed's shape, and a host
-// that just rate-limited us must not be asked twice in one scrape.
+// be the probe, it succeeds for both. That settlement is empirical for every
+// ref, not only operator seeds: a discovered <slug>/<digits> rides the same
+// probe, so a reposted topic link settles exactly as a seeded one does, and a
+// discovered group with no digits just finds its empty listing and stops. A
+// topic-carrying ref whose listing was reached and carried no message is the
+// group case: that empty listing and its cursor outcome are dropped and the
+// topic is read instead, which costs a genuine forum seed one wasted fetch per
+// cycle and a channel seed nothing. A listing that never came back is not that
+// case and does not fall back: a transport or status error says nothing about
+// the ref's shape, and a host that just rate-limited us must not be asked twice
+// in one scrape.
 //
 // out is newest-first on every return path, and harvestPages takes its inline
 // nodes from out[0] alone: reordering here silently ages that harvest.
@@ -386,17 +476,30 @@ func harvestPage(text string, o origin, cand map[string]uint64, urls []string, r
 // cursorLost reports that the walk stopped only because a fetched page carried
 // no cursor while the page budget still had room — the one outcome that is
 // indistinguishable from a short channel per-channel but diagnostic in
-// aggregate; see cursorStats.
-func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
-	out, cursorLost, listingFailed := c.walkListing(ctx, ref.slug, pages)
+// aggregate; see cursorStats. viaTopic reports that out came from the topic
+// embed rather than the listing — the fact the self-exclusion carve-out is
+// gated on, since only then do the page's same-group links name sibling
+// topics of a chat actually being read through one. listingFailed separates a
+// listing the walk never read from one it read and found empty; see
+// walkListing.
+func (c *Crawler) scrapeChat(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost, viaTopic, listingFailed bool) {
+	out, cursorLost, listingFailed = c.walkListing(ctx, ref.slug, pages)
 	if listingFailed || ref.topic == "" || (len(out) > 0 && strings.Contains(out[0], messageWrap)) {
-		return out, cursorLost
+		return out, cursorLost, false, listingFailed
 	}
-	return c.scrapeTopic(ctx, ref), false
+	return c.scrapeTopic(ctx, ref), false, true, false
 }
 
-// walkListing pages backward through a channel's t.me/s listing; see
-// scrapeChannel for what cursorLost means. fetchFailed separates a listing the
+// scrapeChannel is scrapeChat without the two outcomes only recursion decides
+// from; the tests that pin seed settlement against signature churn hold it to
+// this two-return shape.
+func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
+	out, cursorLost, _, _ = c.scrapeChat(ctx, ref, pages)
+	return out, cursorLost
+}
+
+// walkListing pages backward through a chat's t.me/s listing; see
+// scrapeChat for what cursorLost means. fetchFailed separates a listing the
 // walk never read from one it read and found empty, which is the only thing
 // that tells a group apart from an unreachable host. It never coincides with
 // cursorLost: a lost cursor is a page that was read.
@@ -447,19 +550,23 @@ const topicQuery = "?embed=1&discussion=1&comments_limit=200"
 
 // messageWrap is t.me's per-message container class in both the /s/ listing and
 // the discussion widget. Its presence in a /s/ page is also what separates a
-// channel from a group, and so which of the two shapes a seed is read through.
+// channel from a group, and so which of the two shapes a ref is read through.
 const messageWrap = "tgme_widget_message_wrap"
 
 // scrapeTopic fetches a forum topic's newest messages as one page, which is the
-// only way to reach a group's messages at all. The discussion widget carries no
-// ?before= cursor, so a topic is always one page and never enters cursorStats —
-// a false cursor loss per forum seed would drag the fleet-wide ratio toward
+// only way to reach a group's messages at all — for a discovered ref settling
+// its hint exactly as for a seed. The discussion widget carries no ?before=
+// cursor, so a topic is always one page and never enters cursorStats — a false
+// cursor loss per forum seed would drag the fleet-wide ratio toward
 // reportCursors' markup alarm.
 //
 // Getting here means the /s/ listing was reached and carried no message either,
-// so a reachable body with no message wrap means this seed yields nothing at
+// so a reachable body with no message wrap means this ref yields nothing at
 // all: logged apart from a failed fetch, so a topic that went empty is never
-// read as one that was never reachable.
+// read as one that was never reachable. The counter split follows: only a body
+// that came back counts toward TopicPages (and TopicEmpty when it wraps
+// nothing), so empty/pages stays a markup-health ratio over everything the
+// embed answered, and a rate-limited host moves neither.
 func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
 	u := "https://t.me/" + ref.slug + "/" + ref.topic + topicQuery
 	page, err := c.client.page(ctx, u)
@@ -467,9 +574,11 @@ func (c *Crawler) scrapeTopic(ctx context.Context, ref chanRef) []string {
 		c.logger.Warn().Err(err).Str("channel", ref.String()).Msg("topic listing fetch failed")
 		return nil
 	}
+	metrics.Crawl.TopicPages.Add(1)
 	if !strings.Contains(page, messageWrap) {
+		metrics.Crawl.TopicEmpty.Add(1)
 		c.logger.Warn().Str("channel", ref.String()).Int("bytes", len(page)).
-			Msg("topic listing carried no message; the seed's topic is gone or was never one")
+			Msg("topic listing carried no message; the topic is gone or was never one")
 		return nil
 	}
 	return []string{page}
@@ -485,35 +594,82 @@ func (c *Crawler) pagesFor(n scanNode) int {
 	return min(c.opts.Pages, discoveredPages)
 }
 
-// extractChannels returns the distinct channel slugs referenced across pages,
-// excluding the channel itself, reserved paths, and bot deep links (?start=).
-// Discoveries are bare because identity here is the slug: the three-segment
-// t.me/<chat>/<topic>/<msg> form does say which topic it belongs to, but a
-// reposted link names one topic of a chat arbitrarily, and which topic of a
-// group is worth reading is a judgement only the operator's seed carries.
-func extractChannels(pages []string, self string) []string {
+// extractRefs returns the distinct chat references across pages, excluding
+// reserved paths and bot deep links (?start=). Unlike the bare slugs it
+// replaced, a ref keeps its numeric second segment, or the digits of a
+// ?topic=/?comment= query, as its topic. For another chat that topic is an
+// advisory hint settled empirically like a seed's (scrapeChat); a ref naming
+// the scraped chat itself is kept here unjudged — whether it recurses is the
+// self-exclusion carve-out, which scanChannel decides against how that node
+// was actually read, a fact no pure function of these pages knows.
+//
+// Dedupe is by full ref: one page naming both <chat> and <chat>/<topic> yields
+// both, and scan admits at most one of them per cycle via its visited check.
+func extractRefs(pages []string, _ chanRef) []chanRef {
 	seen := map[string]bool{}
-	var out []string
+	var out []chanRef
 	for _, page := range pages {
 		for _, m := range channelRe.FindAllStringSubmatch(page, -1) {
 			slug := strings.ToLower(m[1])
-			if strings.HasPrefix(m[2], "?start") {
-				continue // bot deep link, not a channel
+			if strings.HasPrefix(m[3], "?start") {
+				continue // bot deep link, not a chat
 			}
-			if reservedSlugs[slug] || slug == self || seen[slug] {
+			if reservedSlugs[slug] {
 				continue
 			}
-			seen[slug] = true
-			out = append(out, slug)
+			topic := m[2]
+			if topic == "" {
+				topic = queryTopic(m[3])
+			}
+			ref := chanRef{slug: slug, topic: topic}
+			if seen[ref.String()] {
+				continue
+			}
+			seen[ref.String()] = true
+			out = append(out, ref)
 		}
 	}
 	return out
 }
 
+// queryTopic digs the digits of ?topic= or ?comment= out of a t.me query; the
+// comment form is how an anchored reply inside one topic names that topic.
+func queryTopic(query string) string {
+	for _, param := range [...]string{"topic=", "comment="} {
+		_, digits, found := strings.Cut(query, param)
+		if !found {
+			continue
+		}
+		if end := strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }); end >= 0 {
+			digits = digits[:end]
+		}
+		if digits != "" {
+			return digits
+		}
+	}
+	return ""
+}
+
+// childRefs turns a scanned page's chat references into the next hop's nodes.
+// The self-exclusion carve-out needs how this node was read — a fact no pure
+// function of these pages knows — so scanChannel hands it in.
+func childRefs(pages []string, n scanNode, viaTopic bool) []scanNode {
+	var kids []scanNode
+	for _, r := range extractRefs(pages, n.ref) {
+		if r.slug == n.ref.slug {
+			if !viaTopic || r.topic == "" || r.topic == n.ref.topic {
+				continue
+			}
+		}
+		kids = append(kids, scanNode{ref: r, depth: n.depth + 1, carved: r.slug == n.ref.slug})
+	}
+	return kids
+}
+
 // parseSeed turns a seed entry (bare slug, @handle, "<slug>/<topic>", or a t.me
 // URL of either) into a chanRef. A numeric second segment is kept as a forum
 // topic although a channel permalink is the same shape: the ambiguity is not
-// resolvable here and scrapeChannel settles it on the /s/ answer instead, so a
+// resolvable here and scrapeChat settles it on the /s/ answer instead, so a
 // topic costs a channel seed nothing. A third segment (a permalink's message
 // id) and any non-numeric segment are dropped, and a reserved path yields an
 // empty ref the caller skips.

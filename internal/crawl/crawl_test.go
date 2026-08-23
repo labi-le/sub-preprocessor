@@ -896,15 +896,19 @@ func TestExtractChannels(t *testing.T) {
 			`lookalike <a href="https://shortcut.me/abcdef">not telegram</a>` +
 			`bare lookalike shortcut.me/ghijkl end`,
 	}
-	got := extractChannels(pages, "o00000000i")
+	got := extractRefs(pages, chanRef{slug: "o00000000i"})
 
-	want := map[string]bool{"d_code": true, "rap_ex": true}
+	// Dedupe is by full ref, so rap_ex bare and rap_ex/12 both survive here;
+	// scan's visited check is what admits at most one per cycle. The self
+	// permalink survives too — extractRefs no longer judges self-refs, the
+	// carve-out in scanChannel does, against how the node was read.
+	want := map[string]bool{"d_code/26804": true, "rap_ex": true, "rap_ex/12": true, "o00000000i/3631": true}
 	if len(got) != len(want) {
-		t.Fatalf("got %v, want channels %v", got, keysOf(want))
+		t.Fatalf("got %v, want refs %v", got, keysOf(want))
 	}
-	for _, ch := range got {
-		if !want[ch] {
-			t.Errorf("unexpected channel %q (bot/self/reserved should be excluded)", ch)
+	for _, ref := range got {
+		if !want[ref.String()] {
+			t.Errorf("unexpected ref %q (bot/reserved should be excluded)", ref.String())
 		}
 	}
 }
@@ -3031,13 +3035,32 @@ type feedFanout struct {
 // parsing fold gets wrong.
 func migrationFanout() []feedFanout {
 	fanout := []feedFanout{
-		{"feed-01", 75}, {"file-vpn-2", 43}, {"feed-03", 30}, {"feed-04", 26},
-		{"tg-vpn", 23}, {"feed-2026", 21}, {"feed-c0ffee", 20}, {"feed-08", 19},
-		{"feed-09", 18}, {"feed-10", 17}, {"feed-11", 16}, {"feed-12", 15},
-		{"collide-c", 14}, {"feed-14", 13}, {"feed-15", 12}, {"feed-16", 11},
-		{"collide-m", 10}, {"feed-18", 9}, {"feed-x-7", 8}, {"feed-20", 6},
-		{"feed-21", 5}, {"feed-22", 5}, {"feed-23", 4}, {"feed-24", 4},
-		{"feed-25", 3}, {"feed-26", 3},
+		{"feed-01", 75},
+		{"file-vpn-2", 43},
+		{"feed-03", 30},
+		{"feed-04", 26},
+		{"tg-vpn", 23},
+		{"feed-2026", 21},
+		{"feed-c0ffee", 20},
+		{"feed-08", 19},
+		{"feed-09", 18},
+		{"feed-10", 17},
+		{"feed-11", 16},
+		{"feed-12", 15},
+		{"collide-c", 14},
+		{"feed-14", 13},
+		{"feed-15", 12},
+		{"feed-16", 11},
+		{"collide-m", 10},
+		{"feed-18", 9},
+		{"feed-x-7", 8},
+		{"feed-20", 6},
+		{"feed-21", 5},
+		{"feed-22", 5},
+		{"feed-23", 4},
+		{"feed-24", 4},
+		{"feed-25", 3},
+		{"feed-26", 3},
 	}
 	for i := len(fanout) + 1; i <= migrationChannels; i++ {
 		fanout = append(fanout, feedFanout{slug: fmt.Sprintf("feed-%d", i), urls: 1})

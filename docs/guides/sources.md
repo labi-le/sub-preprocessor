@@ -89,13 +89,36 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   serving right now are indistinguishable at that gate: 12/162 = 7.4% vs 17/200 = 8.5%,
   z=-0.38, p=0.70. What ages is the node, not the venue — which is why inline harvesting
   is restricted to each channel's NEWEST page instead of being switched off.
-- **Do NOT build a forum/thread harvester.** All three seams work and were verified
+- **A forum/thread harvester is still out; bounded targeted in-forum traversal is in
+  (decision reversed 2026-08-23).** All three seams work and were verified
   (`?embed=1&discussion=1&comments_limit=N` renders comments server-side, `&comment=<id>`
   is a deep cursor, `POST t.me/api/method` `loadComments` answers unauthenticated), and one
   topic holds 6036 distinct nodes over 46.5 d — more than 15 channels and 192 pages
-  combined (5280). Struck anyway: its day-zero nodes pass at 3 of 112 (2.7%), WORSE than
-  channels, so depth buys volume of DEAD nodes (~3 prod-gate nodes/day in steady state). A
-  new endpoint re-opens nothing here; only a measurement beating 2.7% would.
+  combined (5280). The struck measurement priced the UNBOUNDED shape, and that verdict stands:
+  its day-zero INLINE nodes passed at 3 of 112 (2.7%), worse than channels, which is what
+  exhaustive deep-history mining buys under the 10.34 d half-life above and the 7.4% same-day
+  base rate — an unbounded pass costs an estimated ~1182 requests and returns mostly dead nodes
+  (design-cost estimate, 2026-08-23; refused then and now). What the crawler does instead is the
+  bounded opposite: it reads only each topic's NEWEST embed window (~96–200 replies; live probe,
+  2026-08-23 — no static pagination exists, so newest-window-only is a property, not a choice),
+  expands only along proven-productive edges (a discovered topic is itself expanded only if its
+  own page yielded a live subscription — the gate above, not a new one), spends at most one GET
+  per topic per cycle inside the existing caps (the shared `MaxChannels` pool of 200 counting
+  topic visits with cross-channel ones, `discoveredPages`, `CRAWL_DEPTH`; `comments_limit` stays
+  200; zero new knobs), and admits same-group hops only through a narrow carve-out from the
+  slug-equals-self exclusion: the scanned node must have been read through its topic embed this
+  cycle, the child ref must carry a different numeric topic, and the child faces the same
+  productivity gate at its own dequeue.
+- **The measurement that re-opened this question is pre-committed, and it can re-close it.**
+  After at least 14 daily cycles, compare the DAY-ZERO pass rate of topic-origin vs
+  channel-origin discovered subscription candidates over the SAME window at the SAME gate.
+  Never set that figure against the 92.7% managed annuity baseline at the top of this section
+  (steady-state survivors — a different population), and never conflate it with the 2.7%
+  inline-node population without saying so. Primary kill switch, self-repealing: if the
+  topic-origin day-zero rate does not beat the recorded 2.7%, revert the feature commit and
+  restore the do-not-build bullet recording BOTH measurements. Secondary signals: discovered
+  topics against the 200-slot budget headroom, the empty/pages ratio (embed markup health), and
+  cycle wall-time delta against the pre-deploy median.
 - **Do NOT move the harvest to the vassago instance.** Chat/forum nodes are 3.0x LESS
   whitelist-fit than what it already subscribes to — 21 of 675 resolved keys (3.1%)
   against 1838 of 20049 (9.2%) — and 0 of the novel ones were alive.
@@ -103,7 +126,7 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
   alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
   yield. What the number cannot tell you is which 500: seeds are walked in Go map order
-  (`scan`'s `for slug, s := range seeds`, `discover.go:108`), so the truncation point is
+  (`scan`'s `for slug, s := range seeds`, `discover.go:126`), so the truncation point is
   arbitrary within one cycle's fresh pool.
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
