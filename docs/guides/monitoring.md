@@ -405,13 +405,14 @@ vendor the dashboard into the nixos repo.
   `stable_crawl_topic_discovered_total` same-group carve-out edges admitted into the crawl queue;
   `stable_crawl_group_empty_total` bare discovered groups whose `/s/` listing was reached and
   empty with no topic hint available — the counted dead end.
-- **Two alarms ship with the five counters; both are fleet-shaped, never per-topic.** (1) The
-  empty ratio pinned near 1 while fetches keep rising ⇒ the embed markup changed and every topic
-  read is coming back silently empty — fired as a warn from the same per-cycle log line once at
-  least five topic pages were fetched in a cycle with zero live yields, the same fleet-shaped warn `reportCursors`
-  uses for lost listing cursors. (2) `stable_crawl_topic_discovered_total` stuck near zero over days ⇒ the
-  same-group carve-out is misfiring and intra-forum recursion is effectively dead — check that
-  before concluding the forums themselves dried up.
+- **One automated alarm and one operator check ship with the five counters; both are fleet-shaped,
+  never per-topic.** (1) The empty ratio pinned near 1 while fetches keep rising ⇒ the embed markup
+  changed and every topic read is coming back silently empty — fired as a warn from the same per-cycle
+  log line once at least five topic pages were fetched in a cycle with zero live yields, the same
+  fleet-shaped warn `reportCursors` uses for lost listing cursors. (2) `stable_crawl_topic_discovered_total`
+  stuck near zero over days ⇒ the same-group carve-out is misfiring and intra-forum recursion is
+  effectively dead — operator guidance rather than an automated alarm: nothing fires on it, so check
+  that before concluding the forums themselves dried up.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway

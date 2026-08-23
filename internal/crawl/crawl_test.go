@@ -896,7 +896,7 @@ func TestExtractChannels(t *testing.T) {
 			`lookalike <a href="https://shortcut.me/abcdef">not telegram</a>` +
 			`bare lookalike shortcut.me/ghijkl end`,
 	}
-	got := extractRefs(pages, chanRef{slug: "o00000000i"})
+	got := extractRefs(pages)
 
 	// Dedupe is by full ref, so rap_ex bare and rap_ex/12 both survive here;
 	// scan's visited check is what admits at most one per cycle. The self

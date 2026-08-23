@@ -20,9 +20,10 @@ type CrawlCounters struct {
 	TopicPages atomic.Int64
 	TopicLive  atomic.Int64
 	TopicEmpty atomic.Int64
-	// TopicDiscovered counts same-group carve-out edges admitted past their
-	// per-cycle budget; GroupEmpty counts discovered groups whose t.me/s
-	// listing was reached, carried no message, and came with no topic hint.
+	// TopicDiscovered counts same-group topic edges admitted through the
+	// carve-out under the shared per-cycle pool; GroupEmpty counts discovered
+	// groups whose t.me/s listing was reached, carried no message, and came
+	// with no topic hint.
 	TopicDiscovered atomic.Int64
 	GroupEmpty      atomic.Int64
 }

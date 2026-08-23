@@ -57,7 +57,6 @@ func TestExtractRefsCarriesTopics(t *testing.T) {
 
 	cases := []struct {
 		name string
-		self chanRef
 		page string
 		want []chanRef
 	}{
@@ -108,7 +107,6 @@ func TestExtractRefsCarriesTopics(t *testing.T) {
 		},
 		{
 			name: "self refs are kept unjudged for the caller",
-			self: chanRef{slug: "forumchat"},
 			page: `<a href="https://t.me/forumchat/55">x</a>`,
 			want: []chanRef{{slug: "forumchat", topic: "55"}},
 		},
@@ -116,7 +114,7 @@ func TestExtractRefsCarriesTopics(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := extractRefs([]string{tc.page}, tc.self)
+			got := extractRefs([]string{tc.page})
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -133,7 +131,7 @@ func TestExtractRefsCarriesTopics(t *testing.T) {
 		page := `<a href="https://t.me/rap_ex">a</a>` +
 			`<a href="https://t.me/rap_ex">b</a>` +
 			`<a href="https://t.me/rap_ex/12">c</a>`
-		got := extractRefs([]string{page}, chanRef{})
+		got := extractRefs([]string{page})
 		want := []chanRef{{slug: "rap_ex"}, {slug: "rap_ex", topic: "12"}}
 		if len(got) != len(want) {
 			t.Fatalf("got %v, want %v", got, want)
@@ -230,7 +228,6 @@ func TestDiscoveredRefSettlesBothWays(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 // TestCarveOutGating pins the self-exclusion carve-out: same-group recursion
@@ -483,7 +480,9 @@ func TestBareGroupDeadEndCounted(t *testing.T) {
 // TestTopicMetricsRendered drives a mixed fixture cycle and reads the numbers
 // back off GET /metrics. It does not run in parallel: it asserts exact values
 // of process-wide counters, and another test bumping them mid-cycle would make
-// that a coin toss.
+// that a coin toss. Judging the render against an absolute Stats() snapshot
+// taken at the response keeps that exactness across orderings and -count
+// repetitions alike.
 func TestTopicMetricsRendered(t *testing.T) {
 	const (
 		forumListURL = "https://t.me/s/forumchat"
@@ -510,13 +509,7 @@ func TestTopicMetricsRendered(t *testing.T) {
 	}}, &logBuf)
 
 	ts := metrics.Crawl.Since(before)
-	want := map[string]int64{
-		"stable_crawl_topic_pages_total":      ts.TopicPages,
-		"stable_crawl_topic_live_total":       ts.TopicLive,
-		"stable_crawl_topic_empty_total":      ts.TopicEmpty,
-		"stable_crawl_topic_discovered_total": ts.TopicDiscovered,
-		"stable_crawl_group_empty_total":      ts.GroupEmpty,
-	}
+	cycle := crawlSampleIDs(ts)
 	expect := map[string]int64{
 		"stable_crawl_topic_pages_total":      3, // parent, live sibling and empty sibling embeds all answered
 		"stable_crawl_topic_live_total":       2, // parent seed page and the live sibling
@@ -525,8 +518,8 @@ func TestTopicMetricsRendered(t *testing.T) {
 		"stable_crawl_group_empty_total":      1,
 	}
 	for name, e := range expect {
-		if want[name] != e {
-			t.Errorf("%s delta = %d, want %d", name, want[name], e)
+		if cycle[name] != e {
+			t.Errorf("cycle delta %s = %d, want %d", name, cycle[name], e)
 		}
 	}
 
@@ -544,6 +537,10 @@ func TestTopicMetricsRendered(t *testing.T) {
 	if _, err = buf.ReadFrom(resp.Body); err != nil {
 		t.Fatal(err)
 	}
+	// GET /metrics renders LIFETIME totals, so the oracle is the absolute
+	// counter set read as the response lands — equal to the render by
+	// construction whatever earlier cycles or -count repetitions did.
+	want := crawlSampleIDs(metrics.Crawl.Stats())
 	rendered := renderedSamples(t, buf.String())
 	for name, w := range want {
 		got, ok := rendered[name]
@@ -597,12 +594,23 @@ func renderedSamples(t *testing.T, body string) map[string]float64 {
 	return rendered
 }
 
+// crawlSampleIDs maps the five counter fields of a CrawlStats snapshot onto
+// their rendered sample names.
+func crawlSampleIDs(ts metrics.CrawlStats) map[string]int64 {
+	return map[string]int64{
+		"stable_crawl_topic_pages_total":      ts.TopicPages,
+		"stable_crawl_topic_live_total":       ts.TopicLive,
+		"stable_crawl_topic_empty_total":      ts.TopicEmpty,
+		"stable_crawl_topic_discovered_total": ts.TopicDiscovered,
+		"stable_crawl_group_empty_total":      ts.GroupEmpty,
+	}
+}
+
 // TestFixtureSlugsMatchChannelRe guards the fixture corpus against the one
 // silent failure mode it has shown: a t.me link whose slug is shorter than
 // channelRe's five-character floor matches nothing, so a test built on it
-// passes without exercising the path it names. Every t.me slug this file's
-// fixtures reference must be one discovery can actually see; reserved paths
-// and the /s/ preview prefix are exempt.
+// passes without exercising the path it names. Reserved paths and the /s/
+// preview prefix are exempt.
 func TestFixtureSlugsMatchChannelRe(t *testing.T) {
 	t.Parallel()
 
@@ -610,7 +618,10 @@ func TestFixtureSlugsMatchChannelRe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := regexp.MustCompile(`(?:^|[^a-zA-Z0-9.-])t\.me/([a-zA-Z][a-zA-Z0-9_]{2,31})`)
+	// The capture floor sits below channelRe's on purpose: at channelRe's own
+	// floor a sub-floor fixture slug is not captured at all and slips silently,
+	// which is the very failure this guard turns loud.
+	link := regexp.MustCompile(`(?:^|[^a-zA-Z0-9.-])t\.me/([a-zA-Z][a-zA-Z0-9_]{0,31})`)
 	seen := map[string]bool{}
 	for _, m := range link.FindAllStringSubmatch(string(src), -1) {
 		slug := strings.ToLower(m[1])

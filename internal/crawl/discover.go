@@ -544,8 +544,8 @@ func (c *Crawler) walkListing(ctx context.Context, slug string, pages int) (out 
 // candidates it could not see included the only durable source there.
 //
 // 200 is where the ceiling is reached, so a higher value only re-sends the same
-// body. Walking message ids instead measured ~1182 requests for one pass and
-// invites the rate limiter, which is still refused.
+// body. Walking message ids instead costs a design-estimated ~1182 requests
+// for one pass and invites the rate limiter, which is still refused.
 const topicQuery = "?embed=1&discussion=1&comments_limit=200"
 
 // messageWrap is t.me's per-message container class in both the /s/ listing and
@@ -605,7 +605,7 @@ func (c *Crawler) pagesFor(n scanNode) int {
 //
 // Dedupe is by full ref: one page naming both <chat> and <chat>/<topic> yields
 // both, and scan admits at most one of them per cycle via its visited check.
-func extractRefs(pages []string, _ chanRef) []chanRef {
+func extractRefs(pages []string) []chanRef {
 	seen := map[string]bool{}
 	var out []chanRef
 	for _, page := range pages {
@@ -655,7 +655,7 @@ func queryTopic(query string) string {
 // function of these pages knows — so scanChannel hands it in.
 func childRefs(pages []string, n scanNode, viaTopic bool) []scanNode {
 	var kids []scanNode
-	for _, r := range extractRefs(pages, n.ref) {
+	for _, r := range extractRefs(pages) {
 		if r.slug == n.ref.slug {
 			if !viaTopic || r.topic == "" || r.topic == n.ref.topic {
 				continue
