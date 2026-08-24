@@ -163,10 +163,8 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 	var wg sync.WaitGroup
 	sem := fanoutSem(concurrency)
 	for _, px := range proxies {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			reachable, mbps := bandwidthProbeOne(ctx, px, target, timeout)
@@ -185,7 +183,7 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 				out[label] = o
 			}
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	return out

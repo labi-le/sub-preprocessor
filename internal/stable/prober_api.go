@@ -104,10 +104,8 @@ func (m *MihomoProber) apiCheck(
 	var wg sync.WaitGroup
 	sem := fanoutSem(concurrency)
 	for _, px := range proxies {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout)
@@ -126,7 +124,7 @@ func (m *MihomoProber) apiCheck(
 				out[label] = o
 			}
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	return out

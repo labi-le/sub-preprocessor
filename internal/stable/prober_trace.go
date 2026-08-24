@@ -90,10 +90,8 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 	var wg sync.WaitGroup
 	sem := fanoutSem(c.Concurrency)
 	for _, px := range proxies {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout)
@@ -117,7 +115,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 				winner[label] = cand
 			}
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 

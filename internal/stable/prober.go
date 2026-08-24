@@ -548,14 +548,12 @@ func (m *MihomoProber) filterReachable(
 	budget := m.precheckDialBudget()
 	var wg sync.WaitGroup
 	for i, addr := range addrs {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 
 			verdicts[i] = reachableTCP(ctx, addr, budget)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -691,10 +689,8 @@ func (m *MihomoProber) runRound(
 	var wg sync.WaitGroup
 	for _, i := range live {
 		px := nodes[i].proxy
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			tctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
@@ -722,7 +718,7 @@ func (m *MihomoProber) runRound(
 			}
 			a.succ++
 			a.sum += int32(delay)
-		}()
+		})
 	}
 	wg.Wait()
 }

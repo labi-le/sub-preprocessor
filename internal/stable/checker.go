@@ -583,9 +583,7 @@ func (c *Checker) fetchSources(
 	var wg sync.WaitGroup
 	for i, src := range spec.Sources {
 		sem <- struct{}{} // bound goroutine creation, not just execution
-		wg.Add(1)
-		go func(i int, src config.SubscriptionSource) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 
 			c.logger.Debug().Str("source", src.Name).Msg("fetching source")
@@ -614,7 +612,7 @@ func (c *Checker) fetchSources(
 				body:  SourceBody{Name: src.Name, Nodes: nodes},
 				stats: stats,
 			}
-		}(i, src)
+		})
 	}
 	wg.Wait()
 
