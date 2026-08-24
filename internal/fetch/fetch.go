@@ -495,7 +495,7 @@ func newHTTPClient(guardIPs bool) *http.Client {
 			if errDial != nil {
 				return nil, fmt.Errorf("split host port: %w", errDial)
 			}
-			if ip, errIP := netip.ParseAddr(host); errIP == nil {
+			if ip, ok := parseIPHost(host); ok {
 				if !isPublicIP(ip) {
 					return nil, errors.New(errNonPublicTarget)
 				}
@@ -515,9 +515,9 @@ func newHTTPClient(guardIPs bool) *http.Client {
 		},
 	}
 
-	validate := ValidatePublicHTTPSURL
+	validate := ValidatePublicParsedHTTPSURL
 	if !guardIPs {
-		validate = ValidateHTTPSURL
+		validate = validateHTTPSURLParsed
 	}
 	return &http.Client{
 		Timeout:   defaultHTTPTimeout,
@@ -526,9 +526,15 @@ func newHTTPClient(guardIPs bool) *http.Client {
 			if len(via) >= maxRedirects {
 				return errStoppedRedirects
 			}
-			return validate(SubscriptionURL(req.URL.String()))
+			return validate(req.URL)
 		},
 	}
+}
+
+// validateHTTPSURLParsed is checkHTTPSURL for the parsed form, so a redirect's
+// req.URL needs no round-trip through String and url.Parse.
+func validateHTTPSURLParsed(u *url.URL) error {
+	return checkHTTPSURL(u)
 }
 
 // MaybeDecode wraps the response body in the reader for fileType. A gzip
