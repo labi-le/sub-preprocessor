@@ -849,6 +849,11 @@ const inlineSourceName = "inline"
 // single base64 Body under the managed inline source. It returns ok=false when
 // no usable inline node was found.
 func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
+	// Refused before Parse, not inside it: an append-then-refuse callback
+	// strands the first node past the cap it enforces.
+	if c.opts.InlineMax == 0 {
+		return source{}, 0, false
+	}
 	seen := make(map[string]struct{}, len(uris))
 	var kept []string
 	subscription.Parse([]byte(strings.Join(uris, "\n")), func(n subscription.Node) bool {
@@ -861,10 +866,10 @@ func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
 		}
 		seen[key] = struct{}{}
 		kept = append(kept, n.Raw)
-		if c.opts.InlineMax <= 0 {
+		if c.opts.InlineMax > 0 && len(kept) >= c.opts.InlineMax {
 			return false
 		}
-		return len(kept) < c.opts.InlineMax
+		return true
 	})
 	if len(kept) == 0 {
 		return source{}, 0, false

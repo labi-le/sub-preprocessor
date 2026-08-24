@@ -113,13 +113,12 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 	if maxDiscovered <= 0 {
 		maxDiscovered = defaultMaxDiscovered
 	}
-	// A cross-channel discovery's identity is its slug alone: a chat seeded
-	// with a forum topic and reposted without one is one target, a permalink's
-	// digits ride as an advisory hint only, and scraping it twice would also
-	// feed cursorStats a page-cursor loss the group's message-less t.me/s/
-	// listing cannot help producing. Same-group carve-out children key by the
-	// full ref instead — their slug is by construction already visited — so a
-	// flood of permalinks for one topic still enqueues one entry.
+	// Two admission identities, applied by admitNode alone: a cross-channel
+	// discovery keys on the slug — a chat seeded with a topic and reposted
+	// without one is one target, and scraping it twice would feed cursorStats
+	// a loss the group's message-less t.me/s/ listing cannot help producing —
+	// while same-group carve-out children key on the full ref, their slug
+	// being by construction already visited.
 	visited := make(map[string]bool, len(seeds))
 	topicsSeen := make(map[string]bool, len(seeds))
 	queue := make([]scanNode, 0, len(seeds))
@@ -134,15 +133,9 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 			continue
 		}
 
-		for _, ch := range c.scanChannel(ctx, n, st, live, &inline, &cursors, rej) {
-			if ch.carved {
-				if !topicsSeen[ch.ref.String()] {
-					queue = append(queue, ch)
-				}
-			} else if !visited[ch.ref.slug] {
-				queue = append(queue, ch)
-			}
-		}
+		// Children enqueue unmarked: admitNode owns every refusal, and
+		// pre-filtering here would double-bookkeep the very maps it marks.
+		queue = append(queue, c.scanChannel(ctx, n, st, live, &inline, &cursors, rej)...)
 	}
 	c.reportCursors(cursors)
 	c.reportTopics(metrics.Crawl.Since(topicsBefore))
@@ -488,14 +481,6 @@ func (c *Crawler) scrapeChat(ctx context.Context, ref chanRef, pages int) (out [
 		return out, cursorLost, false, listingFailed
 	}
 	return c.scrapeTopic(ctx, ref), false, true, false
-}
-
-// scrapeChannel is scrapeChat without the two outcomes only recursion decides
-// from; the tests that pin seed settlement against signature churn hold it to
-// this two-return shape.
-func (c *Crawler) scrapeChannel(ctx context.Context, ref chanRef, pages int) (out []string, cursorLost bool) {
-	out, cursorLost, _, _ = c.scrapeChat(ctx, ref, pages)
-	return out, cursorLost
 }
 
 // walkListing pages backward through a chat's t.me/s listing; see

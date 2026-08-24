@@ -66,8 +66,9 @@ const dataPost = `data-post="`
 // and tail resumes at the attribute's VALUE, so no byte extractURLs could
 // harvest is skipped. A zero id ends the walk.
 //
-// A value that is not "<chat>/<digits>" is no boundary and stays inside seg,
-// which is the shape cursorRe demands of the same attribute.
+// A value that is not "<chat>/<digits>" is no boundary and stays inside seg —
+// the shape cursorRe demands of the same attribute, except that postID also
+// refuses leading-zero and over-wide digit runs where cursorRe accepts them.
 func nextMessage(text string) (seg string, id uint64, tail string) {
 	for pos := 0; ; {
 		i := strings.Index(text[pos:], dataPost)
