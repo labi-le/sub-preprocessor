@@ -737,6 +737,7 @@ func TestRejectSummaryExcludesACandidateAcceptedElsewhere(t *testing.T) {
 	}
 	// The line itself is still there: one channel's fetch really did answer 503.
 	if n := len(withMsg(decodeLines(t, buf.String()), "candidate rejected")); n != 1 {
+		t.Fatalf("candidate rejected lines = %d, want 1", n)
 	}
 }
 
