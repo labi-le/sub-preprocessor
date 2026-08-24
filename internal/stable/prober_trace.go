@@ -2,7 +2,6 @@ package stable
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -96,10 +95,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 
 			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout)
 			res, ok := parseTrace(body)
-			host, _, splitErr := net.SplitHostPort(px.Addr())
-			if splitErr != nil {
-				host = px.Addr()
-			}
+			host := proxyHost(px)
 			n := prog.step()
 			opLog.Debug().Str("node", px.Name()).Str("server", host).
 				Bool("reachable", reachable).Int("status", status).

@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"net"
 	"strings"
 
 	mihomo "github.com/metacubex/mihomo/constant"
@@ -9,6 +10,16 @@ import (
 // entryLabel maps a mihomo proxy back onto the Entry.Label it was built from.
 func entryLabel(px mihomo.Proxy) string {
 	return foldMieruName(px.Name(), px.Type() == mihomo.Mieru)
+}
+
+// proxyHost is the server half of a proxy's address, for outcome fields that
+// name the probed endpoint.
+func proxyHost(px mihomo.Proxy) string {
+	host, _, err := net.SplitHostPort(px.Addr())
+	if err != nil {
+		return px.Addr()
+	}
+	return host
 }
 
 // mappingLabel is entryLabel for a mapping no adapter was built from, which is

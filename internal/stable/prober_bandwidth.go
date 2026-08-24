@@ -168,10 +168,7 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 			defer func() { <-sem }()
 
 			reachable, mbps := bandwidthProbeOne(ctx, px, target, timeout)
-			host, _, splitErr := net.SplitHostPort(px.Addr())
-			if splitErr != nil {
-				host = px.Addr()
-			}
+			host := proxyHost(px)
 			o := BandwidthOutcome{Server: host, Reachable: reachable, Mbps: mbps}
 			n := prog.step()
 			opLog.Debug().Str("node", px.Name()).Str("server", host).

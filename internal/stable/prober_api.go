@@ -109,10 +109,7 @@ func (m *MihomoProber) apiCheck(
 			defer func() { <-sem }()
 
 			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout)
-			host, _, splitErr := net.SplitHostPort(px.Addr())
-			if splitErr != nil {
-				host = px.Addr()
-			}
+			host := proxyHost(px)
 			o := APIOutcome{Server: host, Reachable: reachable, Blocked: reachable && blocked(status, body)}
 			n := prog.step()
 			opLog.Debug().Str("node", px.Name()).Str("server", host).
