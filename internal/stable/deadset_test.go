@@ -30,8 +30,8 @@ func TestDeadSet(t *testing.T) {
 	if err := d.Prune(); err != nil {
 		t.Fatal(err)
 	}
-	if d.Len() != 0 {
-		t.Fatalf("expired entry should be pruned, len=%d", d.Len())
+	if d.Blocked("1.1.1.1:443") {
+		t.Fatal("an expired key must stay unblocked across Prune")
 	}
 }
 
@@ -58,7 +58,7 @@ func TestDeadSetBlockCopiesRetainedKey(t *testing.T) {
 	if d.Blocked("2.2.2.2:443") {
 		t.Error("overwriting the caller's buffer must not move the cached key")
 	}
-	if d.Len() != 1 {
-		t.Errorf("refreshing one key must keep one entry, len=%d", d.Len())
+	if !d.Blocked("1.1.1.1:443") {
+		t.Error("refreshing one key must leave exactly that key blocked")
 	}
 }

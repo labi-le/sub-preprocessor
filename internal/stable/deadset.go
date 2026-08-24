@@ -70,10 +70,3 @@ func (d *DeadSet) Prune() error {
 	d.mu.Unlock()
 	return nil
 }
-
-// Len returns the current entry count (may include not-yet-pruned expired ones).
-func (d *DeadSet) Len() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return len(d.m)
-}
