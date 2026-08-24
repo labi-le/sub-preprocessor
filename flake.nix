@@ -13,51 +13,32 @@
       flake-utils,
     }:
     let
-      version = "1.0.0";
       pname = "sub-preprocessor";
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
-
-      systemConfigs = {
-        x86_64-linux = {
-          arch = "linux_amd64";
-          hash = ""; # x86_64-linux
-        };
-        aarch64-linux = {
-          arch = "linux_arm64";
-          hash = ""; # aarch64-linux
-        };
-      };
     in
     flake-utils.lib.eachSystem supportedSystems (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        config = systemConfigs.${system};
       in
       {
-        packages.default = pkgs.stdenv.mkDerivation {
-          inherit pname version;
+        packages.default = pkgs.buildGoModule {
+          inherit pname;
+          # no release tags exist to version against; the build tracks the pinned rev
+          version = self.shortRev or self.dirtyShortRev;
+          src = self;
+          subPackages = [ "." ];
+          vendorHash = "sha256-acgA9ktV7Pvc4fZcBxGLMeS29NgCnhRLG+OyCfNiPmY=";
 
-          src = pkgs.fetchurl {
-            url = "https://github.com/labi-le/sub-preprocessor/releases/download/v${version}/${pname}_${version}_${config.arch}";
-            hash = config.hash;
-          };
+          env.CGO_ENABLED = "0";
 
-          dontUnpack = true;
-
-          installPhase = ''
-            mkdir -p $out/bin
-            cp $src $out/bin/${pname}
-            chmod +x $out/bin/${pname}
-          '';
-
-          meta = with pkgs.lib; {
+          meta = {
             description = "Sub-preprocessor";
             homepage = "https://github.com/labi-le/sub-preprocessor";
-            license = licenses.mit;
+            license = pkgs.lib.licenses.mit;
             platforms = supportedSystems;
           };
         };
