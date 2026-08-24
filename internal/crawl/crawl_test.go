@@ -1116,11 +1116,7 @@ func (f pageFetcher) page(_ context.Context, u string) (string, error) {
 func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
+	priv := writeEmptyPrivate(t, t.TempDir())
 
 	page := `<pre>vless://a@1.1.1.1:443#n1</pre>` +
 		` vless://b@1.1.1.1:443#dup ` + // same server:port as n1 -> deduped
@@ -1185,19 +1181,15 @@ func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 // it, while that same page's subscription link still becomes a managed source.
 func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) {
 	t.Parallel()
-
 	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
+	priv := writeEmptyPrivate(t, dir)
 
 	const (
 		newest = "vless://a@1.1.1.1:443#newest"
 		older  = "vless://b@2.2.2.2:443#older"
 		subURL = "https://older.example/sub"
 	)
-	// data-post is what pageCursor reads, so page one hands scrapeChannel the
+	// data-post is what pageCursor reads, so page one hands scrapeChat the
 	// ?before= key of the second, older page.
 	page1 := `<div data-post="chan/100"></div><pre>` + newest + `</pre>`
 	page2 := `<pre>` + older + `</pre><a href="` + subURL + `">sub</a>`
@@ -1288,10 +1280,7 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 func TestRunOnceAttributesBothLinksOfOnePost(t *testing.T) {
 	t.Parallel()
 
-	priv := filepath.Join(t.TempDir(), "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
+	priv := writeEmptyPrivate(t, t.TempDir())
 
 	const (
 		post   = "3631"
@@ -1356,12 +1345,7 @@ func hasInlineSource(t *testing.T, priv string) bool {
 // an inline source even though the scraped page carries inline URIs.
 func TestRunOnceInlineDisabled(t *testing.T) {
 	t.Parallel()
-
-	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
+	priv := writeEmptyPrivate(t, t.TempDir())
 
 	page := `<pre>vless://a@1.1.1.1:443#n1</pre> vless://c@2.2.2.2:443#n2`
 	c := &Crawler{
@@ -1419,6 +1403,7 @@ func TestRunOnceYieldsInlineNameToHandAddedEntry(t *testing.T) {
 			PrivatePath:   priv,
 			Pages:         1,
 			InlineEnabled: true,
+			InlineMax:     5,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
 		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
@@ -1465,6 +1450,17 @@ func hasWarnNaming(logs, name string) bool {
 		}
 	}
 	return false
+}
+
+// writeEmptyPrivate seeds an empty managed-overlay file at dir/private.yaml
+// and returns its path.
+func writeEmptyPrivate(t *testing.T, dir string) string {
+	t.Helper()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return priv
 }
 
 // sourcesByName loads private.yaml keyed by name, refusing a duplicate: that is
@@ -1540,6 +1536,7 @@ func TestRunOnceSheltersHandAddedBodySource(t *testing.T) {
 			PrivatePath:   priv,
 			Pages:         1,
 			InlineEnabled: true,
+			InlineMax:     5,
 		},
 		client: pageFetcher{pages: pages},
 		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
@@ -1597,12 +1594,7 @@ func TestRunOnceSheltersHandAddedBodySource(t *testing.T) {
 // proxy URIs, so buildInlineSource returns ok=false and no inline is written.
 func TestRunOnceNoInlineNodes(t *testing.T) {
 	t.Parallel()
-
-	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
+	priv := writeEmptyPrivate(t, t.TempDir())
 
 	page := `<pre>just prose, a classy pass://foo link, and no proxies here</pre>`
 	c := &Crawler{
@@ -2550,7 +2542,7 @@ func TestScrapeChannelReportsLostCursor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := &Crawler{client: pageFetcher{pages: tc.pages}, logger: zerolog.Nop()}
-			pages, lost := c.scrapeChannel(context.Background(), chanRef{slug: "chan"}, tc.budget)
+			pages, lost, _, _ := c.scrapeChat(context.Background(), chanRef{slug: "chan"}, tc.budget)
 			if len(pages) != tc.wantPages {
 				t.Errorf("pages = %d, want %d", len(pages), tc.wantPages)
 			}
@@ -2600,10 +2592,7 @@ func TestRunOnceHonoursBlockedList(t *testing.T) {
 		keptURL    = "https://fine.example/sub"
 	)
 	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	priv := writeEmptyPrivate(t, dir)
 	channels := filepath.Join(dir, "channels.yaml")
 	if err := os.WriteFile(channels, []byte("channels:\n  - chan\nblocked:\n  - "+blockedURL+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2708,7 +2697,7 @@ func TestScrapeChannelForumTopic(t *testing.T) {
 				client: pageFetcher{pages: tc.pages, errs: tc.errs},
 				logger: zerolog.New(&logBuf),
 			}
-			pages, lost := c.scrapeChannel(context.Background(), tc.ref, tc.budget)
+			pages, lost, _, _ := c.scrapeChat(context.Background(), tc.ref, tc.budget)
 			logged := logBuf.String()
 			if len(pages) != tc.wantPages {
 				t.Fatalf("pages = %d, want %d (log: %s)", len(pages), tc.wantPages, logged)
@@ -2773,8 +2762,7 @@ func TestScrapeChannelPermalinkSeedWalksTheListing(t *testing.T) {
 		},
 		logger: zerolog.New(&logBuf),
 	}
-
-	pages, lost := c.scrapeChannel(context.Background(), parseSeed(entry), 6)
+	pages, lost, _, _ := c.scrapeChat(context.Background(), parseSeed(entry), 6)
 	logged := logBuf.String()
 	if len(pages) != 2 {
 		t.Fatalf("pages = %d, want the 2 the listing walk yields (log: %s)", len(pages), logged)
@@ -2820,8 +2808,7 @@ func TestScrapeChannelGroupSeedFallsBackToItsTopic(t *testing.T) {
 		},
 		logger: zerolog.New(&logBuf),
 	}
-
-	pages, lost := c.scrapeChannel(context.Background(), parseSeed("forumchat/1310"), 6)
+	pages, lost, _, _ := c.scrapeChat(context.Background(), parseSeed("forumchat/1310"), 6)
 	logged := logBuf.String()
 	if len(pages) != 1 || !strings.Contains(pages[0], subURL) {
 		t.Fatalf("pages = %v, want exactly the topic listing (log: %s)", pages, logged)
@@ -2866,8 +2853,7 @@ func TestScrapeChannelListingFetchFailureDoesNotReadTheTopic(t *testing.T) {
 		},
 		logger: zerolog.New(&logBuf),
 	}
-
-	pages, lost := c.scrapeChannel(context.Background(), parseSeed("forumchat/1310"), 6)
+	pages, lost, _, _ := c.scrapeChat(context.Background(), parseSeed("forumchat/1310"), 6)
 	logged := logBuf.String()
 	if got := hits[topicURL]; got != 0 {
 		t.Errorf("the discussion embed was fetched %d time(s); a host that just failed the listing must not be asked again", got)
@@ -2947,12 +2933,8 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	priv := filepath.Join(dir, "private.yaml")
+	priv := writeEmptyPrivate(t, dir)
 	statePath := filepath.Join(dir, ".crawler-state.json")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
-
 	const subURL = "https://sub.example/rotating"
 	page := `<div class="tgme_widget_message_wrap">` +
 		`<a href="https://t.me/forumchat/1310/21206">permalink</a>` +
@@ -3551,9 +3533,6 @@ func TestRunOnceLogsCuratedCount(t *testing.T) {
 	t.Parallel()
 
 	priv := filepath.Join(t.TempDir(), "private.yaml")
-	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
-		t.Fatalf("write private.yaml: %v", err)
-	}
 	first := writeCurated(t, "subscriptions:\n  sources:\n    - name: kept-1\n    - name: kept-2\n")
 	second := writeCurated(t, "subscriptions:\n  sources:\n    - name: kept-2\n    - name: kept-3\n")
 
@@ -3574,19 +3553,17 @@ func TestRunOnceLogsCuratedCount(t *testing.T) {
 		},
 		logger: zerolog.New(&buf),
 	}
-
 	c.RunOnce(context.Background())
-
-	var terminal string
-	for line := range strings.SplitSeq(buf.String(), "\n") {
-		if strings.Contains(line, "private.yaml updated") {
-			terminal = line
+	var terminal map[string]any
+	for _, m := range decodeLines(t, buf.String()) {
+		if m["message"] == "private.yaml updated" {
+			terminal = m
 		}
 	}
-	if terminal == "" {
+	if terminal == nil {
 		t.Fatalf("the cycle wrote nothing, so the terminal line is untested:\n%s", buf.String())
 	}
-	if !strings.Contains(terminal, `"curated":3`) {
-		t.Errorf(`terminal line = %s, want "curated":3 (kept-2 counted once)`, terminal)
+	if terminal["curated"] != float64(3) {
+		t.Errorf("terminal line = %v, want curated=3 (kept-2 counted once)", terminal)
 	}
 }

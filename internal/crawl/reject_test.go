@@ -90,10 +90,12 @@ func fixtureClassify(_ context.Context, _ *http.Client, u fetch.SubscriptionURL)
 	case fixRaw:
 		return classify.Result{}, fmt.Errorf("origin refused %s", fixRaw) //nolint:err113 // fixture
 	case fixRedirect:
-		return classify.Result{}, fmt.Errorf("do request: %w", &url.Error{Op: "Get", URL: fixRedirect,
+		return classify.Result{}, fmt.Errorf("do request: %w", &url.Error{
+			Op: "Get", URL: fixRedirect,
 			Err: fmt.Errorf("invalid url: %w", &url.Error{
 				Op: "parse", URL: fixElsewhere, Err: errors.New("net/url: invalid control character in URL"),
-			})})
+			}),
+		})
 	default:
 		return classify.Result{}, errors.New("unexpected fixture url: " + string(u))
 	}
@@ -170,16 +172,7 @@ func runCycle(t *testing.T, page string) cycleResult {
 
 	out := cycleResult{raw: buf.String(), priv: priv, classified: seen}
 	slices.Sort(out.classified)
-	for l := range strings.SplitSeq(strings.TrimSpace(out.raw), "\n") {
-		if l == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(l), &m); err != nil {
-			t.Fatalf("log line is not JSON (%v): %s", err, l)
-		}
-		out.lines = append(out.lines, m)
-	}
+	out.lines = decodeLines(t, out.raw)
 	return out
 }
 
@@ -192,6 +185,30 @@ func withMsg(lines []map[string]any, msg string) []map[string]any {
 		}
 	}
 	return out
+}
+
+// decodeLines decodes a whole zerolog stream into its JSON objects, skipping
+// the blank lines a split can leave behind.
+func decodeLines(t *testing.T, raw string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for l := range strings.SplitSeq(strings.TrimSpace(raw), "\n") {
+		if l == "" {
+			continue
+		}
+		out = append(out, decodeLine(t, l))
+	}
+	return out
+}
+
+// decodeLine decodes one zerolog line or fails the test.
+func decodeLine(t *testing.T, line string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &m); err != nil {
+		t.Fatalf("log line is not JSON (%v): %s", err, line)
+	}
+	return m
 }
 
 // TestRunOnceCandidateOutcomesAreByteStable pins the accept/reject decision of a
@@ -340,10 +357,7 @@ func TestRejectLineURLIDIsChannelIndependent(t *testing.T) {
 	id := func(slug, rawURL string) string {
 		var buf bytes.Buffer
 		newRejects(zerolog.New(&buf)).record(origin{Slug: slug}, rawURL, rejectNodeless, 0, nil)
-		var line map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line); err != nil {
-			t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
-		}
+		line := decodeLine(t, buf.String())
 		got, ok := line["urlid"].(string)
 		if !ok || got == "" {
 			t.Fatalf("no urlid for %s in channel %s: %s", rawURL, slug, buf.String())
@@ -378,10 +392,7 @@ func TestRejectLineKeepsThePostOutOfTheURLID(t *testing.T) {
 	var buf bytes.Buffer
 	newRejects(zerolog.New(&buf)).record(origin{Slug: fixChannel, Post: post}, fixNodeless, rejectNodeless, 0, nil)
 
-	var line map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line); err != nil {
-		t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
-	}
+	line := decodeLine(t, buf.String())
 	sum := sha256.Sum256([]byte(fixNodeless))
 	if want := hex.EncodeToString(sum[:])[:8]; line["urlid"] != want {
 		t.Errorf("urlid = %v, want the per-URL %q", line["urlid"], want)
@@ -395,10 +406,7 @@ func TestRejectLineKeepsThePostOutOfTheURLID(t *testing.T) {
 
 	buf.Reset()
 	newRejects(zerolog.New(&buf)).record(origin{Slug: fixChannel}, fixNodeless, rejectNodeless, 0, nil)
-	var postless map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &postless); err != nil {
-		t.Fatalf("log line is not JSON (%v): %s", err, buf.String())
-	}
+	postless := decodeLine(t, buf.String())
 	if got, ok := postless["post"]; ok {
 		t.Errorf("origin with no post logged post = %v, want the field absent", got)
 	}
@@ -420,7 +428,8 @@ func TestRejectLinesCarryNoCredential(t *testing.T) {
 		t.Fatal("no log output captured")
 	}
 	secrets := make([]string, 0, 20)
-	secrets = append(secrets,
+	secrets = append(
+		secrets,
 		"payload=", "SECRETPAYLOAD1234", "DEADSECRET9999", "RAWSECRET7777",
 		"REDIRSECRET5555", "OTHERSECRET3333",
 		// The path-borne credential: the token, and the whole path holding it.
@@ -499,10 +508,10 @@ func TestRejectLineKeepsRealClassifyErrors(t *testing.T) {
 		setup func(t *testing.T) (string, *http.Client)
 		want  []string
 	}{{
-		// classify.go's read-response wrap: Content-Length promises more than the
+		// classify.go's read-body wrap: Content-Length promises more than the
 		// handler delivers, and the partial body is flushed before the abort so
 		// the failure lands in io.ReadAll rather than in client.Do.
-		name: "read response",
+		name: "read body",
 		setup: func(t *testing.T) (string, *http.Client) {
 			srv := tlsFixtureServer(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Length", "4096")
@@ -512,7 +521,7 @@ func TestRejectLineKeepsRealClassifyErrors(t *testing.T) {
 			})
 			return srv.URL + credPath, srv.Client()
 		},
-		want: []string{"read response", "unexpected EOF"},
+		want: []string{"read body", "unexpected EOF"},
 	}, {
 		// The reachable *url.Error: net/http embeds the whole request URL, so
 		// this is the case the substitution exists for.
@@ -573,11 +582,7 @@ func assertRealErrorSurvives(t *testing.T, name, raw string, err error, want []s
 			t.Errorf("reject line leaks %q from a real %s error:\n%s", secret, name, line)
 		}
 	}
-
-	var m map[string]any
-	if uErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &m); uErr != nil {
-		t.Fatalf("log line is not JSON (%v): %s", uErr, line)
-	}
+	m := decodeLine(t, line)
 	got, _ := m["error"].(string)
 	if got == redactedError || got == redactedPathError {
 		t.Fatalf("a real %s error was redacted (%q), so classify or fetch now names a request "+
@@ -720,15 +725,7 @@ func TestRejectSummaryExcludesACandidateAcceptedElsewhere(t *testing.T) {
 	}
 	c.RunOnce(context.Background())
 
-	var lines []map[string]any
-	for l := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(l), &m); err != nil {
-			t.Fatalf("log line is not JSON (%v): %s", err, l)
-		}
-		lines = append(lines, m)
-	}
-	summary := withMsg(lines, "candidates rejected by reason")
+	summary := withMsg(decodeLines(t, buf.String()), "candidates rejected by reason")
 	if len(summary) != 1 {
 		t.Fatalf("got %d summary lines, want one", len(summary))
 	}
@@ -739,8 +736,7 @@ func TestRejectSummaryExcludesACandidateAcceptedElsewhere(t *testing.T) {
 		t.Fatalf("bad_status = %v, want 0", got)
 	}
 	// The line itself is still there: one channel's fetch really did answer 503.
-	if n := len(withMsg(lines, "candidate rejected")); n != 1 {
-		t.Fatalf("got %d per-candidate lines, want the one 503 attempt", n)
+	if n := len(withMsg(decodeLines(t, buf.String()), "candidate rejected")); n != 1 {
 	}
 }
 
@@ -914,11 +910,7 @@ func TestRejectTrackingIsBounded(t *testing.T) {
 	buf.Reset()
 	rej.report(nil)
 	var summary map[string]any
-	for l := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(l), &m); err != nil {
-			t.Fatalf("log line is not JSON (%v): %s", err, l)
-		}
+	for _, m := range decodeLines(t, buf.String()) {
 		if m["message"] == "candidates rejected by reason" {
 			summary = m
 		}
