@@ -725,13 +725,10 @@ func (c *CloudflareConfig) applyDefaults() {
 // reaches make(chan struct{}, n) in the trace fan-out, and a negative timeout
 // bypasses the ==0 default guard.
 func (c *CloudflareConfig) validate() error {
-	if c.Timeout < 0 {
-		return errors.New("geo.cloudflare.timeout must not be negative")
-	}
-	if c.Concurrency < 0 {
-		return errors.New("geo.cloudflare.concurrency must not be negative")
-	}
-	return nil
+	return errors.Join(
+		rejectNegativeDur("geo.cloudflare.timeout", &c.Timeout),
+		rejectNegativeInt("geo.cloudflare.concurrency", &c.Concurrency),
+	)
 }
 
 // GeoBlockConfig configures the per-node geo-block list -- a SQLite TTL store of
@@ -998,12 +995,13 @@ func Load(path string) (Config, error) {
 		return Config{}, errValidate
 	}
 
-	privatePath := filepath.Join(filepath.Dir(path), "private.yaml")
-	privBytes, readErr := os.ReadFile(privatePath)
-	switch {
-	case readErr == nil:
+	b, ok, err := readOverlay(filepath.Dir(path), "private.yaml")
+	if err != nil {
+		return Config{}, fmt.Errorf("read private config: %w", err)
+	}
+	if ok {
 		var priv privateConfig
-		if unmarshalErr := decodeStrict("private config", privBytes, &priv); unmarshalErr != nil {
+		if unmarshalErr := decodeStrict("private config", b, &priv); unmarshalErr != nil {
 			return Config{}, unmarshalErr
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
@@ -1013,15 +1011,23 @@ func Load(path string) (Config, error) {
 		if validateErr := cfg.Subscriptions.validateSources(""); validateErr != nil {
 			return Config{}, fmt.Errorf("private config: %w", validateErr)
 		}
-	case errors.Is(readErr, fs.ErrNotExist):
-		// No private overlay to merge.
-	default:
-		// A permission or I/O error must fail loudly: silently skipping the
-		// overlay would drop the crawler-managed sources from the output.
-		return Config{}, fmt.Errorf("read private config: %w", readErr)
 	}
 
 	return cfg, nil
+}
+
+// readOverlay reads one overlay file from dir. ok is false only for a missing
+// file; every other read error is returned, so callers fail loudly rather than
+// silently dropping crawler-managed sources.
+func readOverlay(dir, name string) ([]byte, bool, error) {
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	return b, true, nil
 }
 
 // sourcesOverlayFile is the git-tracked curated overlay, named in the error that
@@ -1034,33 +1040,28 @@ func errManagedInCuratedFile(file, name string) error {
 	return fmt.Errorf("subscriptions.sources.%s: managed: true is the crawler's own mark and belongs in private.yaml; %s and config.yaml are curated", name, file)
 }
 
-// mergeSourcesOverlay appends subscription sources from a sibling sources.yaml
-// (curated sources kept out of config.yaml) to cfg. A missing file is fine; a
-// read or parse error fails loudly, mirroring the private.yaml overlay so a
-// permission/I/O problem never silently drops the curated sources.
 func mergeSourcesOverlay(dir string, cfg *Config) error {
-	b, err := os.ReadFile(filepath.Join(dir, sourcesOverlayFile))
-	switch {
-	case err == nil:
-		var overlay privateConfig
-		if unmarshalErr := decodeStrict("sources config", b, &overlay); unmarshalErr != nil {
-			return unmarshalErr
-		}
-		// The rule travels with the file rather than with Load's statement
-		// order: an overlay merged after private.yaml would meet no other gate,
-		// and refusing before the append also keeps the blame on the entries
-		// this file actually carried.
-		for _, src := range overlay.Subscriptions.Sources {
-			if src.Managed {
-				return errManagedInCuratedFile(sourcesOverlayFile, src.Name)
-			}
-		}
-		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, overlay.Subscriptions.Sources...)
-	case errors.Is(err, fs.ErrNotExist):
-		// No sources overlay to merge.
-	default:
+	b, ok, err := readOverlay(dir, sourcesOverlayFile)
+	if err != nil {
 		return fmt.Errorf("read sources config: %w", err)
 	}
+	if !ok {
+		return nil
+	}
+	var overlay privateConfig
+	if unmarshalErr := decodeStrict("sources config", b, &overlay); unmarshalErr != nil {
+		return unmarshalErr
+	}
+	// The rule travels with the file rather than with Load's statement
+	// order: an overlay merged after private.yaml would meet no other gate,
+	// and refusing before the append also keeps the blame on the entries
+	// this file actually carried.
+	for _, src := range overlay.Subscriptions.Sources {
+		if src.Managed {
+			return errManagedInCuratedFile(sourcesOverlayFile, src.Name)
+		}
+	}
+	cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, overlay.Subscriptions.Sources...)
 	return nil
 }
 
@@ -1159,50 +1160,39 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
-// validateNonNegative rejects negative durations. The cache TTLs and the three
-// geo refresh intervals are pointers (nil-checked) because an explicit 0 is
-// valid and means "disable".
-func (cfg *Config) validateNonNegative() error {
-	if cfg.Resolver.Timeout < 0 {
-		return errors.New("resolver.timeout must not be negative")
-	}
-	if cfg.Resolver.CacheTTL != nil && *cfg.Resolver.CacheTTL < 0 {
-		return errors.New("resolver.cache_ttl must not be negative")
-	}
-	if cfg.Resolver.CacheNegativeTTL != nil && *cfg.Resolver.CacheNegativeTTL < 0 {
-		return errors.New("resolver.cache_negative_ttl must not be negative")
-	}
-	if cfg.Geo.ASN.Timeout < 0 {
-		return errors.New("geo.asn.timeout must not be negative")
-	}
-	if cfg.Geo.ASN.CacheTTL < 0 {
-		return errors.New("geo.asn.cache_ttl must not be negative")
-	}
-	if cfg.Fetch.Timeout < 0 {
-		return errors.New("fetch.timeout must not be negative")
-	}
-	if cfg.DeadCache.TTL != nil && *cfg.DeadCache.TTL < 0 {
-		return errors.New("deadcache.ttl must not be negative")
-	}
-	if cfg.Geo.Geofeed.RefreshInterval != nil && *cfg.Geo.Geofeed.RefreshInterval < 0 {
-		return errors.New("geo.geofeed.refresh_interval must not be negative")
-	}
-	if cfg.Geo.DBIP.RefreshInterval != nil && *cfg.Geo.DBIP.RefreshInterval < 0 {
-		return errors.New("geo.dbip.refresh_interval must not be negative")
-	}
-	if cfg.Geo.Registry.RefreshInterval != nil && *cfg.Geo.Registry.RefreshInterval < 0 {
-		return errors.New("geo.registry.refresh_interval must not be negative")
-	}
-	if cfg.Subscriptions.Interval < 0 {
-		return errors.New("subscriptions.interval must not be negative")
-	}
-	if cfg.Subscriptions.Check.Timeout < 0 {
-		return errors.New("subscriptions.check.timeout must not be negative")
-	}
-	if cfg.Subscriptions.Check.SourceTimeout < 0 {
-		return errors.New("subscriptions.check.source_timeout must not be negative")
+// rejectNegativeDur and rejectNegativeInt are nil-safe so pointer fields keep
+// their "explicit 0 is valid" semantics without repeating the nil check.
+func rejectNegativeDur(path string, d *time.Duration) error {
+	if d != nil && *d < 0 {
+		return fmt.Errorf("%s must not be negative", path)
 	}
 	return nil
+}
+
+func rejectNegativeInt(path string, n *int) error {
+	if n != nil && *n < 0 {
+		return fmt.Errorf("%s must not be negative", path)
+	}
+	return nil
+}
+
+func (cfg *Config) validateNonNegative() error {
+	checks := []error{
+		rejectNegativeDur("resolver.timeout", &cfg.Resolver.Timeout),
+		rejectNegativeDur("resolver.cache_ttl", cfg.Resolver.CacheTTL),
+		rejectNegativeDur("resolver.cache_negative_ttl", cfg.Resolver.CacheNegativeTTL),
+		rejectNegativeDur("geo.asn.timeout", &cfg.Geo.ASN.Timeout),
+		rejectNegativeDur("geo.asn.cache_ttl", &cfg.Geo.ASN.CacheTTL),
+		rejectNegativeDur("fetch.timeout", &cfg.Fetch.Timeout),
+		rejectNegativeDur("deadcache.ttl", cfg.DeadCache.TTL),
+		rejectNegativeDur("geo.geofeed.refresh_interval", cfg.Geo.Geofeed.RefreshInterval),
+		rejectNegativeDur("geo.dbip.refresh_interval", cfg.Geo.DBIP.RefreshInterval),
+		rejectNegativeDur("geo.registry.refresh_interval", cfg.Geo.Registry.RefreshInterval),
+		rejectNegativeDur("subscriptions.interval", &cfg.Subscriptions.Interval),
+		rejectNegativeDur("subscriptions.check.timeout", &cfg.Subscriptions.Check.Timeout),
+		rejectNegativeDur("subscriptions.check.source_timeout", &cfg.Subscriptions.Check.SourceTimeout),
+	}
+	return errors.Join(checks...)
 }
 
 // validateResolverAddress requires an explicit host:port -- the string
@@ -1383,34 +1373,17 @@ func validateProviderChain(i int, providers []string) error {
 // concurrency reaches make(chan struct{}, n) in the prober workers, and
 // negative timeouts/TTLs bypass the ==0 default guards.
 func (g *GeoBlockConfig) validate() error {
-	if g.TTL < 0 {
-		return errors.New("geoblock.ttl must not be negative")
-	}
-	if g.Gemini.Timeout < 0 {
-		return errors.New("geoblock.gemini.timeout must not be negative")
-	}
-	if g.Gemini.Concurrency < 0 {
-		return errors.New("geoblock.gemini.concurrency must not be negative")
-	}
-	if g.Claude.Timeout < 0 {
-		return errors.New("geoblock.claude.timeout must not be negative")
-	}
-	if g.Claude.Concurrency < 0 {
-		return errors.New("geoblock.claude.concurrency must not be negative")
-	}
-	if g.ChatGPT.Timeout < 0 {
-		return errors.New("geoblock.chatgpt.timeout must not be negative")
-	}
-	if g.ChatGPT.Concurrency < 0 {
-		return errors.New("geoblock.chatgpt.concurrency must not be negative")
-	}
-	if g.Tidal.Timeout < 0 {
-		return errors.New("geoblock.tidal.timeout must not be negative")
-	}
-	if g.Tidal.Concurrency < 0 {
-		return errors.New("geoblock.tidal.concurrency must not be negative")
-	}
-	return nil
+	return errors.Join(
+		rejectNegativeDur("geoblock.ttl", &g.TTL),
+		rejectNegativeDur("geoblock.gemini.timeout", &g.Gemini.Timeout),
+		rejectNegativeInt("geoblock.gemini.concurrency", &g.Gemini.Concurrency),
+		rejectNegativeDur("geoblock.claude.timeout", &g.Claude.Timeout),
+		rejectNegativeInt("geoblock.claude.concurrency", &g.Claude.Concurrency),
+		rejectNegativeDur("geoblock.chatgpt.timeout", &g.ChatGPT.Timeout),
+		rejectNegativeInt("geoblock.chatgpt.concurrency", &g.ChatGPT.Concurrency),
+		rejectNegativeDur("geoblock.tidal.timeout", &g.Tidal.Timeout),
+		rejectNegativeInt("geoblock.tidal.concurrency", &g.Tidal.Concurrency),
+	)
 }
 
 func (s *SubscriptionsConfig) applyDefaults() {
