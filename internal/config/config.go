@@ -1025,7 +1025,7 @@ func readOverlay(dir, name string) ([]byte, bool, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false, nil
 	case err != nil:
-		return nil, false, err
+		return nil, false, fmt.Errorf("read overlay %s: %w", name, err)
 	}
 	return b, true, nil
 }
