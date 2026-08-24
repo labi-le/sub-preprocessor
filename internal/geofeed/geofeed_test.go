@@ -19,6 +19,10 @@ func TestParseAndLookupCountry(t *testing.T) {
 		"# comment",
 		"198.51.100.0/24,DE",
 		"198.51.100.10/32,NL,ZH,Amsterdam",
+		// Digits fold to themselves, not letters: a junk country must drop
+		// the line rather than mint a CountryCode of raw bytes. Its range sits
+		// apart from the two above, so nothing else can answer for it.
+		"203.0.113.0/24,11",
 	}, "\n"))
 
 	entries, err := geofeed.Parse(body)
@@ -30,6 +34,9 @@ func TestParseAndLookupCountry(t *testing.T) {
 
 	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("198.51.100.10")); got != (geofeed.CountryCode{'N', 'L'}) {
 		t.Fatalf("unexpected country: %q", got)
+	}
+	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("203.0.113.1")); got != (geofeed.CountryCode{}) {
+		t.Fatalf("a line with a non-letter country must be dropped whole, got %q", got)
 	}
 }
 

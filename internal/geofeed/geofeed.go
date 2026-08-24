@@ -120,12 +120,10 @@ func parseLine(line []byte) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	c1, c2 := countryBytes[0], countryBytes[1]
-	if c1 >= 'a' && c1 <= 'z' {
-		c1 -= 32
-	}
-	if c2 >= 'a' && c2 <= 'z' {
-		c2 -= 32
+	const caseBit = 0x20 // ASCII case bit; clearing it upper-folds letters
+	c1, c2 := countryBytes[0]&^caseBit, countryBytes[1]&^caseBit
+	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
+		return Entry{}, false
 	}
 
 	return Entry{Prefix: prefix, Country: CountryCode{c1, c2}}, true

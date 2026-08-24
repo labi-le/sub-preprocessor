@@ -460,7 +460,6 @@ func (m *MihomoProber) PrecheckReport() PrecheckReport {
 // 29-200), read off the mapping so the verdict costs no adapter object.
 func dialsServerOverTCP(typ string, mapping map[string]any) bool {
 	switch typ {
-	//nolint:goconst // mihomo's own dispatch keys, quoted at the one site that must match adapter/parser.go
 	case "vless", "vmess", "trojan", "ss", "ssr", "socks5", "http", "anytls":
 		return !dialsServerOverQUIC(mapping)
 	default:
@@ -649,8 +648,7 @@ func reachableTCP(ctx context.Context, addr string, budget time.Duration) preche
 
 			return verdictReachable
 		}
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) {
+		if _, isDNS := errors.AsType[*net.DNSError](err); isDNS {
 			verdict = verdictUnresolved
 		} else {
 			verdict = verdictRefused
@@ -673,8 +671,7 @@ func reachableTCP(ctx context.Context, addr string, budget time.Duration) preche
 // difference would classify the same failure per protocol. The pre-check
 // separates the transport class structurally rather than by parsing errors.
 func probeStage(err error) ProbeStage {
-	var fetchErr *url.Error
-	if errors.As(err, &fetchErr) {
+	if _, ok := errors.AsType[*url.Error](err); ok {
 		return StageFetch
 	}
 

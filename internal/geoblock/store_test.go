@@ -159,11 +159,14 @@ func TestLoadFoldsLegacyMixedCaseRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	soon := time.Now().Add(time.Minute).UnixNano()
+	// `soon` is deliberately in the PAST: min-wins would then resurrect the
+	// block from the expired row and Blocked() below would pass either way.
+	soon := time.Now().Add(-time.Minute).UnixNano()
 	later := time.Now().Add(48 * time.Hour).UnixNano()
 	for host, exp := range map[string]int64{"Legacy.Example.COM": later, "legacy.example.com": soon} {
 		if _, execErr := db.Exec(
-			`INSERT INTO geoblock(host, blocked_until) VALUES(?, ?)`, host, exp); execErr != nil {
+			`INSERT INTO geoblock(host, blocked_until) VALUES(?, ?)`, host, exp,
+		); execErr != nil {
 			t.Fatal(execErr)
 		}
 	}

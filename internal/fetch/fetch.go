@@ -603,6 +603,7 @@ var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use
 	netip.MustParsePrefix("100::/64"),       // discard-only
 	netip.MustParsePrefix("2001::/32"),      // Teredo
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849)
 	netip.MustParsePrefix("2002::/16"),      // 6to4
 	netip.MustParsePrefix("fec0::/10"),      // deprecated site-local
 }

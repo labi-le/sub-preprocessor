@@ -53,8 +53,7 @@ const redactedURLDigestBytes = 6
 func New(logger zerolog.Logger, listen string, holder *Holder, stableHolder *stable.Holder) *Server {
 	errorHandler := func(c *fiber.Ctx, err error) error {
 		code := fiber.StatusInternalServerError
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			code = fiberErr.Code
 		}
 

@@ -75,7 +75,7 @@ type Options struct {
 	StatePath     string        // persisted productive-channel memory; empty disables persistence
 	StateTTL      time.Duration // drop a productive channel from memory after this long without a live sub
 	InlineEnabled bool          // harvest raw inline proxy URIs pasted in channel messages
-	InlineMax     int           // cap on inline nodes kept per cycle (first N after dedup)
+	InlineMax     int           // cap on inline nodes kept per cycle (first N after dedup); 0 keeps none, negative is uncapped
 }
 
 type source struct {
@@ -203,17 +203,25 @@ func (c *Crawler) RunDaily(ctx context.Context, hour, minute int) {
 // cycle is already running it returns false immediately without waiting, so a
 // scheduled tick or an HTTP trigger that collides with a live cycle is skipped
 // safely rather than queued. A non-zero budget bounds the cycle's wall clock.
-func (c *Crawler) runGuarded(ctx context.Context, budget time.Duration) bool {
-	if !c.running.TryLock() {
-		return false
-	}
-	defer c.running.Unlock()
+// runBounded wraps ctx in the cycle's wall-clock budget and runs one cycle
+// under it. The budget exists for schedules long enough that a fraction of the
+// interval bounds nothing (see cycleBudget); a triggered cycle shares it so an
+// HTTP trigger cannot start what a scheduled tick would have aborted.
+func (c *Crawler) runBounded(ctx context.Context, budget time.Duration) {
 	if budget > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
 	c.RunOnce(ctx)
+}
+
+func (c *Crawler) runGuarded(ctx context.Context, budget time.Duration) bool {
+	if !c.running.TryLock() {
+		return false
+	}
+	defer c.running.Unlock()
+	c.runBounded(ctx, budget)
 	return true
 }
 
@@ -853,7 +861,10 @@ func (c *Crawler) buildInlineSource(uris []string) (source, int, bool) {
 		}
 		seen[key] = struct{}{}
 		kept = append(kept, n.Raw)
-		return c.opts.InlineMax <= 0 || len(kept) < c.opts.InlineMax
+		if c.opts.InlineMax <= 0 {
+			return false
+		}
+		return len(kept) < c.opts.InlineMax
 	})
 	if len(kept) == 0 {
 		return source{}, 0, false

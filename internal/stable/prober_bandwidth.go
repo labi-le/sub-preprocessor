@@ -213,7 +213,7 @@ func hostPort(target string) (string, bool) {
 	}
 	port := u.Port()
 	if port == "" {
-		if u.Scheme == "http" { //nolint:goconst // a URL scheme, not the adapter dispatch key dialsServerOverTCP spells the same way
+		if u.Scheme == "http" {
 			port = "80"
 		} else {
 			port = "443"

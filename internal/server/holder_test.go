@@ -35,19 +35,24 @@ func TestHolder_StoreLoad(t *testing.T) {
 	}
 }
 
-func TestHolder_ConcurrentRace(_ *testing.T) {
-	snap := &server.Snapshot{Svc: &stubFilterer{}, Groups: nil}
-	h := server.NewHolder(snap)
+func TestHolder_ConcurrentRace(t *testing.T) {
+	snaps := []*server.Snapshot{
+		{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"US"}}},
+		{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"DE"}}},
+	}
+	h := server.NewHolder(snaps[0])
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			h.Store(&server.Snapshot{Svc: &stubFilterer{}})
+			h.Store(snaps[i%2])
 		}()
 		go func() {
 			defer wg.Done()
-			_ = h.Load()
+			if got := h.Load(); got != snaps[0] && got != snaps[1] {
+				t.Error("Load() returned a snapshot that was never stored")
+			}
 		}()
 	}
 	wg.Wait()

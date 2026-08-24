@@ -77,7 +77,7 @@ func serveMux(ctx context.Context, c *Crawler) http.Handler {
 		}
 		go func() {
 			defer c.running.Unlock()
-			c.RunOnce(ctx)
+			c.runBounded(ctx, cycleBudget(oneDay))
 		}()
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("crawl started\n"))

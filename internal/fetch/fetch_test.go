@@ -244,14 +244,15 @@ var (
 		// IPv4-in-IPv6 encodings Unmap does not normalise, in order: NAT64
 		// well-known, NAT64 local-use, 6to4, Teredo, deprecated
 		// IPv4-compatible. Each embeds 127.0.0.1 and reaches it wherever the
-		// matching gateway or tunnel exists. Then three non-global IPv6
-		// ranges: discard-only, deprecated site-local, unique local.
+		// matching gateway or tunnel exists. Then four non-global IPv6
+		// ranges: discard-only, documentation, deprecated site-local, unique local.
 		"https://[64:ff9b::7f00:1]/",
 		"https://[64:ff9b:1::7f00:1]/",
 		"https://[2002:7f00:1::]/",
 		"https://[2001:0:1::1]/",
 		"https://[::7f00:1]/",
 		"https://[100::1]/",
+		"https://[2001:db8::1]/",
 		"https://[fec0::1]/",
 		"https://[fd00::1]/",
 		// 127.0.0.1 as one 32-bit decimal, as hex, as the two-part short form,

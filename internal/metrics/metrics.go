@@ -471,7 +471,7 @@ func gauge(w *exposition, name, helpText string, v float64) {
 
 func counter(w *exposition, name, helpText string, v int64) {
 	help(w, name, "counter", helpText)
-	sample(w, name, nil, float64(v))
+	intSample(w, name, "", nil, int(v))
 }
 
 func help(w *exposition, name, typ, helpText string) {

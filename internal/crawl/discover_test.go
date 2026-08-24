@@ -442,6 +442,47 @@ func TestPermalinkDiscoveryRecordsBareSlug(t *testing.T) {
 	}
 }
 
+// TestThematicGateDoesNotExpandBarrenChild pins the gate: a discovered channel
+// whose pages yield no live subscription is crawled but not expanded, so the
+// graph stays one hop deep around barren channels.
+func TestThematicGateDoesNotExpandBarrenChild(t *testing.T) {
+	t.Parallel()
+
+	const (
+		seedListURL       = "https://t.me/s/srca"
+		childListURL      = "https://t.me/s/barrench"
+		grandchildListURL = "https://t.me/s/deeperg"
+		subSeed           = "https://sub.example/seed"
+	)
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	opts := Options{Channels: []string{"srca"}, Pages: 1, MaxDepth: 3}
+	c := &Crawler{
+		opts: opts,
+		client: pageFetcher{hits: hits, pages: map[string]string{
+			seedListURL: wrapMsg(subSeed) + `<a href="https://t.me/barrench">repost</a>`,
+			childListURL: wrapMsg("https://sub.example/child-never-live") +
+				`<a href="https://t.me/deeperg">child's own repost</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) == subSeed {
+				return classify.Result{Nodes: 1}, nil
+			}
+			return classify.Result{}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	st := state{Productive: map[string]channelState{}}
+	c.scan(context.Background(), &st)
+
+	if hits[childListURL] != 1 {
+		t.Errorf("barren child fetched %d time(s), want exactly the one discovery visit", hits[childListURL])
+	}
+	if hits[grandchildListURL] != 0 {
+		t.Error("a child that yielded nothing must not be expanded into its own references")
+	}
+}
+
 // TestBareGroupDeadEndCounted pins item-14 accounting: a discovered group whose
 // listing came back without a message and whose link named no topic warns once,
 // counts once, is fetched once despite leftover budget, and ends the cycle.
@@ -474,6 +515,27 @@ func TestBareGroupDeadEndCounted(t *testing.T) {
 	}
 	if len(live) == 0 || live[subSeed].Slug != "srca" {
 		t.Errorf("live = %v, want the cycle to complete with the seed's own find", live)
+	}
+}
+
+// A discovered GROUP whose listing fetch fails is a transport problem, not an
+// empty chat: the group-empty counter must not move. Driven through
+// scanChannel because scan drops a failed child before its accounting runs.
+func TestBareGroupListingFailureNotCounted(t *testing.T) {
+	t.Parallel()
+
+	c := &Crawler{
+		opts: Options{Channels: []string{"srca"}, Pages: 6, MaxDepth: 3},
+		client: pageFetcher{errs: map[string]error{
+			"https://t.me/s/deadgrp": errors.New("bad status: 429 Too Many Requests"),
+		}},
+		logger: zerolog.Nop(),
+	}
+	before := metrics.Crawl.GroupEmpty.Load()
+	n := scanNode{ref: chanRef{slug: "deadgrp"}, depth: 1}
+	c.scanChannel(context.Background(), n, &state{}, map[string]origin{}, nil, &cursorStats{}, newRejects(zerolog.Nop()))
+	if d := metrics.Crawl.GroupEmpty.Load() - before; d != 0 {
+		t.Errorf("group-empty counter moved %d for a failed listing fetch, want 0", d)
 	}
 }
 
@@ -635,5 +697,15 @@ func TestFixtureSlugsMatchChannelRe(t *testing.T) {
 	}
 	if !seen["srca2"] || !seen["forumchat"] {
 		t.Errorf("guard matched %v — its own link pattern drifted from the fixtures", seen)
+	}
+}
+
+// TestTopicQueryKeepsCommentCeiling pins the query constant itself: the whole
+// fixture corpus above is built on the embed URL shape topicQuery produces,
+// and the 200 comment ceiling (measured where t.me stops returning more) is
+// what those fixtures represent.
+func TestTopicQueryKeepsCommentCeiling(t *testing.T) {
+	if !strings.Contains(topicQuery, "comments_limit=200") {
+		t.Errorf("topicQuery = %q, want it to keep comments_limit=200", topicQuery)
 	}
 }

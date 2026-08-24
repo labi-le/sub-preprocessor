@@ -708,4 +708,38 @@ func TestLoggedSubscriptionURLIsRedacted(t *testing.T) {
 	if !strings.Contains(line, "provider.example") {
 		t.Fatalf("redacted log line lost the host, leaving nothing to debug with: %q", line)
 	}
+
+	digestOf := func() string {
+		for line := range strings.SplitSeq(logs.String(), "\n") {
+			if !strings.Contains(line, "subscription_url") {
+				continue
+			}
+			_, rest, ok := strings.Cut(line, "provider.example")
+			if !ok {
+				continue
+			}
+			digest, _, _ := strings.Cut(rest, ",")
+			return digest
+		}
+		return ""
+	}
+	first := digestOf()
+	if first == "" || !strings.Contains(first, "#") {
+		t.Fatalf("redacted URL must carry a # before the digest: %q", first)
+	}
+
+	logs.Reset()
+	status2, _ := doGet(t, srv, "/?subscription_url="+url.QueryEscape(secret)+"&countries=FI,EE")
+	if status2 != http.StatusOK {
+		t.Fatalf("unexpected second status: %d", status2)
+	}
+	if again := digestOf(); again != first {
+		t.Fatalf("digest for one URL must be stable across calls: %q vs %q", first, again)
+	}
+
+	logs.Reset()
+	doGet(t, srv, "/?subscription_url="+url.QueryEscape(secret+"x")+"&countries=FI,EE")
+	if other := digestOf(); other == first {
+		t.Fatal("a different subscription URL must render a different digest")
+	}
 }
