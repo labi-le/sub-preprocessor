@@ -10,7 +10,9 @@ import (
 	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
-const maxSubscriptionSize = 10 << 20
+// MaxSubscriptionSize caps one subscription document, so a "live" verdict in
+// classify and the worker's fetch share one limit.
+const MaxSubscriptionSize = 10 << 20
 
 // doubleSlash is the URI scheme delimiter. Kept as a package-level
 // var []byte so the compiler can reference it as a static constant
@@ -47,7 +49,7 @@ type Node struct {
 }
 
 func Load(ctx context.Context, rawURL fetch.SubscriptionURL) ([]byte, error) {
-	body, err := fetch.BytesWithType(ctx, rawURL, maxSubscriptionSize, fetch.FileTypeRaw)
+	body, err := fetch.BytesWithType(ctx, rawURL, MaxSubscriptionSize, fetch.FileTypeRaw)
 	if err != nil {
 		return nil, fmt.Errorf("fetch subscription: %w", err)
 	}

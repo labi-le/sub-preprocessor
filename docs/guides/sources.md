@@ -51,7 +51,7 @@ outlives them, and it applies to `config/sources.yaml` just as well.
      accepted and shipped at 52-104 days before the by-hand check reached them, so audit the
      entries you already have, not only the ones you are adding.
   2. FETCHABLE inside `fetch.timeout`, shipped at 3s, AND under the worker's 10 MiB body
-     cap (`subscription.maxSubscriptionSize`), which rejects an oversized source with
+     cap (`subscription.MaxSubscriptionSize`), which rejects an oversized source with
      `response too large` so it loads NOTHING. Both halves bit this round: the
      best-yielding candidate found — 409969 nodes — takes 9s, and
      `gitverse.ru/LimonTH/proxy-list` `output/live` (forge-native; 404 on GitHub)

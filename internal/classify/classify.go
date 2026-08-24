@@ -19,11 +19,6 @@ import (
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
-// maxSubscriptionSize mirrors the worker's cap (internal/subscription's
-// unexported maxSubscriptionSize, 10 MiB) so a "live" verdict here matches
-// what the worker would accept; keep the two values in sync.
-const maxSubscriptionSize = 10 << 20
-
 // proxySchemes are the URI schemes a Mihomo-compatible subscription is built
 // from. The node parser is deliberately scheme-generic, so a document that is
 // not a subscription at all can still yield nodes: restricting the count to
@@ -193,12 +188,12 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Result{}, &StatusError{Code: resp.StatusCode, Status: resp.Status}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionSize+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, subscription.MaxSubscriptionSize+1))
 	if err != nil {
-		return Result{}, fmt.Errorf("read response: %w", err)
+		return Result{}, fmt.Errorf("read body: %w", err)
 	}
-	if int64(len(body)) > maxSubscriptionSize {
-		return Result{}, fmt.Errorf("response too large: over %d bytes", maxSubscriptionSize)
+	if int64(len(body)) > subscription.MaxSubscriptionSize {
+		return Result{}, fmt.Errorf("response too large: over %d bytes", subscription.MaxSubscriptionSize)
 	}
 	return Body(body, resp.Header.Get("Subscription-Userinfo"), time.Now().Unix()), nil
 }
