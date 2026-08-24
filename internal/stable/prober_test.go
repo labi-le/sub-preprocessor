@@ -120,13 +120,8 @@ func refusedAddrs(n int) []string {
 func precheckProber(t *testing.T) *MihomoProber {
 	t.Helper()
 
-	p, err := NewMihomoProber(config.CheckConfig{Timeout: time.Second, ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return p
+	return testProberWith(t, config.CheckConfig{Timeout: time.Second, ExpectedStatus: "204"},
+		config.BandwidthConfig{}, zerolog.Nop())
 }
 
 // accsByName maps the name-keyed accumulators a test writes onto the positional
@@ -151,16 +146,13 @@ func accsByName(t *testing.T, pxs []mihomo.Proxy, want map[string]delayAcc) []de
 func TestProbeCancelledContextReturnsError(t *testing.T) {
 	t.Parallel()
 
-	p, err := NewMihomoProber(config.CheckConfig{
+	p := testProberWith(t, config.CheckConfig{
 		Rounds:         2,
 		Concurrency:    1,
 		Timeout:        time.Second,
 		TestURL:        "http://127.0.0.1:0/",
 		ExpectedStatus: "204",
-	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, config.BandwidthConfig{}, zerolog.Nop())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -189,16 +181,13 @@ func TestProbeZeroConcurrencyDoesNotDeadlock(t *testing.T) {
 	//
 	// The node needs a LIVE listener: a condemned one never reaches runRound,
 	// and this test would then pass with the semaphore unbounded.
-	p, err := NewMihomoProber(config.CheckConfig{
+	p := testProberWith(t, config.CheckConfig{
 		Rounds:         1,
 		Concurrency:    0,
 		Timeout:        50 * time.Millisecond,
 		TestURL:        "http://127.0.0.1:0/",
 		ExpectedStatus: "204",
-	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, config.BandwidthConfig{}, zerolog.Nop())
 	payload := vmessPayloadAt(t, liveTCPAddr(t))
 
 	done := make(chan struct{})
@@ -319,7 +308,8 @@ func TestProbeNodesKeyTheTCPVerdictOnTheTransport(t *testing.T) {
 		// No tls, so convert drops the alpn and mihomo's h3 test cannot match.
 		{"xhttp with h3 but no tls stays on TCP", vlessXHTTPLine(addr, "none", "h3", "n4"), true},
 		{"h3 alpn outside xhttp is not the QUIC mode", strings.Replace(
-			vlessXHTTPLine(addr, "tls", "h3", "n5"), "type=xhttp", "type=tcp", 1), true},
+			vlessXHTTPLine(addr, "tls", "h3", "n5"), "type=xhttp", "type=tcp", 1,
+		), true},
 		{"plain vless", benchVlessLine(h, p, "n6"), true},
 		{"vmess", benchVmessLine(h, p, "n7"), true},
 		{"anytls", "anytls://pass@" + addr + "#n8", true},
@@ -494,16 +484,13 @@ func TestProbeNeverURLTestsACondemnedNode(t *testing.T) {
 
 			var buf bytes.Buffer
 			logger := zerolog.New(zerolog.SyncWriter(&buf)).Level(zerolog.DebugLevel)
-			p, err := NewMihomoProber(config.CheckConfig{
+			p := testProberWith(t, config.CheckConfig{
 				Rounds:         2,
 				Concurrency:    1,
 				Timeout:        200 * time.Millisecond,
 				TestURL:        "http://127.0.0.1:1/",
 				ExpectedStatus: "204",
-			}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", logger)
-			if err != nil {
-				t.Fatal(err)
-			}
+			}, config.BandwidthConfig{}, logger)
 
 			res, probeErr := p.Probe(context.Background(), vmessPayloadAt(t, c.addr))
 			if probeErr != nil {
@@ -544,16 +531,13 @@ func TestProbeNeverParsesACondemnedNode(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := zerolog.New(zerolog.SyncWriter(&buf))
-	p, err := NewMihomoProber(config.CheckConfig{
+	p := testProberWith(t, config.CheckConfig{
 		Rounds:         1,
 		Concurrency:    1,
 		Timeout:        200 * time.Millisecond,
 		TestURL:        "http://127.0.0.1:1/",
 		ExpectedStatus: "204",
-	}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, config.BandwidthConfig{}, logger)
 
 	res, err := p.Probe(context.Background(), []byte(payload))
 	if err != nil {
@@ -609,11 +593,7 @@ func TestProbeExpositionForAFixedPool(t *testing.T) {
 	}
 	payload := entriesPayload(entries)
 
-	p, err := NewMihomoProber(config.CheckConfig{Timeout: time.Second, ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := testProber(t)
 	res, err := p.Probe(context.Background(), payload)
 	if err != nil {
 		t.Fatal(err)
@@ -677,11 +657,15 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 		wantCondemned int
 		wantRep       PrecheckReport
 	}{
-		{"every endpoint refused", 0, 0,
-			PrecheckReport{State: PrecheckTripped, Dialled: total, Refused: total}},
+		{
+			"every endpoint refused", 0, 0,
+			PrecheckReport{State: PrecheckTripped, Dialled: total, Refused: total},
+		},
 		// 95 of 101 refused is 94.05%, just under the threshold.
-		{"just under the threshold", total - 95, 95,
-			PrecheckReport{State: PrecheckRan, Dialled: total, Refused: 95}},
+		{
+			"just under the threshold", total - 95, 95,
+			PrecheckReport{State: PrecheckRan, Dialled: total, Refused: 95},
+		},
 	} {
 		t.Run(c.desc, func(t *testing.T) {
 			t.Parallel()
@@ -731,11 +715,7 @@ func TestPrecheckBudgetCoversShippedLatencyGates(t *testing.T) {
 				t.Fatalf("load %s: %v", path, err)
 			}
 			check := cfg.Subscriptions.Check
-			p, err := NewMihomoProber(check, config.BandwidthConfig{}, config.GeoBlockConfig{},
-				config.CloudflareConfig{}, "", zerolog.Nop())
-			if err != nil {
-				t.Fatal(err)
-			}
+			p := testProberWith(t, check, config.BandwidthConfig{}, zerolog.Nop())
 			gate := time.Duration(check.MaxAvgMs) * time.Millisecond
 			if budget := precheckAttempts * p.precheckDialBudget(); budget < gate {
 				t.Errorf("%s: pre-check spends at most %v on an endpoint, under max_avg_ms of %v",
@@ -779,11 +759,7 @@ func TestPrecheckBudgetTracksTheDefaultTimeout(t *testing.T) {
 		t.Fatalf("load fixture: %v", err)
 	}
 	check := cfg.Subscriptions.Check
-	p, err := NewMihomoProber(check, config.BandwidthConfig{}, config.GeoBlockConfig{},
-		config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := testProberWith(t, check, config.BandwidthConfig{}, zerolog.Nop())
 	if budget, want := precheckAttempts*p.precheckDialBudget(), check.Timeout; budget != want {
 		t.Errorf("pre-check spends %v on an endpoint under the default check.timeout, want %v",
 			budget, want)

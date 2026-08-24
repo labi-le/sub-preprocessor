@@ -54,10 +54,7 @@ func TestGeminiURLAndEnabled(t *testing.T) {
 		t.Fatalf("geminiURL = %q, want %q", got, want)
 	}
 
-	off, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	off := testProber(t)
 	if off.GeminiEnabled() {
 		t.Fatal("no key must disable the gate")
 	}

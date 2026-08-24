@@ -412,9 +412,9 @@ func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
 				&mieruPort{name: label + ":9998-9999/UDP", addr: "1.2.3.4:9998", delay: c.deadDelay},
 			}
 			const timeout = 5 * time.Second
-			m := testProberWith(t, config.BandwidthConfig{
+			m := testProberWith(t, config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{
 				TestURL: srv.URL, Timeout: timeout, Concurrency: 2,
-			})
+			}, zerolog.Nop())
 			ctx := context.Background()
 
 			api := m.apiCheck(ctx, "test.api", "api", pxs, srv.URL, nil,
@@ -601,16 +601,16 @@ func TestBetterBandwidthOutcomePriority(t *testing.T) {
 func testProber(t *testing.T) *MihomoProber {
 	t.Helper()
 
-	return testProberWith(t, config.BandwidthConfig{})
+	return testProberWith(t, config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, zerolog.Nop())
 }
 
 // testProberWith builds the prober through its real constructor, so a check
 // under test reads the same validated fields production does.
-func testProberWith(t *testing.T, bandwidth config.BandwidthConfig) *MihomoProber {
+func testProberWith(t *testing.T, check config.CheckConfig, bandwidth config.BandwidthConfig, logger zerolog.Logger) *MihomoProber {
 	t.Helper()
 
-	p, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
-		bandwidth, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
+	p, err := NewMihomoProber(check,
+		bandwidth, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", logger)
 	if err != nil {
 		t.Fatal(err)
 	}

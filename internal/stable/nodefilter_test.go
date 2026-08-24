@@ -56,10 +56,7 @@ func TestBandwidthFilterApply(t *testing.T) {
 func TestBuildNodeFilters(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "KEY", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	prober := testProber(t)
 
 	if fs := buildNodeFilters(nil, prober, nil, zerolog.Nop()); len(fs) != 0 {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
@@ -118,10 +115,7 @@ func (stubBlocklist) Prune() error       { return nil }
 func TestTidalFilterKeepsNoStore(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"}, config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	prober := testProber(t)
 
 	fs := buildNodeFilters([]string{"claude", "tidal"}, prober, stubBlocklist{}, zerolog.Nop())
 	if len(fs) != 2 {
@@ -164,12 +158,7 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 	t.Parallel()
 
-	prober, err := NewMihomoProber(
-		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	prober := testProber(t)
 	// Real proxies for s-001 and s-002 only; s-003 is intentionally absent.
 	payload := benchVlessLine("1.1.1.1", "443", "s-001") + "\n" +
 		benchVlessLine("2.2.2.2", "443", "s-002")
@@ -368,11 +357,7 @@ func TestGeminiAccountReachesTheCycleReport(t *testing.T) {
 func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
 	t.Parallel()
 
-	keyless, err := NewMihomoProber(config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	keyless := testProber(t)
 	if keyless.GeminiEnabled() {
 		t.Fatal("setup: an empty key must disable the gate")
 	}
@@ -388,7 +373,7 @@ func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
 		Filters:       buildNodeFilters([]string{geminiFilterName}, keyless, nil, zerolog.Nop()),
 	}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
 
-	if err = c.RunOnce(context.Background()); err != nil {
+	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if rec.last == nil {

@@ -285,15 +285,10 @@ func benchSpareEvery(n int, pct float64) []int {
 func benchParseProber(b *testing.B) *MihomoProber {
 	b.Helper()
 
-	prober, err := NewMihomoProber(
-		config.CheckConfig{ExpectedStatus: "204"},
-		config.BandwidthConfig{}, config.GeoBlockConfig{}, config.CloudflareConfig{}, "", zerolog.Nop(),
-	)
-	if err != nil {
-		b.Fatal(err)
-	}
+	p := testProberWith(&testing.T{}, config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{}, zerolog.Nop())
 
-	return prober
+	return p
 }
 
 // foldProxy carries the two methods entryLabel reads, so this prices the
