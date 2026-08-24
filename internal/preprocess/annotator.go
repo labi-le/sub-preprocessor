@@ -13,6 +13,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// UnknownCountry is the marker a GEO tag renders when no provider in its
+// chain resolved a country ([GEO:??]). The stable_geo_unknown_nodes gauge
+// counts published nodes carrying it, so the spelling is part of that
+// gauge's contract and must not drift from the annotator's render.
+const UnknownCountry = "??"
+
 // Egress is what a node reported about itself through the cloudflare probe. The
 // zero value means the probe never ran — on `GET /` it never does, and in the
 // worker only nodes that survived the latency probe are traced.
@@ -152,7 +158,7 @@ func (a *annotator) Annotate(
 		}
 		scratch.WriteString("[GEO:")
 		if c == (geofeed.CountryCode{}) {
-			scratch.WriteString("??")
+			scratch.WriteString(UnknownCountry)
 		} else {
 			scratch.WriteByte(c[0])
 			scratch.WriteByte(c[1])

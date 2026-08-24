@@ -167,8 +167,9 @@ func (r *renderer) speedPrefix(mbps int) string {
 }
 
 // countryUnknown is the annotator's marker for "no provider resolved a
-// country" ([GEO:??]).
-const countryUnknown = "??"
+// country" ([GEO:??]); it is the preprocess constant so the gauge counting
+// [GEO:??] nodes and this comparison can never disagree.
+var countryUnknown = preprocess.UnknownCountry
 
 // alphaLetters is the alphabet countryCodes spans.
 const alphaLetters = 'Z' - 'A' + 1
