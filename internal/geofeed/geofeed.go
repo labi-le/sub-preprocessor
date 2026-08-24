@@ -116,17 +116,12 @@ func parseLine(line []byte) (Entry, bool) {
 	}
 
 	countryBytes, _, _ := bytes.Cut(rest, []byte{','})
-	if len(countryBytes) != 2 { //nolint:mnd // ISO 3166-1 alpha-2 length
+	country, ok := foldCountryCode(countryBytes)
+	if !ok {
 		return Entry{}, false
 	}
 
-	const caseBit = 0x20 // ASCII case bit; clearing it upper-folds letters
-	c1, c2 := countryBytes[0]&^caseBit, countryBytes[1]&^caseBit
-	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
-		return Entry{}, false
-	}
-
-	return Entry{Prefix: prefix, Country: CountryCode{c1, c2}}, true
+	return Entry{Prefix: prefix, Country: country}, true
 }
 
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {

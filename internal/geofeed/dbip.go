@@ -99,9 +99,10 @@ func parseDBIPLine(line []byte) (Range, bool) {
 	return Range{Start: start, End: end, Country: country}, true
 }
 
-// parseCountry accepts exactly two ASCII letters, folds them to upper case,
-// and rejects the unknown-country marker ZZ.
-func parseCountry(b []byte) (CountryCode, bool) {
+// foldCountryCode accepts exactly two ASCII letters and folds them to upper
+// case. It does NOT reject the unknown-country marker ZZ: geofeed rows keep it,
+// dbip's parseCountry wraps this core to drop them.
+func foldCountryCode(b []byte) (CountryCode, bool) {
 	if len(b) != 2 { //nolint:mnd // ISO 3166-1 alpha-2 length
 		return CountryCode{}, false
 	}
@@ -110,8 +111,18 @@ func parseCountry(b []byte) (CountryCode, bool) {
 	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
 		return CountryCode{}, false
 	}
-	if c1 == 'Z' && c2 == 'Z' {
+	return CountryCode{c1, c2}, true
+}
+
+// parseCountry accepts exactly two ASCII letters, folds them to upper case,
+// and rejects the unknown-country marker ZZ.
+func parseCountry(b []byte) (CountryCode, bool) {
+	cc, ok := foldCountryCode(b)
+	if !ok {
 		return CountryCode{}, false
 	}
-	return CountryCode{c1, c2}, true
+	if cc[0] == 'Z' && cc[1] == 'Z' {
+		return CountryCode{}, false
+	}
+	return cc, true
 }

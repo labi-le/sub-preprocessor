@@ -40,6 +40,25 @@ func TestParseAndLookupCountry(t *testing.T) {
 	}
 }
 
+// The two CSV parsers share the case-fold core but deliberately disagree on
+// the unknown-country marker: a geofeed row keeps its prefix under ZZ, while
+// dbip drops the whole range.
+func TestZZCountryDivergence(t *testing.T) {
+	t.Parallel()
+
+	entries, err := geofeed.Parse([]byte("198.51.100.0/24,ZZ\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Country != (geofeed.CountryCode{'Z', 'Z'}) {
+		t.Fatalf("geofeed must keep ZZ rows, got %+v", entries)
+	}
+
+	if ranges := geofeed.ParseDBIP([]byte("0.0.0.0,0.255.255.255,ZZ\n")); len(ranges) != 0 {
+		t.Fatalf("dbip must drop ZZ rows, got %+v", ranges)
+	}
+}
+
 func TestGstaticGeofeedLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live test in short mode")
