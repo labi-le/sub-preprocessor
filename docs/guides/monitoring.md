@@ -142,7 +142,7 @@ vendor the dashboard into the nixos repo.
   `format: "table"` the Prometheus datasource hands Grafana every label as a plain string FIELD
   and that transformation passes through any field carrying no labels of its own (measured against
   `@grafana/data` 10.4.19 on the shipped transformation arrays, 2026-08-18). `managed: true` is
-  WRITE AUTHORITY over `config/private.yaml` — `recheckManaged` (`crawl.go:386`) re-classifies
+  WRITE AUTHORITY over `config/private.yaml` — `recheckManaged` (`crawl.go:395`) re-classifies
   only marked entries (`:393`), `mergeManaged`'s ownership switch (`:451`) passes an unmarked entry
   through verbatim (`:467`), and `managedCount` (`:613`) counts only marked ones so bulk-prune can
   never delete a hand-added source — and `owner="crawler"` is that same predicate, read off the
@@ -205,7 +205,7 @@ vendor the dashboard into the nixos repo.
   shape too: `wepogp-1` and `wepogp-4` would have collapsed onto a `wepogp` row no channel
   produced. Attribution is therefore recorded, not recovered.
   The rows stay mixed, for a reason `owner` now makes legible rather than hides: the inline
-  harvest (`inline`, `crawl.go:835`) records no channel and neither does a bare-hash name
+  harvest (`inline`, `crawl.go:844`) records no channel and neither does a bare-hash name
   (`unattributedNameRe`, `crawl.go:63`), so each falls back to naming itself, yet each is an
   `owner="crawler"` feed standing alone.
   The figure to read here counts BUCKETS, not rows: all four targets are gated on `topk(25, sum
@@ -241,7 +241,7 @@ vendor the dashboard into the nixos repo.
   mark on a git-tracked entry so a curated file cannot claim it by accident: `mergeSourcesOverlay`
   (`config.go:1041`) inside `sources.yaml` before the append (`:1053-1057`), and `validateSources`
   (`:1469`) over the merged list (`:1472-1473`), which is what also covers `config.yaml`.
-  So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:835`) is
+  So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:844`) is
   crawler-managed but is harvested raw node URIs rather than a channel, and a bare-hash name
   (`unattributedNameRe`, `crawl.go:63`)
   is managed too — measured on `:9091` 2026-08-16 12:45 +03:00, before the cutover, the managed
