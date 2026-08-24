@@ -995,7 +995,7 @@ func Load(path string) (Config, error) {
 		return Config{}, errValidate
 	}
 
-	b, ok, err := readOverlay(filepath.Dir(path), "private.yaml")
+	b, ok, err := readOverlay(filepath.Dir(path), privateOverlayFile)
 	if err != nil {
 		return Config{}, fmt.Errorf("read private config: %w", err)
 	}
@@ -1030,8 +1030,20 @@ func readOverlay(dir, name string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
-// sourcesOverlayFile is the git-tracked curated overlay, named in the error that
-// refuses a crawler mark in it.
+// OverlayFiles names the overlay files Load merges beside a config.yaml, in
+// watcher-relevant order: the crawler's private overlay first, then the
+// git-tracked curated one.
+func OverlayFiles() []string {
+	return []string{privateOverlayFile, sourcesOverlayFile}
+}
+
+// privateOverlayFile is the crawler-written private overlay. It lives beside
+// sourcesOverlayFile so both names have one owner; only OverlayFiles is
+// exported because no reader outside this package needs the single name.
+const privateOverlayFile = "private.yaml"
+
+// sourcesOverlayFile is the git-tracked curated overlay, named in the error
+// that refuses a crawler mark in it.
 const sourcesOverlayFile = "sources.yaml"
 
 // errManagedInCuratedFile is the one wording for a refused mark, so the message

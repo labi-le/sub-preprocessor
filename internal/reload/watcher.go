@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/rs/zerolog"
+
+	"domains.lst/sub-preprocessor/internal/config"
 )
 
 // debounceInterval is the window over which a burst of filesystem events for
@@ -24,17 +27,13 @@ const debounceInterval = 200 * time.Millisecond
 type Watcher struct {
 	fsw        *fsnotify.Watcher
 	configPath string
-	// privatePath is the optional `private.yaml` overlay sibling of configPath.
-	// config.Load merges it into the effective config, so a change to it must
-	// trigger a reload just like a change to the main file.
-	privatePath string
-	// sourcesPath is the tracked `sources.yaml` overlay sibling of configPath.
-	// config.Load appends its subscription sources, so a change to it must
-	// trigger a reload just like a change to the main file.
-	sourcesPath string
-	onChange    func(context.Context)
-	logger      zerolog.Logger
-	debounce    time.Duration
+	// overlayPaths are the overlay files config.Load merges beside configPath,
+	// from config.OverlayFiles: a change to any of them must trigger a reload
+	// just like a change to the main file.
+	overlayPaths []string
+	onChange     func(context.Context)
+	logger       zerolog.Logger
+	debounce     time.Duration
 }
 
 // NewWatcher creates a Watcher for configPath. It registers a watch on the
@@ -52,14 +51,18 @@ func NewWatcher(configPath string, onChange func(context.Context), logger zerolo
 		return nil, fmt.Errorf("watch config directory: %w", addErr)
 	}
 
+	dir := filepath.Dir(cleaned)
+	var overlayPaths []string
+	for _, name := range config.OverlayFiles() {
+		overlayPaths = append(overlayPaths, filepath.Join(dir, name))
+	}
 	return &Watcher{
-		fsw:         fsw,
-		configPath:  cleaned,
-		privatePath: filepath.Join(filepath.Dir(cleaned), "private.yaml"),
-		sourcesPath: filepath.Join(filepath.Dir(cleaned), "sources.yaml"),
-		onChange:    onChange,
-		logger:      logger,
-		debounce:    debounceInterval,
+		fsw:          fsw,
+		configPath:   cleaned,
+		overlayPaths: overlayPaths,
+		onChange:     onChange,
+		logger:       logger,
+		debounce:     debounceInterval,
 	}, nil
 }
 
@@ -142,11 +145,10 @@ func (d *debouncer) stop() {
 }
 
 // matches reports whether ev is a create/write/rename/remove on the watched
-// config file or its private.yaml / sources.yaml overlay siblings. Chmod-only
-// events are ignored.
+// config file or one of its overlay siblings. Chmod-only events are ignored.
 func (w *Watcher) matches(ev fsnotify.Event) bool {
 	name := filepath.Clean(ev.Name)
-	if name != w.configPath && name != w.privatePath && name != w.sourcesPath {
+	if name != w.configPath && !slices.Contains(w.overlayPaths, name) {
 		return false
 	}
 	return ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0
