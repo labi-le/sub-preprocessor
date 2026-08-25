@@ -367,8 +367,9 @@ is not changing, which is why the ambiguity is written down here instead of desi
   attributed names in six channels. How many PANELS stand behind those names is decided by
   what the URLs return, not by how they look, and only a fetch settles it. All 165 URLs of
   `dailyv2ry`, `file-vpn-2`, `proxytglte` and `holost-vpn`, fetched at 17:22Z
-  on 2026-08-15 with the service's own User-Agent (`mihomo-geofeed-preprocessor/0.1`,
-  `internal/fetch/fetch.go:20`), answered 200, and the URL misleads in both directions.
+  on 2026-08-15 with the service User-Agent of the day (`mihomo-geofeed-preprocessor/0.1`,
+  since replaced by `internal/fetch`'s rotating client pool), answered 200,
+  and the URL misleads in both directions.
   Eight of `holost-vpn`'s 23 sit at eight different repository paths under one GitHub
   account (`Ai123999`) and return one byte-identical 33101-byte body, all with md5
   `2193975ecadf359d136da4658ca7a1e6` and 121 server endpoints each — so eight names are
@@ -478,6 +479,8 @@ under it were deleted.
   every candidate passes — geo, ASN, probe — the three-gates doctrine above
   applied to retirement instead of admission.
 
-Checking any retired URL by hand MUST use the service User-Agent:
-`is.wepogp.gay` serves the real payload to `mihomo-geofeed-preprocessor/0.1` and
-a 116-byte stub to a browser UA, so a browser check condemns live sources.
+Checking any retired URL by hand MUST use a client User-Agent, not a browser one —
+`curl -A "v2rayNG/2.3.5" ...`. Measured 2026-08-25: `sync.wepogp.gay` serves the real
+payload (250 B, 2×vless) to `Happ`, `v2rayNG`, `v2rayN` AND to
+`mihomo-geofeed-preprocessor/0.1` when the origin is up; a browser UA gets a 116-byte stub.
+`is.wepogp.gay` answers 523 intermittently regardless of UA.

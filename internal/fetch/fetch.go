@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,9 +16,31 @@ import (
 	"time"
 )
 
-// UserAgent is sent on every outbound fetch. Exported so sibling packages
-// (classify) present the same identity a real worker fetch would.
-const UserAgent = "mihomo-geofeed-preprocessor/0.1"
+// userAgents are real subscription-client identities. Panels branch on the
+// prefix, and the formats a Marzban-shaped panel serves differ WITHIN this
+// pool: Happ/v2rayNG/v2rayN elicit v2ray-json or base64 v2ray (both parse
+// here), HiddifyNext sing-box JSON and ClashMetaForAndroid clash YAML — two
+// shapes internal/subscription does NOT convert, kept anyway because
+// non-panel origins ignore UA entirely and unknown-origin coverage beats
+// uniformity. Version gates switch the served format, so exact strings
+// matter. Rotation is per request: it spreads rate-limit fingerprints across
+// clients instead of concentrating them on one service UA.
+var userAgents = []string{
+	"Happ/4.7.0",
+	"v2rayNG/2.3.5",
+	"v2rayN/7.24.8",
+	"Shadowrocket/2701 CFNetwork/1399 Darwin/22.1.0 iPhone11,8",
+	"HiddifyNext/4.1.2 (android) like ClashMeta v2ray sing-box",
+	"ClashMetaForAndroid/2.11.33",
+}
+
+// UserAgent returns one pool identity per call, chosen at random. Exported so
+// sibling packages (classify, crawl) present the same rotating client identity
+// a worker fetch presents: a classify verdict must describe what a worker sees,
+// which varies by prefix when the origin branches on User-Agent.
+func UserAgent() string {
+	return userAgents[rand.IntN(len(userAgents))] //nolint:gosec // client-UA rotation needs no cryptographic randomness
+}
 
 type FileType string
 
@@ -129,8 +152,7 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 	if errReq != nil {
 		return nil, fmt.Errorf("create request: %w", errReq)
 	}
-	req.Header.Set("User-Agent", UserAgent)
-
+	req.Header.Set("User-Agent", UserAgent())
 	resp, errResp := client.Do(req)
 	if errResp != nil {
 		return nil, fmt.Errorf("do request: %w", errResp)

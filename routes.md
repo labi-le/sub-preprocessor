@@ -119,10 +119,8 @@ Safe HTTP fetching. Only `https`, no userinfo, no proxy. The **SSRF IP policy li
 - `NewSafeHTTPClient() *http.Client` — guarded transport: non-public resolved IPs refused at dial time
 - `NewUnrestrictedHTTPClient() *http.Client` — https-only, no proxy, **no IP guard** (crawler only)
 - `MaybeDecode(resp, fileType) (io.ReadCloser, error)` — wrap gzip if needed; the gzip path is guarded against decompression bombs (the read fails once output passes the size floor AND exceeds a fixed ratio of the wire bytes consumed, so a few-KB archive can no longer inflate to the caller's whole byte limit)
+- `UserAgent() string` — one client identity per call, drawn from a rotating pool of real subscription clients (`Happ`, `v2rayNG`, `v2rayN`, `Shadowrocket`, `HiddifyNext`, `ClashMetaForAndroid`). Panels branch the elicited subscription format on the User-Agent prefix, so the pick is per request and every consumer of an outbound identity (`BytesWithType`, `classify.URL`, the crawler's page fetches) calls it fresh — all of them present whatever rotating client identity a worker fetch would present
 - `ValidateFileType(fileType) error` — must be `raw` or `gzip`
-
-**Constants:**
-- `UserAgent` — sent on every outbound fetch; exported so `classify` presents the same identity a worker fetch would
 
 **Tags:** `http`, `fetch`, `ssrf`, `security`, `gzip`, `download`, `client`, `redirect`
 

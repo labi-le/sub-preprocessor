@@ -37,7 +37,6 @@ const (
 	classifyConcurrency = 8
 	classifyTimeout     = 15 * time.Second
 	fetchTimeout        = 20 * time.Second
-	userAgent           = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"
 	maxPageBytes        = 8 << 20 // cap on bytes read from a single channel page
 	oneDay              = 24 * time.Hour
 )
@@ -129,7 +128,8 @@ type fetchClient interface {
 }
 
 // httpFetcher fetches a page with the crawler's unrestricted client (no IP
-// guard, so t.me via the fake-ip tunnel is reachable) and a browser User-Agent.
+// guard, so t.me via the fake-ip tunnel is reachable) and the shared rotating
+// client identity (fetch.UserAgent), one pool pick per request.
 type httpFetcher struct{ client *http.Client }
 
 func (f httpFetcher) page(ctx context.Context, u string) (string, error) {
@@ -139,7 +139,7 @@ func (f httpFetcher) page(ctx context.Context, u string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", fetch.UserAgent())
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)

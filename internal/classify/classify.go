@@ -177,9 +177,10 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("create request: %w", err)
 	}
-	// Present the same identity a worker fetch would, so the verdict matches
-	// what the worker sees (some panels vary the response by User-Agent).
-	req.Header.Set("User-Agent", fetch.UserAgent)
+	// Mirror whatever identity a worker fetch presents, per-request rotation
+	// included: the verdict must describe what the worker would see, and some
+	// panels vary the response format by User-Agent prefix.
+	req.Header.Set("User-Agent", fetch.UserAgent())
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, fmt.Errorf("do request: %w", err)
