@@ -542,11 +542,26 @@ Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
 `CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
 for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
 `CRAWL_CURATED` is a comma-separated list of YAML files the crawler reads for
-NAMES ONLY — default `/config/sources.yaml,/config/config.yaml`, both of which
-may carry `subscriptions.sources` entries — so the mint does not take a name one
-of them already holds. A missing file is normal and silent; a read or parse
-failure warns naming that file and the cycle continues on the rest, minting
-without that file's names and so able to collide with them.
+names and URLs — default `/config/sources.yaml,/config/config.yaml`, both of
+which may carry `subscriptions.sources` entries — so the mint does not take a
+name one of them already holds, and no URL they list is mirrored into the
+managed corpus. A missing file is normal and silent; a read or parse failure
+warns naming that file and the cycle continues on the rest, minting without
+that file's names and so able to collide with them.
+`CRAWL_DEAD_TTL` (default `720h`, 30 days; `0` disables) is how long the
+crawler remembers a subscription URL after a definitive not-live verdict
+(HTTP 404/410/451 or an origin-advertised expiry). A remembered URL is not
+classified again when a channel re-advertises it: the discovery pass skips it
+without spending a request. An entry still in the managed corpus is still
+rechecked, which is the one route by which a URL that came back clears its
+record before the TTL runs out. The record otherwise lasts until the TTL
+expires — after which the URL is classified afresh if rediscovered — and
+transient failures or nodeless 2xx bodies never create one. The memory is
+capped at 5000 records, evicting the stamps closest to expiry first.
+The same curated files above do double duty: any URL they
+list verbatim under `subscriptions.sources` is withheld from crawler management
+for exactly as long as it stays listed, so retiring a mirror is an edit to the
+curated list, not a deny-list entry.
 
 There is also a one-shot `classify` subcommand:
 

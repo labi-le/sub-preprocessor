@@ -422,3 +422,62 @@ is not changing, which is why the ambiguity is written down here instead of desi
   `tg-96c4d7c7a7` and `96c4d7c7a7` after adoption. The crawler's own inline harvest is a
   third shape, the fixed `inline`, which carries a `body:` and not a `url:`, so there is
   nothing behind it to look up.
+
+## Retiring a source
+
+Three reasons to retire a managed entry exist, and none of them is served by a
+hand-maintained deny list any more: `config/channels.yaml` carries only
+`channels:` since 2026-08-25, when its `blocked:` field and everything listed
+under it were deleted.
+
+- **A curated duplicate is withheld by CONFIG, for as long as it is listed, and
+  no state records it.** A URL that appears VERBATIM as a
+  `subscriptions.sources[].url` in any `CRAWL_CURATED` file (`curatedURLs`) is
+  refused by `mergeManaged`: the crawler never manages it as a mirror — the
+  curated entry itself is what the worker fetches — and the refusal re-applies
+  on every rediscovery, so deleting the managed copy by hand is unnecessary.
+  The match is verbatim only: a different query spelling or a dropped fragment
+  is a different string and a different source. Because the mirror copies sit in
+  `config/private.yaml` until something removes them, the FIRST cycle after a
+  curated set broadens over URLs the crawler already mirrors drops every one of
+  those managed entries, and it does so in ONE write: a withholding is
+  deliberately NOT counted as a deletion (`mergeManaged`), so the bulk-prune
+  floor never rules on it. That floor refuses a write only when it drops BOTH
+  more than `bulkPruneMinDrop` (10) entries AND more than 30% of the corpus, and
+  it exists to catch the crawler deleting sources by mistake, not to throttle
+  deliberate curation — broaden the curated list in stages if you want the
+  removal staged.
+- **A dead panel retires itself into crawler state.** A DEFINITIVE not-live
+  verdict — HTTP 404/410/451 (`StatusError.Gone()`) or an origin-advertised
+  expiry — records the URL in the `Dead` map persisted in
+  `.crawler-state.json` (`state.Dead`, written by `recordDead`, capped at
+  `maxDead` records evicting the stamps closest to expiry). A remembered URL is
+  not classified again when a channel re-advertises it: the discovery pass skips
+  it without spending a request, counted as `dead` in the per-cycle reject
+  summary and deliberately given no log line of its own. An entry still in the
+  managed corpus IS still rechecked — `recheckManaged` passes no skip set — and
+  that is the one route by which a URL that came back clears its record
+  (`clearDead`) before the TTL runs out. Every renewed definitive verdict
+  re-stamps it, `pruneDead` drops stamps past `CRAWL_DEAD_TTL`
+  (`Options.DeadTTL`, whose ZERO VALUE disables the memory outright; the 720h
+  default is `main`'s, from the env var), and after expiry the URL is classified
+  afresh on its next rediscovery — revival needs no edit. A cycle that saw no
+  live answer anywhere records nothing at all: without one, nothing proved the
+  egress works. Transient statuses (403/408/425/429/5xx, transport errors)
+  and nodeless-2xx placeholder bodies never create a record: a WAF answering for
+  a live payload and a panel whose death reads nodeless-2xx stay in the ordinary
+  classify/recheck flow.
+- **A live-but-unwanted source has NO hold mechanism.** Owner decision,
+  2026-08-25: sources rejected at curation — the aggregators measured to add
+  nothing (`github.com/zieng2/wl`, all 15 files of `igareck/vpn-configs-for-russia`)
+  and the wepogp panel endpoints serving real payloads — lost their old
+  `blocked:` hold, and they MAY re-enter as managed mirrors whenever their
+  channel reposts the link. That list stood between those URLs and the corpus
+  against a harvest that rediscovers hourly, and keeping it current cost a human
+  decision per URL forever. Their yield is absorbed downstream by the same gates
+  every candidate passes — geo, ASN, probe — the three-gates doctrine above
+  applied to retirement instead of admission.
+
+Checking any retired URL by hand MUST use the service User-Agent:
+`is.wepogp.gay` serves the real payload to `mihomo-geofeed-preprocessor/0.1` and
+a 116-byte stub to a browser UA, so a browser check condemns live sources.

@@ -51,6 +51,7 @@ services:
       # CRAWL_CHANNELS (comma/space list) still works as an extra override.
       - CRAWL_CHANNELS_FILE=/config/channels.yaml
       - CRAWL_PRIVATE=/config/private.yaml
+      # - CRAWL_DEAD_TTL=720h # uncomment to override how long a definitive not-live verdict (404/410/451, advertised expiry) keeps a URL out of the discovery pass; 0 disables, default 720h
       # Explicit because the default is invisible when wrong: the mint reads
       # these two for names it must not take, and a broken mount would look
       # exactly like a clean cycle.
