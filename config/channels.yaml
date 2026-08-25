@@ -12,15 +12,15 @@
 # forum topic inside a group (e.g. mifa_world/1310). A group has no t.me/s
 # preview at all. Discovered groups now settle empirically, like seeded ones: a bare discovered group with an empty listing and no topic is a counted dead end, and a discovered <slug>/<digits> hint settles through the same /s/-answer logic a seed's does.
 channels:
-  - o00000000i
-  - hiddifycode
-  - V2RayTunSub
-  - YoutubeUnBlockRu
-  - immalware
-  - whitelistbypass
-  - surfboardv2ray   # research find: Type-A https sub (sub.suffusion.workers.dev), 134 nodes verified
-  - DailyV2RY   # research find: daily rotating bin.mudfish.net pastes, 42% novelty measured; isolated in the repost graph so BFS cannot reach it
-  - Holost_VPN   # measured 2026-08-12: one cycle yielded 22 of the 23 managed sources added that day
-  - FreeCFGHub   # measured 2026-08-12: 1 live sub of its own, plus 12 inline nodes on page 1; it is the CHANNEL behind chat FreeCFGHubMIX, whose /s/ 302s (chats have no web preview)
-  - mifa_world/1310   # measured 2026-08-14: forum topic, publishes a NEW 24h link daily; its /s/ preview carries zero messages, and 19 of the 20 links on the topic are the panel's own "больше неактуальны" list
-  - razlo4ka7/39   # measured 2026-08-14: the group's only subscription topic of 9; 296 inline endpoints and 13 candidates at comments_limit=200, 68 endpoints new against the 159 configured sources, and absent from every other seed's depth-1 frontier so BFS cannot reach it
+  - o00000000i   # measured 2026-08-25: 19 msgs/page, but its 3 candidates are an LLM console and two NextDNS profiles - kept for the repost graph, not for subs
+  - hiddifycode   # measured 2026-08-25: 12 candidates, every one on the single funnel host is.wepogp.gay (rotating ?payload=); 21 refs make it the widest frontier in this file
+  - tunpass   # replaces V2RayTunSub on 2026-08-25: that slug was re-registered by a stranger ("tunji", 6 subs, 2 messages, 0 candidates) and it also tripped cursorLost every cycle, voting a false markup alarm. Its last message names @TunPass, whose /s/ carries 19 msgs and 19 candidates. Do not put the old slug back: a recycled handle feeds attacker-chosen URLs straight into the candidate set
+  - YoutubeUnBlockRu   # measured 2026-08-25: Zapret/DPI-bypass channel; 4 candidates, none a subscription, and one is an unresolvable Tailscale MagicDNS host fetched every cycle
+  - immalware   # measured 2026-08-25: 13 candidates per page, not one a subscription (DNS-unblock service, store pages, issue threads); absent from the productive memory for the whole 720h TTL
+  - whitelistbypass   # measured 2026-08-25: page 1 IS the whole channel (10 msgs, ids down to 1), so this is final, not a page-1 artifact - 7 candidates, no subscription. It is where the vassago cidr allow-list came from, nothing more
+  - surfboardv2ray   # measured 2026-08-25: 2 own subs (raw.githubusercontent.com Proxy-sorter/converted.txt, TGParse/configtg.txt) + 122 inline nodes over 6 pages. The sub.suffusion.workers.dev this line used to name is gone from the channel entirely
+  - DailyV2RY   # measured 2026-08-25: 9 distinct bin.mudfish.net pastes on page 1 and still zero refs emitted, so BFS reaches it only as a seed
+  - Holost_VPN   # measured 2026-08-25: quiet, not dead - 2 subs on pages 3 and 5 plus 36 inline nodes per 6-page cycle, where 2026-08-12 saw 22 of one day's 23 new sources. All 5 of its refs probe barren
+  - FreeCFGHub   # measured 2026-08-25: 13 inline nodes on page 1 but its two own subs sit on page 4 (gitverse.ru lite, raw.githubusercontent.com FreeCFGHubSUB), so it needs CRAWL_PAGES>=4 to pay off; it is the CHANNEL behind chat FreeCFGHubMIX, whose /s/ 302s
+  - mifa_world/1310   # measured 2026-08-25: not a forum topic but a 2026-04-08 post plus its comment thread; the embed carries 2 wraps and ONE fixed URL, mifa.world/rider, whose payload rotates every 24h while the link itself never changes - one managed source covers it, subs=1 on 39 consecutive cycles
+  - razlo4ka7/39   # measured 2026-08-25: the richest seed here - 97 wraps and 519 KB per page at comments_limit=200, 14 distinct candidates, ~800 inline endpoints, 5-10 live subs per cycle against 15 managed sources
