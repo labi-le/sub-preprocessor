@@ -39,7 +39,7 @@ func carveCrawler(t *testing.T, opts Options, f pageFetcher, logBuf *bytes.Buffe
 		logger: zerolog.New(logBuf),
 	}
 	st := state{Productive: map[string]channelState{}}
-	live, _ := c.scan(context.Background(), &st)
+	live, _, _ := c.scan(context.Background(), &st, nil)
 	return live, &st
 }
 
@@ -473,7 +473,7 @@ func TestThematicGateDoesNotExpandBarrenChild(t *testing.T) {
 		logger: zerolog.New(&logBuf),
 	}
 	st := state{Productive: map[string]channelState{}}
-	c.scan(context.Background(), &st)
+	c.scan(context.Background(), &st, nil)
 
 	if hits[childListURL] != 1 {
 		t.Errorf("barren child fetched %d time(s), want exactly the one discovery visit", hits[childListURL])
@@ -533,7 +533,7 @@ func TestBareGroupListingFailureNotCounted(t *testing.T) {
 	}
 	before := metrics.Crawl.GroupEmpty.Load()
 	n := scanNode{ref: chanRef{slug: "deadgrp"}, depth: 1}
-	c.scanChannel(context.Background(), n, &state{}, map[string]origin{}, nil, &cursorStats{}, newRejects(zerolog.Nop()))
+	c.scanChannel(context.Background(), n, &state{}, nil, map[string]origin{}, nil, &cursorStats{}, newRejects(zerolog.Nop()))
 	if d := metrics.Crawl.GroupEmpty.Load() - before; d != 0 {
 		t.Errorf("group-empty counter moved %d for a failed listing fetch, want 0", d)
 	}

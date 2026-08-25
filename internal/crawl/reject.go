@@ -34,6 +34,7 @@ const (
 	rejectStatus   rejectReason = "bad-status"   // origin answered non-2xx; the code is logged alongside
 	rejectNodeless rejectReason = "nodeless-2xx" // 2xx body carrying no proxy-scheme node
 	rejectExpired  rejectReason = "expired"      // origin advertised an expiry already past
+	rejectDead     rejectReason = "dead"         // withheld from state.Dead; no request and no line spent on it
 )
 
 // rejectField gives each reason its column in the per-cycle summary.
@@ -50,6 +51,7 @@ var rejectField = map[rejectReason]string{
 	rejectStatus:     "bad_status",
 	rejectNodeless:   "nodeless_2xx",
 	rejectExpired:    "expired",
+	rejectDead:       "dead",
 }
 
 // maxRejectLines caps per-candidate lines per cycle. These are INFO, not DEBUG,
@@ -133,6 +135,11 @@ type rejects struct {
 	// would inflate those with duplicates.
 	untracked int
 	logged    int
+	// noted counts URLs recorded by noteDead, which deliberately spend no log
+	// line. They must come off the suppressed figure: that number answers "how
+	// many lines did the cap withhold", and a withholding nobody wanted logged
+	// is not one of them.
+	noted int
 }
 
 func newRejects(logger zerolog.Logger) *rejects {
@@ -213,6 +220,29 @@ func (r *rejects) record(o origin, rawURL string, reason rejectReason, code int,
 	ev.Msg("candidate rejected")
 }
 
+// noteDead counts a URL withheld by state.Dead. It spends no log line on it:
+// no request was made, so there is no answer to report, and the per-cycle line
+// budget belongs to the candidates that did answer — a channel reposting
+// hundreds of remembered-dead links would otherwise crowd every diagnostic
+// line out of the cycle it is hardest to diagnose. The state file already
+// holds these URLs, with their expiry, which is strictly more than a line
+// could say. The per-reason summary still counts them, from r.verdict.
+func (r *rejects) noteDead(rawURL string) {
+	if r == nil {
+		return
+	}
+	if _, dup := r.verdict[rawURL]; dup {
+		return
+	}
+	if len(r.verdict) >= maxRejectTracked {
+		r.untracked++
+		return
+	}
+	// Clone for record's reason: the key outlives the page buffer it points into.
+	r.verdict[strings.Clone(rawURL)] = rejectDead
+	r.noted++
+}
+
 // report emits the per-cycle summary: one count per reason plus the total, so
 // "why did this cycle find fewer subscriptions" is answerable without reading
 // every line. The counts are complete even when the cap withheld lines, and the
@@ -263,7 +293,7 @@ func (r *rejects) report(live map[string]origin) {
 	}
 	ev.Msg("candidates rejected by reason")
 
-	if suppressed := len(r.verdict) - r.logged; suppressed > 0 {
+	if suppressed := len(r.verdict) - r.logged - r.noted; suppressed > 0 {
 		r.logger.Info().Int("suppressed", suppressed).Int("cap", maxRejectLines).
 			Msg("per-candidate reject lines withheld by the cycle cap")
 	}

@@ -64,14 +64,20 @@ var unattributedNameRe = regexp.MustCompile("^[0-9a-f]{10}$")
 
 // Options configures a crawl run.
 type Options struct {
-	Channels      []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
-	ChannelsPath  string   // YAML file of seed channels, re-read each cycle for hot-reload
-	PrivatePath   string
-	CuratedPaths  []string      // YAML files of hand-written sources (CRAWL_CURATED), read for names the mint must avoid — never crawled
-	Pages         int           // t.me/s pages (~20 msgs each) to walk back per configured seed channel
-	Prune         bool          // drop managed sources proven no longer live
-	MaxDepth      int           // repost-recursion depth; 0 = only seed channels (no recursion)
-	MaxChannels   int           // cap on discovered (non-seed) channels per cycle; 0 = defaultMaxDiscovered
+	Channels     []string // static seed channels (from CRAWL_CHANNELS); merged with ChannelsPath
+	ChannelsPath string   // YAML file of seed channels, re-read each cycle for hot-reload
+	PrivatePath  string
+	CuratedPaths []string // YAML files of hand-written sources (CRAWL_CURATED), read for names the mint must avoid — never crawled
+	Pages        int      // t.me/s pages (~20 msgs each) to walk back per configured seed channel
+	Prune        bool     // drop managed sources proven no longer live
+	MaxDepth     int      // repost-recursion depth; 0 = only seed channels (no recursion)
+	MaxChannels  int      // cap on discovered (non-seed) channels per cycle; 0 = defaultMaxDiscovered
+	// DeadTTL is how long a URL judged DEFINITIVELY not live (gone status or
+	// origin-advertised expiry) is remembered and not fetched again on the
+	// discovery path. The zero value disables the memory outright — no
+	// recording and no withholding — so an embedder gets the feature only by
+	// asking for it; main supplies the 720h default from CRAWL_DEAD_TTL.
+	DeadTTL       time.Duration // remember a dead subscription URL for this long
 	StatePath     string        // persisted productive-channel memory; empty disables persistence
 	StateTTL      time.Duration // drop a productive channel from memory after this long without a live sub
 	InlineEnabled bool          // harvest raw inline proxy URIs pasted in channel messages
@@ -270,14 +276,20 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// Discover live subscription URLs by scanning the channel repost graph,
 	// seeded by configured channels plus remembered productive ones. scan
 	// records freshly productive channels into st; stale ones are pruned.
+	// pruneDead runs before the scan so a record expiring mid-cycle is judged
+	// by its own rule: expired means classifiable again, this cycle.
 	st := loadState(c.opts.StatePath, c.logger)
-	live, inline := c.scan(ctx, &st)
+	st.pruneDead(time.Now())
+	live, inline, discDead := c.scan(ctx, &st, c.deadSet(&st))
 	if ctx.Err() != nil {
 		c.logger.Warn().Str("reason", abortReason(ctx.Err())).
 			Msg("cycle aborted mid-scan; skipping state save and merge")
 		return
 	}
 	st.prune(time.Now().Add(-c.opts.StateTTL))
+	// Saved before the recheck, which is network-bound over the whole managed
+	// corpus: an abort in that window would otherwise discard this cycle's
+	// productive-channel discoveries and the expiries pruneDead just dropped.
 	c.persistState(st)
 	// Captured before recheckManaged folds revived URLs into live.
 	discovered := len(live)
@@ -291,10 +303,14 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	dark := rr.dark(discovered)
+	// A dark cycle is a crawler-side fault (see dark): its not-live answers
+	// are no evidence about any source, so it records and clears nothing —
+	// the same reasoning that stops it pruning.
 	if dark {
 		c.logger.Error().Int("rechecked", rr.checked).
 			Msg("cycle discovered no subscription and revived none; treating as crawler-side fault, pruning nothing and advancing no retirement streak")
 	} else {
+		c.rememberVerdicts(&st, discDead, rr.dead, live)
 		rr.stale = c.trackLiveness(&st, rr.managedURL, live)
 	}
 	prune := c.opts.Prune && !dark
@@ -306,11 +322,11 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 		return
 	}
 	before := managedCount(pf)
-	// Re-read alongside the merge, not at cycle start: a cycle runs for
-	// minutes to hours and an operator retiring a source expects the block to
-	// take effect on the write it is racing.
-	blocked := blockedSet(loadChannels(c.opts.ChannelsPath, c.logger).Blocked)
-	next, managed, deleted, curated := c.mergeManaged(pf, live, rr, prune, blocked)
+	// The deny list is read alongside the merge, not at cycle start, for the
+	// same reason private.yaml is re-read here: an operator broadening the
+	// curated set expects the withholding to apply to the write it races.
+	denied := curatedURLs(c.opts.CuratedPaths, c.logger)
+	next, managed, deleted, curated := c.mergeManaged(pf, live, rr, prune, denied)
 	inlineCount := 0
 	if c.opts.InlineEnabled {
 		if s, n, ok := c.buildInlineSource(inline); ok {
@@ -371,8 +387,9 @@ type recheckResult struct {
 	// stale is filled by RunOnce from the persisted streaks, not by the recheck:
 	// one cycle's undetermined answer never retires a source, N of them do.
 	stale   map[string]bool
-	checked int // URLs rechecked (not rediscovered in a channel)
-	revived int // rechecked URLs that answered as a live subscription
+	checked int      // URLs rechecked (not rediscovered in a channel)
+	revived int      // rechecked URLs that answered as a live subscription
+	dead    []string // definitive not-live verdicts this pass, for recordDead
 }
 
 // dark reports a cycle that learned nothing anywhere: no live subscription found
@@ -391,6 +408,11 @@ func (r recheckResult) dark(discovered int) bool {
 // transport (DNS, timeout, TLS, read), answered a transient status (403, 408,
 // 425, 429, any 5xx) or answered 2xx with no node at all lands in unknown, since
 // none of those show the subscription is gone; see classifyAll.
+//
+// The recheck deliberately passes a nil dead set: these URLs are the corpus the
+// crawler already owns, so a stale record must not stop it asking whether they
+// still serve — that is what makes recordDead's stamp refreshable rather than
+// terminal. Their definitive verdicts come back in rr.dead.
 func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[string]origin) recheckResult {
 	rr := recheckResult{managedURL: map[string]bool{}}
 	var pending []string
@@ -414,10 +436,11 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 	// nil recorder, no channel and no ids: these are existing managed sources,
 	// not candidates this cycle discovered, and their fate is already reported
 	// by checked/revived and the prune decision.
-	relive, unknown := c.classifyAll(ctx, pending, nil, "", nil)
+	relive, unknown, dead := c.classifyAll(ctx, pending, nil, nil, "", nil)
 	rr.unknown = unknown
 	rr.checked = len(pending)
 	rr.revived = len(relive)
+	rr.dead = dead
 	for u := range relive {
 		// Revived by recheck, not seen in a channel this cycle: origin unknown.
 		if _, ok := live[u]; !ok {
@@ -436,11 +459,17 @@ func (c *Crawler) recheckManaged(ctx context.Context, pf privateFile, live map[s
 // mis-set CRAWL_CURATED silently disabled the seeding. Which of the not-live
 // managed URLs survive is retainManaged's decision.
 //
-// blocked is the operator's retirement list (channels.yaml `blocked:`). It is
-// applied here, the single funnel every candidate URL passes through, so a
-// blocked source cannot re-enter from the re-loaded file, from rediscovery in
-// a channel, or from a recheck reviving it.
-func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr recheckResult, prune bool, blocked map[string]struct{}) (kept, managed []source, deleted []string, curated int) {
+// denied is the curated-source deny list (curatedURLs): any URL listed verbatim
+// as subscriptions.sources[].url in a CRAWL_CURATED file is withheld, whatever
+// its liveness — the curated entry itself is what the worker fetches. It sits in
+// this single funnel every candidate URL passes through, so a withheld source
+// cannot re-enter from rediscovery in a channel or from a recheck reviving it.
+// A withholding is deliberately NOT counted as a deletion: a first cycle after a
+// broadened curated set can withhold many managed mirrors at once, and counting
+// them would trip the bulk-prune floor against an operator action rather than a
+// crawler mistake — the floor exists to catch the crawler deleting sources by
+// accident, not to throttle deliberate curation.
+func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr recheckResult, prune bool, denied map[string]struct{}) (kept, managed []source, deleted []string, curated int) {
 	all := map[string]struct{}{}
 	existing := map[string]source{}
 	// Every name the file already holds is spoken for, whoever owns it:
@@ -487,14 +516,11 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr rechec
 		urls = append(urls, u)
 	}
 	sort.Strings(urls)
-	blockedDropped := 0
+	deniedDropped := 0
 	for _, u := range urls {
 		_, wasManaged := existing[u]
-		if _, isBlocked := blocked[u]; isBlocked {
-			// An operator block is a deliberate removal, so it is deliberately
-			// NOT counted as a deletion: the prune floor exists to catch the
-			// crawler deleting sources by mistake, not to throttle the operator.
-			blockedDropped++
+		if _, isDenied := denied[u]; isDenied {
+			deniedDropped++
 			continue
 		}
 		if !retainManaged(u, live, rr, prune) {
@@ -516,8 +542,9 @@ func (c *Crawler) mergeManaged(pf privateFile, live map[string]origin, rr rechec
 		}
 		managed = append(managed, mintSource(u, existing[u], live[u], used))
 	}
-	if blockedDropped > 0 {
-		c.logger.Info().Int("blocked", blockedDropped).Msg("managed sources withheld by the channels.yaml blocked list")
+	if deniedDropped > 0 {
+		c.logger.Info().Int("denied", deniedDropped).
+			Msg("managed sources withheld by the curated-source deny list")
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	kept = append(kept, managed...)
@@ -571,11 +598,57 @@ func retainManaged(u string, live map[string]origin, rr recheckResult, prune boo
 	return false
 }
 
+// rememberVerdicts folds this cycle's DEFINITIVE not-live verdicts into the
+// persisted dead memory and forgets the records of URLs that answered live. Both
+// verdict slices are stamped at one instant so a cycle's records share an
+// expiry, and they stay separate slices rather than being appended: the
+// discovery half is scan's own buffer, which nothing else may extend.
+//
+// A cycle that saw no live subscription anywhere records NOTHING. Its 404s are
+// no evidence about any panel, because nothing in it proved the egress works —
+// a DNS sinkhole answering 404 for every host produces exactly this shape.
+// recheckResult.dark catches that only once the corpus is non-empty (it needs
+// rr.checked > 0), so a fresh deploy behind such an egress would otherwise
+// condemn every candidate it ever saw for the whole TTL, and the withholding
+// would then hide them from the healthy cycles that follow.
+func (c *Crawler) rememberVerdicts(st *state, discovered, rechecked []string, live map[string]origin) {
+	if len(live) == 0 {
+		if len(discovered)+len(rechecked) > 0 {
+			c.logger.Warn().Int("verdicts", len(discovered)+len(rechecked)).
+				Msg("cycle proved nothing live; not remembering its not-live verdicts")
+		}
+		return
+	}
+	now := time.Now()
+	changed := st.recordDead(discovered, c.opts.DeadTTL, now)
+	if st.recordDead(rechecked, c.opts.DeadTTL, now) {
+		changed = true
+	}
+	if changed {
+		c.logger.Info().Int("dead", len(st.Dead)).Msg("remembered dead subscription URLs")
+	}
+	if st.clearDead(live) {
+		c.logger.Info().Msg("cleared dead records for URLs that answered live")
+	}
+}
+
+// deadSet is the cycle's skip set. A DeadTTL of 0 is the documented off switch,
+// and it has to switch off WITHHOLDING as well as recording: otherwise records
+// already on disk would go on suppressing fetches that nothing will ever
+// re-stamp. They stay on disk, inert, until pruneDead ages them out.
+func (c *Crawler) deadSet(st *state) map[string]time.Time {
+	if c.opts.DeadTTL <= 0 {
+		return nil
+	}
+	return st.Dead
+}
+
 // trackLiveness folds this cycle's liveness verdicts into the persisted streaks
 // and returns the managed URLs the retirement window has run out on, logging the
-// evidence behind each. It saves the state itself: the streak is this cycle's
-// only record that these sources were observed at all, and every path from the
-// merge on may return without another save.
+// evidence behind each. It saves the state itself, which is what persists both
+// the streaks and the dead records rememberVerdicts stamped just before it: the
+// streak is this cycle's only record that these sources were observed at all,
+// and every path from the merge on may return without another save.
 func (c *Crawler) trackLiveness(st *state, managed map[string]bool, live map[string]origin) map[string]bool {
 	now := time.Now()
 	stale := st.ageManaged(managed, live, now)
@@ -765,12 +838,18 @@ func appendChannelSlug(dst []byte, ch string) []byte {
 }
 
 // classifyAll classifies urls with bounded concurrency, returning the set that
-// classify as live and the set whose verdict is undetermined. A URL lands in
-// neither set only when it is provably no longer a subscription: the origin
-// answered a definitively gone status, or it advertised an expiry already in the
-// past. Everything else — transport failure, transient status, oversized body,
-// or a 2xx carrying no node — is undetermined, because callers prune on the
-// absence of both verdicts.
+// classify as live, the set whose verdict is undetermined, and deadOut: the
+// URLs that received a DEFINITIVE not-live verdict this call — a gone
+// status (404/410/451) or an origin-advertised expiry. Everything else —
+// transport failure, transient status (403/408/425/429, any 5xx), oversized
+// body, or a 2xx carrying no node — is undetermined, and never reaches deadOut,
+// because callers prune on the absence of both live and unknown.
+//
+// A non-nil dead set is the URLs already remembered dead: they are not fetched
+// at all, land in neither returned set, are reported to rej under rejectDead,
+// and stay out of deadOut — a record is only re-stamped by a fresh definitive
+// verdict, which a skipped URL cannot produce. nil skips nothing; the recheck
+// pass passes nil so it can still harvest deadOut for records it must refresh.
 //
 // Every URL that does not end up live is reported to rej under the origin it was
 // harvested from: one call spans a whole channel, so the slug is that channel's
@@ -779,13 +858,20 @@ func appendChannelSlug(dst []byte, ch string) []byte {
 // folding them into the discovery summary would mix two populations under one
 // total; slug is empty and posts nil with it, which is the zero origin that
 // pass has always recorded.
-func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, slug string, posts map[string]uint64) (live, unknown map[string]bool) {
+func (c *Crawler) classifyAll(ctx context.Context, urls []string, dead map[string]time.Time, rej *rejects, slug string, posts map[string]uint64) (live, unknown map[string]bool, deadOut []string) {
 	live = make(map[string]bool, len(urls))
 	unknown = map[string]bool{}
 	var mu sync.Mutex
 	sem := make(chan struct{}, classifyConcurrency)
 	var wg sync.WaitGroup
 	for _, u := range urls {
+		if _, remembered := dead[u]; remembered {
+			// Counted, not logged, and never fetched: see rejects.noteDead.
+			mu.Lock()
+			rej.noteDead(u)
+			mu.Unlock()
+			continue
+		}
 		sem <- struct{}{} // acquire before spawning so goroutines stay bounded
 		wg.Add(1)
 		go func(u string) {
@@ -805,6 +891,8 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 					// Transport failure, or a status that proves nothing about
 					// the subscription: the verdict stays undetermined.
 					unknown[u] = true
+				} else {
+					deadOut = append(deadOut, u)
 				}
 				if statusErr != nil {
 					rej.record(o, u, rejectStatus, statusErr.Code, nil)
@@ -830,12 +918,13 @@ func (c *Crawler) classifyAll(ctx context.Context, urls []string, rej *rejects, 
 				// The only 2xx answer that proves the subscription is over,
 				// because the origin itself advertised the expiry. It joins
 				// neither set, so it prunes.
+				deadOut = append(deadOut, u)
 				rej.record(o, u, rejectExpired, 0, nil)
 			}
 		}(u)
 	}
 	wg.Wait()
-	return live, unknown
+	return live, unknown, deadOut
 }
 
 // inlineSourceName is the one managed name that is not minted from a URL: the
@@ -985,6 +1074,7 @@ type curatedFile struct {
 	Subscriptions struct {
 		Sources []struct {
 			Name string `yaml:"name"`
+			URL  string `yaml:"url"`
 		} `yaml:"sources"`
 	} `yaml:"subscriptions"`
 }
@@ -1025,6 +1115,45 @@ func curatedNames(paths []string, logger zerolog.Logger, room int) map[string]bo
 		used[name] = true
 	}
 	return used
+}
+
+// curatedURLs collects every subscription URL the curated overlays carry,
+// verbatim: mergeManaged withholds exactly these from the managed corpus, so
+// the crawler never mirrors a source the operator already curates by hand. The
+// match is verbatim only — a different query spelling is a different URL and a
+// different source. Read best-effort like curatedNames, and separately from it
+// on purpose: names feed the mint's taken-set, URLs the deny funnel, and the
+// two evolve at different rates for files this small that reading them twice
+// per cycle costs nothing.
+func curatedURLs(paths []string, logger zerolog.Logger) map[string]struct{} {
+	var urls []string
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Warn().Err(err).Str("path", path).Msg("read curated sources failed; denying without that file's curated URLs")
+			}
+			continue
+		}
+		var cf curatedFile
+		if unmarshalErr := yaml.Unmarshal(b, &cf); unmarshalErr != nil {
+			logger.Warn().Err(unmarshalErr).Str("path", path).Msg("unmarshal curated sources failed; denying without that file's curated URLs")
+			continue
+		}
+		for _, s := range cf.Subscriptions.Sources {
+			if s.URL != "" {
+				urls = append(urls, s.URL)
+			}
+		}
+	}
+	denied := make(map[string]struct{}, len(urls))
+	for _, u := range urls {
+		denied[u] = struct{}{}
+	}
+	return denied
 }
 
 // adoptLegacyNames migrates the corpus off the tg- prefix, once. Its gate is

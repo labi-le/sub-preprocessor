@@ -93,10 +93,15 @@ type origin struct {
 // yield a live sub are recorded into st (bounded by maxProductive) so they
 // become seeds on future cycles, surviving days when their recent pages carry
 // no live sub. Returns every live subscription URL found, mapped to the origin
-// that first yielded it.
-func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []string) {
+// that first yielded it, and the URLs that received a DEFINITIVE not-live
+// verdict this scan, for recordDead to stamp.
+//
+// dead is the cycle's remembered-dead set (state.Dead), threaded to classifyAll;
+// nil-safe, and nil simply fetches everything.
+func (c *Crawler) scan(ctx context.Context, st *state, dead map[string]time.Time) (map[string]origin, []string, []string) {
 	live := map[string]origin{}
 	var inline []string
+	var deadOut []string
 	discovered := 0
 	var cursors cursorStats
 	rej := newRejects(c.logger)
@@ -107,7 +112,7 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 	if len(seeds) == 0 {
 		c.logger.Warn().Str("channels_file", c.opts.ChannelsPath).
 			Msg("no seed channels; add them to channels.yaml or CRAWL_CHANNELS")
-		return live, inline
+		return live, inline, nil
 	}
 	maxDiscovered := c.opts.MaxChannels
 	if maxDiscovered <= 0 {
@@ -135,12 +140,14 @@ func (c *Crawler) scan(ctx context.Context, st *state) (map[string]origin, []str
 
 		// Children enqueue unmarked: admitNode owns every refusal, and
 		// pre-filtering here would double-bookkeep the very maps it marks.
-		queue = append(queue, c.scanChannel(ctx, n, st, live, &inline, &cursors, rej)...)
+		children, dead := c.scanChannel(ctx, n, st, dead, live, &inline, &cursors, rej)
+		queue = append(queue, children...)
+		deadOut = append(deadOut, dead...)
 	}
 	c.reportCursors(cursors)
 	c.reportTopics(metrics.Crawl.Since(topicsBefore))
 	rej.report(live)
-	return live, inline
+	return live, inline, deadOut
 }
 
 // admitNode applies the two admission identities and the shared discovery
@@ -268,7 +275,10 @@ func (c *Crawler) reportTopics(ts metrics.CrawlStats) {
 // next depth (nil when the thematic gate closes or the scrape yielded no
 // pages). A ref naming the scraped chat itself survives only the self-exclusion
 // carve-out below and comes back marked, so scan keys it against topicsSeen.
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) []scanNode {
+//
+// dead is this cycle's remembered-dead set (state.Dead); classifyAll skips
+// those URLs without fetching and reports them under rejectDead. nil-safe.
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead map[string]time.Time, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) (children []scanNode, deadOut []string) {
 	pages, cursorLost, viaTopic, listingFailed := c.scrapeChat(ctx, n.ref, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
@@ -287,11 +297,12 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 			Msg("discovered group listing carried no message and the link named no topic")
 	}
 	if len(pages) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	cand := c.harvestPages(pages, inline, rej, n.ref.slug)
-	found, _ := c.classifyAll(ctx, keys(cand), rej, n.ref.slug, cand)
+	var found map[string]bool
+	found, _, deadOut = c.classifyAll(ctx, keys(cand), dead, rej, n.ref.slug, cand)
 	for u := range found {
 		// First discoverer wins: BFS visits seeds before discovered channels, so
 		// attribution prefers the operator-configured origin. The slug stays
@@ -322,10 +333,10 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, live m
 	// chats that actually produced subscriptions — a carve-out child faces
 	// this same gate at its own dequeue, not its parent's yield.
 	if n.depth >= c.opts.MaxDepth || (n.depth > 0 && len(found) == 0) {
-		return nil
+		return nil, deadOut
 	}
 
-	return childRefs(pages, n, viaTopic)
+	return childRefs(pages, n, viaTopic), deadOut
 }
 
 // gateVerdict is the verdict candidate gave one rejected URL, memoized for the

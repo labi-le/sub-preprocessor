@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -101,8 +102,14 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(),
-		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, "", nil)
+	live, unknown, dead := c.classifyAll(context.Background(),
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, nil, "", nil)
+	// deadOut carries no order: workers append under the mutex as they finish,
+	// and its only consumer writes a map.
+	if !slices.Contains(dead, "https://dead.example/sub") ||
+		!slices.Contains(dead, "https://gone.example/sub") || len(dead) != 2 {
+		t.Errorf("dead = %v, want exactly the expired and the gone URL", dead)
+	}
 
 	if !live["https://live.example/sub"] || len(live) != 1 {
 		t.Errorf("live = %v, want exactly the live URL", live)
@@ -147,7 +154,10 @@ func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, "", nil)
+	live, unknown, dead := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, nil, "", nil)
+	if len(dead) != 2 {
+		t.Errorf("dead = %v, want exactly the expired and gone URLs", dead)
+	}
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL served a node", live)
@@ -188,7 +198,7 @@ func TestClassifyAllBoundsConcurrency(t *testing.T) {
 	for i := range cap(urls) {
 		urls = append(urls, fmt.Sprintf("https://h%d.example/sub", i))
 	}
-	live, unknown := c.classifyAll(context.Background(), urls, nil, "", nil)
+	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil)
 	if len(live) != len(urls) || len(unknown) != 0 {
 		t.Fatalf("live=%d unknown=%d, want %d/0", len(live), len(unknown), len(urls))
 	}
@@ -298,7 +308,7 @@ func TestClassifyAllTreatsTransientStatusAsUnknown(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown := c.classifyAll(context.Background(), urls, nil, "", nil)
+	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil)
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL answered 2xx", live)
@@ -2580,29 +2590,152 @@ func TestReportCursorsWarnsOnlyOnFleetWideLoss(t *testing.T) {
 	}
 }
 
-// TestRunOnceHonoursBlockedList pins CRAWL-7: deleting a harvested source by
-// hand does not stick, because the next cycle rediscovers the URL in a channel
-// and re-adds it. The channels.yaml blocked list is the only supported way to
-// retire one for good.
-func TestRunOnceHonoursBlockedList(t *testing.T) {
+// testDeadTTL is any positive window: the memory is on, and every test that
+// cares about expiry sets its own stamps rather than waiting one out. The
+// production default lives in main (CRAWL_DEAD_TTL), not in this package.
+const testDeadTTL = 720 * time.Hour
+
+// TestRunOnceWithholdingIsNotADeletion pins the half of the deny funnel that no
+// other test can see: a withholding must not be counted as a deletion, or a
+// curated set broadened over URLs the crawler already mirrors would trip the
+// bulk-prune floor and refuse the write — turning an operator action into a
+// two-cycle standoff. 15 of 20 managed URLs go at once here, which is over both
+// arms of the floor (minDrop 10 AND 30%).
+func TestRunOnceWithholdingIsNotADeletion(t *testing.T) {
 	t.Parallel()
 
-	const (
-		blockedURL = "https://abusive.example/sub"
-		keptURL    = "https://fine.example/sub"
-	)
 	dir := t.TempDir()
-	priv := writeEmptyPrivate(t, dir)
-	channels := filepath.Join(dir, "channels.yaml")
-	if err := os.WriteFile(channels, []byte("channels:\n  - chan\nblocked:\n  - "+blockedURL+"\n"), 0o644); err != nil {
+	priv := filepath.Join(dir, "private.yaml")
+	var pf privateFile
+	var curated, page strings.Builder
+	curated.WriteString("subscriptions:\n  sources:\n")
+	for i := range 20 {
+		u := fmt.Sprintf("https://panel-%02d.example/sub", i)
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources,
+			source{Name: fmt.Sprintf("chan-%d", i), URL: u, Managed: true})
+		fmt.Fprintf(&page, `<a href="%s">x</a> `, u)
+		if i < 15 {
+			fmt.Fprintf(&curated, "    - name: curated-%02d\n      url: %s\n", i, u)
+		}
+	}
+	if err := writePrivate(priv, pf); err != nil {
 		t.Fatal(err)
 	}
+	sources := filepath.Join(dir, "sources.yaml")
+	if err := os.WriteFile(sources, []byte(curated.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "state.json")
 
-	page := `<a href="` + blockedURL + `">a</a> <a href="` + keptURL + `">b</a>`
 	c := &Crawler{
 		opts: Options{
 			PrivatePath:  priv,
-			ChannelsPath: channels,
+			Channels:     []string{"chan"},
+			CuratedPaths: []string{sources},
+			StatePath:    statePath,
+			DeadTTL:      testDeadTTL,
+			Pages:        1,
+			Prune:        true,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page.String()}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if n := len(got.Subscriptions.Sources); n != 5 {
+		t.Errorf("sources = %d, want the 5 uncurated URLs: the write must go through, not wait for a second cycle", n)
+	}
+	for _, s := range got.Subscriptions.Sources {
+		if i, convErr := strconv.Atoi(s.URL[len("https://panel-") : len("https://panel-")+2]); convErr != nil || i < 15 {
+			t.Errorf("a curated URL survived the merge: %s", s.URL)
+		}
+	}
+	if st := loadState(statePath, zerolog.Nop()); len(st.BulkPruneURLs) != 0 {
+		t.Errorf("the floor recorded a refused proposal %v; a withholding is not a deletion", st.BulkPruneURLs)
+	}
+}
+
+// TestClassifyAllRecordsSkipsAndVerdictsSafely covers the skip branch's lock.
+// It runs on the CALLER goroutine inside the loop that spawns the workers, so it
+// touches rejects while a worker from an earlier iteration may be inside
+// rej.record — a lost write there is `fatal error: concurrent map writes` in
+// production, a crashed crawler rather than a wrong verdict. Every other fixture
+// classifies instantly, so the two never overlap and the race is invisible.
+func TestClassifyAllRecordsSkipsAndVerdictsSafely(t *testing.T) {
+	t.Parallel()
+
+	const n = 64
+	urls := make([]string, 0, 2*n)
+	dead := make(map[string]time.Time, n)
+	for i := range n {
+		slow := fmt.Sprintf("https://slow-%02d.example/sub", i)
+		gone := fmt.Sprintf("https://gone-%02d.example/sub", i)
+		urls = append(urls, slow, gone)
+		dead[gone] = time.Now().Add(time.Hour)
+	}
+	c := &Crawler{
+		opts: Options{DeadTTL: testDeadTTL},
+		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL) (classify.Result, error) {
+			time.Sleep(time.Millisecond)
+			return classify.Result{}, &classify.StatusError{Code: http.StatusServiceUnavailable, Status: "503 Service Unavailable"}
+		},
+		logger: zerolog.Nop(),
+	}
+	rej := newRejects(zerolog.Nop())
+
+	_, unknown, deadOut := c.classifyAll(context.Background(), urls, dead, rej, "chan", nil)
+
+	if len(unknown) != n {
+		t.Errorf("unknown = %d, want %d: a 503 proves nothing about the subscription", len(unknown), n)
+	}
+	if len(deadOut) != 0 {
+		t.Errorf("deadOut = %v, want empty: a skipped URL produces no fresh verdict and a 503 is not one", deadOut)
+	}
+	if len(rej.verdict) != 2*n {
+		t.Errorf("rej.verdict = %d, want %d: a lost write dropped a record", len(rej.verdict), 2*n)
+	}
+	if rej.noted != n {
+		t.Errorf("noted = %d, want %d withheld from the line budget", rej.noted, n)
+	}
+}
+
+// TestRunOnceWithholdsCuratedURLs pins the successor to CRAWL-7's blocked list:
+// a URL the operator already curates by hand is never mirrored into the managed
+// corpus, however live it classifies, while its neighbour on the same page is
+// harvested as usual. Withholding is not a death verdict, so it must leave no
+// dead record behind — the two mechanisms have different revocation paths.
+func TestRunOnceWithholdsCuratedURLs(t *testing.T) {
+	t.Parallel()
+
+	const (
+		curatedURL = "https://curated.example/sub"
+		freshURL   = "https://fine.example/sub"
+	)
+	dir := t.TempDir()
+	priv := writeEmptyPrivate(t, dir)
+	statePath := filepath.Join(dir, "state.json")
+	sources := filepath.Join(dir, "sources.yaml")
+	if err := os.WriteFile(sources,
+		[]byte("subscriptions:\n  sources:\n    - name: curated-one\n      url: "+curatedURL+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	page := `<a href="` + curatedURL + `">a</a> <a href="` + freshURL + `">b</a>`
+	c := &Crawler{
+		opts: Options{
+			PrivatePath:  priv,
+			Channels:     []string{"chan"},
+			CuratedPaths: []string{sources},
+			StatePath:    statePath,
+			DeadTTL:      testDeadTTL,
 			Pages:        1,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
@@ -2622,11 +2755,331 @@ func TestRunOnceHonoursBlockedList(t *testing.T) {
 	for _, s := range got.Subscriptions.Sources {
 		urls[s.URL] = true
 	}
-	if urls[blockedURL] {
-		t.Errorf("a blocked URL was harvested anyway: %+v", got.Subscriptions.Sources)
+	if urls[curatedURL] {
+		t.Errorf("a curated URL was mirrored anyway: %+v", got.Subscriptions.Sources)
 	}
-	if !urls[keptURL] {
-		t.Errorf("the unblocked URL must still be harvested, got %+v", got.Subscriptions.Sources)
+	if !urls[freshURL] {
+		t.Errorf("the uncurated URL must still be harvested, got %+v", got.Subscriptions.Sources)
+	}
+	if st := loadState(statePath, zerolog.Nop()); len(st.Dead) != 0 {
+		t.Errorf("withholding recorded a dead stamp %v; only a definitive verdict may", st.Dead)
+	}
+}
+
+// TestRunOnceRemembersDeadAndSkipsRefetch pins the whole point of the dead
+// memory: a definitively gone URL costs exactly one classify request, ever.
+// The second cycle must not spend one on it even though the channel still
+// advertises the link, while a live sibling on the same page is unaffected.
+func TestRunOnceRemembersDeadAndSkipsRefetch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		goneURL = "https://gone.example/sub"
+		liveURL = "https://alive.example/sub"
+	)
+	dir := t.TempDir()
+	priv := writeEmptyPrivate(t, dir)
+	statePath := filepath.Join(dir, "state.json")
+	var goneFetches, liveFetches atomic.Int64
+	page := `<a href="` + goneURL + `">a</a> <a href="` + liveURL + `">b</a>`
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			DeadTTL:     testDeadTTL,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) == goneURL {
+				goneFetches.Add(1)
+				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+			}
+			liveFetches.Add(1)
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+	st := loadState(statePath, zerolog.Nop())
+	if _, ok := st.Dead[goneURL]; !ok {
+		t.Fatalf("a 404 must be remembered, got Dead = %v", st.Dead)
+	}
+	if _, ok := st.Dead[liveURL]; ok {
+		t.Errorf("a live URL must never be stamped dead, got Dead = %v", st.Dead)
+	}
+
+	c.RunOnce(context.Background())
+	if n := goneFetches.Load(); n != 1 {
+		t.Errorf("the remembered URL was classified %d times, want exactly the 1 that condemned it", n)
+	}
+	if n := liveFetches.Load(); n != 2 {
+		t.Errorf("the live URL was classified %d times, want 1 per cycle: the skip must not spill onto it", n)
+	}
+}
+
+// TestRunOnceDarkCycleRecordsNoDead pins the fault gate over the new memory. A
+// broken egress that answers 404 for everything is exactly the shape dark()
+// exists to catch, and stamping that cycle's verdicts would withhold the whole
+// corpus for a month over one outage.
+func TestRunOnceDarkCycleRecordsNoDead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		managedURL = "https://managed.example/sub"
+		pageURL    = "https://candidate.example/sub"
+	)
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources:\n    - name: chan-1\n      url: "+
+		managedURL+"\n      managed: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "state.json")
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			DeadTTL:     testDeadTTL,
+			Pages:       1,
+			Prune:       true,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<a href="` + pageURL + `">a</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	if st := loadState(statePath, zerolog.Nop()); len(st.Dead) != 0 {
+		t.Errorf("a dark cycle recorded %v; its not-live answers are evidence about the crawler, not any source", st.Dead)
+	}
+}
+
+// TestRunOnceEmptyCorpusRecordsNoDead covers the hole dark() structurally cannot
+// see: it needs rr.checked > 0, so a fresh deploy (or one rebuilt after losing
+// private.yaml) behind an egress that 404s everything has no recheck to prove
+// anything with. Stamping there is self-concealing — later healthy cycles skip
+// those URLs without a request — so recording requires a live answer somewhere,
+// not merely the absence of a dark verdict.
+func TestRunOnceEmptyCorpusRecordsNoDead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := writeEmptyPrivate(t, dir)
+	statePath := filepath.Join(dir, "state.json")
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			DeadTTL:     testDeadTTL,
+			Pages:       1,
+			Prune:       true,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<a href="https://a.example/sub">a</a> <a href="https://b.example/sub">b</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	if st := loadState(statePath, zerolog.Nop()); len(st.Dead) != 0 {
+		t.Errorf("a cycle that proved nothing live recorded %v; nothing in it showed the egress works", st.Dead)
+	}
+}
+
+// TestRejectSummaryExcludesNotedFromSuppressed: `suppressed` answers "how many
+// per-candidate lines did the cycle cap withhold". A noteDead record spends no
+// line by design, so counting it there would report hundreds of withheld lines
+// nobody ever wanted — a wrong number replacing the one this fix removed.
+func TestRejectSummaryExcludesNotedFromSuppressed(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	rej := newRejects(zerolog.New(&buf))
+	for i := range 5 {
+		rej.noteDead(fmt.Sprintf("https://gone-%d.example/sub", i))
+	}
+	rej.report(map[string]origin{})
+
+	out := buf.String()
+	if strings.Contains(out, "suppressed") {
+		t.Errorf("withholdings nobody logged were reported as suppressed lines:\n%s", out)
+	}
+	if !strings.Contains(out, `"dead":5`) {
+		t.Errorf("the per-reason summary must still count them:\n%s", out)
+	}
+}
+
+// TestRunOnceReclassifiesAfterDeadRecordExpiry pins the revival route: expiry is
+// the whole mechanism by which a panel that came back re-enters, and it must
+// need no operator edit.
+func TestRunOnceReclassifiesAfterDeadRecordExpiry(t *testing.T) {
+	t.Parallel()
+
+	const revivedURL = "https://revived.example/sub"
+	dir := t.TempDir()
+	priv := writeEmptyPrivate(t, dir)
+	statePath := filepath.Join(dir, "state.json")
+	seed := state{
+		Productive: map[string]channelState{},
+		Dead:       map[string]time.Time{revivedURL: time.Now().Add(-time.Minute)},
+	}
+	if err := saveState(statePath, seed); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			DeadTTL:     testDeadTTL,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<a href="` + revivedURL + `">a</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(got.Subscriptions.Sources) != 1 || got.Subscriptions.Sources[0].URL != revivedURL {
+		t.Errorf("an expired record must not withhold: sources = %+v", got.Subscriptions.Sources)
+	}
+	if st := loadState(statePath, zerolog.Nop()); len(st.Dead) != 0 {
+		t.Errorf("the expired record must be gone, got %v", st.Dead)
+	}
+}
+
+// TestRunOnceDeadTTLZeroWithholdsNothing pins the off switch as documented in
+// README and sources.md: DeadTTL 0 must stop WITHHOLDING as well as recording,
+// or records nothing will ever re-stamp go on suppressing fetches for as long
+// as their old expiry runs.
+func TestRunOnceDeadTTLZeroWithholdsNothing(t *testing.T) {
+	t.Parallel()
+
+	const heldURL = "https://held.example/sub"
+	dir := t.TempDir()
+	priv := writeEmptyPrivate(t, dir)
+	statePath := filepath.Join(dir, "state.json")
+	// Unexpired by a wide margin: only the off switch can admit this URL.
+	if err := saveState(statePath, state{
+		Productive: map[string]channelState{},
+		Dead:       map[string]time.Time{heldURL: time.Now().Add(24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetches atomic.Int64
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			DeadTTL:     0,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<a href="` + heldURL + `">a</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+			fetches.Add(1)
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(context.Background())
+
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("classify calls = %d, want 1: a held record must not withhold once the memory is off", n)
+	}
+	got, err := loadPrivate(priv)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+	if len(got.Subscriptions.Sources) != 1 || got.Subscriptions.Sources[0].URL != heldURL {
+		t.Errorf("sources = %+v, want the URL harvested", got.Subscriptions.Sources)
+	}
+}
+
+// TestRunOnceKeepsChannelMemoryOnMidRecheckAbort pins the save the scan earns.
+// The recheck is network-bound over the whole managed corpus and cycleBudget
+// aborts exactly there on a crawl whose fan-out outgrew its interval, so a save
+// that waited for the merge would discard the productive-channel memory the scan
+// had just learned — memory nothing reconstructs, and every entry of which is a
+// depth-0 seed for later cycles. The recheck's own half-collected verdicts are
+// deliberately NOT saved: a partial cycle is never evidence a source died.
+func TestRunOnceKeepsChannelMemoryOnMidRecheckAbort(t *testing.T) {
+	t.Parallel()
+
+	const (
+		managedURL = "https://managed.example/sub"
+		freshURL   = "https://fresh.example/sub"
+	)
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources:\n    - name: chan-1\n      url: "+
+		managedURL+"\n      managed: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "state.json")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Crawler{
+		opts: Options{
+			PrivatePath: priv,
+			Channels:    []string{"chan"},
+			StatePath:   statePath,
+			StateTTL:    720 * time.Hour,
+			DeadTTL:     testDeadTTL,
+			Pages:       1,
+			Prune:       true,
+		},
+		client: pageFetcher{pages: map[string]string{
+			"https://t.me/s/chan": `<a href="` + freshURL + `">a</a>`,
+		}},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+			if string(u) == managedURL {
+				// The recheck: the budget expiring here is the real case.
+				cancel()
+				return classify.Result{}, context.Canceled
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+
+	c.RunOnce(ctx)
+
+	st := loadState(statePath, zerolog.Nop())
+	if len(st.Productive) == 0 {
+		t.Error("the scan's channel memory was discarded by an abort in the recheck; nothing reconstructs it")
+	}
+	if len(st.Dead) != 0 {
+		t.Errorf("a partial cycle recorded %v; its verdicts are not evidence", st.Dead)
 	}
 }
 
@@ -2910,7 +3363,7 @@ func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
 	}
 	st := state{Productive: map[string]channelState{}}
 
-	live, _ := c.scan(context.Background(), &st)
+	live, _, _ := c.scan(context.Background(), &st, nil)
 	logged := logBuf.String()
 	if got := hits[listURL]; got != 1 {
 		t.Errorf("t.me/s/forumchat fetched %d time(s), want the 1 group probe; a second visit would vote a false cursor loss", got)

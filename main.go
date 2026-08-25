@@ -22,9 +22,14 @@ import (
 )
 
 const (
-	defaultCrawlPages     = 6
-	defaultCrawlDepth     = 2
-	defaultCrawlStateTTL  = 720 * time.Hour
+	defaultCrawlPages    = 6
+	defaultCrawlDepth    = 2
+	defaultCrawlStateTTL = 720 * time.Hour
+	// defaultCrawlDeadTTL is 30 days. The TTL is the re-probe period, not a
+	// per-cycle cost — a record costs exactly one classify request per TTL — so
+	// it trades how long a panel that came back stays locked out against how
+	// often a permanently gone one is paid for again. CRAWL_DEAD_TTL=0 is off.
+	defaultCrawlDeadTTL   = 720 * time.Hour
 	defaultCrawlInterval  = 30 * time.Minute
 	defaultCrawlInlineMax = 500
 	classifyTimeout       = 30 * time.Second
@@ -73,6 +78,7 @@ func runCrawl() {
 		MaxChannels:   intDefault(getenv("CRAWL_MAX_CHANNELS", ""), 0),
 		StatePath:     getenv("CRAWL_STATE", "/config/.crawler-state.json"),
 		StateTTL:      durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
+		DeadTTL:       durationAllowZero(getenv("CRAWL_DEAD_TTL", ""), defaultCrawlDeadTTL),
 		InlineEnabled: boolDefault(getenv("CRAWL_INLINE", ""), true),
 		InlineMax:     intDefault(getenv("CRAWL_INLINE_MAX", ""), defaultCrawlInlineMax),
 	}
@@ -176,6 +182,18 @@ func durationDefault(s string, def time.Duration) time.Duration {
 		return d
 	}
 	return def
+}
+
+// durationAllowZero parses a duration whose ZERO is meaningful, which
+// durationDefault cannot express: it reads every non-positive parse as unset
+// and substitutes the default, so "0" could never switch a feature off. Empty,
+// malformed and negative input still defaults — only an explicit zero is kept.
+func durationAllowZero(s string, def time.Duration) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
 }
 
 func boolDefault(s string, def bool) bool {

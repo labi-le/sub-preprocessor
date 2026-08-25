@@ -46,6 +46,13 @@ type state struct {
 	// different one made later. See confirmBulkPrune.
 	BulkPruneAt   time.Time `json:"bulk_prune_at,omitzero"`
 	BulkPruneURLs []string  `json:"bulk_prune_urls,omitempty"`
+	// Dead is keyed by subscription URL judged DEFINITIVELY not live (a gone
+	// status or an origin-advertised expiry), holding when the record expires.
+	// A remembered URL is not FETCHED again while the record stands, on the
+	// discovery path — the recheck deliberately still fetches the corpus it
+	// owns. Bounded twice: by the record's own expiry (pruneDead) and by
+	// maxDead (recordDead).
+	Dead map[string]time.Time `json:"dead,omitempty"`
 	// loadFailed marks state that stands in for a file loadState could not
 	// read or parse. saveState refuses to write it: the real file may hold
 	// weeks of productive-channel memory that nothing can reconstruct, and a
@@ -100,6 +107,104 @@ func (s *state) prune(cutoff time.Time) {
 	for _, ch := range slugs[maxProductive:] {
 		delete(s.Productive, ch)
 	}
+}
+
+// maxDead caps the remembered-dead memory. Dead is the one persisted map whose
+// intake nothing else bounds: Productive is capped at maxProductive and Managed
+// by the corpus itself (ageManaged drops a record whose URL private.yaml no
+// longer holds), while Dead takes every gone link the channels advertise — one
+// cycle stamps whatever its pages carried, over up to defaultMaxDiscovered
+// channels, and holds it for the whole TTL. The file cost scales with URL
+// length, not just the count: at the ~66-byte URLs this corpus mostly carries
+// 5000 records is ~545 KB, and at the 150-200-byte panel URLs the deleted
+// blocked list was full of it is nearer 1 MB — that whole file is rewritten on
+// every cycle that changes it.
+const maxDead = 5000
+
+// recordDead stamps urls as dead until now+ttl, refreshing entries already on
+// file: every renewed definitive verdict buys the URL a fresh full window,
+// which is what keeps a permanently gone panel out of every later cycle.
+// Blank strings are skipped, and a non-positive ttl records nothing — that is
+// the documented off switch (Options.DeadTTL), not a fallback.
+//
+// The cap is applied here rather than in pruneDead alone: pruneDead runs before
+// the scan, so a cap there is one cycle late and the cycle that overshoots
+// still writes the oversized map.
+func (s *state) recordDead(urls []string, ttl time.Duration, now time.Time) (changed bool) {
+	if ttl <= 0 {
+		return false
+	}
+	until := now.Add(ttl)
+	for _, u := range urls {
+		if u == "" {
+			continue
+		}
+		if s.Dead == nil {
+			s.Dead = make(map[string]time.Time, len(urls))
+		}
+		if e, ok := s.Dead[u]; ok && e.Equal(until) {
+			continue
+		}
+		s.Dead[u] = until
+		changed = true
+	}
+	return s.capDead() || changed
+}
+
+// capDead evicts the soonest-expiring records once the memory is over maxDead,
+// keeping the freshest stamps: those are the URLs most recently proven gone and
+// so the ones a repost is likeliest to offer again. Every URL a cycle stamps
+// shares one expiry (rememberVerdicts stamps at a single instant), so among one
+// cycle's own records the URL tiebreak decides, and an overshooting cycle
+// evicts its own newest records in reverse alphabetical order — deterministic,
+// which is the property that matters against randomized map iteration.
+//
+// The early return keeps the sort off every cycle that fits, as prune does.
+func (s *state) capDead() (changed bool) {
+	if len(s.Dead) <= maxDead {
+		return false
+	}
+	urls := make([]string, 0, len(s.Dead))
+	for u := range s.Dead {
+		urls = append(urls, u)
+	}
+	sort.Slice(urls, func(i, j int) bool {
+		if a, b := s.Dead[urls[i]], s.Dead[urls[j]]; !a.Equal(b) {
+			return a.After(b)
+		}
+		return urls[i] < urls[j]
+	})
+	for _, u := range urls[maxDead:] {
+		delete(s.Dead, u)
+	}
+	return true
+}
+
+// pruneDead drops expired records; expiry itself is what admits a URL back into
+// classification. Expiry alone does NOT bound the map — its population is every
+// gone link the channels advertise inside a TTL window, not the corpus — so the
+// bound is recordDead's cap.
+func (s *state) pruneDead(now time.Time) (changed bool) {
+	for u, until := range s.Dead {
+		if !until.After(now) {
+			delete(s.Dead, u)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// clearDead forgets the records of URLs that answered live: the verdict
+// outranks any stamp, however fresh. It reads the cycle's live map directly, as
+// ageManaged does, rather than a key-set copy of it.
+func (s *state) clearDead(live map[string]origin) (changed bool) {
+	for u := range live {
+		if _, ok := s.Dead[u]; ok {
+			delete(s.Dead, u)
+			changed = true
+		}
+	}
+	return changed
 }
 
 const (
