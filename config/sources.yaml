@@ -54,8 +54,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
     - name: prominbro
       url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
-    - name: obwl-wwh
-      url: https://obwlsub.vercel.app/wwh
     - name: obhodwl
       url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL
     - name: reality
@@ -64,8 +62,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/gergew452/Generation-Liberty/refs/heads/main/githubmirror/best.txt
     - name: whitelist-sanuyyq
       url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
-    - name: lime
-      url: https://raw.githubusercontent.com/LimeHi/LimeVPNGenerator/main/Keys.txt?v=1
     - name: shatak
       url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
     - name: rostunnel-gen
@@ -88,10 +84,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt
     - name: kasesm
       url: https://raw.githubusercontent.com/kasesm/Free-Config/main/all_raw.txt
-    - name: wepogp-1
-      url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=9Uysah7/fNwcH4ZJtls6A4Z7UCZ9hyL1hepLRS1kavYU555xTTqq4nGazHwhIJ%2BAWCwES/fmUfcpC1f3KXbVhsynIWUHbjEFRm37H2t%2BrNItwjcbN8j6D4arQKoCCb3/2nLMsLAYo29QGnH4ei51yctLBhubqY8eUgubEq9U4zc%3D"
-    - name: wepogp-4
-      url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=TT9IrxOfhgJyEk0MCOdGYXwx6vwM%2Bi30GcZkAeCHYhCGDHEqZJJKYTE61E1nPyGNDm274BT9fzc8PEKr3Xj5hC1A3Xt7p%2BCmcI7SXDA86nr0uvOInbPurA3heJf4d%2BFhkAjTFkQJ/rfGYEDZVuFVC4BxV/diP0/xn0qHNU8PNC0qAafArQuNc0ZT5noIrVKn"
     - name: kernyx
       url: https://gitverse.ru/api/repos/Kernyx/notes/raw/branch/master/sub.txt
     - name: apelsintel
