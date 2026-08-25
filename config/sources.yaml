@@ -100,3 +100,49 @@ subscriptions:
       url: https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/rkn_white_list
     - name: rjsxrd-bypass
       url: https://raw.githubusercontent.com/whoahaow/rjsxrd/refs/heads/main/githubmirror/bypass/bypass-all.txt
+    - name: ruvipien-goida
+      url: https://gitverse.ru/api/repos/RUVIPIEN/russian-white-bolt/raw/branch/master/VPNMIRRORS/vless/GOIDA_VLESS_1__AvenCores_.txt
+    - name: emillynn-au1rxx
+      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/au1rxx-v2ray.txt
+    - name: emillynn-goida24
+      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/goida-24.txt
+    - name: ruwbl-kvru
+      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/KvRuVPN/KvRuVPN.txt
+    - name: emillynn-white
+      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/FLAT447-WHITE_FULL.txt
+    - name: emillynn-lte
+      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/FLAT447-BLACK_LTE.txt
+    - name: linspisok-all
+      url: https://hub.mos.ru/LinSpisokObhod/LInSpisokObhod/-/raw/main/sub/ALL.txt
+    - name: ruwbl-rostun
+      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/RosTun/utf-8_wl.txt
+    - name: xalador
+      url: https://gitverse.ru/api/repos/Xalador/AutoConfig/raw/branch/master/output.txt
+    - name: ruwbl-outline
+      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/OutlineVPN/OutlineVPN.txt
+    - name: ayub-mobile
+      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS_mobile.txt
+    - name: ruwbl-zieng2
+      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/Zieng2/Zieng2_vless_lite.txt
+    - name: ayub-rus
+      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS.txt
+    - name: ayub-ss
+      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_SS%2BAll_RUS.txt
+    - name: ruvipien-igareck
+      url: https://gitverse.ru/api/repos/RUVIPIEN/russian-white-bolt/raw/branch/master/VPNMIRRORS/vless/VLESS_Reality_White_Lists_RU_Mobile_2__igareck_.txt
+    - name: glproxy
+      url: https://gitverse.ru/api/repos/glprx/glproxy/raw/branch/master/processed.txt
+    - name: ayub-reality
+      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+    - name: lonnory
+      url: https://gitverse.ru/api/repos/Lonnory/VlessALL/raw/branch/master/Vpn.txt
+    - name: moonlume-vless
+      url: https://gitverse.ru/api/repos/moonlume/ru-whitelist/raw/branch/master/vless.txt
+    - name: mirgittech-mia
+      url: https://gitverse.ru/api/repos/mirgittech/mia/raw/branch/master/configs.txt
+    - name: goida26-1
+      url: https://gitflic.ru/project/id821859431/goida-vpn-configs26/blob/raw?file=1igarec
+    - name: scalavpn
+      url: https://gitflic.ru/project/scala/scalavpn-configs/blob/raw?file=sub
+    - name: revotech
+      url: https://gitverse.ru/api/repos/revotech.ru/xray-vless-gen/raw/branch/master/shadow.txt
