@@ -92,3 +92,19 @@ subscriptions:
       url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=9Uysah7/fNwcH4ZJtls6A4Z7UCZ9hyL1hepLRS1kavYU555xTTqq4nGazHwhIJ%2BAWCwES/fmUfcpC1f3KXbVhsynIWUHbjEFRm37H2t%2BrNItwjcbN8j6D4arQKoCCb3/2nLMsLAYo29QGnH4ei51yctLBhubqY8eUgubEq9U4zc%3D"
     - name: wepogp-4
       url: "https://is.wepogp.gay/bypass-hwid-lock-3z5O6BFAaJQzGlamvtSo?payload=TT9IrxOfhgJyEk0MCOdGYXwx6vwM%2Bi30GcZkAeCHYhCGDHEqZJJKYTE61E1nPyGNDm274BT9fzc8PEKr3Xj5hC1A3Xt7p%2BCmcI7SXDA86nr0uvOInbPurA3heJf4d%2BFhkAjTFkQJ/rfGYEDZVuFVC4BxV/diP0/xn0qHNU8PNC0qAafArQuNc0ZT5noIrVKn"
+    - name: kernyx
+      url: https://gitverse.ru/api/repos/Kernyx/notes/raw/branch/master/sub.txt
+    - name: apelsintel
+      url: https://gitverse.ru/api/repos/bikinitw22/apelsintel/raw/branch/main/alive_full.txt
+    - name: vdevel26
+      url: https://gitverse.ru/api/repos/vdevel/proxy/raw/branch/main/26.txt
+    - name: gidro-white
+      url: https://gitverse.ru/api/repos/gidro/white/raw/branch/master/subscription.txt
+    - name: fnoide-keys
+      url: https://gitverse.ru/api/repos/Fnoide/Keys/raw/branch/main/processed_keys.txt
+    - name: ultav-white
+      url: https://gitverse.ru/api/repos/volondses/ultav/raw/branch/master/UltavWhite.txt
+    - name: bazz1024-mirror
+      url: https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/rkn_white_list
+    - name: rjsxrd-bypass
+      url: https://raw.githubusercontent.com/whoahaow/rjsxrd/refs/heads/main/githubmirror/bypass/bypass-all.txt
