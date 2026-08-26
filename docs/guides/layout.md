@@ -4,7 +4,6 @@
 
 ## Important package map
 
-- `main.go` — root entrypoint
 - `internal/app` — app bootstrap, config load, service construction, server start
 - `internal/config` — YAML config parsing/validation
 - `internal/fetch` — safe HTTP fetching, file-type decoding, SSRF protections
@@ -24,7 +23,7 @@
 - `internal/geo` — the provider adapters (`geofeed`/`dbip`/`registry`/`asn`) the country filter and the annotator share, each named after the data source it queries
 - `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate
 - `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay (instance 1 only); it owns the source-name convention and writes ownership and attribution as the `managed`/`feed` fields on each entry it mints, so no other package parses a name
-- `internal/log` — zerolog setup, runtime level changes, the `ctxlog.Op` child-logger helper
+- `internal/log` — zerolog setup, runtime level changes (`SetLevel`), the `Op` child-logger helper (`ctxlog.go`)
 - `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `crawl`, `geofeed`, `preprocess`, `subscription` and `stable`
 
 ## Project layout

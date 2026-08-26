@@ -51,17 +51,17 @@ agents here work in worktrees off a parent whose `./config` is bind-mounted read
 a running container (`docker-compose.yaml:14`). **Mutate in a `git archive` export under
 `/tmp`, never in the shared worktree.** A mutation is a deliberately wrong tree and
 concurrent agents are the normal mode here, so a peer reading the shared checkout
-mid-round sees a defect that does not exist — this round one reviewer's harness showed
-another a red they could not reproduce. Isolation makes the empty-diff check vacuous
+mid-round sees a defect that does not exist — one reviewer's mutation harness has already
+shown another a red they could not reproduce. Isolation makes the empty-diff check vacuous
 rather than optional: it still binds anything mutated in place, and in place is what you
 must avoid — and an untracked package (`internal/cidrset` on this branch) has no `git
 diff` to be empty at all, so there the check is `cmp` against a pre-mutation copy.
-Figures measured in an export tree describe that tree, which is why none of this round's
-mutation numbers reached a document. Mutation has repeatedly found tests here
-that could not fail at all: the mieru outcome fold shipped with three tests that looked like
-coverage while neutering both production fold conditions left the package green, and
-replacing `betterTraceOutcome`'s body with `return a.name < b.name` also left it green
-(`364a50d`) — every ranked case sorted identically under either key.
+Figures measured in an export tree describe that tree, so no number measured in a `/tmp`
+mutation export may be published as a figure about this repository. Mutation has repeatedly
+found tests here that could not fail at all: the mieru outcome fold shipped with three tests
+that looked like coverage while neutering both production fold conditions left the package
+green, and replacing `betterTraceOutcome`'s body with `return a.name < b.name` also left it
+green (`364a50d`) — every ranked case sorted identically under either key.
 
 **Why review at all when CI is green.** The `geotrace` filter once shipped completely inert,
 and stayed that way from `11e5ca3` to `e554307`. `go test ./...`, `-race` and

@@ -19,10 +19,10 @@ services:
     stop_grace_period: 30s
     restart: always
 
-  # Same image, second config: nodes are kept only when their resolved IP is in
-  # the `hxehex/russia-mobile-internet-whitelist` allow-list -- despite the name a
-  # worldwide scan artifact rather than a Russian ACL, see README -- and no
-  # geo-block gate runs.
+  # Same image, second config: live `filters:` are `country` then `bandwidth`, no
+  # geo-block gate. The `cidr` allow-list on `hxehex/russia-mobile-internet-whitelist` --
+  # a worldwide scan artifact, not a Russian ACL, see README -- sits commented out in
+  # config-vassago/config.yaml, disabled 2026-08-14 after 43 cycles of 1 published node.
   sub-preprocessor-vassago:
     image: sub-preprocessor:latest
     container_name: sub-preprocessor-vassago

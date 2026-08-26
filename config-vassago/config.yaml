@@ -66,10 +66,11 @@ deadcache:
 fetch:
   # Governs the worker's per-source download too, not only / -- filterInto nests
   # it inside subscriptions.check.source_timeout. It is gate 2 of the three the
-  # 33 ADDED sources were selected under -- gates 2 and 3 governed all 54, gate
-  # 1 only the additions: every added source was admitted only after
-  # its whole body downloaded inside this budget, best of 3 attempts. Live
-  # cycles land 54 of 54 on a good pass; no bad pass has been observed on this
+  # 33 ADDED sources were selected under -- gates 2 and 3 governed all 54 the
+  # 2026-08-10 curation shipped, gate 1 only the additions: every added source
+  # was admitted only after its whole body downloaded inside this budget, best
+  # of 3 attempts. Live cycles land 52 of 52 on a good pass; no bad pass has
+  # been observed on this
   # list yet, and the one to expect is rostunnel-mega, which answers in ~300ms or hangs, whatever
   # the deadline, so a longer one buys nothing and only delays the cycle.
   timeout: 3s

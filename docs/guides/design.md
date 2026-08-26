@@ -34,8 +34,10 @@ startup, so `503` is left for a genuinely cold start rather than every restart.
 **Two instances of this binary run from the one image** (`docker-compose.yaml`):
 `sub-preprocessor` on `:7008` reading `./config`, and `sub-preprocessor-vassago`
 on `:7009` reading `./config-vassago`. Same code, same two modes, different
-`filters:`. The vassago instance gates on the ENTRY address — a `cidr` allow-list
-holding `hxehex/russia-mobile-internet-whitelist` — then `country`, then `bandwidth`.
+`filters:`. The vassago instance's live chain is `country` then `bandwidth`. The `cidr`
+allow-list on the ENTRY address that gave it its purpose, holding
+`hxehex/russia-mobile-internet-whitelist`, is commented out in `config-vassago/config.yaml`,
+disabled 2026-08-14 after it published 1 node per cycle for 43 cycles.
 The `country` entry carries no `exclude_*`, so it is inert on `/stable.txt`
 (`GeofeedFilter` early-returns on a full allow set with an empty deny set) and is
 there for `GET /`: without an entry of that type `buildFilters` builds nothing,
@@ -44,7 +46,7 @@ no filter then reads. It arms no through-node geo gate and no `cloudflare`
 provider: its nodes are meant to be used UNDER that whitelist, so an egress-geo
 gate answers a question nobody asked and each one costs a request per survivor to
 do it. Only the first instance runs the crawler and holds the Gemini key; the
-second's 54 sources are curated by hand, against a measurement its
+second's 52 sources are curated by hand, against a measurement its
 `config-vassago/sources.yaml` header records. A change to "the shipped config" now
 has to be checked against BOTH directories.
 
@@ -75,12 +77,11 @@ no deployment may be sized off the 15649, only off a measured node count.
   tree and dropped. It reached parity on every mihomo-free package and could not
   cross the prober: replacing the language means reimplementing mihomo's adapter set
   (vless/vmess/ss/ssr/trojan/hysteria2/tuic/mieru) *and* its parse quirks, and
-  without that step the worker probes nobody and publishes nothing. The CPU gain
-  measured ~1.2x on microbenchmarks — **that figure's artifacts are not in this
-  repository and cannot be reproduced from a checkout, so cite the mechanism, not the
-  number**: a `/stable.txt` cycle is 20-55 min on a 68k-node pool, nearly all of it
-  DNS resolution and one URL-test probe per node, so microbenchmark seconds are not
-  the cycle. What the exercise actually bought is the three commits sitting on top of
+  without that step the worker probes nobody and publishes nothing. **Cite the
+  mechanism, not a microbenchmark number**: a `/stable.txt` cycle is 20-55 min on a
+  68k-node pool, nearly all of it DNS resolution and one URL-test probe per node, so
+  microbenchmark seconds are not the cycle. What the exercise actually bought is the
+  three commits sitting on top of
   `cd21b6b` — the `inet_aton` SSRF gate, one shared `net.Resolver`, and a single
   unescape per crawled page. Writing the pipeline a second time is what found them;
   keeping a second implementation was not what paid.
@@ -91,9 +92,9 @@ no deployment may be sized off the 15649, only off a measured node count.
   - `mierus://` — the port list lives in the query. We key the node on the first `port` value mihomo's adapter would actually serve (1..65535, or a range of two such), not merely the first one written down.
 - Portless `http`/`https`/`socks`/`socks5`/`socks5h` lines are **rejected** by the parser: mihomo refuses such a proxy, and accepting them published any bare web URL in a source body as a node. The PORTFUL form is still a valid node — which is why `internal/classify`'s proxy-scheme whitelist and the crawler's inline-node scheme list (`isInlineScheme`) still leave those schemes out: a `https://example.com:8443/docs` in a README must not make the page read as a live subscription.
 - A subscription URL may also answer with an **Xray JSON config** instead of a URI list — panel software (Hiddify) does. `subscription.Normalize` converts such a document's outbounds into share links, so nothing downstream (`Parse`, `classify`, the geo pipeline, `Merge`, `rewrite`) knows about JSON. The asymmetry with the line above is deliberate, not an oversight: URI parsing is scheme-generic, the JSON conversion covers **vless and hysteria2 only** — 158 of the 160 proxy outbounds in the first measured corpus were vless, and one of the two shadowsocks entries carried the literal address `sdfsdf`, so shadowsocks is still out. Add a protocol when data justifies it: hysteria2 is what that looked like, and it converts at version 2 ONLY, mihomo reading v1 under its own `hysteria://` scheme with a different parameter set.
-- Filtering logic only cares about hostname/IP and final geofeed country.
+- IP-stage filters see only a node's resolved IPs (`Filter.Process`, `internal/preprocess/filters.go`), never its name or protocol: country from the local databases, AS name/country, `cidr` membership.
 - Output rewriting is still **scheme-aware/safe**: it only rewrites parsed URI nodes.
-- The on-demand `/` path does no liveness probing; it only geo/ASN-filters. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
+- The on-demand `/` path does no liveness probing. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
 - In the `/stable.txt` worker a node is identified by its `Entry.Label` (`<source>-NNN`), never by the mihomo proxy name — because the two differ for `mierus://`, which mihomo expands into ONE proxy PER configured port, named `<label>:<port>/<protocol>`. `entryLabel` (`internal/stable/label.go`) folds that back; without it a healthy mieru node matched nothing, was never selected, went into the dead cache and counted `unreachable` in every through-node filter. The latency probe and both through-node outcome maps then fold a label's duplicates **best-of-ports** (the entry survives if any of its ports passed — best-of, never a sum, or `Successes` could exceed `check.rounds`), while the filters' proxy subset keeps EVERY port, so a port dead on our egress cannot mask a live sibling.
 - The resolver keeps an in-memory DNS TTL cache (`resolver.cache_ttl` / `resolver.cache_negative_ttl`) so repeated stable cycles don't hammer the upstream DNS.
 - Geofeed sources are explicit in YAML via `geofeed.sources[].url` + `geofeed.sources[].type`.
@@ -102,7 +103,7 @@ no deployment may be sized off the 15649, only off a measured node count.
 - A config reload NEVER restarts the `/stable.txt` worker. `stable.Controller.Apply` swaps a `CheckerSpec` the next cycle reads, so the crawler's hourly `private.yaml` rewrite cannot cancel a 20–55 min cycle in flight and burn a full probe pass. Nor does it stop the worker: a reload whose merged source list came out EMPTY is refused with a warning and the previous spec stays live, because every source comes from an overlay and an empty list is nearly always a missing file. Only shutdown calls `Stop`.
 - The `cidr` allow-list **fails closed at BUILD**, unlike every downloadable database beside it. Two gates, both fatal to `NewProcessor`: `cidrset.Load` errors when no URL yielded a range, and `newCIDRStore` refuses an empty set (`errEmptyCIDRSet`) even where a load reported success. A warning would be wrong here, because an allow-list that failed to download is not a degraded filter but the INVERTED one — it drops every node while every counter reads healthy, and the instance publishes an empty subscription. Verified against the real config: pointing `filters[].urls` at a 404 exits 1 with `no cidr ranges loaded (1 source(s) failed)`. A hot reload hitting the same error keeps the previous processor, so the running list survives a typo.
 - **The allow-list's swap guard counts COVERED ADDRESSES, never merged ranges.** `swapRefusalSize` is shared with the geo databases, whose unit is ranges, and the cidr store hands it `Set.Covered()` instead. The two quantities move in opposite directions, and the upstream itself is the proof: `cidrwhitelist.txt` is 30228 lines -> 15649 merged ranges -> 36265984 addresses, while the SAME repo's `ipwhitelist.txt` publishes that identical space as 141664 lines — every one of them the `.1` of a /24 already covered, 0 outside. Configure both URLs and lose the CIDR file, and a range-count guard reads 15649 -> 141664 (+805%) as healthy growth while swapping in a set covering 0.39% of the space, whose only survivors are nodes resolving to a literal `.1`. Coverage refuses that swap; `Len()` applauds it. That is why `cidrset.Len`'s doc comment says what it must not be used for.
-- **That 15649 is an INTERVAL count and no CIDR tool reproduces it.** `cidrset.newSet` coalesces any two ranges that TOUCH (`next.lo <= ranges[last].hi+1`), where `ipaddress.collapse_addresses()` merges only ALIGNED prefix pairs and answers 30222 CIDRs over the same `cidrwhitelist.txt`. Both are right about different things. This is written down because a reviewer filed the repo's own 15649 as stale over exactly that disagreement and retracted: check a range count against the merge rule that produced it, never against a tool with a different one.
+- **That 15649 is an INTERVAL count and no CIDR tool reproduces it.** `cidrset.newSet` coalesces any two ranges that TOUCH (`next.lo <= ranges[last].hi+1`), where `ipaddress.collapse_addresses()` merges only ALIGNED prefix pairs and answers 30222 CIDRs over the same `cidrwhitelist.txt`. Both are right about different things: check a range count against the merge rule that produced it, never against a tool with a different one.
 - **At most ONE `cidr` entry per config**, rejected at load rather than merged. `urls:` already expresses the union, so a second entry could only mean intersection — a shape nothing here wants — and one entry means one live store, which is what lets the reload carry-over stay a single `CIDRState` instead of a keyed collection.
 
 ## API behavior to remember
@@ -110,10 +111,10 @@ no deployment may be sized off the 15649, only off a measured node count.
 - `GET /healthz` returns `ok`
 - `GET /` requires:
   - `subscription_url`
-  - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`)
-  - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. (Folding exclusions into `All()` used to drop every unplaceable IP the moment one country was excluded.) Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
-- `GET /` no longer publishes a portless `http`/`https`/`socks`/`socks5`/`socks5h` line as a node: a bare `https://t.me/somechannel` in a source body used to be emitted as a node and now counts in `Stats.Unsupported` (`unsupported=` in `X-Preprocessor-Stats`) instead. A portful one (`https://example.com:8443`) is still a node
-- `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 33.4k-node aggregator source outright
+  - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`) — or, alone, either `exclude_*` parameter below: an exclusion-only request is accepted
+  - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
+- `GET /` does not publish a portless `http`/`https`/`socks`/`socks5`/`socks5h` line as a node: a bare `https://t.me/somechannel` in a source body counts in `Stats.Unsupported` (`unsupported=` in `X-Preprocessor-Stats`). A portful one (`https://example.com:8443`) is still a node
+- `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 36421-node aggregator source outright
 - `GET /stable.txt` serves the worker's current list; `503` until there is one — the first completed cycle, or the snapshot restored at startup when `subscriptions.snapshot_path` is set (a restored list keeps its original `updated=`, so its age shows). Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
 - `/` stats are returned in `X-Preprocessor-Stats`

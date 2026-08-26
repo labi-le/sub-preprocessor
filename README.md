@@ -43,9 +43,9 @@ the query. Each decoder mirrors mihomo's own accept rule, so a
 node kept here is a node the prober can convert. Portless `http`, `https`,
 `socks`, `socks5` and `socks5h` lines are the one outright rejection: such a
 proxy is `host:port` by definition and mihomo refuses it, so a bare
-`https://t.me/somechannel` in a source body is now counted in `unsupported=`
-(see `X-Preprocessor-Stats` below) instead of being published as a node. The
-portful form is still a node — which is why the crawler's classifier keeps its
+`https://t.me/somechannel` in a source body counts as `unsupported=` (see
+`X-Preprocessor-Stats` below). The portful form is still a node — which is why
+the crawler's classifier keeps its
 own fixed proxy-scheme list, to reject pages full of ordinary `https://` links.
 
 Two instances of the service run side by side (see [Deployment](#deployment)),
@@ -138,9 +138,9 @@ whole cycle — measured at 58 minutes on a 68266-node pool. The restored list
 keeps its original `updated=`, so its age is visible rather than reset by the
 restart, and there is no expiry: the in-memory rule already serves the last
 good list through failing cycles. A missing, unreadable or malformed file is a
-warning and nothing more — the endpoint then behaves exactly as it did before
-the file existed. The write is atomic (temp file in the same directory, then
-rename), and a write that fails warns without touching the published list.
+warning and nothing more. The write is atomic (temp file in the same
+directory, then rename), and a write that fails warns without touching the
+published list.
 
 ## The filter pipeline
 
@@ -202,8 +202,7 @@ after DNS resolution, before any probing:
   `ipaddress.collapse_addresses()` reports 30222 CIDRs over the identical file
   because it merges only ALIGNED prefix pairs, where `cidrset` merges any two
   ranges that TOUCH and so counts contiguous intervals. Both numbers are right
-  about different things; the 15649 has been filed as stale over that gap once
-  already, and the finding was retracted.
+  about different things.
 
   **This list is not a Russian ACL, whatever its upstream repository is
   named.** Measured 2026-08-10 across the same 15649 intervals: AS749 DNIC (US
@@ -216,17 +215,15 @@ after DNS resolution, before any probing:
   anyone sizing a deployment from 15649 ranges will be wrong, and the only
   figure that means anything is a measured node count.
 
-  Across the 51 sources in `config/sources.yaml` — 59558 nodes on 19330
-  distinct servers — 5023 nodes (8.43%) sat on a server that resolves into it.
-  That measurement seeded the second compose instance and no longer describes
-  it: `config-vassago/sources.yaml` now carries 54 sources selected against the
-  whitelist directly, most of them not in `config/sources.yaml` at all, and its
-  header records their own measurement. What survives from a live run of that
-  instance is not a count but an identity — `total` equals `kept` plus every
-  drop reason, e.g. a source answering with 586 nodes booking 25 kept, 533
-  `cidr_drop` and 28 `geo_drop` under `countries=RU`, which is 586 = 25 + 533 +
-  28. Counts themselves never reproduce: these sources are live and rotate
-  within the hour.
+  `config-vassago/sources.yaml` is a source list selected against this
+  whitelist directly, and its header records that measurement. No shipped
+  config enables a `cidr` filter today: the entry that gated on it is
+  commented out in `config-vassago/config.yaml`. What a live run of that
+  instance leaves is not a count but an identity — `total` equals `kept` plus
+  every drop reason, e.g. a source answering with 586 nodes booking 25 kept,
+  533 `cidr_drop` and 28 `geo_drop` under `countries=RU`, which is
+  586 = 25 + 533 + 28. Counts themselves never reproduce: these sources are
+  live and rotate within the hour.
 
 Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
@@ -240,16 +237,12 @@ are gates that drop:
   do). Blocked hosts are recorded in the geoblock store and dropped.
   Requires an API key (`geoblock.gemini.key_file` in agenix `KEY=VALUE`
   format, `key_var`, or inline `api_key`); without a key the filter is
-  skipped — and it cannot be made keyless. Measured from a geo-blocked
-  egress, the API answers in this order: caller identity (403 `Method
-  doesn't allow unregistered callers` when no key is sent), key validity
-  (400 `API_KEY_INVALID` for a junk key), and only then the location
-  precondition (400 `FAILED_PRECONDITION` + the marker) — so the verdict
-  this gate reads is invisible to anything but a working credential. For
-  the same reason a response that never reached the location check — key
-  rotated or restricted, wrong `model` (404), quota (429) — is not read as
-  "not blocked": those nodes are counted, warned about, and kept
-  unverified.
+  skipped — and it cannot be made keyless: the API resolves caller identity
+  and key validity before the location precondition, so the verdict this gate
+  reads is invisible to anything but a working credential. For the same reason
+  a response that never reached the location check — key rotated or
+  restricted, wrong `model` (404), quota (429) — is not read as "not blocked":
+  those nodes are counted, warned about, and kept unverified.
 - `claude` — same idea, keyless: the Anthropic endpoint answers 403
   `Request not allowed` from blocked regions. Also feeds the geoblock store.
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
@@ -257,18 +250,15 @@ are gates that drop:
   store.
 - `tidal` — keyless as well, and the only **fail-closed** gate: a node is kept
   only when `GET api.tidal.com/v1/country` came back `2xx`. Where Tidal refuses
-  an egress the request never reaches the API — measured from a Russian egress,
-  CloudFront answers `403` with an HTML error page — so there is no refusal
-  marker to match and the status is the whole verdict (redirects are not
-  followed, so a `3xx` interstitial is a refusal too). The response body is not
-  read at all: the country it carries only says where Tidal *sells*
-  subscriptions, not where an existing one streams. The tradeoff of judging by
-  status alone: a node whose upstream answers `2xx` from something that is not
-  Tidal (ISP block page, captive portal) counts as passed.
-  It deliberately does **not** feed the geoblock store either: a bare status
-  code is a weaker signal than the other checks' refusal markers, and the store
-  is host-keyed for its whole TTL, so one CDN hiccup would evict the node from
-  every endpoint.
+  an egress the request never reaches the API, so there is no refusal marker to
+  match and the status is the whole verdict (redirects are not followed, so a
+  `3xx` interstitial is a refusal too). The response body is not read at all:
+  the country it carries only says where Tidal *sells* subscriptions, not where
+  an existing one streams. A `2xx` from something that is not Tidal (ISP block
+  page, captive portal) therefore counts as passed. It deliberately does
+  **not** feed the geoblock store: a bare status code is a weaker signal than
+  the other checks' refusal markers, and the store is host-keyed for its whole
+  TTL, so one CDN hiccup would evict the node from every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
   dropped; a kept node's Mbps is recorded, and the `[SPD:<n>M]` tag it earns is
@@ -324,62 +314,51 @@ an annotate chain actually references them.
 `asn` is accepted here and deliberately unused. It is Team Cymru's DNS
 redistribution of the same RIR delegation data `registry` already holds in
 memory, so it behaves as a registry lookup over the network rather than as a
-geolocation source: measured over every address behind every configured
-subscription it was a strict SUBSET of a complete `registry` — no country it
-placed that `registry` did not, and no disagreement where both answered — and
-placed behind this chain its marginal contribution was zero hits, because
-`dbip` alone answers all but a handful of addresses and that handful is
-unroutable — RFC 2544 / RFC 5737 space (198.18.0.0/15, 192.0.2.0/24) returned
-by DNS-poisoning sinkholes, and sources publishing 127.0.0.1 or
-255.255.255.255 outright — which Cymru correctly has no record for either. It
-remains reachable as `{type: country, provider: asn}` and as the `{type: asn}`
-deny-pattern filter, whose AS *names* no local database carries. Re-measure
-before putting it back in a chain.
+geolocation source, and behind this chain its marginal contribution measured
+zero hits: `dbip` alone answers all but a handful of addresses, and that
+handful is unroutable sinkhole / RFC 5737 + RFC 2544 space Cymru correctly has
+no record for either. It remains reachable as `{type: country, provider: asn}`
+and as the `{type: asn}` deny-pattern filter, whose AS *names* no local
+database carries. Re-measure before putting it back in a chain.
 
 `registry` reads APNIC from `ftp.lacnic.net`, not `ftp.apnic.net`: APNIC's own
 host answers the TLS ClientHello without echoing the legacy session ID that
 RFC 8446 requires, which Go's `crypto/tls` rejects outright, so that RIR
-silently dropped out of the build and cost roughly two and a half points of
+silently drops out of the build and costs roughly two and a half points of
 coverage. RIPE and LACNIC both mirror the file byte-identically under APNIC's
 own published checksum, so the choice between them is about blast radius, not
 fidelity — and blast radius is measured in RANGES behind the worst single host,
-not in hosts. The five URLs sit on four hosts either way (`ftp.lacnic.net`
-serves APNIC's mirror and LACNIC's own file), so a host count cannot tell the
-candidates apart and the weights are the whole argument: `ripencc` already
-comes from `ftp.ripe.net`, so parking APNIC there would put 201810 of the
-330937 loaded ranges (61.0%) behind one outage, where `ftp.lacnic.net` leaves
-the worst host at ripencc's own 126845 (38.3%) — the floor no mirror choice can
-beat — with `ftp.lacnic.net` itself only second at 108784 (32.9%). The same
-arithmetic rules out `ftp.arin.net`
-(163160, 49.3%), which a keep-them-on-separate-hosts reading would have waved
-through; `assertRegistryHostConcentration` in `internal/config` enforces it as
-a rule over the range weights, so re-pointing any of these URLs has to argue
-with the numbers. A mirror is also a copy on someone else's schedule, so
-`LoadRegistry` logs each file's own header serial — an observable for lag, not a
-gate. Its form is the publishing registry's business (`20260804` from APNIC, a
-unix timestamp from RIPE, unix ms from ARIN), so read it against the same
-source's previous value, not across sources.
+not in hosts. The five URLs sit on four hosts either way, so a host count
+cannot tell the candidates apart and the weights are the whole argument:
+parking APNIC on `ftp.ripe.net`, where `ripencc` already sits, would put 61.0%
+of the loaded ranges behind one outage, and `ftp.arin.net` 49.3% — which a
+keep-them-on-separate-hosts reading would have waved through — where
+`ftp.lacnic.net` leaves the worst host at ripencc's own 38.3%, the floor no
+mirror choice can beat. `assertRegistryHostConcentration` in `internal/config`
+enforces that as a rule over the range weights, so re-pointing any of these
+URLs has to argue with the numbers. A mirror is also a copy on someone else's
+schedule, so `LoadRegistry` logs each file's own header serial — an observable
+for lag, not a gate — whose form is the publishing registry's business, so
+read it against the same source's previous value, not across sources.
 
-`cloudflare` is the odd one out, but not in the way the old name suggested. It
-is a geo-IP database like the others — the tag carries the `loc=` line it
-answers with, Cloudflare's own lookup — and what differs is the ADDRESS it is
-asked about. Every other provider looks the node's *resolved* address up, and
-41% of the named hosts measured in the pool sit in Cloudflare's shared anycast
-ranges, which terminate in many countries at once — so a node tagged `CA` was
-in fact exiting in Germany. Asking the node where its traffic leaves from costs
-one request through it, which only the `/stable.txt` worker's post-probe stage
-can spend: on `GET /` there is nothing to ask, so `cloudflare` always misses
-there and the chain falls through to the offline providers. Naming it in a
-chain is what arms that probe; leaving it out means no cycle pays for it.
+`cloudflare` is the odd one out. It is a geo-IP database like the others — the
+tag carries the `loc=` line it answers with, Cloudflare's own lookup — and what
+differs is the ADDRESS it is asked about. Every other provider looks the node's
+*resolved* address up, and 41% of the named hosts measured in the pool sit in
+Cloudflare's shared anycast ranges, which terminate in many countries at once —
+so a node tagged `CA` was in fact exiting in Germany. Asking the node where its
+traffic leaves from costs one request through it, which only the `/stable.txt`
+worker's post-probe stage can spend: on `GET /` there is nothing to ask, so
+`cloudflare` always misses there and the chain falls through to the offline
+providers. Naming it in a chain is what arms that probe; leaving it out means
+no cycle pays for it.
 
 Its `timeout`/`concurrency` are `geo.cloudflare.*`. There is deliberately no
 `endpoint` key: the parser encodes Cloudflare's documented reserved `loc`
-values (`XX`, `T1`) and its uppercase convention, so no other VENDOR's endpoint
-can satisfy it, and a key whose every cross-vendor value silently yields "no
-answer" would be a false affordance. The one substitution that does parse is
-intra-vendor — Cloudflare serves `/cdn-cgi/trace` on every domain it proxies,
-so any Cloudflare-fronted host answers the same shape — and that belongs in
-`stable.cloudflareTraceURL`, not in a config key.
+values (`XX`, `T1`) and its uppercase convention, so no other VENDOR's
+endpoint can satisfy it. The one substitution that does parse is intra-vendor
+— Cloudflare serves `/cdn-cgi/trace` on every domain it proxies — and it
+belongs in `stable.cloudflareTraceURL`, not in a config key.
 
 The country **filter** (`provider: geofeed`) judges nodes with that same chain,
 in the order the `annotate:` list gives it: it consults every local database
@@ -427,12 +406,8 @@ request-triggered refresh retries; a failed background refresh keeps the
 stale data. Loaded databases are carried across hot reloads when their config
 block is unchanged, together with the retry schedule of a download that is
 currently failing, so a reload neither re-downloads a healthy database nor
-resets a failing one's backoff. The cidr allow-list rides that same machinery
-with three deliberate differences: it is built when a `cidr` filter is
-configured rather than when a provider is named, an empty startup load is
-fatal rather than a warning, and its refresh guard measures the swap in
-covered ADDRESSES where the geo databases count ranges — the last two are
-spelled out with the filter above.
+resets a failing one's backoff. The cidr allow-list rides that same
+machinery, with the three differences spelled out with the filter above.
 
 ## Telegram crawler
 
@@ -462,15 +437,13 @@ compose sidecar) that discovers new sources automatically:
 - writes results to `config/private.yaml` as `<channel>-<postid>` sources — the
   discovering channel's slug plus, where the post is known, the id of the message
   the link was posted in, so the origin of every subscription is visible,
-  including in `/stable.txt` node labels. A later link out of one post takes
-  `<channel>-<postid>-2`, `-3` and so on, N being the lowest ordinal free in that
-  cycle rather than a position in the post: the bare `<channel>-<postid>` is only
-  OFFERED first, so a post whose stem is already taken starts at `-2` with its own
-  first URL. A channel with no post id counts from 1 instead — `<channel>-1`,
-  `-2`, … — no bare stem ever being minted for it; the two families share one
-  string space, so a `-N` tail does not say which of the two a name belongs to
-  (`docs/guides/sources.md` has the ambiguity); and only an unusable channel slug
-  falls to a bare `<sha10>` that upgrades on the next rediscovery in a channel,
+  including in `/stable.txt` node labels. Further URLs out of one post, and
+  channels whose posts carry no id, take an ordinal tail (`<channel>-<postid>-2`,
+  `<channel>-1`) that is the lowest ordinal free in the cycle, not a position in
+  the post; an unusable channel slug falls to a bare `<sha10>` that upgrades on
+  the next rediscovery in a channel. The two ordinal families share one string
+  space, so a `-N` tail does not say which of the two a name belongs to
+  (`docs/guides/sources.md` has the grammar and the ambiguity),
 - marks each of those entries `managed: true` and records the channel as
   `feed: <channel>`. Those two FIELDS, not the name, are what say the entry is
   the crawler's to rewrite or prune and which channel it came from: an entry
@@ -480,67 +453,40 @@ compose sidecar) that discovers new sources automatically:
   and **hot-reloads** on change.
 
 The inline harvest reads the newest page alone because a pasted node is a
-frozen `server:port` whose worth is the age of the message carrying it:
-against this instance's own probe gate (`rounds: 2`, `timeout: 1000ms`,
-`max_avg_ms: 800`), 7.4% of the nodes from messages ≤1 day old passed
-(12 of 162) against 2.8% at 1–3 days (5 of 178), and `?before=` pagination
-walks backward, so pages 2..N are older by construction. Page position is a
-proxy for message age, not a measurement of it: a page holds ~20 messages, so
-it is a day for a channel posting ~20/day and a week for one posting three,
-and a dormant channel still re-seeded from the 30-day state memory
-contributes a page of >30d nodes, which passed at 1 of 249. Subscription **links** are
-still taken from every page — a URL keeps serving fresh nodes, a `server:port`
-cannot refresh itself. What the older pages were worth is bounded above by
-what the whole source is worth: 25 to 40 of the `inline` source's 499 distinct
-`server:port` were absent from the sources that merge ahead of it, so ~93% of
-what it contributed was already in the list. A kept node's residency in the
-source also drops from ~6 pages of message scroll to ~1, which is the intended
-trade against a 10.34 d half-life (95% CI [5.47, 16.58], n=1089 — fitted on
-reachability at a looser 8000 ms arm, not the gate above, which kills a node
-on latency before unreachability does).
+frozen `server:port` whose worth is the age of the message carrying it: at
+this instance's own probe gate, 7.4% of the nodes from messages ≤1 day old
+passed (12 of 162) against 2.8% at 1–3 days (5 of 178), and `?before=`
+pagination walks backward, so pages 2..N are older by construction. Page
+position is a proxy for message age, not a measurement of it: a page holds
+~20 messages, so it is a day for a channel posting ~20/day and a week for one
+posting three, and a dormant channel still re-seeded from the 30-day state
+memory contributes a page of >30d nodes, which passed at 1 of 249.
+Subscription **links** are still taken from every page — a URL keeps serving
+fresh nodes, a `server:port` cannot refresh itself. A kept node's residency in
+the source drops from ~6 pages of message scroll to ~1;
+`docs/guides/sources.md` carries the probe gate every pass rate here is
+measured at (`subscriptions.check`), the decay fit that trade is made against,
+and the share of the harvest the sources merging ahead of it already carry.
 
-Every candidate that fails a gate or does not classify live gets one log line
-saying which channel it came from, a `urlid` — the first 8 hex of the sha256 of
-the URL — and why — `noise-host`, `invalid-url`, `bad-status` (with the code),
-`fetch-failed`, `nodeless-2xx` or `expired` — followed by one per-cycle summary
-counting each reason. These lines carry the host and nothing more of the URL:
-the credential lives in the query on some panels (`?payload=…`) and in the path
-on others (Marzban's `/sub/<token>`, 3x-ui's `/<subPath>/<subId>`, neither with
-a query at all), so the `urlid` is what pins which subscription it was. It is no
-longer a source name and does not pretend to be one: the same link gets the same
-`urlid` in every cycle and from every channel, which is what makes one that keeps
-failing greppable, and the channel rides its own field beside it. It is per-URL
-but not unique: the cap means a cycle prints at most 200 of them, and `host` is
-what tells a colliding pair apart, since a pair from one channel shares the
-`channel` field. `routes.md` carries the odds and the population they are
-computed over. The post id is withheld and logged as its own
-field too, because `<slug>-<postid>` names a post: a rejected link would otherwise
-carry the name of whichever sibling link of the same post was accepted. They
-are capped at 200 per cycle and the cycle reports how many it withheld; the
-summary counts stay complete regardless. Dedupe is what keeps them complete, and
-it is bounded in turn: past 20,000 distinct rejected URLs in one cycle the
-summary stops tracking and reports the overflow as `untracked=<n>` instead.
-`untracked` is deliberately *not* folded into the total — past the bound a repeat
-cannot be told from a new candidate — so the per-reason counts still sum exactly
-to `rejected`, and `untracked` is the rejections beside them that went
-unaccounted for.
-
-A line's `error` field is guarded by two rules, and each has its own replacement
-text. The candidate's URL is substituted out of the message, and if any URL
-survives that (a refused redirect names a second one) the whole message is
-dropped for `redacted: error names the candidate url`. An error naming only the
-path or query slips that rule — no `://` is left to see — so a second check
-replaces it with `redacted: error names the candidate url path or query`. That
-second one is deliberately over-eager and matches substrings, so **read it as a
-false positive first**: a candidate whose path is `/o` matches the `i/o` in
-`dial tcp: i/o timeout`, and `net/http: TLS handshake timeout` has a slash too,
-so the commonest failures can lose their diagnosis to a short path. Only when
-the candidate's own path and query cannot collide with the expected message does
-it mean what it says.
+Every candidate the crawler refuses — one that fails a gate, or one that does
+not classify live — costs one INFO line, `candidate rejected`, and is counted
+in the per-cycle summary line `candidates rejected by reason`, so an operator
+can read why a link never became a source. INFO, and there is no log-level
+knob on the crawler, so these are always on. The line names the channel, the
+host, a `urlid` correlator and the reason; it deliberately carries neither the
+path nor the query, because on Marzban and 3x-ui the credential lives in the
+path. `routes.md` has the per-field detail: the reason vocabulary, the `urlid`
+width reasoning and its collision odds, the `untracked=<n>` bound on the
+summary, and the two redaction rules on a line's `error` field — including the
+over-eager one whose `redacted: error names the candidate url path or query`
+is to be read as a false positive first.
 
 Seed channels live in `config/channels.yaml` (re-read every cycle). Schedule:
-`CRAWL_INTERVAL` (default 30m) or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1`
-for a single cycle; optional `CRAWL_HTTP` on-demand trigger listener.
+`CRAWL_INTERVAL` or daily `CRAWL_AT=HH:MM`; `CRAWL_RUN_ONCE=1` for a single
+cycle; optional `CRAWL_HTTP` on-demand trigger listener. Every default named
+here is the binary's own (`main.go`), and the compose sidecar overrides the two
+it disagrees with: `CRAWL_INTERVAL` defaults to 30m and ships as `1h`,
+`CRAWL_DEPTH` defaults to 2 and ships as `3`.
 `CRAWL_CURATED` is a comma-separated list of YAML files the crawler reads for
 names and URLs — default `/config/sources.yaml,/config/config.yaml`, both of
 which may carry `subscriptions.sources` entries — so the mint does not take a
@@ -601,7 +547,7 @@ The repo ships **two** config directories, one per compose instance:
 container, so everything below is relative to whichever directory an instance
 runs on, and the strict-decode, overlay and hot-reload rules are identical for
 both. `config-vassago/` ships `config.yaml` + `sources.yaml` and no
-`private.yaml`: the crawler writes into `config/` only, so that instance's 54
+`private.yaml`: the crawler writes into `config/` only, so that instance's
 sources are curated by hand. Read that file's header before editing it — it
 carries the measurement the list was selected on, and the three gates a
 candidate has to pass: the repo is FRESH, the body is FETCHABLE inside
@@ -625,9 +571,7 @@ Key sections:
   taken from LACNIC's mirror, 24h refresh).
 - `geo.cloudflare.timeout` / `geo.cloudflare.concurrency` (default 15s, 8) —
   the `/cdn-cgi/trace` probe behind the `cloudflare` ANNOTATE provider. Two
-  keys and no `endpoint`: only Cloudflare's own body parses, so the URL is a
-  compile-time constant. There is no `{type: cloudflare}` filter entry either;
-  naming `cloudflare` in an `annotate` chain is what turns the probe on.
+  keys and no `endpoint`, for the reasons given with that provider above.
 - `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`, and `resolver.address`
   — the upstream DNS server as `host:port` (a portless value is rejected at
   load: it dials nothing, so every node would be dropped as a DNS failure).
@@ -643,8 +587,8 @@ Key sections:
   dropped.
 - `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
   `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
-  for the through-node filters. Every tenant here is a gate; the trace probe
-  used to sit alongside them and moved to `geo.cloudflare` because it is not.
+  for the through-node filters. Every tenant here is a gate; the
+  `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
@@ -682,19 +626,14 @@ histograms — `stable_kept_speed_mbps` and `stable_kept_latency_ms`, each with
 cycle/failure totals. The latency histogram is the one that closes a loop:
 `check.max_avg_ms` both admits a node and orders the published list, so
 without it the single threshold deciding how long that list is had no
-observable to tune against. That only works while the gate is visible on the
-axis, so **`latencyBuckets` must carry a bound equal to every
-`check.max_avg_ms` any shipped config sets.** A threshold landing between two
-bounds hides the very edge the panel exists to show. Both instances publish
-this metric name under different Prometheus jobs and their thresholds are free
-to differ, so the ladder carries all of them and moving any one of them adds
-its bucket in the same commit. The
+observable to tune against — which only holds while the gate is visible on the
+axis, so `latencyBuckets` carries a bound equal to every `check.max_avg_ms`
+any shipped config sets. The
 IP-stage drop reasons are `dns`, `geo`, `cidr`, `asn`, `geoblock`, `ipv6` and
-`unsupported`; adding `cidr` cost no new metric name and no panel or query
-change, because the reasons are label values on `stable_source_dropped_nodes`
-and the panel sums by `reason` instead of enumerating them. The dashboard was
-still edited: the "IP-stage drops by reason" panel's DESCRIPTION enumerates the
-reasons in prose, so it names `cidr` and says what gates it.
+`unsupported`. They are label values on `stable_source_dropped_nodes` and the
+"IP-stage drops by reason" panel sums by `reason` instead of enumerating them,
+so a new reason costs no metric name and no query change — only that panel's
+DESCRIPTION, which enumerates the reasons in prose.
 
 A gate that verified nothing is reported separately from a gate that dropped
 nothing. The gemini check needs a working credential to see a location verdict
@@ -705,10 +644,7 @@ Those nodes are **kept and published unverified**, so the pair is deliberately
 outside the per-filter drop counters. `stable_gemini_gate_enabled` separates
 the third state: 0 means the gate is configured but has no usable key, so it
 checked nothing at all. All three are absent when the gate did not run, which
-is not the same as "not configured": nothing has been scraped, no cycle has
-published yet, no `gemini` filter is in `filters`, or one is and never reached
-its check (the prober has no Gemini support, or parsing the survivors into
-proxies failed and the whole through-node chain was skipped).
+is not the same as "not configured".
 
 The metrics listener is bound synchronously at startup, so a port conflict is a
 startup failure like any other rather than a silently missing monitoring
@@ -758,19 +694,21 @@ docker compose up -d --build   # or: make dc-up
   mounted at `/run/agenix/litellm-env`.
 - `sub-preprocessor-vassago` — the same image on a second config
   (`./config-vassago`), published on `:7009` with metrics on
-  `127.0.0.1:9092:9090`. Its `filters:` are `cidr`, `country` and `bandwidth`: a
-  node is kept only when its entry IP is inside the allow-list that `cidr`
-  entry downloads — upstream `hxehex/russia-mobile-internet-whitelist`, which
-  despite the name is a worldwide scan artifact rather than a Russian ACL (see
-  the `cidr` filter above; ~27% of it is US DoD and unrouted space). The
-  `country` entry carries no `exclude_*`, so it is inert on
-  `/stable.txt` — a full allow set with an empty deny set makes `GeofeedFilter` a
-  no-op — and exists for `GET /`, where it is what makes the `countries=` /
-  `groups=` parameters actually gate: without an entry of that type the server
-  still demands one of those parameters and then no filter reads it. No
-  through-node geo gate runs at all — these nodes are meant to be used UNDER that
-  whitelist, so an egress-geo gate answers a question nobody asked and would cost
-  a request per survivor to do it. It mounts no agenix secret
+  `127.0.0.1:9092:9090`. Its live `filters:` are `country` and `bandwidth`. The
+  `cidr` entry that gave the instance its purpose is commented out in
+  `config-vassago/config.yaml`, disabled 2026-08-14: the gate worked — it
+  admitted 3498 of 38663 endpoints (9.0%) — but of 80 admitted nodes whose
+  server accepts TCP, zero brought a tunnel up, and the instance published 1
+  node per cycle for 43 cycles. The entry is left commented rather than deleted
+  because the reasoning beside it is the expensive part. Without it this is an
+  ordinary geo instance on `config-vassago/sources.yaml`, whose sources were
+  still selected against the `hxehex/russia-mobile-internet-whitelist` space
+  described with the `cidr` filter above. The `country` entry carries no
+  `exclude_*`, so it is inert on `/stable.txt` and exists for `GET /`, where it
+  is what makes `countries=` / `groups=` actually gate. No through-node geo
+  gate runs at all — these nodes are meant to be used UNDER that whitelist, so
+  an egress-geo gate answers a question nobody asked and would cost a request
+  per survivor to do it. It mounts no agenix secret
   (there is no Gemini key to read) and carries no `build:` section, so
   `sub-preprocessor` is what produces the shared image — hence the
   `depends_on`.

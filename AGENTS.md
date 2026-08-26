@@ -59,16 +59,6 @@ edit; the rules above are the summary, not the argument.
 - **A stale comment is worse than none.** Changing behavior means updating the comment or deleting it — never leave it describing the old world.
 - Removing an obvious doc comment is lint-safe: `.golangci.yml` excludes revive's "exported … should have comment", and `godot` needs no trailing period. Comments that remain must still start with the symbol's name (`godoc`/`staticcheck`). staticcheck's SA5011 is off in `_test.go` only — it does not model `t.Fatal` as terminating, so `if x == nil { t.Fatal(...) }` followed by using `x` reads as a nil deref; it stays on for production code.
 
-## Project overview for LLM agents
-
-Before making any changes, read `./routes.md` — it describes every package in the
-project, its key types/functions, tags, and the dependency graph. This gives an
-LLM a complete orientation without browsing the full source.
-
-After adding, removing, or significantly restructuring a package — or changing
-a package's public API (key types, constructors, interfaces) — update
-`./routes.md` to reflect the new state.
-
 ## Guides — read on demand
 
 `AGENTS.md` holds only what applies to every task. Everything else is a guide you
@@ -84,7 +74,7 @@ load when its trigger fires. Each guide states its own trigger at the top.
 | [`docs/guides/sources.md`](./docs/guides/sources.md) | adding, removing or auditing a subscription source, or touching `internal/crawl` |
 | [`docs/guides/security.md`](./docs/guides/security.md) | touching `internal/fetch`, a user-supplied URL, or the SSRF gates |
 | [`docs/guides/layout.md`](./docs/guides/layout.md) | orientation: which package owns a concern |
-| [`routes.md`](./routes.md) | the per-package reference — types, functions, tags, dependency graph |
+| [`routes.md`](./routes.md) | orientation before a change, and after adding, removing or restructuring a package, or changing a package's public API (key types, constructors, interfaces) — the per-package reference: types, functions, tags, dependency graph |
 
 Two rules about the guides themselves, both learned the hard way:
 

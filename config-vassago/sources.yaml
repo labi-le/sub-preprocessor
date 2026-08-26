@@ -1,7 +1,7 @@
 # Subscription sources for the vassago instance: every source measured to carry
-# nodes inside the cidrwhitelist.txt address space, wherever it came from. 21
+# nodes inside the cidrwhitelist.txt address space, wherever it came from. 20
 # are what survives of the config/sources.yaml subset this file started as; the
-# other 33 were found by search and exist only here. Sources are NOT shared
+# other 32 were found by search and exist only here. Sources are NOT shared
 # with instance 1 and the Telegram crawler does not write here -- config.Load
 # only merges the sources.yaml and private.yaml sitting beside the config.yaml
 # it was given.
@@ -15,7 +15,10 @@
 # Curated 2026-08-10 against cidrwhitelist.txt (30228 lines, 15649 merged
 # ranges, 36265984 addresses, sha256 149d27a8...), superseding the 51-source
 # measurement this header used to record. 16 sources were removed and 33 added;
-# 21 of the previous 37 remain. The 16 were redundant in all six audit samples
+# 21 of the previous 37 remain, so the curation shipped 54. Two of those have
+# since been dropped as dead (one survivor, one added), so the file below lists
+# 52, while every figure further down was measured on the 54. The 16 were
+# redundant in all six audit samples
 # taken over 1.5h -- they do carry whitelisted nodes, but every one of those
 # nodes arrives on another configured source too -- so dropping them frees
 # 5412 node lines per cycle and costs no server:port.

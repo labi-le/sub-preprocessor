@@ -1,6 +1,6 @@
 # Measurement discipline
 
-> **When to read this:** Read before quoting a performance figure or taking one. This file is mostly a list of ways measurements here have been wrong, including figures that had to be retracted.
+> **When to read this:** Read before quoting a performance figure or taking one. This file is mostly a list of ways measurements here have been wrong.
 
 ## Bench / performance notes
 
@@ -16,7 +16,7 @@
   Controlled both times against a hybrid tree holding the fixture constant, the fixture was
   100% of each B/op move. Every `benchmarks/` snapshot older than `5d06fb6` records
   `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% win that does not
-  exist; the post-`5d06fb6` pipeline baseline is **~16200 ns/op**, not the hybrid's ~15900.
+  exist.
 - **A sub-2% ns delta on these benchmarks is not measurable here and MUST NOT be quoted as
   a result.** The variable is the linked image, not the session: two `git archive` exports
   of byte-identical source, relinked, disagree by up to ~2% on a must-be-zero null control,
@@ -41,34 +41,27 @@
   `CacheStore/parallel` cases have a STABLE FLOOR (13 B/op) and a ceiling that is a draw of
   the instrument, because `B/op` is a total divided by 100 iterations spread over 16 P's, so
   a handful of fixed per-P costs lands the quotient anywhere. Three `-benchtime 100x
-  -count=20` sweeps, two links: RWMutexMap 13 x10 / 14 x5 / 28,57,71,85,85, then 13->71,
-  then 13 x9 / 14 x2 up through 43,53,72,77,86,91; SyncMap 13->86, then 13->61, then
-  13 x15 / 14 x3 / 53,76. Same floor every time, a different ceiling every time - which is
-  why the pair that used to be quoted here ("13 <-> 52") was outside its own band by the
-  second sweep. Name the floor and the mechanism, quote no ceiling.
+  -count=20` sweeps over two links read the same 13 B/op floor every time and a different
+  ceiling every time. Name the floor and the mechanism, quote no ceiling.
   The one deliberate increase is in `countryChainOrder`: a config splitting
   one `GEO` chain across several entries now pays a per-request `chainLookup` it did not
   before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
   already cost. The shipped config is unmoved, and the alternative was the wrong filter
   verdict - see `Processor.countryChain`.
-- **STRUCK by explicit agreement, after six review rounds:** the per-link median tables,
-  per-session interquartile ranges and A/B/C/D build enumerations that used to fill this
-  section. They were measured in `/tmp` export trees that no longer exist, so no reader
-  could check them from a fresh checkout - which is the rule at the top of this file.
-  They existed to support a NULL result, so the apparatus could never be load-bearing and
-  could only be wrong in new ways; each rewrite minted the next round's findings ("five
-  commits" was seven, "four independent links" was three links and a re-run, a tree that
-  "reproduced exactly" was a different tree). The three bullets above are what four
-  independent reviewers verified and what stands without figures. Re-measure with
-  `nix-shell --run "make bench"` rather than trusting a number here.
+- **Per-link median tables, per-session interquartile ranges and A/B/C/D build enumerations
+  do not belong in this section.** They were measured in `/tmp` export trees that no longer
+  exist, so no reader could check them from a fresh checkout - which is the rule at the top
+  of this file - and they existed to support a NULL result, so the apparatus could never be
+  load-bearing and could only be wrong in new ways. The three bullets above are what stands
+  without figures. Re-measure with `nix-shell --run "make bench"` rather than trusting a
+  number here.
 - **The 2026-08-18 allocation wave.** Every pair below mixes two provenances, and the
   difference is the point: the BEFORE number is the pre-wave baseline the change that landed it
   measured, and the AFTER number is a re-reading of the SETTLED tree — `go test -run '^$'
   -bench <name> -benchmem -count=5 ./internal/<pkg>`, medians, 2026-08-18, this machine.
   Chaining the individual per-change deltas does NOT reproduce these, because several of the
   paths sit inside one another; re-read the benchmark instead. ALLOCATION counts, not ns/op: a
-  fresh checkout reproduces one by re-running the named benchmark, which is exactly what the
-  struck ns/op apparatus could not offer.
+  fresh checkout reproduces one by re-running the named benchmark.
   - `internal/metrics` — `BenchmarkWriteSources` 24912 -> 3 allocs/op. The renderer appends
     into one self-flushing byte buffer instead of calling `fmt.Fprintf` per sample, which
     boxed every argument into an `[]any` and heap-copied the string headers.
@@ -83,8 +76,7 @@
   - `internal/crawl` — `BenchmarkHarvestPages/guarded` 387 -> 21 for this rewrite, then
     21 -> 16 across the naming cutover that segmented the walk; `/inline` 43 -> 11 and
     691746 -> 60024 B/op. Hand-scanned URL and inline-node extraction plus `unescapeInto`,
-    where the regexps and `html.UnescapeString` were. (`guarded` was recorded at 27 the day it
-    landed and reads 21 here — which is why the AFTER column is a re-reading and not a record.)
+    where the regexps and `html.UnescapeString` were.
   - `internal/fetch` — `BenchmarkReadBody/median_41704/unannounced` 17 -> 2. `readChunked`
     replaced `io.ReadAll` on the path a body announcing no length takes.
   - `internal/stable` — `BenchmarkMerge` 6228 -> 764 (202601 B/op), `BenchmarkBuildPayload`
@@ -99,14 +91,13 @@
   **`Merge` is on that list, so read the "untouched packages" enumeration above as relative
   to the two TAG-REMOVAL commits and not to this wave**: diff the packages the change in
   front of you touched, never a membership list written for another change.
-  **Both pipeline figures in the first bullet — the `1600 B/op` and the `~16200 ns/op`
-  baseline — are PRE-WAVE readings.** `BenchmarkProcessBodyPipeline` runs through the
-  annotate path, and this wave touched it: `rewrite.NodeName` writes the tag prefix, its
-  space and the name straight into the caller's buffer (`rewrite.go:58-63`), leaving a
-  contiguous name to be built only by the vmess/ssr payload arms (`displayName`). Re-read on the
-  settled tree it allocates NOTHING — 0 B/op, 0 allocs/op over its 100 nodes — so the
-  `4640 -> 1600` arithmetic and the "65% win that does not exist" describe a tree at `5d06fb6`
-  and say nothing about this one.
+  **The `1600 B/op` in the FIXTURE bullet above is a PRE-WAVE reading.**
+  `BenchmarkProcessBodyPipeline` runs through the annotate path, and this wave touched it:
+  `rewrite.NodeName` writes the tag prefix, its space and the name straight into the caller's
+  buffer (`rewrite.go:58-63`), leaving a contiguous name to be built only by the vmess/ssr
+  payload arms (`displayName`). Re-read on the settled tree it allocates NOTHING — 0 B/op,
+  0 allocs/op over its 100 nodes — so the `4640 -> 1600` arithmetic describes a tree at
+  `5d06fb6` and says nothing about this one.
   **Two ns/op LOSSES came out of this wave on source it does not touch, and they are
   recorded here rather than against either path.** `BenchmarkParse_SSLegacy` reads 3623 and
   3636 ns/op on two links of HEAD against 3776 and 3876 on two links of the settled tree
@@ -131,24 +122,17 @@
   machine, AMD Ryzen 7 9800X3D).** Four `/tmp` export trees, each relinked — HEAD `8c8ec21`, the
   settled tree, the pre-retype tree carrying `origin.Post` as a string plus one post-id clone per
   keeping message ("the clone tree" below), and the settled tree with only `sourceLabelBytes`
-  reverted. Every figure below was taken for this entry, and the crawl arms were taken twice, by
-  two runs that shared no export tree: every settled-column allocation figure reproduced exactly,
-  `segmented`'s settled ns/op did not repeat to the digit (see that bullet), and the HEAD
-  `segmented` row exists only because the fixture was ported into a HEAD export — done twice now,
-  to readings that disagree, the later one superseding (see that bullet). Where two readings
-  stand, both are named. **Then `cand`, the harvest's per-candidate map, narrowed from
-  `map[string]origin` to `map[string]uint64`, and every crawl B/op moved again**: each
-  `internal/crawl` figure below is a 2026-08-19 re-reading, of the shipped tree and of a
-  fifth export — `git archive 8c8ec21` carrying the new benchmark family as its only change —
-  both `go test -run XXX -bench BenchmarkHarvestPages -benchmem -count=5 ./internal/crawl/`. The
-  `1992 B` this entry quoted for `guarded` and `segmented` until then, together with the `/blind`
-  B/op increase it recorded, are RETRACTED. `/blind` read 27160 B — reproduced exactly on
-  2026-08-19, so that READING stands — but **the claim this entry hung on it, that 27160 is "HEAD's
-  own figure", is WITHDRAWN: the two 27160s were HEAD's faithful twin against this tree's DRIFTED
-  one, not one figure measured twice**. Corrected, `/blind` reads 25560 B / 244 allocs against
-  HEAD's 27160 / 249 (both 2026-08-19); it is apparatus rather than an arm of the shipped harvest,
-  and the bullet below is where all of it belongs. No arm in the package sits above HEAD, on either
-  half of agreement item 14.
+  reverted. Every settled-column allocation figure reproduced exactly across two runs that shared
+  no export tree; `segmented`'s settled ns/op did not repeat to the digit, and the HEAD
+  `segmented` row exists only because the fixture was ported into a HEAD export (see that
+  bullet). Where two readings stand, both are named. **Then `cand`, the harvest's per-candidate
+  map, narrowed from `map[string]origin` to `map[string]uint64`, and every crawl B/op moved
+  again**: each `internal/crawl` figure below is a 2026-08-19 re-reading, of the shipped tree and
+  of a fifth export — `git archive 8c8ec21` carrying the new benchmark family as its only change
+  — both `go test -run XXX -bench BenchmarkHarvestPages -benchmem -count=5 ./internal/crawl/`.
+  `/blind` reads 25560 B / 244 allocs against HEAD's 27160 / 249 (both 2026-08-19); it is
+  apparatus rather than an arm of the shipped harvest, and the bullet below is where all of it
+  belongs. No arm in the package sits above HEAD, on either half of agreement item 14.
   `BenchmarkWriteSources` is untouched by that narrowing and stays a 2026-08-18 reading.
   - **`BenchmarkWriteSources` 86016 -> 73728 B/op, 3 allocs/op either side — and the formula is
     a THIRD of it, not the whole.** Holding the fixture at its new shape and reverting only
@@ -159,8 +143,8 @@
     12288 B is arena rounding, exactly: the request falls 36007 -> 30513 -> 27949 B and lands in
     40960 -> 32768 -> 28672, the other two allocations (`ends`, the exposition buffer) unmoved
     at 4096 and 40960. **Do not record this drop against the formula.**
-    Guarded since 2026-08-19 by `internal/metrics/alloc_test.go`, because until then nothing
-    was: `sourceLabelBytes` only sizes the arena and changes no exposition byte, so the golden
+    Guarded by `internal/metrics/alloc_test.go`, because nothing else can be:
+    `sourceLabelBytes` only sizes the arena and changes no exposition byte, so the golden
     fixture cannot see it drift, and `make bench` tees its output without comparing it. Reducing
     the estimate to `len(s.Name)` alone leaves `go test ./internal/metrics` green while the
     reading goes 141824 B / 8 allocs, 65% above the HEAD this row is published as beating;
@@ -178,15 +162,8 @@
     (`discover.go` there diff-verified byte-identical to `8c8ec21`) and run — 16596 ns / 3448 B /
     21 allocs, `-count=5` medians over samples 16593-16629, 2026-08-19, against the clone tree's
     22175 ns / 2080 B / 22 allocs and the shipped tree's ~22500 ns / 1848 B / 16 allocs.
-    **The `16700 ns / 3424 B / 20 allocs` this bullet recorded for HEAD `segmented` until
-    2026-08-19 is RETRACTED, and the splice it warned about was its own**: 3424 B / 20 allocs is
-    what `BenchmarkHarvestPagesByDistinct`'s 6-distinct point reads on HEAD, one HARNESS
-    allocation below any table-driven arm (last bullet here), so that row crossed harnesses. The
-    3448 B / 21 allocs a review body reported for HEAD `segmented`, dismissed here as a copy of
-    `guarded`'s row, is what the export actually reads. HEAD `guarded` reads 15002 ns / 3448 B /
-    21 allocs on it (14990 the day it was first taken), so **`benchPages` and
-    `benchSegmentedPages` read IDENTICALLY on HEAD, as they do on the shipped tree**: the 24 B
-    and one allocation once called a fixture difference are neither.
+    HEAD `guarded` reads 15002 ns / 3448 B / 21 allocs on it (14990 the day it was first
+    taken).
   - **Segmentation costs no allocation at all, and the arm equalling `/guarded` to the byte is
     what says so.** Both read 1848 B / 16 allocs on the shipped tree, and both read 3448 / 21 on
     HEAD, where nothing segments: the two fixtures are equal-cost by construction, so the
@@ -196,17 +173,14 @@
     fixture. Retyping `origin.Post` to `uint64` removed the carrier rather than the copy —
     `unsafe.Sizeof(origin{})` 32 -> 24, so nothing is left to alias — leaving this fixture's own
     -5 (21 -> 16, the same -5 `guarded` takes) with no clone added back, and no increase to
-    record. The clone tree's 22 is that 16 plus one copy per message that keeps a link, six here;
-    HEAD's 21 is that 16 plus the five per-page URL slices the wave folded away. A page whose
+    record. HEAD's 21 is that 16 plus the five per-page URL slices the wave folded away. A page whose
     messages mostly keep nothing never paid the clone; a page where every message keeps a link
     paid one per message.
-  - **The review's segmented figures do not reproduce and the difference is the fixture.** The
-    performance pass measured 2096 B / 17 allocs and attributed one extra allocation to
-    segmentation; the same arm reads 2080 B / 22 with the string id and its clone, 1992 B / 16
-    without either on the then-settled tree, and 1848 B / 16 once `cand` narrowed further to
-    `map[string]uint64` — two changes apart, not one — so the boundary walk allocates nothing and
-    the review's `+1` belonged to its own throwaway fixture. Both numbers are honest readings of
-    different fixtures, which is why the arm is committed instead of quoted.
+  - **A segmented figure is a reading of its fixture, which is why the arm is committed instead
+    of quoted.** A throwaway fixture reads a `+1` allocation for segmentation that the committed
+    one does not, and the committed arm moved twice rather than once: 2080 B / 22 allocs with the
+    string id and its clone, 1992 B / 16 without either, 1848 B / 16 once `cand` narrowed to
+    `map[string]uint64`. The boundary walk itself allocates nothing.
   - **The wave's real cost is ns/op, on every arm, and it is the third full pass over each
     page** (`strings.Count` for the slice, `strings.Index` for the boundary, then `appendURLs`),
     plus `postID`'s `ParseUint` over every boundary that pass finds: `guarded` 14990 -> 17104 ->
@@ -227,10 +201,7 @@
     taken on every tree. Allocations went the other way on every shipped arm — `guarded` and
     `segmented` alike 3448 B / 21 allocs -> 1848 / 16, `noise` 5992 / 60 -> 3528 / 37, `inline`
     unmoved at 60024 / 11 — and that -1600 B is the same flat saving
-    `BenchmarkHarvestPagesByDistinct` reads at all six distinct counts below. **`/blind` sat in
-    that list until 2026-08-19 and never belonged in it**: it runs a test-owned twin rather than
-    the shipped harvest, so it is not a shipped arm and its figure is not a reading of one. It has
-    the bullet immediately below to itself.
+    `BenchmarkHarvestPagesByDistinct` reads at all six distinct counts below.
     The naming cutover has since moved `noise`, and only `noise`, because it is the one arm above
     that executes code this wave changed: it reads 3432 B / 37 allocs with five identical samples
     and a 19938 ns median over a 19903-19977 spread (2026-08-19, `go test -run '^$' -bench
@@ -238,9 +209,8 @@
     instead of minting a name it no longer has. The 3528 above is the earlier wave's endpoint
     rather than a current reading, and `inline`'s 17251 stands: its path is untouched, so the
     difference is the run-to-run variance this file's own rule refuses to recompute.
-  - **`/blind` is a TWIN's figure; the HEAD equality it used to report was two different
-    comparisons landing on one number, and correcting the twin moved it 27160 -> 25560 B/op and
-    249 -> 244 allocs/op.** The arm runs `harvestPagesBlind`
+  - **`/blind` is a TWIN's figure, not the shipped harvest's, and correcting the twin moved it
+    27160 -> 25560 B/op and 249 -> 244 allocs/op.** The arm runs `harvestPagesBlind`
     (`internal/crawl/reject_bench_test.go:276`), a test-owned mirror of `harvestPages` over
     `harvestPage` with the dedupe dropped, so every byte it reports is a property of that mirror
     and of nothing else. **On HEAD that mirror was FAITHFUL**: `8c8ec21`'s own shipped
@@ -249,19 +219,16 @@
     on both trees — an inline loop at `extract.go:34-35` on HEAD, which had no `appendURLs` at all,
     and the `appendURLs` wrapper at `extract.go:35-36` here. There was no hoist on that tree to
     mirror, so nothing was wrong with the twin as written. **The drift is this wave's**: it hoisted
-    one `urls` slice into `harvestPages` (`discover.go:375`, grown only when a page needs more at
-    `:404`) and left the twin scanning per page, so from that commit until
-    2026-08-19 the twin mirrored a body that had moved under it. **That is why `27160` read "either
-    side", and why calling it "HEAD's own figure" was wrong**: it was HEAD's faithful twin against
-    this tree's DRIFTED twin, landing on the same number because the twin's drift was exactly the
-    size of what the wave had saved. An arm that does not execute the changed code cannot report
-    that the change did nothing.
-    Corrected, the twin reads **25560 B / 244 allocs** on the shipped tree against **27160 / 249**
-    on an `8c8ec21` export — HEAD needs no backport, it carries this family and its own
-    `harvestPagesBlind` — both `-count=5` with all five samples identical, measured by
-    `agent://ReworkGuards` 2026-08-19 with `go test -count=5 -run '^$' -bench BenchmarkHarvestPages
-    -benchmem ./internal/crawl/`, the pre-fix figure taken on an export verified byte-identical to
-    the worktree. **Read the two deltas apart, because only one of them is a code win:**
+    one `urls` slice into `harvestPages` (`discover.go:381`, grown only when a page needs more at
+    `:407`) and left the twin scanning per page, and the twin's drift was exactly the size of what
+    the wave had saved — so a DRIFTED twin and HEAD's faithful one land on the same 27160, either
+    side of a change that really saved 1600 B. An arm that does not execute the changed code
+    cannot report that the change did nothing.
+    Both figures are `-count=5` with all five samples identical, measured 2026-08-19 by
+    `agent://ReworkGuards` with `go test -count=5 -run '^$' -bench BenchmarkHarvestPages
+    -benchmem ./internal/crawl/` — HEAD needs no backport, it carries this family and its own
+    `harvestPagesBlind`, and the pre-fix figure was taken on an export verified byte-identical
+    to the worktree. **Read the two deltas apart, because only one of them is a code win:**
     - **WITHIN this tree, 27160 -> 25560 is the TWIN being corrected**, and no shipped line moved
       for it — `guarded` and `segmented` 1848 / 16, `noise` 3528 / 37, `inline` 60024 / 11 and all
       six curve points re-read unmoved in the same run (that run's readings; the naming cutover
@@ -269,16 +236,15 @@
       got honest.
     - **ACROSS trees, 25560 against HEAD's 27160 IS the wave's hoist** — the same -1600 B / -5
       allocs every other arm shows, the twin's five redundant 320 B header blocks, the 320 B x 5 the
-      FLAT-curve bullet below describes. So the old equality was HIDING a real win rather than
-      inventing one, and it stayed hidden for as long as the apparatus kept paying the exact cost
-      the wave had removed from the harvest. `/blind` sits 1600 B and 5 allocs BELOW HEAD, so
+      FLAT-curve bullet below describes. `/blind` sits 1600 B and 5 allocs BELOW HEAD, so
       agreement item 14 is satisfied on it in the passing direction.
     The pair's meaning moves with the figure: `/guarded` against `/blind` priced the dedupe PLUS
     five slice mints only the drifted twin ever paid, and now prices **the dedupe alone** —
     `candidate` and one `strings.Clone` per OCCURRENCE against per DISTINCT URL. **The lesson
     generalises: a twin is faithful only to the tree it was written against** — this one was correct
     the day it landed and was falsified by a change to the body it mirrors, in a file that change
-    never opened, and no assertion in the package caught it.
+    never opened; `TestHarvestPagesBlindAllocatesLikeTheShippedHarvest` now holds the twin's
+    apparatus to the harvest it mirrors (`internal/crawl/twin_test.go:52-57`).
   - **The axis the committed arms cannot express: the distinct-candidate curve.**
     `BenchmarkHarvestPagesByDistinct` (`internal/crawl/reject_bench_test.go:539`) holds page
     bytes, page count, occurrences per page and URL length, and varies only the repost factor, so
@@ -296,7 +262,7 @@
     one `[]string` per PAGE, not per candidate: at `8c8ec21` `extractURLs` minted
     `make([]string, 0, strings.Count(page, urlScheme))` for every page (`extract.go:35` there),
     where `harvestPages` now hoists one `urls` slice across the whole channel and `harvestPage`
-    grows it only when a page needs more (`discover.go:375` and `:404`). This fixture holds 20
+    grows it only when a page needs more (`discover.go:381` and `:407`). This fixture holds 20
     occurrences per page at every point on the curve, so that slice is a 20-element header block —
     320 B — and five of six pages stop allocating one: -5 allocations and -1600 B, whatever the
     distinct count. Anything stored per KEY moves the other way and SCALES with it: a 24 B
@@ -322,19 +288,17 @@
     `internal/crawl/reject_bench_test.go:216:7: moved to heap: sb`, which is `benchInlinePages`'
     builder escaping into `fmt.Fprintf` as it writes the inline arm's fixture. A fourth move,
     `:339:6: moved to heap: parseErr` inside `benchCandidateCase.check`, belongs to the candidate
-    benchmarks rather than to this family. (All four anchors are 2026-08-19 `-m` output, re-run on
-    the reworked file; the `:463:9`, `:454:7` and `:502` this bullet cited until then named
-    constructs that have since moved between functions. Compiler output is quoted, never
-    renumbered by hand.) One 24 B
+    benchmarks rather than to this family. (Compiler output is quoted, never renumbered by
+    hand.) One 24 B
     allocation, in the harness and not in the harvest, and it is there in BOTH trees: HEAD reads
     3448 B / 21 allocs on its table arms against 3424 / 20 at 6 distinct, the shipped tree 1848 / 16
     against 1824 / 15. The -1600 B and -5 allocs are the same figure whichever harness you read them
     in, which is the only reason the two rows can be compared at all — and only after subtracting
     that header, never by splicing the rows.
 - **The probe's parse moved behind the TCP pre-check (2026-08-18, this machine, `-count=5`
-  medians unless stated).** `Probe` used to build a mihomo adapter object for every converted
-  mapping and then let the pre-check condemn most of them unread; it now derives the pre-check's
-  whole input from the raw mapping (`probeNodes`) and parses the survivors alone (`parseLive`).
+  medians unless stated).** `probeNodes` derives the pre-check's whole input from the raw
+  mapping and `parseLive` parses the survivors alone, against an eager front-end that built a
+  mihomo adapter object for every converted mapping and let the pre-check condemn most unread.
   Every figure below was re-read for this entry on the settled tree — the reorder plus the
   `probeNodes` short-circuit that skips `probeAddr` for a mapping the pre-check will never dial —
   against a snapshot of the pre-reorder worktree, two `/tmp` exports of each.
@@ -365,10 +329,10 @@
     over DISTINCT ENDPOINTS, which `PrecheckReport` states outright is not interchangeable with
     the `stage="condemned"` node count: every position the pre-check never judged is condemned by
     neither, UDP-typed nodes and the ~5.2% of endpoints whose name does not resolve
-    (`filterReachable`) included, which caps the node share at 0.589 * 0.948 = 55.8%. **This
-    bullet quoted the endpoint share until 2026-08-18**: at 58.9% the same benchmark reads 28263
-    allocs/op and 2986025 B/op, so the wrong denominator flattered the change by 4.7% on
-    allocations and 4.8% on bytes.
+    (`filterReachable`) included, which caps the node share at 0.589 * 0.948 = 55.8%. **Seeding
+    the constant from the endpoint share instead flatters the change**: at 58.9% the same
+    benchmark reads 28263 allocs/op and 2986025 B/op, 4.7% better on allocations and 4.8% on
+    bytes.
   - **The floor is a small LOSS, and it is the healthy-upstream case.** At 0% condemned the
     reorder pays a second pass over the mappings and a `JoinHostPort` per position that the
     spared adapter then builds again: 55395 allocs/op (55394 on some runs) and 5902783 B/op
@@ -402,10 +366,8 @@
     `109464 B/op` / `598 allocs/op` on both sides**, which is the whole load-bearing content.
     Neither runs edited code — `select.go` is byte-identical across the change and `merge.go`'s
     only diff is a comment — so any ns gap on them is a relink comparison by construction and none
-    is attributed to this change. **The +4.8% / +5.3% pair this bullet quoted until 2026-08-18,
-    and the 5.6% / 6.3% relink control offered against it, reproduce on none of the four links
-    either side and are retracted**: per-link ns figures minted to support a null result are the
-    apparatus this file struck above.
+    is attributed to this change: per-link ns figures minted to support a null result are
+    apparatus this file does not keep.
 - Earlier waves, mechanisms only (no figure for them is reachable from a checkout): geofeed
   parsing allocations, fragment-rewrite allocations, inner filter hot-path allocations, and
   skipping non-URI lines during subscription parse.
