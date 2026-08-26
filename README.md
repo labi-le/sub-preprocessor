@@ -654,8 +654,10 @@ surface — the service's stable-list health is only observable through these
 metrics.
 
 `deploy/grafana/sub-preprocessor.json` is the provisioned Grafana dashboard;
-`flake.nix` exports `nixosModules.monitoring` (Prometheus scrape job +
-dashboard provisioning) for the NixOS host to import, and
+`flake.nix` exports `nixosModules.monitoring` (`deploy/monitoring.nix`) for the
+NixOS host to import — it enables Prometheus and Grafana (both loopback, both
+`mkDefault` so a host with its own keeps its settings), scrapes the service
+under its own job, and provisions the datasource and dashboard — and
 `nixosModules.default` (systemd service module). The dashboard lives in this
 repo so it tracks the metric names — change a metric, update the dashboard in
 the same commit.
