@@ -140,3 +140,42 @@ subscriptions:
       url: https://gitflic.ru/project/scala/scalavpn-configs/blob/raw?file=sub
     - name: revotech
       url: https://gitverse.ru/api/repos/revotech.ru/xray-vless-gen/raw/branch/master/shadow.txt
+    # Salvaged from config-vassago/sources.yaml when that instance was dropped
+    # 2026-08-26. Those 52 hand-curated sources were measured against the live
+    # 737-source production corpus (152165 endpoints) the same day: these 17 are
+    # the ones carrying endpoints no already-configured source did, +6935
+    # between them. The other 35 added nothing and died with the directory.
+    - name: heops6767-whitefiltredhy2vlesstroj
+      url: https://raw.githubusercontent.com/heops6767/PypsCFG/main/output/WhiteFiltredHy2VlessTrojan.txt
+    - name: holms2012-shj1
+      url: https://raw.githubusercontent.com/holms2012/vtor/main/shj1.txt
+    - name: elanski-collected-raw
+      url: https://raw.githubusercontent.com/elanski/proxy-preflight/main/configs/collected_raw
+    - name: ndsphonemy-ru-arch
+      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru-arch.txt
+    - name: kryyyyyyyyyyyyyyyyyyy-blacklist
+      url: https://raw.githubusercontent.com/KRYYYYYYYYYYYYYYYYYYY/local/main/test1/blacklist.txt
+    - name: qubertuwu-tgk-raw
+      url: https://raw.githubusercontent.com/qubertuwu/Gh0st_WhiteList/main/configs/tgk/tgk_raw.txt
+    - name: kreemchek-26
+      url: https://raw.githubusercontent.com/Kreemchek/goida-vpn-configs/main/githubmirror/26.txt
+    - name: xxx3-lab-ru-white-all-part1
+      url: https://raw.githubusercontent.com/xxx3-lab/ahiteo-vpn/main/ru_white_all_part1.txt
+    - name: kort0881-vless-042
+      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_042.txt
+    - name: kort0881-vless-041
+      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_041.txt
+    - name: dxfh-ru
+      url: https://raw.githubusercontent.com/DXFH/clash-free-cleaner/main/sub/countries/RU.txt
+    - name: kort0881-all-posts
+      url: https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/vpn-files/all_posts.txt
+    - name: recrumptor-vless-sorted
+      url: https://raw.githubusercontent.com/recrumptor/csub/main/vless_sorted.txt
+    - name: rudolfdiesel1488-dot-whitelist-con
+      url: https://raw.githubusercontent.com/rudolfdiesel1488-dot/my-vpn-sub/main/whitelist_configs.txt
+    - name: plsn1337-filtered-vless-keys-2
+      url: https://raw.githubusercontent.com/plsn1337/white-vless/main/filtered_vless_keys_2.txt
+    - name: ndsphonemy-ru
+      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru.txt
+    - name: mgentel1309-vless-lite
+      url: https://raw.githubusercontent.com/mGentel1309/Vpn/main/vless_lite.txt
