@@ -296,14 +296,13 @@ vendor the dashboard into the nixos repo.
   would flatten `filtered` to zero. It quotes no digits of its own, aggregates `sum by (owner)`
   over one target per column (`count by (owner)` for the sources column), and keeps panels 8, 22
   and 20's column vocabulary, in which `filtered` IS `stable_source_published_nodes`.
-- `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) = the
-  monitoring stack itself: `mkDefault`-enables Prometheus (loopback, 30d
-  retention) and Grafana (loopback :3000), scrapes `127.0.0.1:9091` under job
-  `sub-preprocessor`, and provisions BOTH the datasource and the dashboard
-  (`deploy/grafana/sub-preprocessor.json`; datasource picked via a template
-  variable, so no fixed uid). The Grafana secrets (admin_password, secret_key)
-  are host-side — nixpkgs 26.11 hard-asserts on secret_key (grafana.nix:2065).
-  `nixosModules.default` is the separate systemd-service module — leave it.
+- `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) adds
+  the `sub-preprocessor` Prometheus scrape job and the Grafana dashboard
+  provider (`deploy/grafana/sub-preprocessor.json`). It assumes the host
+  already owns Prometheus, Grafana, and the datasource they use; the dashboard
+  itself picks that datasource through a template variable, so no fixed uid is
+  needed here. `nixosModules.default` is the separate systemd-service module —
+  leave it.
 - **Every IP-stage drop reason is emitted every cycle, so a zero is an answer on four of the
   seven.** `writeSources` builds a FIXED seven-entry table per source, never reading `filters:`
   (`internal/metrics/metrics.go:350-353`, reason names at :303): `dns` (nothing resolved), `ipv6`
@@ -401,7 +400,7 @@ vendor the dashboard into the nixos repo.
   beside a large `valid` says only that nothing reached the payload under that name: dedupe,
   dead-cache skip, probe failure and a gate read alike.
 - **One deployment, one scrape JOB — a second one gets its OWN job, never a second target
-  in the first.** `deploy/monitoring.nix:28-33` scrapes `sub-preprocessor` at
+  in the first.** `deploy/monitoring.nix:10-17` scrapes `sub-preprocessor` at
   `127.0.0.1:9091` under that `job_name`, and nothing else today: the second instance's job
   was removed with it on 2026-08-26. The mechanism outlives the count, because the
   dashboard's Instance picker is `label_values(stable_cycles_total, job)` and every panel
@@ -441,6 +440,4 @@ Grafana+Prometheus first):
 $EDITOR deploy/grafana/sub-preprocessor.json && git commit -am '...' && git push
 # in the nixos repo (server imports inputs.sub-preprocessor.nixosModules.monitoring):
 nix flake update sub-preprocessor && make switch
-# on pet (channels host, imports deploy/monitoring.nix by absolute path):
-cd ~/projects/sub-preprocessor && git pull --ff-only && sudo nixos-rebuild switch
 ```

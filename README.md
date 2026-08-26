@@ -655,9 +655,9 @@ metrics.
 
 `deploy/grafana/sub-preprocessor.json` is the provisioned Grafana dashboard;
 `flake.nix` exports `nixosModules.monitoring` (`deploy/monitoring.nix`) for the
-NixOS host to import — it enables Prometheus and Grafana (both loopback, both
-`mkDefault` so a host with its own keeps its settings), scrapes the service
-under its own job, and provisions the datasource and dashboard — and
+NixOS host to import — it adds the `sub-preprocessor` Prometheus scrape job and
+the Grafana dashboard provider, and assumes the host already owns the
+Prometheus/Grafana services plus the datasource they use — and
 `nixosModules.default` (systemd service module). The dashboard lives in this
 repo so it tracks the metric names — change a metric, update the dashboard in
 the same commit.
