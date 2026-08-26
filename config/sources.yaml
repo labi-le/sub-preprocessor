@@ -106,12 +106,6 @@ subscriptions:
       url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/au1rxx-v2ray.txt
     - name: emillynn-goida24
       url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/goida-24.txt
-    - name: ruwbl-kvru
-      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/KvRuVPN/KvRuVPN.txt
-    - name: emillynn-white
-      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/FLAT447-WHITE_FULL.txt
-    - name: emillynn-lte
-      url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/FLAT447-BLACK_LTE.txt
     - name: linspisok-all
       url: https://hub.mos.ru/LinSpisokObhod/LInSpisokObhod/-/raw/main/sub/ALL.txt
     - name: ruwbl-rostun

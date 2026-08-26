@@ -34,6 +34,15 @@ outlives them, and it applies to `config/sources.yaml` just as well.
   Three separate measurements over three different sets; none is derivable from the
   others, and the last supersedes the rest. Union the sets. Never total the counts, and
   never derive a new figure by taking one source's number out of an old one.
+  **And the baseline MUST be the whole shipped list, managed entries included.** Measured
+  2026-08-26 on 38 ru-forge candidates: scored against the 50 curated sources alone
+  (24417 endpoints) they looked worth 3036 new ones, but against the production corpus of
+  710 sources (54837 endpoints, 660 of them crawler-managed) the same fetches were worth
+  1924. Three that passed the curated-only pass collapsed on the full one —
+  `ru-wbl/wl KvRuVPN.txt` 259 new to ZERO, `FLAT447-WHITE_FULL` 40 to zero,
+  `au1rxx-v2ray` 82 to 10 — because the crawler already harvests those providers from
+  Telegram. A curated-only baseline is not a conservative approximation; it is an
+  overstatement that ships redundant sources.
   **And re-check every COMPARISON when you re-measure its operands.** A "staler than", a
   "more than half", a "2.3x" is a derived quantity that keeps its old truth value while the
   numbers around it move, so it survives exactly the sweep that fixes everything else. Two
@@ -205,9 +214,10 @@ mint `seyedng-3631-2` instead of colliding — it yields there too. And `used` n
 BOTH files are seeded, not just the overlay: `validateSources` rules on the whole MERGED list and
 `config.yaml` carries `subscriptions.sources` of its own, so seeding one of the two would fail
 closed on the entire config over a name the crawler had in front of it. Curated names do
-wear the minted shape: the shipped overlay carries `wepogp-1` and `wepogp-4`
-(`config/sources.yaml:91,93`) and vassago's `kort0881-vless-042` and `kreemchek-26`
-(`config-vassago/sources.yaml:248,200`, read 2026-08-19). `wepogp-1` is precisely what the mint
+wear the minted shape: vassago's `kort0881-vless-042` and `kreemchek-26`
+(`config-vassago/sources.yaml:248,200`, read 2026-08-19). `config/sources.yaml` carried the
+same shape in `wepogp-1` and `wepogp-4` until 2026-08-26, when both were pruned for yielding
+4 and 6 nodes a cycle — the hazard is a naming rule, not those two rows. `wepogp-1` is precisely what the mint
 produces for the first postless URL of a channel slugging to `wepogp`, so had it minted that
 string the merged list would carry the name twice and `config.Load` would fail exactly as above —
 at startup a crash loop, and at runtime the WORSE case, silent, the reloader keeping the previous
@@ -294,7 +304,8 @@ is not changing, which is why the ambiguity is written down here instead of desi
   post id — must strip to `file-vpn-2`. The two are indistinguishable as strings. Nothing in a
   name says which trailing digit run was the slug's own. Curated
   names share the minted shape too: counted over both shipped overlays 2026-08-18, `wepogp-1`
-  and `wepogp-4` (`config/sources.yaml:91,93`) would collapse onto one `wepogp` row that no
+  and `wepogp-4` (then at `config/sources.yaml:91,93`, pruned 2026-08-26) would collapse onto
+  one `wepogp` row that no
   channel produced, and six of vassago's 52 names do the same — `kort0881-vless-042` and
   `-041` onto `kort0881-vless`, `kreemchek-26` onto `kreemchek`. So the mint writes the slug
   down at the one moment it has it, and no reader guesses.
@@ -355,8 +366,9 @@ is not changing, which is why the ambiguity is written down here instead of desi
   adds sources every hour: `stable_sources_total` went 230 → 396 over the fourteen days
   to 2026-08-15 17:23Z, so any total here is stale within hours. That metric is the live
   figure, drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard;
-  prefer it to any number below. It counts BOTH overlays — `config/sources.yaml`'s 46
-  curated names as well as the crawler's private ones — and it lags the file on disk by up
+  prefer it to any number below. It counts BOTH overlays — `config/sources.yaml`'s curated
+  names (46 when this was written, 73 on 2026-08-26) as well as the crawler's private ones —
+  and it lags the file on disk by up
   to one cycle, because a reload only reaches the worker when its next cycle starts. At
   17:23Z it read 396 = the 46 curated names plus the 350 private ones the 17:09Z cycle
   loaded (`stable_last_success_timestamp_seconds`), while the file on disk already held
