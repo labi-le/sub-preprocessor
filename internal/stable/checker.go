@@ -508,8 +508,9 @@ func (c *Checker) filterAndMeasureEgress(
 // allocation is that one map -- 13.6kB at 349 sources, flat in the node count,
 // zero per node. The CPU is not free at ~11ns a lookup, but tested is the
 // PROBE's survivor set, not the merged pool: measured 2026-08-15 it held 376
-// nodes on prod and 853 on vassago, so the two passes cost under 20us once per
-// cycle. The map is sized by the source count, which is why it dwarfs them.
+// nodes here and 853 on the second instance (retired 2026-08-26), so the two
+// passes cost under 20us once per cycle. The map is sized by the source count,
+// which is why it dwarfs them.
 //
 // A label attributing to no configured source has nowhere to land, so the
 // shortfall is logged rather than dropped in silence: the per-source columns

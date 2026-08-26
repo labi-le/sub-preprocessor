@@ -382,9 +382,10 @@ const (
 	precheckAttempts = 2
 	// Bounded by the ROUTER's conntrack table, which is the binding cost here.
 	// Measurement independence is real but secondary: this dial yields no bit
-	// any gate reads, so check.concurrency — 16 in config against max_avg_ms
-	// 800, 32 in config-vassago against 4000, each pinned by its own latency
-	// measurement — has no claim on it.
+	// any gate reads, so check.concurrency — 16 against max_avg_ms 800 in the
+	// shipped config, 32 against 4000 on the second instance (retired
+	// 2026-08-26), each pinned by its own latency measurement — has no claim
+	// on it.
 	//
 	// Measured 2.8 tracked flows per endpoint (one TCP flow when the first
 	// attempt connects, two when it is black-holed, plus the A/AAAA pair for a
@@ -419,9 +420,9 @@ const (
 )
 
 // precheckDialBudget is the per-attempt dial deadline. Derived, never a
-// constant: 500ms was 8x tighter than config-vassago's max_avg_ms of 4000, an
-// instance deliberately tuned to admit slow nodes, so it deleted what that
-// instance exists to keep.
+// constant: 500ms was 8x tighter than the max_avg_ms of 4000 measured on the
+// second instance (retired 2026-08-26), deliberately tuned to admit slow nodes,
+// so the constant deleted exactly what that tuning existed to keep.
 //
 // All precheckAttempts attempts share exactly ONE url-test round's budget,
 // which is what makes the verdict safe by construction: a node that cannot

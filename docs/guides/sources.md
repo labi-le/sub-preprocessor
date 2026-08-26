@@ -4,10 +4,17 @@
 
 ## Curating a subscription source list
 
-`config-vassago/sources.yaml` is curated entirely by hand — no crawler writes into that
-directory — and one measured round of it (2026-08-10) produced four findings that cost hours
-to obtain. That file's header carries the round's numbers; what follows is the part that
-outlives them, and it applies to `config/sources.yaml` just as well.
+The four findings below come from one measured round (2026-08-10) of a hand-curated
+whitelist source list — the second compose instance's `sources.yaml`, which no crawler ever
+wrote into. That instance was retired 2026-08-26 and its directory deleted, so the round's
+own numbers now live in git history alone (`config-vassago/sources.yaml:15-24` at the commit
+before the deletion: whitelist file 30228 lines / 15649 merged ranges, 16 sources removed
+and 33 added, 54 shipped, 52 after two later died, every figure below measured on the 54).
+What follows is the part that outlives the file, and it applies to `config/sources.yaml`
+just as well — 17 of those 52 sources are now IN it (`config/sources.yaml:143-181`), the
+ones that carried endpoints no already-configured source did when the 52 were measured
+against the live 737-source corpus (152165 endpoints) on 2026-08-26: +6935 between them,
+while the other 35 added nothing and died with the directory.
 
 - **The biggest names marketed FOR whitelist bypass contribute nothing; the bulk comes from
   undifferentiated aggregators.** Measured across ten independent search channels:
@@ -128,9 +135,15 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   restore the do-not-build bullet recording BOTH measurements. Secondary signals: discovered
   topics against the 200-slot budget headroom, the empty/pages ratio (embed markup health), and
   cycle wall-time delta against the pre-deploy median.
-- **Do NOT move the harvest to the vassago instance.** Chat/forum nodes are 3.0x LESS
-  whitelist-fit than what it already subscribes to — 21 of 675 resolved keys (3.1%)
-  against 1838 of 20049 (9.2%) — and 0 of the novel ones were alive.
+- **Chat/forum nodes are 3.0x LESS whitelist-fit than a curated whitelist list, so an
+  IP-allow-listed deployment is the wrong place to point this harvest.** Measured on the
+  second instance (retired 2026-08-26), whose every source was curated for membership in
+  that allow-list: 21 of 675 resolved keys from the harvest were inside it (3.1%) against
+  1838 of 20049 (9.2%) for what the instance already subscribed to, and 0 of the novel ones
+  were alive. The deployment is gone and the rule has no subject left, but the ratio is a
+  property of the two POPULATIONS rather than of that host, so it still answers the question
+  it was measured for: aimed at a cidr-gated pool, this harvest feeds ~3x fewer usable nodes
+  per DNS resolve and probe slot than hand-curated whitelist sources do.
 - **`InlineMax` still binds after that restriction, so raising it buys more of the same.**
   The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
   alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
@@ -216,10 +229,13 @@ to `/config/sources.yaml,/config/config.yaml`). BOTH files are seeded, not just 
 `validateSources` rules on the whole MERGED list and
 `config.yaml` carries `subscriptions.sources` of its own, so seeding one of the two would fail
 closed on the entire config over a name the crawler had in front of it. Curated names do
-wear the minted shape: vassago's `kort0881-vless-042` and `kreemchek-26`
-(`config-vassago/sources.yaml:248,200`, read 2026-08-19). `config/sources.yaml` carried the
-same shape in `wepogp-1` and `wepogp-4` until 2026-08-26, when both were pruned for yielding
-4 and 6 nodes a cycle — the hazard is a naming rule, not those two rows. `wepogp-1` is precisely what the mint
+wear the minted shape, in the shipped overlay right now: `goida26-1`, `kreemchek-26`,
+`kort0881-vless-042`, `-041` and `plsn1337-filtered-vless-keys-2` — 5 of the 87 curated
+names in `config/sources.yaml` (`:137`, `:160`, `:164`, `:166`, `:176`, read 2026-08-26).
+The last four arrived that day, salvaged from the retired second instance's list, where they
+read at `config-vassago/sources.yaml:203,223,251,259` before the directory was deleted.
+The same overlay carried `wepogp-1` and `wepogp-4` until 2026-08-26, when both were pruned
+for yielding 4 and 6 nodes a cycle — the hazard is a naming rule, not any one row. `wepogp-1` is precisely what the mint
 produces for the first postless URL of a channel slugging to `wepogp`, so had it minted that
 string the merged list would carry the name twice and `config.Load` would fail exactly as above —
 at startup a crash loop, and at runtime the WORSE case, silent, the reloader keeping the previous
@@ -302,11 +318,14 @@ is not changing, which is why the ambiguity is written down here instead of desi
   `file-vpn-2`, and `file-vpn-2-1444c8` strips down to `file-vpn` while `file-vpn-2-3631` — a
   post id — must strip to `file-vpn-2`. The two are indistinguishable as strings. Nothing in a
   name says which trailing digit run was the slug's own. Curated
-  names share the minted shape too: counted over both shipped overlays 2026-08-18, `wepogp-1`
-  and `wepogp-4` (then at `config/sources.yaml:91,93`, pruned 2026-08-26) would collapse onto
-  one `wepogp` row that no
-  channel produced, and six of vassago's 52 names do the same — `kort0881-vless-042` and
-  `-041` onto `kort0881-vless`, `kreemchek-26` onto `kreemchek`. So the mint writes the slug
+  names share the minted shape too, and the count outlived the second instance: 5 of the 87
+  curated names in `config/sources.yaml` wear it (read 2026-08-26) — `kort0881-vless-042`
+  and `-041` collapsing onto one `kort0881-vless` row no channel produced, `kreemchek-26`
+  onto `kreemchek`, `plsn1337-filtered-vless-keys-2` onto `plsn1337-filtered-vless-keys`,
+  `goida26-1` onto `goida26`. The first four were salvaged that day from the retired second
+  instance, where six of its 52 names did the same (counted 2026-08-18 across both
+  instances' curated overlays, the same count that caught `wepogp-1` and `wepogp-4`, then at
+  `config/sources.yaml:91,93` and pruned 2026-08-26). So the mint writes the slug
   down at the one moment it has it, and no reader guesses.
   `stable_source_dropped_nodes` is the one family carrying neither `feed` nor `owner` —
   `source` and `reason` only — so per-source drops stay a question you ask by name.

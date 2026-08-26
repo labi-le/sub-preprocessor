@@ -66,8 +66,8 @@ func foldMieruName(name string, mieru bool) string {
 // It returns a substring, never a copy, because countSourceStages calls it from
 // both of its passes -- over tested and over the filtered subset of it -- so a
 // published node is split twice and a dropped one once. Both passes walk the
-// probe's survivors, not the merged pool: 572 calls on prod and 1441 on
-// vassago, measured 2026-08-15.
+// probe's survivors, not the merged pool: measured 2026-08-15, 572 calls here
+// and 1441 on the second instance, retired 2026-08-26.
 //
 // A label of another shape is returned unchanged rather than "" so a future
 // naming change degrades into one unattributed row instead of collapsing

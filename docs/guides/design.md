@@ -31,24 +31,20 @@ swapped in atomically; the last good list is kept if a cycle fails, and with
 `subscriptions.snapshot_path` set it is also written to disk and reloaded at
 startup, so `503` is left for a genuinely cold start rather than every restart.
 
-**Two instances of this binary run from the one image** (`docker-compose.yaml`):
-`sub-preprocessor` on `:7008` reading `./config`, and `sub-preprocessor-vassago`
-on `:7009` reading `./config-vassago`. Same code, same two modes, different
-`filters:`. The vassago instance's live chain is `country` then `bandwidth`. The `cidr`
-allow-list on the ENTRY address that gave it its purpose, holding
-`hxehex/russia-mobile-internet-whitelist`, is commented out in `config-vassago/config.yaml`,
-disabled 2026-08-14 after it published 1 node per cycle for 43 cycles.
-The `country` entry carries no `exclude_*`, so it is inert on `/stable.txt`
-(`GeofeedFilter` early-returns on a full allow set with an empty deny set) and is
-there for `GET /`: without an entry of that type `buildFilters` builds nothing,
-and the server goes on demanding a `countries`/`groups`/`exclude_*` parameter that
-no filter then reads. It arms no through-node geo gate and no `cloudflare`
-provider: its nodes are meant to be used UNDER that whitelist, so an egress-geo
-gate answers a question nobody asked and each one costs a request per survivor to
-do it. Only the first instance runs the crawler and holds the Gemini key; the
-second's 52 sources are curated by hand, against a measurement its
-`config-vassago/sources.yaml` header records. A change to "the shipped config" now
-has to be checked against BOTH directories.
+**One instance of this binary runs from the image** (`docker-compose.yaml`):
+`sub-preprocessor` on `:7008` reading `./config`, with the `tg-sub-crawler`
+sidecar writing its `private.yaml` overlay into that same directory, so "the
+shipped config" is one directory and one `filters:` chain. A second instance on
+a second config directory was retired 2026-08-26. The `cidr` allow-list on the
+ENTRY address that had given it its purpose, holding
+`hxehex/russia-mobile-internet-whitelist`, was disabled 2026-08-14 after it
+published 1 node per cycle for 43 cycles; the filter type is still a feature and
+that verdict now sits with it, commented out, in `config/config.yaml`.
+The shipped `country` entry carries no `exclude_*`, so it is inert on
+`/stable.txt` (`GeofeedFilter` early-returns on a full allow set with an empty
+deny set) and is there for `GET /`: without an entry of that type
+`buildFilters` builds nothing, and the server goes on demanding a
+`countries`/`groups`/`exclude_*` parameter that no filter then reads.
 
 **Do not read that upstream repository name as a description of the data.** Measured
 2026-08-10 over the whitelist's 15649 intervals: AS749 DNIC (US DoD) is 20.97% of the

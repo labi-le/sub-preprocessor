@@ -215,15 +215,21 @@ after DNS resolution, before any probing:
   anyone sizing a deployment from 15649 ranges will be wrong, and the only
   figure that means anything is a measured node count.
 
-  `config-vassago/sources.yaml` is a source list selected against this
-  whitelist directly, and its header records that measurement. No shipped
-  config enables a `cidr` filter today: the entry that gated on it is
-  commented out in `config-vassago/config.yaml`. What a live run of that
-  instance leaves is not a count but an identity — `total` equals `kept` plus
-  every drop reason, e.g. a source answering with 586 nodes booking 25 kept,
-  533 `cidr_drop` and 28 `geo_drop` under `countries=RU`, which is
-  586 = 25 + 533 + 28. Counts themselves never reproduce: these sources are
-  live and rotate within the hour.
+  No shipped config enables a `cidr` filter today: the entry that gated on it
+  is kept commented out in `config/config.yaml`, with the measurement that
+  disabled it and the argument against adding `ipwhitelist.txt` beside the
+  CIDR file — read both before re-enabling it. That gate ran on a second
+  compose instance, retired 2026-08-26, over a source list selected against
+  this whitelist directly, and what it measured was the pool's verdict, not
+  the gate's: on 2026-08-14 it admitted 3498 of 38663 endpoints (9.0%), yet of
+  80 admitted nodes whose server accepts TCP zero brought a tunnel up (37
+  refused the protocol, 14 timed out, 16 failed on credentials), counts
+  byte-identical from a second egress, and that instance published 1 node per
+  cycle for 43 cycles. What a live run there left is not a count but an
+  identity — `total` equals `kept` plus every drop reason, e.g. a source
+  answering with 586 nodes booking 25 kept, 533 `cidr_drop` and 28 `geo_drop`
+  under `countries=RU`, which is 586 = 25 + 533 + 28. Counts themselves never
+  reproduce: these sources are live and rotate within the hour.
 
 Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
@@ -541,20 +547,16 @@ reload that comes out with **zero** subscription sources is refused rather than
 obeyed — the running worker keeps its previous sources and logs a warning,
 since an empty list is nearly always a missing overlay file.
 
-The repo ships **two** config directories, one per compose instance:
-`config/` for `sub-preprocessor` and `config-vassago/` for
-`sub-preprocessor-vassago`. Each is bind-mounted at `/config` inside its own
-container, so everything below is relative to whichever directory an instance
-runs on, and the strict-decode, overlay and hot-reload rules are identical for
-both. `config-vassago/` ships `config.yaml` + `sources.yaml` and no
-`private.yaml`: the crawler writes into `config/` only, so that instance's
-sources are curated by hand. Read that file's header before editing it — it
-carries the measurement the list was selected on, and the three gates a
-candidate has to pass: the repo is FRESH, the body is FETCHABLE inside
-`fetch.timeout` AND fits under the worker's 10 MiB body cap, and its
-contribution is MARGINAL — `server:port` no already-accepted source carries,
-while the whole ADDED BLOCK stays under a per-cycle budget of resolved hosts.
-Cost here is distinct hosts, not node lines.
+The repo ships **one** config directory, `config/`, bind-mounted at `/config`
+inside the container, so everything below is relative to it and the
+strict-decode, overlay and hot-reload rules above are the rules that govern it.
+Curating what goes into its `sources.yaml` is a separate problem with its own
+rules: `docs/guides/sources.md` carries the three gates a candidate source has
+to pass — the repo is FRESH, the body is FETCHABLE inside `fetch.timeout` AND
+fits under the worker's 10 MiB body cap, and its contribution is MARGINAL,
+`server:port` no already-accepted source carries, with the whole ADDED BLOCK
+under a per-cycle budget of resolved hosts. Cost there is distinct hosts, not
+node lines.
 
 Key sections:
 
@@ -658,12 +660,14 @@ dashboard provisioning) for the NixOS host to import, and
 repo so it tracks the metric names — change a metric, update the dashboard in
 the same commit.
 
-Both compose instances are scraped, each under its own Prometheus job name
-(`sub-preprocessor`, `sub-preprocessor-vassago`), and the dashboard picks
-between them with an **Instance** variable —
-`label_values(stable_cycles_total, job)`, with every panel expression scoped
-`{job="$job"}`. Two jobs rather than two targets in one job is what makes them
-selectable at all: the picker's values come from the `job` label.
+The compose instance is scraped under its own Prometheus job name
+(`sub-preprocessor`), and the dashboard selects it with an **Instance**
+variable — `label_values(stable_cycles_total, job)`, with every panel
+expression scoped `{job="$job"}`. One job means one value in that picker and
+every panel resolves against it as before. The mechanism stays because a job
+name is what makes an instance selectable at all: the picker's values come
+from the `job` label, so a second instance would be added as a second JOB,
+never as a second target inside this one.
 
 ## Running
 
@@ -680,42 +684,20 @@ nix-shell --run "make bench" # saves output to ./benchmarks/
 
 ## Deployment
 
-Docker Compose runs two instances of the service plus the crawler sidecar, all
-from one image:
+Docker Compose runs the service plus the crawler sidecar, both from one image:
 
 ```bash
 docker compose up -d --build   # or: make dc-up
 ```
 
-- `sub-preprocessor` — the general instance on `./config`: the HTTP service
+- `sub-preprocessor` — the service on `./config`: the HTTP endpoints
   (published on `:7008`) and the stable worker. Metrics are published
   loopback-only (`127.0.0.1:9091:9090`) for the host Prometheus — keep them
   non-public. The Gemini API key is read from an agenix-decrypted secret
   mounted at `/run/agenix/litellm-env`.
-- `sub-preprocessor-vassago` — the same image on a second config
-  (`./config-vassago`), published on `:7009` with metrics on
-  `127.0.0.1:9092:9090`. Its live `filters:` are `country` and `bandwidth`. The
-  `cidr` entry that gave the instance its purpose is commented out in
-  `config-vassago/config.yaml`, disabled 2026-08-14: the gate worked — it
-  admitted 3498 of 38663 endpoints (9.0%) — but of 80 admitted nodes whose
-  server accepts TCP, zero brought a tunnel up, and the instance published 1
-  node per cycle for 43 cycles. The entry is left commented rather than deleted
-  because the reasoning beside it is the expensive part. Without it this is an
-  ordinary geo instance on `config-vassago/sources.yaml`, whose sources were
-  still selected against the `hxehex/russia-mobile-internet-whitelist` space
-  described with the `cidr` filter above. The `country` entry carries no
-  `exclude_*`, so it is inert on `/stable.txt` and exists for `GET /`, where it
-  is what makes `countries=` / `groups=` actually gate. No through-node geo
-  gate runs at all — these nodes are meant to be used UNDER that whitelist, so
-  an egress-geo gate answers a question nobody asked and would cost a request
-  per survivor to do it. It mounts no agenix secret
-  (there is no Gemini key to read) and carries no `build:` section, so
-  `sub-preprocessor` is what produces the shared image — hence the
-  `depends_on`.
 - `tg-sub-crawler` — the crawler (`command: ["crawl"]`), sharing the
   `./config` volume so its `private.yaml` writes hot-reload the service. It
-  feeds the first instance only; `./config-vassago` has no crawler and is
-  curated by hand.
+  feeds `./config`.
 - Shutdown is graceful and bounded: the server drains for 15 s (long enough for
   the 5 s DNS/ASN lookup an in-flight request may be blocked in) and the stable
   worker is joined for another 5 s, hence `stop_grace_period: 30s`. Expiring

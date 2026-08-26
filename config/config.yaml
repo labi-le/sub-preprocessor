@@ -36,6 +36,43 @@ resolver:
 # is not cosmetic: a cheap local gate belongs ahead of one that makes a network
 # call per IP, so a cidr allow-list goes before asn, never after it.
 filters:
+  # - type: cidr # IP-stage ALLOW-list: a node whose resolved IP is outside every range dies before any probe. FIRST by the order rule above -- asn and {type: country, provider: asn} spend a Cymru round trip per IP on nodes this discards one step later
+  #   The list is a WORLDWIDE scan artifact, not a Russian ACL (see README):
+  #   whatever a mobile operator's whitelist happened to reach. Read it as a
+  #   measurement, not a policy.
+  #
+  #   DISABLED, and it is the POOL behind the gate that failed, not the gate.
+  #   Measured 2026-08-14 on the second compose instance (retired 2026-08-26):
+  #   it admitted 3498 of 38663 endpoints (9.0%), and of 80 admitted nodes whose
+  #   server ACCEPTS TCP, ZERO brought a tunnel up -- 37 refuse the protocol, 14
+  #   time out, 16 fail on credentials (REALITY auth, or a certificate for
+  #   another name). Counts were byte-identical from a second egress, so the
+  #   configs are stale rather than the network. That instance published 1 node
+  #   per cycle for 43 cycles. Re-enable only if a mobile-whitelist pool is
+  #   worth having again; what is kept here is the reasoning, not the four keys.
+  #
+  #   One argument to weigh before arming another gate alongside this one: a
+  #   cidr allow-list already constrains the ENTRY address to a mobile
+  #   operator's whitelist, so where nothing excludes a country an egress-geo
+  #   gate answers a question nobody asked, and every gate dropped is a round
+  #   trip saved per survivor. It does not indict the gates below --
+  #   claude/chatgpt/tidal test geo-BLOCKING per node, not country membership.
+  #
+  #   DO NOT add ipwhitelist.txt, the pre-CIDR format the same repo publishes.
+  #   Measured 2026-08-09 (same instance) it is the ".1" of every /24 in the
+  #   CIDR file: it adds no range -- the union merges to the same 15649 -- and
+  #   costs 1.76 MB per refresh. That makes it a REGRESSION, not redundancy,
+  #   because alone it is 141664 singletons covering 0.39% of the addresses.
+  #   The one argument FOR a second entry is that urls: is a UNION, so a failed
+  #   cidrwhitelist.txt no longer empties the set. Nothing catches the collapse
+  #   at BUILD -- newCIDRStore refuses only an EMPTY set. A background reload
+  #   WOULD be refused (swapRefusalSize sees failed>0, then the coverage
+  #   collapse), so the exposure is a COLD build -- a restart, or a reload that
+  #   edits this entry -- while cidrwhitelist.txt is down.
+  #   urls:
+  #     - https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt
+  #   file_type: raw
+  #   refresh_interval: 24h
   - type: country
     provider: geofeed
     # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop. NOTE: this key only ever affects /stable.txt -- on / the countries come from the query params

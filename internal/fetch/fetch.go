@@ -99,12 +99,13 @@ const (
 	// announces the cap and then sends nothing costs limit bytes per request.
 	// 256 KiB is the first power of two past the corpus p90 (198272 B) and
 	// covers 133 of the 145 configured sources that announce a length; the 12
-	// above it reach their size in at most four growth steps. The vassago
-	// instance's 52 answering sources are a different distribution — measured
-	// 2026-08-14, median 283358 B, p90 1794886 B, 24 of 52 under this ceiling —
-	// and it stays one constant anyway: the ceiling bounds a HOSTILE
-	// announcement on GET /, which both instances serve, and a configured
-	// source above it pays only a bounded doubling chain per cycle.
+	// above it reach their size in at most four growth steps. A second corpus,
+	// measured 2026-08-14 on the second instance (retired 2026-08-26), was a
+	// different distribution — 52 answering sources, median 283358 B, p90
+	// 1794886 B, 24 of 52 under this ceiling — and it stayed one constant
+	// anyway: the ceiling bounds a HOSTILE announcement on GET / rather than a
+	// configured source, and a configured source above it pays only a bounded
+	// doubling chain per cycle.
 	maxEagerBody = 256 << 10
 	// unannouncedChunk is the first chunk a body that announced no length gets.
 	// One this size or under costs a single allocation and no join, where

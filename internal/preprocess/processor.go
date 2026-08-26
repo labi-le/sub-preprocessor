@@ -355,17 +355,17 @@ func (s *sliceSink) reserve(nodes, byteBound int) {
 
 // fit hands the survivors back without the reservation's unwritten tail, which
 // the caller would otherwise hold for as long as the nodes themselves. How far
-// the line bound overshoots is a property of the INSTANCE, measured 2026-08-14
-// over every configured source of each: config/ keeps 66495 survivors out of
-// 71512 lines (1.08x), while config-vassago's cidr allow-list keeps 15904 of
-// 108742 (6.84x) and left 3.69 MB of never-written capacity live across the
-// whole fetch phase.
+// the line bound overshoots is a property of the CONFIG, not of this code:
+// measured 2026-08-14 over every configured source, config/ keeps 66495
+// survivors out of 71512 lines (1.08x), while the cidr allow-list on the second
+// instance (retired 2026-08-26) kept 15904 of 108742 (6.84x) and left 3.69 MB
+// of never-written capacity live across the whole fetch phase.
 //
-// Copying is gated on the copy being no larger than the capacity it releases,
-// so no shape can lose: the permissive instance keeps its slice untouched
-// (measured byte-identical B/op, its 9519-line largest source included) and the
-// filtering one trades 0.71 MB of transient copy for those 3.69 MB. Zero
-// survivors release the whole reservation and allocate nothing.
+// That contrast is why copying is GATED on the copy being no larger than the
+// capacity it releases: no shape can lose. A permissive config keeps its slice
+// untouched (measured byte-identical B/op, its 9519-line largest source
+// included) and a filtering one trades 0.71 MB of transient copy for those
+// 3.69 MB. Zero survivors release the whole reservation and allocate nothing.
 func (s *sliceSink) fit() []NodeResult {
 	if len(s.nodes)*2 > cap(s.nodes) {
 		return s.nodes

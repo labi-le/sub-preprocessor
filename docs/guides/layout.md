@@ -22,15 +22,14 @@
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
 - `internal/geo` — the provider adapters (`geofeed`/`dbip`/`registry`/`asn`) the country filter and the annotator share, each named after the data source it queries
 - `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate
-- `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay (instance 1 only); it owns the source-name convention and writes ownership and attribution as the `managed`/`feed` fields on each entry it mints, so no other package parses a name
+- `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay; it owns the source-name convention and writes ownership and attribution as the `managed`/`feed` fields on each entry it mints, so no other package parses a name
 - `internal/log` — zerolog setup, runtime level changes (`SetLevel`), the `Op` child-logger helper (`ctxlog.go`)
 - `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `crawl`, `geofeed`, `preprocess`, `subscription` and `stable`
 
 ## Project layout
 
 - `main.go` — entry point
-- `config/` — the first instance's config directory (`config.yaml` + the `sources.yaml` / `private.yaml` overlays)
-- `config-vassago/` — the second instance's (`config.yaml` + `sources.yaml`; no crawler writes here)
+- `config/` — the config directory (`config.yaml` + the `sources.yaml` / `private.yaml` overlays)
 - `Makefile` — common targets (`run`, `test`, `fmt`, `race`, `bench`)
 - `.golangci.yml` — linter configuration
 - `internal/` — internal packages

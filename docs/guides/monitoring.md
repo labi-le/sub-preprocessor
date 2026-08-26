@@ -13,8 +13,10 @@ vendor the dashboard into the nixos repo.
   exposition (deliberately no `client_golang` — the `google.golang.org/protobuf =>
   metacubex/protobuf-go` replace in `go.mod` makes it risky). Served on an internal
   listener (`server.metrics_listen`, default `:9090`); `docker-compose.yaml` publishes
-  it loopback-only once per instance — `127.0.0.1:9091:9090` for `sub-preprocessor`,
-  `127.0.0.1:9092:9090` for `sub-preprocessor-vassago` — keep both non-public.
+  it loopback-only — `127.0.0.1:9091:9090` for `sub-preprocessor`
+  (`docker-compose.yaml:12`) — keep it non-public. One published port per deployment,
+  and each deployment gets its own scrape job (last bullet); the second instance that
+  carried one was retired 2026-08-26.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport` to
   `metrics.Metrics.Observe` on a published cycle and `ObserveError()` on any abort.
   **Adding/renaming a metric? Update
@@ -40,12 +42,23 @@ vendor the dashboard into the nixos repo.
   `stable_cycle_phase_duration_seconds{phase}` bullet above exists to police. Measure with the
   collector on: over the real 163-source corpus the fetch/parse phase allocated 40.69 MB before
   the wave and 24.57 MB after.
-- **`check.concurrency` is instance-specific; nothing may pin one value.**
-  `config/config.yaml` ships 16, `config-vassago/config.yaml` ships 32, each with its
-  own measured rationale in its own comment. A constant in the prober that is tighter
-  than either instance's `check.timeout` deletes nodes that instance is tuned to keep,
-  which is why `precheckDialBudget` derives from `check.timeout` and a test reads BOTH
-  shipped configs to pin it.
+- **`check.concurrency` is per-deployment; nothing may pin one value.**
+  `config/config.yaml` ships 16 against its own `max_avg_ms: 800`
+  (`config/config.yaml:266`, `:265`), with the measured rationale in its comment. The
+  second compose instance, retired 2026-08-26, shipped 32 against `max_avg_ms: 4000`
+  and `check.timeout: 5000ms`: 16 was the knee measured against an 800ms gate, where
+  the +107ms that conc=64 adds is 13% of the budget and only 2.7% of a 4000ms one.
+  That spread is the argument for DERIVING `precheckDialBudget` from `check.timeout`
+  instead of hardcoding it, and one config does not weaken it — the constant it
+  replaced, 500ms, was 8x tighter than the retired instance's gate and deleted nodes
+  that instance was tuned to keep, and nothing stops the next deployment from shipping
+  that gate again. What the retirement did change is that the derivation is now harder
+  to SEE than to keep: the shipped `check.timeout: 1000ms` (`config/config.yaml:263`)
+  over `precheckAttempts` 2 is exactly the 500ms constant. So the test that still tells
+  derived from hardcoded is `TestPrecheckBudgetTracksTheDefaultTimeout`
+  (`internal/stable/prober_test.go:726`), which strips that one line before loading,
+  while `TestPrecheckBudgetCoversShippedLatencyGates` (`:705`) reads the shipped config
+  as it stands.
 - **A histogram bound that marks a gate is a CONTRACT with the config, not a default.**
   `latencyBuckets` MUST carry a bound equal to every `check.max_avg_ms` that any shipped
   config sets, because `SelectSurvivors` admits on exactly that value and a threshold
@@ -55,12 +68,16 @@ vendor the dashboard into the nixos repo.
   its bound in the same commit. Never append a bound the ladder already has:
   `writeHistogram` emits one line per element with no dedupe, so a duplicate renders two
   identical `le=` series and Prometheus rejects the whole scrape.
-  The two instances scrape this metric name under different jobs and may disagree on the
-  threshold, so the ladder carries EVERY shipped value, not one of them. All three halves
-  are enforced rather than merely written here: `TestLatencyBucketsCoverShippedGates`
-  reads both shipped configs through `config.Load`,
-  `TestLatencyBucketsCoverTheDefaultGate` covers the gate neither of them exercises by
-  loading a shipped config with the key stripped, and
+  The ladder carries EVERY shipped value rather than the one this deployment runs,
+  because a second deployment scrapes this same metric name under its own job and may
+  gate elsewhere: 4000 sits on the ladder (`internal/metrics/metrics.go:38`) as the
+  retired second instance's gate and now rides the tail that every bound past the live
+  gate is already in, so keeping it costs nothing and re-adding it would cost a commit.
+  All three halves are enforced rather than merely written here:
+  `TestLatencyBucketsCoverShippedGates` reads the shipped config through `config.Load`
+  (`shippedConfigDirs`, `internal/metrics/ladder_test.go:52`),
+  `TestLatencyBucketsCoverTheDefaultGate` covers the gate it does not exercise by
+  loading it with the key stripped, and
   `TestLatencyBucketsAreStrictlyIncreasing` catches the duplicate.
 - **A count of nodes the pipeline KEPT never rides `FilterReport.Dropped`.** That map renders as
   `stable_filter_dropped_nodes{filter,reason}`, which the dashboard titles "drops by reason", so a
@@ -100,10 +117,12 @@ vendor the dashboard into the nixos repo.
   merged node the dead cache holds, before `SelectSurvivors` ever sees it; and only the
   remainder is URL-tested. The biggest term is the dedupe, not the dead-node
   skip: measured 2026-08-15, `valid_nodes` summed over sources less `stable_merged_nodes` was
-  145553 on `sub-preprocessor` (`:9091`) and 64308 on `sub-preprocessor-vassago` (`:9092`),
-  against a dead skip of 34282 and 32284 and a probe loss of 3102 and 2972. Reach for the dead
-  skip second, as the largest term no per-source series shows: merged 37760 vs probed 3478 on
-  the first instance and 36109 vs 3825 on the second, so nine merged nodes in ten never reach
+  145553 on `sub-preprocessor` (`:9091`) and 64308 on the second instance (retired
+  2026-08-26), against a dead skip of 34282 and 32284 and a probe loss of 3102 and 2972.
+  Both readings stay: the ordering of the three terms is the finding, and it held on two
+  differently curated source lists. Reach for the dead skip second, as the largest term no
+  per-source series shows: merged 37760 vs probed 3478 on `sub-preprocessor` and 36109 vs
+  3825 on the retired instance, so nine merged nodes in ten never reach
   the URL test at all and probe failure can account for at most the ~9% that did — read
   `stable_dead_skipped_nodes` against `stable_merged_nodes` before blaming a source's probe
   results. The per-name source tables — panel 8 (`Crawler sources: top 25 (last cycle)`) and
@@ -189,9 +208,11 @@ vendor the dashboard into the nixos repo.
   channel, and a greedy strip mangles any slug ending in a digit run — `channelSlug` keeps digits
   and folds `_` to `-`, and the corpus carries `file-vpn-2`, whose `file-vpn-2-1444c8` would strip
   to `file-vpn` while `file-vpn-2-3631` must strip to `file-vpn-2`. Curated names share the minted
-  shape too: vassago's `kort0881-vless-042` and `-041`
-  (`config-vassago/sources.yaml:248`, `:256`) would collapse onto a `kort0881-vless` row no
-  channel produced.
+  shape too, and in the shipped overlay: `kort0881-vless-042` and `-041`
+  (`config/sources.yaml:164`, `:166` — salvaged from the retired second instance's list
+  2026-08-26) would collapse onto a `kort0881-vless` row no channel produced, and
+  `goida26-1` (`:137`) is exactly what the mint writes for the first postless URL of a
+  channel slugging to `goida26` (`sourceName`, `internal/crawl/crawl.go:786-790`).
   The rows stay mixed, for a reason `owner` makes legible: the inline
   harvest (`inline`, `crawl.go:933`) records no channel and neither does a bare-hash name
   (`unattributedNameRe`, `crawl.go:62`), so each falls back to naming itself, yet each is an
@@ -257,9 +278,16 @@ vendor the dashboard into the nixos repo.
   unknowable from Prometheus: `fetchSources` warns and `continue`s (`checker.go:623-624`), so they
   emit no per-source series and appear in neither table — not dead, not pruned, not dropped from
   config, and the next cycle may fetch them fine.
-  `job="sub-preprocessor-vassago"` has no managed series at all (52 sources, all hand-curated),
-  so there `{owner="crawler"}` is EMPTY rather than 0 and panel 8 renders "No data" — not rows of
-  zeros — from all four of its targets.
+  A label VALUE with no series reads EMPTY, not 0, and `owner` is where that bites: a
+  deployment with no managed entry loaded — a fresh `./config` before the crawler's first
+  `private.yaml` write, or a preprocessor deployed without `tg-sub-crawler` beside it —
+  makes `{owner="crawler"}` match nothing, so panel 8 renders "No data" from all four of
+  its targets rather than rows of zeros, and panel 21's crawler row goes missing instead of
+  reading 0. Stopping the crawler is NOT that case: `private.yaml` stays on disk and every
+  entry in it keeps reporting `owner="crawler"`, so the managed side reads stale, not empty.
+  The measured case was the second instance: 52 hand-curated sources, no `private.yaml` and
+  no crawler writing into its directory, panel 8 "No data" on all four targets for its whole
+  life (retired 2026-08-26).
   And never divide the two columns into a survival rate: `valid` is counted per source
   BEFORE `Merge` and double-counts a node two sources both yield, whereas `published` is
   post-attribution. Panel 21 (Ownership split: crawler vs curated (last cycle)) sits
@@ -305,9 +333,10 @@ vendor the dashboard into the nixos repo.
 - **The dead cache turns one condemnation into several cycles of missing funnel.** A node
   answering no round folds to `Successes: 0`, which `recordDead` blocks its `server:port` on
   (`internal/stable/checker.go:685-686`); `filterDead` skips it for the TTL (:657, the skip at
-  :660-662). Both ship
-  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:163` and :210,
-  `config-vassago/config.yaml:65` and :77), and `jitteredTTL` stretches it by a uniform [1, 1.5)
+  :660-662). The shipped config sets
+  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:193` and
+  `:240`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
+  it by a uniform [1, 1.5)
   so the graveyard does not expire as one batch (`internal/stable/deadset.go:54-58`): [3h, 4.5h),
   three to four cycles. Stages (`internal/stable/select.go:25-34`): `passed` = a round answered,
   `connect` = no tunnel, `fetch` = tunnel up, GET failed, `condemned` = the pre-check refused the
@@ -368,15 +397,16 @@ vendor the dashboard into the nixos repo.
   logged unattributed survivors (`checker.go:539`) — the one way it can undercount. `filtered` 0
   beside a large `valid` says only that nothing reached the payload under that name: dedupe,
   dead-cache skip, probe failure and a gate read alike.
-- **Two instances, two scrape JOBS — not two targets in one job.** `sub-preprocessor`
-  (`127.0.0.1:9091`) and `sub-preprocessor-vassago` (`127.0.0.1:9092`) each carry their
-  own `job_name`, because the dashboard's Instance picker is
-  `label_values(stable_cycles_total, job)` and every panel expression is scoped
-  `{job="$job"}`. Sharing a job leaves the two deployments unselectable AND silently
-  sums their funnels. Two consequences bind any dashboard edit: a panel added later
-  MUST carry that selector, and a panel description MUST NOT name one config file as
-  the authority for what ran — which filters exist depends on which instance `$job`
-  selects.
+- **One deployment, one scrape JOB — a second one gets its OWN job, never a second target
+  in the first.** `deploy/monitoring.nix:19-24` scrapes `sub-preprocessor` at
+  `127.0.0.1:9091` under that `job_name`, and nothing else today: the second instance's job
+  was removed with it on 2026-08-26. The mechanism outlives the count, because the
+  dashboard's Instance picker is `label_values(stable_cycles_total, job)` and every panel
+  expression is scoped `{job="$job"}` — two targets sharing a job are unselectable AND
+  silently summed into one funnel. So the picker stays (it enumerates one value today,
+  which is valid) and two consequences still bind any dashboard edit: a panel added later
+  MUST carry that selector, and a panel description MUST NOT name a config file as the
+  authority for what ran — which filters exist depends on which deployment `$job` selects.
 - **The crawler's five counters are label-less lifetime int64s with no dashboard panel, and
   they are readable where nothing scrapes.** Rendered by `internal/metrics`' exposition helpers
   and served by the CRAWLER process — not the preprocessor listener described above — at

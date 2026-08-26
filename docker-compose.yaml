@@ -19,31 +19,13 @@ services:
     stop_grace_period: 30s
     restart: always
 
-  # Same image, second config: live `filters:` are `country` then `bandwidth`, no
-  # geo-block gate. The `cidr` allow-list on `hxehex/russia-mobile-internet-whitelist` --
-  # a worldwide scan artifact, not a Russian ACL, see README -- sits commented out in
-  # config-vassago/config.yaml, disabled 2026-08-14 after 43 cycles of 1 published node.
-  sub-preprocessor-vassago:
-    image: sub-preprocessor:latest
-    container_name: sub-preprocessor-vassago
-    user: "1000:1000" # config owner: write /config/.stable-snapshot.json
-    depends_on:
-      - sub-preprocessor # no build: section here, so that service is what produces the image
-    ports:
-      - "7009:8080"
-      - "127.0.0.1:9092:9090"
-    volumes:
-      - ./config-vassago:/config:rw
-    stop_grace_period: 30s
-    restart: always
-
   tg-sub-crawler:
     image: sub-preprocessor:latest
     container_name: tg-sub-crawler
     command: ["crawl"]
     user: "0:0"
     depends_on:
-      - sub-preprocessor
+      - sub-preprocessor # no build: section here, so that service is what produces the image
     volumes:
       - ./config:/config:rw
     environment:

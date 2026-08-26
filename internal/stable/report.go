@@ -206,8 +206,9 @@ type TraceReport struct {
 // remainder is probed. Ordered by size the three terms are Merge, the dead
 // cache, then the probe: measured 2026-08-15, sum(Valid) less merged was
 // 145553 against a 34282-node dead skip and 3102 probe failures on prod, and
-// 64308 / 32284 / 2972 on vassago. The dedupe dominates; the dead cache is
-// only the largest term no per-source series exposes.
+// 64308 / 32284 / 2972 on the second instance, retired 2026-08-26. The dedupe
+// dominates; the dead cache is only the largest term no per-source series
+// exposes.
 type SourceReport struct {
 	Name string
 	// Managed and Feed are the entry's own ownership and attribution, copied

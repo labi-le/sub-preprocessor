@@ -205,24 +205,25 @@ func BenchmarkProcessBodySlice_ManySmallSources(b *testing.B) {
 }
 
 // The benchmarks below drive the /stable.txt worker's sink at the two shapes
-// the shipped instances have, measured live 2026-08-14 over every configured
-// source of each (config/sources.yaml + the crawler's private.yaml, and
-// config-vassago/sources.yaml):
+// measured live 2026-08-14 over every configured source — config/sources.yaml
+// plus the crawler's private.yaml for the permissive one, the cidr-filtered
+// sources.yaml of the second instance (retired 2026-08-26) for the other:
 //
-//	instance          answering   lines    nodes   IP-stage survivors
-//	config/             148/161    71512    69163    66495  (1.08x)
-//	config-vassago/      52/54    108742   100664    15904  (6.84x)
+//	shape        answering   lines    nodes   IP-stage survivors
+//	permissive     148/161    71512    69163    66495  (1.08x)
+//	filtering       52/54    108742   100664    15904  (6.84x)
 //
 // The multiplier is lines/survivors: what reserve() asks for against what
-// lands in the slice. Both fixtures carry the measured share of lines that
+// lands in the slice, and the spread between the two shapes is what the gate
+// in fit() turns on. Both fixtures carry the measured share of lines that
 // parse to no node at all (3.3% and 7.4%) — the reservation is per LINE, so a
 // junk line inflates it exactly as a surviving one does.
 //
 // The drop stage is the cidr allow-list at both shapes, so the two differ ONLY
-// in the survival ratio. Production's permissive instance configures no cidr
-// filter and loses its 3.9% to DNS failures instead, which the sink cannot
-// distinguish: a node dropped at any IP stage never reaches emit. Servers are
-// bare IPv4 throughout, so no DNS and no network is touched.
+// in the survival ratio. The shipped config configures no cidr filter and loses
+// its 3.9% to DNS failures instead, which the sink cannot distinguish: a node
+// dropped at any IP stage never reaches emit. Servers are bare IPv4 throughout,
+// so no DNS and no network is touched.
 const (
 	benchPermissiveSources = 148
 	benchPermissiveLines   = 483 // 71512/148
@@ -232,9 +233,9 @@ const (
 	benchFilteringLines    = 2091 // 108742/52
 	benchFilteringJunk     = 74
 	benchFilteringKept     = 158
-	// bywarm-merged, the largest body either instance fetches (2.88 MB) and one
-	// both configure: 9519 lines, 9487 nodes, 8964 survivors on config/ against
-	// 1524 on config-vassago. One body, two instances, 5.9x apart.
+	// bywarm-merged, the largest body the permissive shape fetches (2.88 MB) and
+	// one the retired second instance configured too: 9519 lines, 9487 nodes,
+	// 8964 survivors permissive against 1524 filtering. One body, 5.9x apart.
 	benchLargestLines          = 9519
 	benchLargestJunk           = 3
 	benchLargestKeptPermissive = 945

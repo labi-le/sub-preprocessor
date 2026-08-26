@@ -743,11 +743,11 @@ func TestProcessBodySizesTheSurvivorArena(t *testing.T) {
 // The line count bounds the node count, so every line the IP stage drops is
 // capacity the worker holds until the merge — measured 2026-08-14 over every
 // configured source, 1.08x of the survivors on config/ (66495 of 71512 lines)
-// against 6.84x on config-vassago (15904 of 108742), 3.69 MB of it never
-// written. The fit is therefore GATED, not unconditional: the permissive
-// instance must get its own slice back, since copying it would cost more than
-// the tail it releases. IPv6 literals are the drop stage here because they are
-// refused without a lookup.
+// against 6.84x under the cidr allow-list of the second instance, retired
+// 2026-08-26 (15904 of 108742), 3.69 MB of it never written. That contrast is
+// why the fit is GATED, not unconditional: a permissive config must get its own
+// slice back, since copying it would cost more than the tail it releases. IPv6
+// literals are the drop stage here because they are refused without a lookup.
 func TestFilterNodesFitsTheSurvivorSlice(t *testing.T) {
 	t.Parallel()
 
@@ -1578,13 +1578,16 @@ func TestASNFilterFormsStillBuild(t *testing.T) {
 
 	shipped, dir, _, opts := shippedConfigOffline(t)
 
-	const shippedFilters = "filters:\n  - type: country\n    provider: geofeed\n"
-	if !bytes.Contains(shipped, []byte(shippedFilters)) {
-		t.Fatalf("shipped config no longer opens filters with %q; re-point this test", shippedFilters)
+	// Anchored on the ENTRY, not on the `filters:` line above it: commented-out
+	// entries sit between the two, and uniqueness is asserted because a splice
+	// landing anywhere else builds a chain the assertions below would misread.
+	const shippedEntry = "  - type: country\n    provider: geofeed\n"
+	if n := bytes.Count(shipped, []byte(shippedEntry)); n != 1 {
+		t.Fatalf("shipped config carries %d filter entries %q, want exactly 1; re-point this test", n, shippedEntry)
 	}
-	withFilters := bytes.Replace(shipped, []byte(shippedFilters),
-		[]byte("filters:\n  - type: asn\n    deny_patterns: [\"(?i)servers\\\\.com\"]\n"+
-			"  - type: country\n    provider: asn\n  - type: country\n    provider: geofeed\n"), 1)
+	withFilters := bytes.Replace(shipped, []byte(shippedEntry),
+		[]byte("  - type: asn\n    deny_patterns: [\"(?i)servers\\\\.com\"]\n"+
+			"  - type: country\n    provider: asn\n"+shippedEntry), 1)
 	path := filepath.Join(dir, "with-asn-filters.yaml")
 	if writeErr := os.WriteFile(path, withFilters, 0o600); writeErr != nil {
 		t.Fatal(writeErr)

@@ -47,9 +47,9 @@ func exposedLatencyBounds(t *testing.T) []float64 {
 	return bounds
 }
 
-// shippedConfigDirs are the per-instance config directories at the repo root.
-// The invariant is about what ships, so the test reads those files, not fixtures.
-var shippedConfigDirs = []string{"config", "config-vassago"}
+// shippedConfigDirs are the config directories the repo ships. The invariant is
+// about what ships, so the test reads those files, not fixtures.
+var shippedConfigDirs = []string{"config"}
 
 // TestLatencyBucketsCoverShippedGates enforces the latencyBuckets invariant
 // against the configs themselves, so moving a max_avg_ms off the ladder fails
@@ -76,10 +76,11 @@ func TestLatencyBucketsCoverShippedGates(t *testing.T) {
 }
 
 // TestLatencyBucketsCoverTheDefaultGate covers the gate no shipped config
-// exercises. Both set max_avg_ms explicitly, so Load never applies
-// defaultCheckMaxAvgMs on either path and the bound justified by it is the one
-// bound deletable with the suite green — exactly the invisible gate this
-// metric exists to prevent, waiting for the first config that omits the key.
+// exercises. The shipped config sets max_avg_ms explicitly, so Load never
+// applies defaultCheckMaxAvgMs on that path and the bound justified by it is
+// the one bound deletable with the suite green — exactly the invisible gate
+// this metric exists to prevent, waiting for the first config that omits the
+// key.
 func TestLatencyBucketsCoverTheDefaultGate(t *testing.T) {
 	t.Parallel()
 	// A shipped config with exactly one line removed, so the fixture stays

@@ -696,58 +696,54 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 
 // TestPrecheckBudgetCoversShippedLatencyGates pins the coupling that a constant
 // broke: an endpoint's whole pre-check budget must be no tighter than the gate
-// the instance publishes against, or the pre-check deletes nodes that instance
-// is deliberately tuned to keep. The shipped 500ms constant was 8x tighter than
-// config-vassago's max_avg_ms of 4000.
+// the instance publishes against, or the pre-check deletes nodes the instance is
+// deliberately tuned to keep. A hardcoded 500ms was 8x tighter than the
+// max_avg_ms of 4000 measured on the second instance, retired 2026-08-26.
 //
-// Read from the configs themselves, as internal/metrics does for latencyBuckets,
-// so re-tuning either instance fails here rather than in production.
+// Read from the config itself, as internal/metrics does for latencyBuckets, so
+// re-tuning check.timeout or max_avg_ms fails here rather than in production.
 func TestPrecheckBudgetCoversShippedLatencyGates(t *testing.T) {
 	t.Parallel()
 
-	for _, dir := range []string{"config", "config-vassago"} {
-		t.Run(dir, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join("..", "..", dir, "config.yaml")
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatalf("load %s: %v", path, err)
-			}
-			check := cfg.Subscriptions.Check
-			p := testProberWith(t, check, config.BandwidthConfig{}, zerolog.Nop())
-			gate := time.Duration(check.MaxAvgMs) * time.Millisecond
-			if budget := precheckAttempts * p.precheckDialBudget(); budget < gate {
-				t.Errorf("%s: pre-check spends at most %v on an endpoint, under max_avg_ms of %v",
-					path, budget, gate)
-			}
-		})
+	path := filepath.Join("..", "..", "config", "config.yaml")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	check := cfg.Subscriptions.Check
+	p := testProberWith(t, check, config.BandwidthConfig{}, zerolog.Nop())
+	gate := time.Duration(check.MaxAvgMs) * time.Millisecond
+	if budget := precheckAttempts * p.precheckDialBudget(); budget < gate {
+		t.Errorf("%s: pre-check spends at most %v on an endpoint, under max_avg_ms of %v",
+			path, budget, gate)
 	}
 }
 
 // TestPrecheckBudgetTracksTheDefaultTimeout covers the timeout no shipped config
-// exercises. Both set check.timeout explicitly, so Load never applies its
-// default on either path and the derivation could be replaced by a constant
-// equal to today's shipped value with the test above still green.
+// exercises, and is the only test separating the derivation from a constant: the
+// shipped check.timeout of 1000ms derives to exactly the 500ms that used to be
+// hardcoded, so the test above passes either way.
 func TestPrecheckBudgetTracksTheDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile(filepath.Join("..", "..", "config-vassago", "config.yaml"))
+	src, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
 	if err != nil {
 		t.Fatalf("read shipped config: %v", err)
 	}
 	var kept []string
 	for line := range strings.SplitSeq(string(src), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "timeout: 5000ms") {
+		if strings.HasPrefix(strings.TrimSpace(line), "timeout: 1000ms") {
 			continue
 		}
 		kept = append(kept, line)
 	}
 	// Guard the STRIP, not the loaded value: Load can never return 0 (normalize
 	// substitutes the default, validate rejects anything <= 0), so a zero check
-	// is dead code. The reachable vacuity is a strip that removes nothing.
-	if len(kept) == len(strings.Split(string(src), "\n")) {
-		t.Fatal("fixture strip removed no line; the test would pin the shipped timeout, not the default")
+	// is dead code. The reachable vacuities are a strip that removes nothing and
+	// one that removes more than check.timeout, the config carrying ten other
+	// timeout keys.
+	if removed := len(strings.Split(string(src), "\n")) - len(kept); removed != 1 {
+		t.Fatalf("fixture strip removed %d lines, want exactly check.timeout", removed)
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
