@@ -96,6 +96,12 @@ type source struct {
 	// Absent means hand-added and sheltered, so an operator who forgets the
 	// field is safe by default; omitempty is what keeps it out of their entry.
 	Managed bool `yaml:"managed,omitempty"`
+	// HWID mirrors config.SubscriptionSource.HWID and is never set by the
+	// crawler, which has no source of one. It exists because every cycle
+	// rewrites private.yaml in full from this struct, so a field missing here
+	// is stripped off a hand-added entry, reverting it to the placeholder the
+	// panel serves without the header.
+	HWID string `yaml:"hwid,omitempty"`
 }
 
 type privateFile struct {
@@ -1273,10 +1279,13 @@ var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 // validatePrivate re-checks the whole list against the rules the consumer
 // applies in config.SubscriptionsConfig.Validate (name alphabet, unique names,
-// public https URL unless the source carries an inline Body). Keep the two in
-// sync: one bad entry fails config.Load for the entire config, which is fatal at
-// service startup, so refusing to write is always the better outcome — including
-// when the offending source was hand-added.
+// public https URL unless the source carries an inline Body). Keep those three
+// in sync: one bad entry fails config.Load for the entire config, which is
+// fatal at service startup, so refusing to write is always the better outcome
+// — including when the offending source was hand-added. The hwid shape is
+// deliberately NOT mirrored: the crawler never authors that field, so refusing
+// the write would only stop the crawler's own work over a typo config.Load
+// already refuses by name and reload logs at error level.
 func validatePrivate(pf privateFile) error {
 	seen := make(map[string]struct{}, len(pf.Subscriptions.Sources))
 	for _, s := range pf.Subscriptions.Sources {
@@ -1346,7 +1355,7 @@ func sameSources(a, b []source) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	seen := map[source]int{}
+	seen := make(map[source]int, len(a))
 	for _, s := range a {
 		seen[s]++
 	}

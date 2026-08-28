@@ -114,6 +114,13 @@ const (
 
 var sourceNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// The shape the Remnawave panel itself validates x-hwid against since v3.0.0.
+// Enforced here because a value outside it is guaranteed to draw the
+// placeholder response: the source fetches 200, publishes nothing and books no
+// error, its own stable_source_published_nodes sitting at 0 with
+// stable_source_nodes_total at 1.
+var sourceHWIDRe = regexp.MustCompile(`^[a-zA-Z0-9=-]{10,64}$`)
+
 // The five RIR delegated-extended-latest files together cover the full
 // allocated IP space with registration countries. Dropping one costs real
 // coverage, not a rounding error: without APNIC the database builds from
@@ -580,6 +587,12 @@ type SubscriptionSource struct {
 	// too; unlike Managed it grants nothing, it only groups. Empty means the
 	// source names itself.
 	Feed string `yaml:"feed,omitempty"`
+	// HWID is sent as the x-hwid request header on this source's fetch. A
+	// Remnawave panel with the HWID device limit enabled answers 200 with a
+	// single placeholder node instead of the real list when it is missing.
+	// Each distinct value registers a device against the subscription's own
+	// device limit, so set it once and never rotate it.
+	HWID string `yaml:"hwid,omitempty"`
 }
 
 type privateConfig struct {
@@ -1471,6 +1484,24 @@ func (s *SubscriptionsConfig) validateSources(curatedFile string) error {
 				return fmt.Errorf("subscriptions.sources.%s: %w", src.Name, err)
 			}
 		}
+		if err := validateSourceHWID(src); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSourceHWID(src SubscriptionSource) error {
+	if src.HWID == "" {
+		return nil
+	}
+	if !sourceHWIDRe.MatchString(src.HWID) {
+		return fmt.Errorf("subscriptions.sources.%s: invalid hwid %q: expected 10-64 characters of [a-zA-Z0-9=-]", src.Name, src.HWID)
+	}
+	// Nothing is fetched for an inline source, so the header has nowhere to go
+	// and the field could only mislead.
+	if strings.TrimSpace(src.URL) == "" {
+		return fmt.Errorf("subscriptions.sources.%s: hwid is only sent on a fetched url, remove it from this inline body source", src.Name)
 	}
 	return nil
 }

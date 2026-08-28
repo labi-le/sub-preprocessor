@@ -963,6 +963,68 @@ func TestValidateInlineSourceShape(t *testing.T) {
 	}
 }
 
+// TestValidateSourceHWID pins the accepted x-hwid shape. A value the panel
+// refuses is worse than an absent one: the fetch still answers 200, carrying
+// only the placeholder node, so no counter anywhere reports the loss. The field
+// is equally refused on an inline body source, which fetches nothing at all.
+func TestValidateSourceHWID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlLine  = "      url: https://a.example.com/s\n"
+		bodyLine = "      body: dmxlc3M6Ly91QDEuMS4xLjE6NDQzI2E=\n"
+		good     = "abcdef0123456789"
+	)
+
+	cases := []struct {
+		name     string
+		srcName  string
+		entry    string
+		wantHWID string
+		wantErr  bool
+	}{
+		{name: "absent", srcName: "plain", entry: urlLine},
+		{name: "sixteen chars", srcName: "sized-ok", entry: urlLine + "      hwid: " + good + "\n", wantHWID: good},
+		{name: "nine chars", srcName: "too-short", entry: urlLine + "      hwid: abcdef012\n", wantErr: true},
+		{name: "sixty-five chars", srcName: "too-long", entry: urlLine + "      hwid: " + strings.Repeat("a", 65) + "\n", wantErr: true},
+		{name: "underscore", srcName: "bad-rune", entry: urlLine + "      hwid: abcdef_0123456789\n", wantErr: true},
+		{name: "space", srcName: "bad-space", entry: urlLine + "      hwid: \"abcdef 0123456789\"\n", wantErr: true},
+		{name: "inline body source", srcName: "inline", entry: bodyLine + "      hwid: " + good + "\n", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: "+tc.srcName+"\n"+tc.entry)
+			if tc.wantErr {
+				assertHWIDRejected(t, err, tc.srcName)
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+			if got := cfg.Subscriptions.Sources[0].HWID; got != tc.wantHWID {
+				t.Fatalf("hwid = %q, want %q", got, tc.wantHWID)
+			}
+		})
+	}
+}
+
+func assertHWIDRejected(t *testing.T, err error, srcName string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("expected the hwid to be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), srcName) {
+		t.Fatalf("error %q does not name the offending source %q", err, srcName)
+	}
+	if !strings.Contains(err.Error(), "hwid") {
+		t.Fatalf("error %q does not name the offending key", err)
+	}
+}
+
 // TestLoadRejectsPortlessResolverAddress: resolver.address is handed verbatim to
 // net.Dialer for every lookup, so a value missing its port dials nothing and
 // every node is dropped as a DNS failure -- with no error naming the key. Load

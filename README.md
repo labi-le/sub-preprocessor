@@ -456,7 +456,10 @@ compose sidecar) that discovers new sources automatically:
   without `managed` is hand-added and is never touched, so forgetting the field
   is the safe direction, and the exporter reads both instead of parsing a name.
   `private.yaml` is an overlay the service merges into `subscriptions.sources`
-  and **hot-reloads** on change.
+  and **hot-reloads** on change. A source's `hwid` is carried through that
+  rewrite although the crawler never sets one: it re-authors the whole file
+  every cycle, so a field it did not know would be silently stripped off a
+  hand-added entry.
 
 The inline harvest reads the newest page alone because a pasted node is a
 frozen `server:port` whose worth is the age of the message carrying it: at
@@ -594,8 +597,15 @@ Key sections:
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
-  `body`, plus the crawler's own `managed` and `feed`; `managed: true` is
-  refused in `config.yaml` and `sources.yaml`, which are curated by
+  `body`, the crawler's own `managed` and `feed`, and `hwid`, which rides as
+  the `x-hwid` request header on that source's fetch and nowhere else — a panel
+  with the HWID device limit on otherwise answers 200 with a single placeholder
+  node instead of the real list, so the source publishes nothing and books no
+  error anywhere — its own `stable_source_published_nodes` sits at 0 with
+  `stable_source_nodes_total` at 1, and that is the whole signal;
+  `docs/guides/config.md` has the shape the panel validates and why the value
+  is set once and never rotated; `managed: true` is refused in `config.yaml`
+  and `sources.yaml`, which are curated by
   definition), `check.*`: URL-test prober params only (`rounds`, `timeout`,
   `max_fail`, `max_avg_ms`, `concurrency`, `source_timeout`, `test_url`,
   `expected_status` in mihomo IntRanges syntax), and `snapshot_path` — where

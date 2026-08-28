@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -723,8 +724,11 @@ func TestCyclePhasesAttributeTheProbe(t *testing.T) {
 		name string
 		d    time.Duration
 	}{
-		{"Fetch", p.Fetch}, {"Merge", p.Merge}, {"DeadFilter", p.DeadFilter},
-		{"Egress", p.Egress}, {"Publish", p.Publish},
+		{"Fetch", p.Fetch},
+		{"Merge", p.Merge},
+		{"DeadFilter", p.DeadFilter},
+		{"Egress", p.Egress},
+		{"Publish", p.Publish},
 	}
 	for _, o := range others {
 		if o.d >= delay {
@@ -1150,7 +1154,6 @@ func TestCheckerSurvivesSnapshotWriteFailure(t *testing.T) {
 
 	err := publishingChecker(filepath.Join(blocker, "stable.json"), zerolog.New(&logBuf), holder).
 		RunOnce(context.Background())
-
 	if err != nil {
 		t.Fatalf("a snapshot that cannot be written must not fail the cycle: %v", err)
 	}
@@ -1168,5 +1171,68 @@ func TestCheckerSurvivesSnapshotWriteFailure(t *testing.T) {
 	}
 	if !strings.Contains(logs, "stable list updated") {
 		t.Errorf("the cycle must still report a published list, got:\n%s", logs)
+	}
+}
+
+// hwidFilterer records what each source's fetch was told, on top of the ordinary
+// fake source bodies.
+type hwidFilterer struct {
+	inner fakeFilterer
+	mu    sync.Mutex
+	seen  map[fetch.SubscriptionURL]string
+}
+
+func (f *hwidFilterer) FilterNodes(
+	ctx context.Context, req preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	f.mu.Lock()
+	f.seen[req.SubscriptionURL] = req.HWID
+	f.mu.Unlock()
+
+	return f.inner.FilterNodes(ctx, req)
+}
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (f *hwidFilterer) Annotator() preprocess.Annotator { return f.inner.Annotator() }
+
+// The worker is the only caller holding per-source config, so it is the only one
+// that can send an hwid. A source that loses its own value still finishes the
+// cycle clean — the panel serves a placeholder node under a 200 — so the value
+// has to be pinned per source, including the neighbour that must send none.
+func TestCheckerCarriesEachSourcesHWID(t *testing.T) {
+	t.Parallel()
+
+	const hwid = "abcdef0123456789"
+	filterer := &hwidFilterer{
+		inner: fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+			"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		}},
+		seen: map[fetch.SubscriptionURL]string{},
+	}
+	spec := testCheckerSpec(&fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 300},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}})
+	spec.Sources = []config.SubscriptionSource{
+		{Name: "alpha", URL: "https://alpha.example/sub", HWID: hwid},
+		{Name: "beta", URL: "https://beta.example/sub"},
+	}
+
+	err := stable.NewChecker(
+		spec,
+		func() stable.Filterer { return filterer },
+		nil, nil, stable.NewHolder(), "", zerolog.Nop(), nil,
+	).RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	want := map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": hwid,
+		"https://beta.example/sub":  "",
+	}
+	if !maps.Equal(filterer.seen, want) {
+		t.Errorf("hwids per source = %q, want %q", filterer.seen, want)
 	}
 }

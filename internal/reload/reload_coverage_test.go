@@ -113,11 +113,14 @@ var reloadClassification = map[string]string{
 	"subscriptions.sources[].name": liveWorker,
 	"subscriptions.sources[].url":  liveWorker,
 	"subscriptions.sources[].body": liveWorker,
-	// managed and feed ride the same path as the rest of the entry: the whole
-	// SubscriptionSource is handed to CheckerSpec, so a changed mark reaches the
-	// worker's next cycle and, through SourceReport, the owner and feed labels.
+	// managed, feed and hwid ride the same path as the rest of the entry: the
+	// whole SubscriptionSource is handed to CheckerSpec, so a change reaches
+	// the worker's next cycle. managed and feed also reach the owner and feed
+	// labels through SourceReport; hwid reaches only the next fetch's header
+	// and appears in no report.
 	"subscriptions.sources[].managed":     liveWorker,
 	"subscriptions.sources[].feed":        liveWorker,
+	"subscriptions.sources[].hwid":        liveWorker,
 	"subscriptions.check.rounds":          liveWorker,
 	"subscriptions.check.timeout":         liveWorker,
 	"subscriptions.check.max_fail":        liveWorker,
@@ -315,6 +318,7 @@ var keyMutators = map[string]func(*config.Config){
 	"subscriptions.sources[].body":        func(c *config.Config) { c.Subscriptions.Sources[0].Body = "other" },
 	"subscriptions.sources[].managed":     func(c *config.Config) { c.Subscriptions.Sources[0].Managed = true },
 	"subscriptions.sources[].feed":        func(c *config.Config) { c.Subscriptions.Sources[0].Feed = "beta-feed" },
+	"subscriptions.sources[].hwid":        func(c *config.Config) { c.Subscriptions.Sources[0].HWID = "abcdef0123456789" },
 	"subscriptions.check.rounds":          func(c *config.Config) { c.Subscriptions.Check.Rounds = 3 },
 	"subscriptions.check.timeout":         func(c *config.Config) { c.Subscriptions.Check.Timeout = time.Second },
 	"subscriptions.check.max_fail":        func(c *config.Config) { c.Subscriptions.Check.MaxFail = 2 },
@@ -480,7 +484,8 @@ func requestPathAffected(base, changed config.Config) bool {
 	// Preloaded* field nil — TestOptionsFromConfig locks that — so DeepEqual
 	// never reaches an error value and its identity comparison cannot mislead.
 	optsChanged := !reflect.DeepEqual( //nolint:govet // no error value is reachable; see above
-		reload.OptionsFromConfig(base), reload.OptionsFromConfig(changed))
+		reload.OptionsFromConfig(base), reload.OptionsFromConfig(changed),
+	)
 	return optsChanged || config.GroupsChanged(base, changed)
 }
 

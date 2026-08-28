@@ -4,17 +4,20 @@
 
 ## Curating a subscription source list
 
-The four findings below come from one measured round (2026-08-10) of a hand-curated
+The first four findings below come from one measured round (2026-08-10) of a hand-curated
 whitelist source list — the second compose instance's `sources.yaml`, which no crawler ever
 wrote into. That instance was retired 2026-08-26 and its directory deleted, so the round's
 own numbers now live in git history alone (`config-vassago/sources.yaml:15-24` at the commit
 before the deletion: whitelist file 30228 lines / 15649 merged ranges, 16 sources removed
-and 33 added, 54 shipped, 52 after two later died, every figure below measured on the 54).
+and 33 added, 54 shipped, 52 after two later died, every figure in those four measured on
+the 54).
 What follows is the part that outlives the file, and it applies to `config/sources.yaml`
 just as well — 17 of those 52 sources are now IN it (`config/sources.yaml:143-181`), the
 ones that carried endpoints no already-configured source did when the 52 were measured
 against the live 737-source corpus (152165 endpoints) on 2026-08-26: +6935 between them,
-while the other 35 added nothing and died with the directory.
+while the other 35 added nothing and died with the directory. The fifth finding is not from
+that round at all — it is a 2026-08-28 measurement against a panel enforcing an HWID device
+limit, and it applies to any deployment, whitelist-gated or not.
 
 - **The biggest names marketed FOR whitelist bypass contribute nothing; the bulk comes from
   undifferentiated aggregators.** Measured across ten independent search channels:
@@ -87,6 +90,26 @@ while the other 35 added nothing and died with the directory.
   samples over 1.5h backed dropping 16 redundant sources, and four more (`aetris bijandi
   flat447 prominbro`) were deliberately KEPT because they were redundant in some samples and
   unique in others. A single sample showing a source adds nothing shows only that.
+- **A panel with the HWID device limit on is FETCHABLE and publishes nothing, so gate 3 is
+  the only one that can catch it.** Such a panel advertises `x-hwid-active: true`, and
+  measured 2026-08-28 it answers a header-less fetch with **200** carrying a single
+  placeholder node (`vless://00000000-…-000000000000@0.0.0.0:1#Ошибка HWID`) where the same
+  URL carrying `x-hwid` returns 828 B and 2 real nodes. Gate 2 waves that through — the body
+  is small, fast and well-formed — and gate 1 has nothing to read; only the MARGINAL count
+  exposes it, as a source whose entire contribution is one placeholder `stable.Merge` refuses
+  a probe slot. The fix is the source's own `hwid:` field, sent as the `x-hwid` request
+  header on that source's fetch and on nothing else (`docs/guides/config.md` has the key, the
+  `^[a-zA-Z0-9=-]{10,64}$` shape the panel has validated since v3.0.0, and the vendor docs
+  that promise a 404 this panel does not send — it sends 200, which is why the symptom is
+  `nodeless-2xx` and not a bad status). Three consequences for curation. The value is
+  operator-invented rather than panel-issued, so a candidate behind such a panel needs one
+  before its yield can be measured at all. Each DISTINCT value registers a device against
+  the subscription's own device limit, so it is set once and never rotated — re-measuring a
+  source under a fresh value spends a slot per pass. And it belongs on a `url:` source only:
+  the loader rejects an `hwid` on an inline `body:` entry, where nothing is fetched for a
+  header to ride on. Hand-adding it to `config/private.yaml` is safe — `crawl.source` mirrors
+  the field, so the crawler's full-file rewrite carries it through instead of stripping it
+  and reverting the source to the placeholder.
 
 ## What the Telegram crawler may harvest
 
@@ -156,7 +179,7 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
 ## What a managed source entry means
 
 A crawler-written source is named `<channel-slug>-<postid>` by `sourceName`
-(`internal/crawl/crawl.go:772`): the slug is the Telegram channel folded into the config name
+(`internal/crawl/crawl.go:778`): the slug is the Telegram channel folded into the config name
 alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and `postid` is the
 decimal id of the Telegram message the URL was harvested from. `seyedng-3631` reads "the
 subscription the crawler found in @seyedng, post 3631".
@@ -164,20 +187,20 @@ subscription the crawler found in @seyedng, post 3631".
 The name is now a LABEL and nothing more. Everything a reader or the exporter needs to know
 about an entry sits beside it as data: `managed: true` says the crawler owns it and
 `feed: <slug>` says which channel it came from (`SubscriptionSource.Managed` and `.Feed`,
-`internal/config/config.go:577,582`). The crawler writes `managed: true` on every entry it mints.
+`internal/config/config.go:584,589`). The crawler writes `managed: true` on every entry it mints.
 `feed:` it writes as the channel slug whenever the name is NEW and the origin named a channel; an
 entry whose name it keeps verbatim keeps the `feed:` it already had, and a mint that saw no usable
-slug records none (`mintSource`, `internal/crawl/crawl.go:567-575`). And `feed:` is not the
+slug records none (`mintSource`, `internal/crawl/crawl.go:573-581`). And `feed:` is not the
 crawler's alone: unlike `managed` it grants nothing and only groups, so a curated entry may set it
-too (`config.go:578-582`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
+too (`config.go:585-589`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
 and prune, so an operator who forgets the field is safe by default. `managed: true` in a
 git-tracked file is REFUSED twice,
-and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1055`) refuses it in
-`config/sources.yaml` before appending it (`:1071-1075`), so that overlay stays policed wherever
-it is merged, and `validateSources` (`:1454`) refuses it again over the merged list
-(`:1458`), which is what covers `config.yaml`'s own entries. Both raise one wording,
-`errManagedInCuratedFile` (`:1051`). Only the pass after the `private.yaml` merge allows the
-mark (`:1011`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
+and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1068`) refuses it in
+`config/sources.yaml` before appending it (`:1084-1088`), so that overlay stays policed wherever
+it is merged, and `validateSources` (`:1467`) refuses it again over the merged list
+(`:1471`), which is what covers `config.yaml`'s own entries. Both raise one wording,
+`errManagedInCuratedFile` (`:1064`). Only the pass after the `private.yaml` merge allows the
+mark (`:1024`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
 carries a URL of one post that did not take the bare stem, N counting from 2 because that stem
 was offered to the post's FIRST URL first. `<slug>-N` carries a known slug whose origin post is
 not, N counting from 1 instead, that family having no bare stem to be offered at all. In both, N is
@@ -185,15 +208,15 @@ the lowest ordinal free in the cycle's taken-name set. And `<sha10>` — the fir
 sha256 of the SUBSCRIPTION URL — carries a URL whose slug is unusable, and NOTHING else now that
 an unbounded ordinal always finds a free name.
 The inline harvest is the fixed name `inline` (`inlineSourceName`,
-`internal/crawl/crawl.go:933`) — the one entry the crawler writes whose name it derived from
+`internal/crawl/crawl.go:939`) — the one entry the crawler writes whose name it derived from
 nothing, and therefore the one an operator can collide with by accident. It holds the aggregate of
 inline node URIs harvested across messages and channels, with `managed: true`, a `body:` and no
-`url:` (`buildInlineSource`, `crawl.go:940`). **Nothing reserves that name.** No validator refuses
+`url:` (`buildInlineSource`, `crawl.go:946`). **Nothing reserves that name.** No validator refuses
 it to anyone — `inline` is a legal curated name and one that loads (`config_test.go:904`) — and
 nothing announces the crawler's namespace either. So the crawler YIELDS the name instead of
 owning it. Hand-add an entry called `inline` to `config/private.yaml` — with a `body:` or a
 `url:`, either way — and the merge shelters
-it like any other unmarked entry (`crawl.go:501-506`), and rather than append a duplicate beside
+it like any other unmarked entry (`crawl.go:507-512`), and rather than append a duplicate beside
 it the crawler skips its own inline entry for that cycle, logging WARN `a hand-added entry holds the
 inline aggregate's name; skipping the inline harvest rather than writing a duplicate` and leaving
 `inline:0` on the `private.yaml updated` line whenever that cycle writes. Nothing else in the
@@ -207,12 +230,12 @@ own state file, and the names AND URLs on every `CRAWL_CURATED` path (`loadPriva
 taken-name set and the URL deny funnel, and nothing else. `inline`
 is not minted: it is a fixed constant, and the skip that protects it tests the `private.yaml`
 entries the cycle is about to write and nothing else (the `slices.ContainsFunc` gate in `RunOnce`,
-`crawl.go:335`). So an `inline` sitting in `config/sources.yaml`, or in `config.yaml` itself, is
+`crawl.go:341`). So an `inline` sitting in `config/sources.yaml`, or in `config.yaml` itself, is
 still invisible to it — both reads happen, but the mint never consults its taken-name set for a
-fixed constant and the deny funnel never sees a `body:` entry with no `url:` (`crawl.go:967`), so
+fixed constant and the deny funnel never sees a `body:` entry with no `url:` (`crawl.go:973`), so
 `inline` escapes both. It cannot see the collision, appends `inline` to `private.yaml` as usual,
 and the MERGED list then carries the name twice — which
-`validateSources("")` refuses (`config.go:1011,1463-1464`) and `config.Load` turns into
+`validateSources("")` refuses (`config.go:1024,1476-1477`) and `config.Load` turns into
 `private config: subscriptions.sources: duplicate name "inline"`, so the service does not start
 until one of the two entries goes. Reserving the literal name in config validation was weighed and
 refused: it would fail files that load today, and it would put authority back into a string, which
@@ -220,11 +243,11 @@ is the very thing `managed:` replaced.
 
 That last hazard is the general one, and `inline` is only its most reachable case. Inside
 `private.yaml` the MINTED forms are already safe: `mergeManaged` seeds `used` from every name the
-file holds, hand-added ones included (`crawl.go:485-506`), and `sourceName` consults it before
-returning a candidate (`crawl.go:781,788`), so an operator holding `seyedng-3631` makes the crawler
+file holds, hand-added ones included (`crawl.go:491-512`), and `sourceName` consults it before
+returning a candidate (`crawl.go:787,794`), so an operator holding `seyedng-3631` makes the crawler
 mint `seyedng-3631-2` instead of colliding — it yields there too. `used` does not stop at
 `private.yaml`: the crawler reads every `CRAWL_CURATED` path and seeds THEIR names FIRST
-(`curatedNames`, `crawl.go:1089`, from `Options.CuratedPaths` — a comma-separated list defaulting
+(`curatedNames`, `crawl.go:1095`, from `Options.CuratedPaths` — a comma-separated list defaulting
 to `/config/sources.yaml,/config/config.yaml`). BOTH files are seeded, not just the overlay:
 `validateSources` rules on the whole MERGED list and
 `config.yaml` carries `subscriptions.sources` of its own, so seeding one of the two would fail
@@ -255,12 +278,12 @@ set `managed: true` and backfilled `feed:` from the name it was stripping. The p
 not trigger it, and could not, because the prefix is not a mark even here: `channelSlug` folds
 `_` to `-`, so the channel `tg_vpn` slugs to `tg-vpn` and every name minted from it — `tg-vpn-123`
 — legitimately begins `tg-` while being nobody's migration. So `needsAdoption`
-(`crawl.go:1244`) requires the rest of the name to wear a shape the pre-cutover mint actually
-produced as well: `inline`, a `-` plus 6-hex tail `legacyFeed` can read a slug off (`crawl.go:1257`),
+(`crawl.go:1250`) requires the rest of the name to wear a shape the pre-cutover mint actually
+produced as well: `inline`, a `-` plus 6-hex tail `legacyFeed` can read a slug off (`crawl.go:1263`),
 or a bare 10 hex (`unattributedNameRe`, `crawl.go:62`). An unmarked `tg-vpn-123` wears none of the
 three, so it stays SHELTERED like any other unmarked entry — the merge writes it back verbatim
-(`crawl.go:504`) — rather than being seized into the prune. The mark settles the crawler's own
-side: a marked entry is never read again (`crawl.go:1245`), so a real `tg-vpn-123456` is safe by
+(`crawl.go:510`) — rather than being seized into the prune. The mark settles the crawler's own
+side: a marked entry is never read again (`crawl.go:1251`), so a real `tg-vpn-123456` is safe by
 its field. An UNMARKED name wearing one of those shapes is adopted, and nothing can tell it from a
 pre-cutover mint: a 6-digit post id is also 6 hex digits, so a hand-added `tg-vpn-123456` is
 exactly what an attributed mint looked like and is claimed as slug `vpn` plus hash, where
@@ -300,8 +323,8 @@ is not changing, which is why the ambiguity is written down here instead of desi
   post id. `feed` is the `feed:` field, or the name when the field is absent — `sourceFeed` tests
   `Feed != ""` and nothing else (`internal/metrics/metrics.go:376-380`), so ownership does not
   enter it. The origin-less `<sha10>` form and any entry that set no `feed:` therefore name
-  themselves, while a curated entry that DID set one keeps it (`config.go:578-582`, asserted by
-  `config_test.go:1099-1109` and rendered as `owner="curated"` beside a divergent feed at
+  themselves, while a curated entry that DID set one keeps it (`config.go:585-589`, asserted by
+  `config_test.go:1161-1171` and rendered as `owner="curated"` beside a divergent feed at
   `internal/metrics/testdata/exposition.golden:119`). Every URL of one channel shares
   one `feed` (`seyedng`) whatever tail its own name carries. `owner` is `crawler` when the
   entry carries `managed: true` and `curated` when it does not, which makes `owner="crawler"`
@@ -341,7 +364,7 @@ is not changing, which is why the ambiguity is written down here instead of desi
   list. The second reason is merely mechanical and would not save it on its own: the
   config source-name alphabet is `^[a-z0-9-]+$` (`sourceNameRe`,
   `internal/config/config.go:115`, mirrored for the crawler's own write-back by its own
-  `sourceNameRe` at `internal/crawl/crawl.go:1272`), and `:` `/` `.` `?` all fall outside it.
+  `sourceNameRe` at `internal/crawl/crawl.go:1278`), and `:` `/` `.` `?` all fall outside it.
 - **The collision form exists because neither a channel nor a post is a source.** One
   channel routinely publishes several distinct subscription URLs, so the slug alone is not
   unique — and a post is a container too, so the post id does not settle it: one message
@@ -430,14 +453,14 @@ is not changing, which is why the ambiguity is written down here instead of desi
   minimum of three digits, not to a width, so the index can be longer). Then grep both
   overlays rather than reasoning about which file owns the name: `private.yaml` holds the
   managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
-  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1463-1464`).
+  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1476-1477`).
 - **`<10 hex>` is the other managed shape and carries no channel at all.** It is not
   merely historical: `unattributedNameRe` matches it and the fallback mint still EMITS it — but only
   ever for a URL the crawler has never named, since an entry that already carries a name gets it
-  back first (`crawl.go:773-774`). For such a URL the fallback fires for exactly ONE reason:
-  the slug was unusable, leaving no stem to build on (`crawl.go:777`). The ordinal is unbounded
+  back first (`crawl.go:779-780`). For such a URL the fallback fires for exactly ONE reason:
+  the slug was unusable, leaving no stem to build on (`crawl.go:783`). The ordinal is unbounded
   and every value it rejects is one distinct name already in `used`, so a usable slug always
-  reaches a free candidate inside `len(used)+1` tries and cannot fall through (`crawl.go:787-791`).
+  reaches a free candidate inside `len(used)+1` tries and cannot fall through (`crawl.go:793-797`).
   `sourceName` upgrades a hash-only name to the attributed form the first time the URL turns
   up in a channel, and that is the only rewrite it ever performs: an already-attributed
   name is kept VERBATIM forever, because a rename churns `private.yaml` and relabels every

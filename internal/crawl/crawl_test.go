@@ -686,6 +686,9 @@ func TestSameSources(t *testing.T) {
 	if sameSources(a, []source{{Name: "x", URL: "u1", Feed: "chan"}, {Name: "y", URL: "u2"}}) {
 		t.Error("sources differing only in Feed must differ")
 	}
+	if sameSources(a, []source{{Name: "x", URL: "u1", HWID: "abcdef0123456789"}, {Name: "y", URL: "u2"}}) {
+		t.Error("sources differing only in HWID must differ")
+	}
 }
 
 // TestPrivateRoundTripPreservesUnmanaged: a write followed by a load must return
@@ -715,6 +718,67 @@ func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
 		t.Fatalf("read private.yaml: %v", readErr)
 	} else if strings.Contains(string(raw), "managed: false") {
 		t.Errorf("a hand-added entry was written a managed key:\n%s", raw)
+	}
+}
+
+// TestPrivateCycleKeepsHandAddedHWID: the cycle rewrites private.yaml in full
+// from the source struct, so an operator's hwid has to survive load -> merge ->
+// write. Losing it leaves a source that still fetches 200 while the panel
+// answers the HWID-error placeholder: nothing errors, and only that source's
+// own stable_source_published_nodes falling to 0 against a nodes_total of 1
+// says so.
+func TestPrivateCycleKeepsHandAddedHWID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlHand    = "https://hand.example/sub"
+		urlManaged = "https://managed.example/sub"
+		hwid       = "abcdef0123456789"
+		seed       = "subscriptions:\n  sources:\n" +
+			"    - name: hand-added\n      url: " + urlHand + "\n      hwid: " + hwid + "\n" +
+			"    - name: chan-3631\n      url: " + urlManaged + "\n      feed: chan\n      managed: true\n"
+	)
+	path := filepath.Join(t.TempDir(), "private.yaml")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+	pf, err := loadPrivate(path)
+	if err != nil {
+		t.Fatalf("loadPrivate: %v", err)
+	}
+
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+	live := map[string]origin{urlManaged: {Slug: "chan", Post: 3631}}
+	rr := recheckResult{managedURL: map[string]bool{urlManaged: true}}
+	next, _, deleted, _ := c.mergeManaged(pf, live, rr, true, nil)
+	if len(deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", deleted)
+	}
+	pf.Subscriptions.Sources = next
+	if writeErr := writePrivate(path, pf); writeErr != nil {
+		t.Fatalf("writePrivate: %v", writeErr)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read private.yaml: %v", err)
+	}
+	if !strings.Contains(string(raw), "hwid: "+hwid) {
+		t.Fatalf("the cycle stripped the hand-added hwid:\n%s", raw)
+	}
+	var got privateFile
+	if unmarshalErr := yaml.Unmarshal(raw, &got); unmarshalErr != nil {
+		t.Fatalf("unmarshal private.yaml: %v", unmarshalErr)
+	}
+	byName := map[string]source{}
+	for _, s := range got.Subscriptions.Sources {
+		byName[s.Name] = s
+	}
+	if hand := byName["hand-added"]; hand.HWID != hwid || hand.URL != urlHand || hand.Managed {
+		t.Errorf("hand-added entry = %+v, want it unchanged with hwid %q", hand, hwid)
+	}
+	if managed := byName["chan-3631"]; managed.HWID != "" {
+		t.Errorf("the crawler minted an hwid it has no source of: %+v", managed)
 	}
 }
 

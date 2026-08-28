@@ -598,10 +598,12 @@ func (c *Checker) fetchSources(
 				SubscriptionURL:  fetch.SubscriptionURL(src.URL),
 				AllowedCountries: filter.All(),
 				DeniedCountries:  spec.Denied,
+				HWID:             src.HWID,
 			}
 			if src.Body != "" {
 				// Inline source: filter the pasted payload directly, no fetch.
 				req.SubscriptionURL = ""
+				req.HWID = ""
 				req.Body = []byte(src.Body)
 			}
 			nodes, stats, err := svc.FilterNodes(sourceCtx, req)

@@ -42,6 +42,10 @@ const (
 	minSwapRatio = 0.5
 )
 
+// loadSubscription is a var so a test can drive the URL path without a network
+// fetch, the same seam geofeed and cidrset keep over fetch.BytesWithType.
+var loadSubscription = subscription.Load
+
 type Options struct {
 	GeofeedSources      []geofeed.Source
 	RefreshInterval     time.Duration
@@ -123,6 +127,10 @@ type FilterRequest struct {
 	// without any HTTP fetch. It is normalized with the same base64-tolerant
 	// decoder used for fetched subscriptions. Takes precedence over SubscriptionURL.
 	Body []byte
+	// HWID rides out as the x-hwid header. `GET /` leaves it empty: that
+	// endpoint has no source config to read it from, so the value belongs to
+	// the /stable.txt worker's per-source entry.
+	HWID string
 }
 
 // Blocklist reports whether a node host is currently geo-blocked (failed a
@@ -577,7 +585,7 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 			fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
 			defer cancelFetch()
 		}
-		loaded, errLoad := subscription.Load(fetchCtx, req.SubscriptionURL)
+		loaded, errLoad := loadSubscription(fetchCtx, req.SubscriptionURL, req.HWID)
 		if errLoad != nil {
 			return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 		}

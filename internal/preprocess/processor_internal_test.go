@@ -19,6 +19,7 @@ import (
 	"domains.lst/sub-preprocessor/internal/asn"
 	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/resolver"
@@ -173,6 +174,44 @@ func TestFilterInlineBodyNoFetch(t *testing.T) {
 
 func newInlineProcessor() *Processor {
 	return &Processor{logger: zerolog.Nop(), resolver: resolver.New(time.Second, "", 0, 0)}
+}
+
+// A source whose hwid never leaves the process still fetches 200 — the panel
+// answers a placeholder node — so nothing but this assertion separates a
+// carried hwid from a dropped one. loadSubscription is where the URL path hands
+// the value over, and `GET /` (empty HWID) must keep sending nothing. The
+// loadSubscription swap is package-global, so this test may not call
+// t.Parallel.
+func TestFilterNodesHandsTheRequestHWIDToTheLoad(t *testing.T) {
+	original := loadSubscription
+	t.Cleanup(func() { loadSubscription = original })
+
+	var seen []string
+	loadSubscription = func(_ context.Context, rawURL fetch.SubscriptionURL, hwid string) ([]byte, error) {
+		if rawURL != "https://example.com/sub" {
+			return nil, fmt.Errorf("unexpected url %q", rawURL)
+		}
+		seen = append(seen, hwid)
+		return []byte("vless://a@192.0.2.1:443#n1\n"), nil
+	}
+
+	for _, hwid := range []string{"abcdef0123456789", ""} {
+		nodes, stats, err := newInlineProcessor().FilterNodes(t.Context(), FilterRequest{
+			SubscriptionURL:  "https://example.com/sub",
+			AllowedCountries: filter.All(),
+			HWID:             hwid,
+		})
+		if err != nil {
+			t.Fatalf("FilterNodes(hwid=%q): %v", hwid, err)
+		}
+		if len(nodes) != 1 || stats.Kept != 1 {
+			t.Fatalf("hwid=%q: nodes=%d stats=%+v, want one kept node", hwid, len(nodes), stats)
+		}
+	}
+
+	if want := []string{"abcdef0123456789", ""}; !slices.Equal(seen, want) {
+		t.Errorf("hwids handed to the load = %q, want %q", seen, want)
+	}
 }
 
 // TestFilterNodesMatchesFilter pins both entry points to one pipeline: the

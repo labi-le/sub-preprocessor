@@ -81,8 +81,8 @@ func TestBytesWithTypeSendsAPoolIdentityOnEveryRequest(t *testing.T) {
 
 	// The swap below repoints the package sharedClient var, so no other test in
 	// package fetch may run in parallel with this one (cidrset's load_internal_test
-	// documents the same constraint over its own fetch swap). Package fetch has
-	// no second BytesWithType test today; add none without honoring this.
+	// documents the same constraint over its own fetch swap). hwid_internal_test
+	// swaps it too and stays sequential for that reason.
 
 	originalClient := sharedClient
 	sharedClient = &http.Client{Transport: &http.Transport{

@@ -48,8 +48,12 @@ type Node struct {
 	FragmentIdx int // index of '#' in Raw, or -1 if not present
 }
 
-func Load(ctx context.Context, rawURL fetch.SubscriptionURL) ([]byte, error) {
-	body, err := fetch.BytesWithType(ctx, rawURL, MaxSubscriptionSize, fetch.FileTypeRaw)
+// fetchBytes is a var for the reason geofeed and cidrset keep the same one: it
+// is the only point a test can observe what Load hands the network.
+var fetchBytes = fetch.BytesWithTypeHWID
+
+func Load(ctx context.Context, rawURL fetch.SubscriptionURL, hwid string) ([]byte, error) {
+	body, err := fetchBytes(ctx, rawURL, MaxSubscriptionSize, fetch.FileTypeRaw, hwid)
 	if err != nil {
 		return nil, fmt.Errorf("fetch subscription: %w", err)
 	}

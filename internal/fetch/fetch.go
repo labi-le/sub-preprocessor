@@ -140,6 +140,14 @@ func (e *StatusError) Error() string {
 var sharedClient = NewSafeHTTPClient()
 
 func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fileType FileType) ([]byte, error) {
+	return BytesWithTypeHWID(ctx, rawURL, limit, fileType, "")
+}
+
+// BytesWithTypeHWID carries hwid in the x-hwid header. A Remnawave panel with
+// the HWID device limit on (it answers x-hwid-active: true) serves a
+// placeholder node instead of the real list when that header is absent, so the
+// fetch reads healthy and publishes nothing. An empty hwid sends no header.
+func BytesWithTypeHWID(ctx context.Context, rawURL SubscriptionURL, limit int64, fileType FileType, hwid string) ([]byte, error) {
 	if err := ValidatePublicHTTPSURL(rawURL); err != nil {
 		return nil, err
 	}
@@ -154,6 +162,11 @@ func BytesWithType(ctx context.Context, rawURL SubscriptionURL, limit int64, fil
 		return nil, fmt.Errorf("create request: %w", errReq)
 	}
 	req.Header.Set("User-Agent", UserAgent())
+	if hwid != "" {
+		// Canonical spelling of the vendor's documented x-hwid: Set canonicalises
+		// any casing, and HTTP/2 lowercases the name on the wire regardless.
+		req.Header.Set("X-Hwid", hwid)
+	}
 	resp, errResp := client.Do(req)
 	if errResp != nil {
 		return nil, fmt.Errorf("do request: %w", errResp)
