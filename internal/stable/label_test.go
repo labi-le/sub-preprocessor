@@ -418,7 +418,7 @@ func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
 			ctx := context.Background()
 
 			api := m.apiCheck(ctx, "test.api", "api", pxs, srv.URL, nil,
-				timeout, 2, func(int, string) bool { return false })
+				timeout, 2, 0, func(int, string) bool { return false })
 			if len(api) != 1 {
 				t.Fatalf("apiCheck outcomes keyed %v, want the single label %s", mapKeys(api), label)
 			}

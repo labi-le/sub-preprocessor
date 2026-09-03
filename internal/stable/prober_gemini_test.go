@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,6 +187,138 @@ func TestGeminiCheckAccountsWhatItCouldNotVerify(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGeminiCheckPacesRequestStarts pins the pacing contract: request starts
+// observed by the server are spread at least the configured interval apart,
+// and every proxy still gets a verdict — pacing must throttle, never starve.
+func TestGeminiCheckPacesRequestStarts(t *testing.T) {
+	t.Parallel()
+
+	// 600/min = one start per 100ms; 5 proxies keep the paced run well under
+	// a second, and gaps of ~100ms are nothing like the ~0 an unpaced check
+	// produces, so half the interval is a flake-safe floor.
+	m, arrivals := geminiPacingProber(t, 600)
+	out, rep := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
+
+	times := arrivals.all()
+	if len(times) != 5 {
+		t.Fatalf("server saw %d requests, want 5 (one per live proxy)", len(times))
+	}
+	const minGap = 50 * time.Millisecond
+	for i := 1; i < len(times); i++ {
+		if gap := times[i].Sub(times[i-1]); gap < minGap {
+			t.Fatalf("request starts %v apart, want >= %v: the shared ticker hands out one start per interval", gap, minGap)
+		}
+	}
+	if len(out) != 5 {
+		t.Fatalf("GeminiCheck returned %d outcomes, want one per proxy", len(out))
+	}
+	if want := (GeminiReport{State: GeminiGateRan, Checks: 5, Unverified: 0}); rep != want {
+		t.Fatalf("GeminiCheck report = %+v, want %+v: pacing must not skip requests", rep, want)
+	}
+}
+
+// TestGeminiCheckRateLimitZeroStaysUnpaced: the zero value means "no pacing",
+// so the check behaves exactly as before the field existed — five loopback
+// requests land as a burst, not spread over paced intervals.
+func TestGeminiCheckRateLimitZeroStaysUnpaced(t *testing.T) {
+	t.Parallel()
+
+	m, arrivals := geminiPacingProber(t, 0)
+	out, rep := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
+
+	times := arrivals.all()
+	if len(times) != 5 {
+		t.Fatalf("server saw %d requests, want 5 (one per live proxy)", len(times))
+	}
+	spread := times[len(times)-1].Sub(times[0])
+	// Even the smallest paced rate (60/min) would spread five starts over a
+	// second; a burst of loopback requests lands in a few ms, so 100ms
+	// separates paced from unpaced without a loaded machine blurring them.
+	if spread >= 100*time.Millisecond {
+		t.Fatalf("request starts spread over %v with RateLimit 0, want an unpaced burst", spread)
+	}
+	if len(out) != 5 {
+		t.Fatalf("GeminiCheck returned %d outcomes, want one per proxy", len(out))
+	}
+	if want := (GeminiReport{State: GeminiGateRan, Checks: 5, Unverified: 0}); rep != want {
+		t.Fatalf("GeminiCheck report = %+v, want %+v", rep, want)
+	}
+}
+
+// TestGeminiCheckCancelDoesNotWaitOutThePace: every worker is parked on the
+// shared ticker when the context dies (pace 1s, cancellation at 50ms), and
+// the check must return at once instead of sitting out the remaining ticks —
+// a cancelled cycle that hung on the ticker would stall the shutdown path.
+func TestGeminiCheckCancelDoesNotWaitOutThePace(t *testing.T) {
+	t.Parallel()
+
+	m, _ := geminiPacingProber(t, 60) // one start per second
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		m.GeminiCheck(ctx, geminiTestProxies(3, 0))
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond) // every worker parked on the ticker
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("GeminiCheck outlived ctx cancellation: a worker sat on the ticker instead of selecting ctx.Done()")
+	}
+}
+
+// geminiArrivalRecorder timestamps each request as the server sees it. Request
+// STARTS are what apiCheck's pace bounds, so the arrival interval is the
+// observable that must spread out (or not).
+type geminiArrivalRecorder struct {
+	mu    sync.Mutex
+	times []time.Time
+}
+
+func (r *geminiArrivalRecorder) add() {
+	r.mu.Lock()
+	r.times = append(r.times, time.Now())
+	r.mu.Unlock()
+}
+
+func (r *geminiArrivalRecorder) all() []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), r.times...)
+}
+
+// geminiPacingProber starts an httptest server that records arrivals and
+// answers 200 with a served-model body, then builds a prober gated on it with
+// the given rate_limit.
+func geminiPacingProber(t *testing.T, rateLimit int) (*MihomoProber, *geminiArrivalRecorder) {
+	t.Helper()
+
+	arrivals := &geminiArrivalRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrivals.add()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"name":"models/gemini-2.0-flash"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m, err := NewMihomoProber(
+		config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{},
+		config.GeoBlockConfig{Gemini: config.GeminiConfig{
+			Endpoint: srv.URL, Model: "gemini-2.0-flash",
+			Timeout: 5 * time.Second, Concurrency: 8, RateLimit: rateLimit,
+		}},
+		config.CloudflareConfig{},
+		"KEY",
+		zerolog.Nop(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m, arrivals
 }
 
 // geminiTestProxies builds live proxies (a DIRECT outbound, which dials the

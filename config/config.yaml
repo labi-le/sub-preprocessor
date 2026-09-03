@@ -151,6 +151,12 @@ geoblock:
     key_var: LITELLM_GOOGLE_API_KEY
     timeout: 15s
     concurrency: 8
+    # Google's generativelanguage.googleapis.com/model_requests quota is 200/min
+    # per project per region (measured 2026-09-03: 500 GETs at concurrency 8 in
+    # 20s returned 202x 429 RESOURCE_EXHAUSTED). A cycle checks 400-550 nodes,
+    # so an unpaced gate leaves most of them unverified and publishes
+    # geo-blocked nodes; 150 paces request starts to 75% of the ceiling.
+    rate_limit: 150
   claude:
     timeout: 15s
     concurrency: 8

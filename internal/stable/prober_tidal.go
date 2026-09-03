@@ -21,7 +21,7 @@ func (m *MihomoProber) tidalURL() string {
 func (m *MihomoProber) TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
 	c := m.geo.Tidal
 	return m.apiCheck(ctx, "stable.TidalCheck", "tidal check", proxies,
-		m.tidalURL(), nil, c.Timeout, c.Concurrency, tidalBlocked)
+		m.tidalURL(), nil, c.Timeout, c.Concurrency, 0, tidalBlocked)
 }
 
 // tidalBlocked reads the status and nothing else: a 2xx means the request got

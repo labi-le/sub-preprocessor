@@ -81,6 +81,14 @@ func fanoutSem(concurrency int) chan struct{} {
 // the body, or a bare CDN 403). Every node logs a debug outcome and the
 // progress logger reports each completed 10% decade.
 //
+// pace is the minimum interval between request STARTS; 0 disables pacing. A
+// paced check owns one ticker for the whole fan-out and every worker waits on
+// it (or on ctx cancellation) before dialling, so request starts leave at most
+// one per interval no matter how many workers are in flight — concurrency
+// still caps how many requests are outstanding. The wait must select on
+// ctx.Done() too, or a cancelled cycle would sit out the remaining interval.
+// One ticker per check, nothing per request.
+//
 // Outcomes are keyed by entry label, which is what a filter looks them up by.
 // Several proxies may share one label (a mieru node's ports), and they finish
 // in arbitrary order, so the fold happens under the same mutex that guards the
@@ -94,6 +102,7 @@ func (m *MihomoProber) apiCheck(
 	header http.Header,
 	timeout time.Duration,
 	concurrency int,
+	pace time.Duration,
 	blocked func(status int, body string) bool,
 ) map[string]APIOutcome {
 	opLog := log.Op(m.logger, op)
@@ -103,10 +112,22 @@ func (m *MihomoProber) apiCheck(
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := fanoutSem(concurrency)
+	var ticker *time.Ticker
+	if pace > 0 {
+		ticker = time.NewTicker(pace)
+		defer ticker.Stop()
+	}
 	for _, px := range proxies {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if ticker != nil {
+				select {
+				case <-ticker.C:
+				case <-ctx.Done():
+					return
+				}
+			}
 
 			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout)
 			host := proxyHost(px)

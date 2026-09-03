@@ -22,6 +22,6 @@ func (m *MihomoProber) ClaudeCheck(ctx context.Context, proxies []mihomo.Proxy) 
 	c := m.geo.Claude
 	header := http.Header{"Anthropic-Version": []string{c.Version}}
 	return m.apiCheck(ctx, "stable.ClaudeCheck", "claude check", proxies,
-		m.claudeURL(), header, c.Timeout, c.Concurrency,
+		m.claudeURL(), header, c.Timeout, c.Concurrency, 0,
 		func(_ int, body string) bool { return markerBlocked(body, c.Marker) })
 }

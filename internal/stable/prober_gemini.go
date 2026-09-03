@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	mihomo "github.com/metacubex/mihomo/constant"
 
@@ -28,6 +29,15 @@ func (m *MihomoProber) geminiURL() string {
 // do: a geo-block appears only in the API response body, not the status code.
 // The caller owns the proxies' lifecycle (parse once, close once).
 //
+// The check paces its own request starts when RateLimit > 0 (interval =
+// time.Minute / RateLimit): Google's metadata-read quota,
+// generativelanguage.googleapis.com/model_requests, is 200/min per project per
+// region — measured 2026-09-03 against the live API with the production key,
+// 500 GETs at concurrency 8 finished in 20s with 202 answering
+// 429 RESOURCE_EXHAUSTED. A 429 is geminiInconclusive, and an inconclusive
+// node is KEPT and published, so an unpaced gate does not merely lose
+// coverage: it publishes geo-blocked nodes.
+//
 // A response that never reached the location check is counted and warned about
 // instead of passing silently as "not blocked": see geminiInconclusive. That
 // count is also RETURNED, because a warning nothing scrapes is how a rotated
@@ -39,9 +49,13 @@ func (m *MihomoProber) geminiURL() string {
 // short-circuits blocked() when nothing came back.
 func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) (map[string]APIOutcome, GeminiReport) {
 	g := m.geo.Gemini
+	var pace time.Duration
+	if g.RateLimit > 0 {
+		pace = time.Minute / time.Duration(g.RateLimit)
+	}
 	var checks, inconclusive atomic.Int64
 	out := m.apiCheck(ctx, "stable.GeminiCheck", "gemini check", proxies,
-		m.geminiURL(), nil, g.Timeout, g.Concurrency,
+		m.geminiURL(), nil, g.Timeout, g.Concurrency, pace,
 		func(status int, body string) bool {
 			checks.Add(1)
 			if geminiInconclusive(status, body) {

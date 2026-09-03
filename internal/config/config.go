@@ -54,6 +54,9 @@ const (
 	defaultGeminiKeyVar      = "LITELLM_GOOGLE_API_KEY"
 	defaultGeminiTimeout     = 15 * time.Second
 	defaultGeminiConcurrency = 8
+	// 75% of the 200/min model_requests ceiling measured 2026-09-03, so an
+	// unpaced gate cannot 429 a whole cycle; numbers in config/config.yaml.
+	defaultGeminiRateLimit   = 150
 	defaultClaudeEndpoint    = "https://api.anthropic.com"
 	defaultClaudeMarker      = "Request not allowed"
 	defaultClaudeVersion     = "2023-06-01"
@@ -242,7 +245,8 @@ func (g *GeoConfig) applyDefaults() {
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
 //   - gemini/claude/chatgpt/tidal: selectors; prober params come from
 //     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden
-//     per-entry (Marker/Model/Endpoint/Key*/Timeout/Concurrency for gemini;
+//     per-entry (Marker/Model/Endpoint/Key*/Timeout/Concurrency/RateLimit for
+//     gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
 //     Endpoint/Timeout/Concurrency for tidal).
@@ -281,13 +285,14 @@ type FilterConfig struct {
 
 	// gemini/claude/chatgpt/tidal overrides (fall back to the geoblock
 	// sub-block).
-	Marker   string `yaml:"marker"`
-	Model    string `yaml:"model"`
-	Endpoint string `yaml:"endpoint"`
-	APIKey   string `yaml:"api_key"`
-	KeyFile  string `yaml:"key_file"`
-	KeyVar   string `yaml:"key_var"`
-	Version  string `yaml:"version"`
+	Marker    string `yaml:"marker"`
+	Model     string `yaml:"model"`
+	Endpoint  string `yaml:"endpoint"`
+	APIKey    string `yaml:"api_key"`
+	KeyFile   string `yaml:"key_file"`
+	KeyVar    string `yaml:"key_var"`
+	RateLimit int    `yaml:"rate_limit"`
+	Version   string `yaml:"version"`
 }
 
 // AnnotateSpec is one entry in the ordered annotation tag list. GEO is the only
@@ -464,6 +469,9 @@ func (f FilterConfig) mergedGemini(base GeminiConfig) GeminiConfig {
 	}
 	if f.Concurrency != 0 {
 		base.Concurrency = f.Concurrency
+	}
+	if f.RateLimit > 0 {
+		base.RateLimit = f.RateLimit
 	}
 	return base
 }
@@ -805,6 +813,7 @@ type GeminiConfig struct {
 	KeyVar      string        `yaml:"key_var"`
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
+	RateLimit   int           `yaml:"rate_limit"`
 }
 
 // ClaudeConfig configures the through-node Anthropic API reachability check.
@@ -871,6 +880,9 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if gm.Concurrency == 0 {
 		gm.Concurrency = defaultGeminiConcurrency
+	}
+	if gm.RateLimit == 0 {
+		gm.RateLimit = defaultGeminiRateLimit
 	}
 	cl := &g.Claude
 	if cl.Endpoint == "" {
@@ -1265,7 +1277,12 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return validateASNFilter(i, f)
 	case FilterCIDR:
 		return validateCIDRFilter(i, f)
-	case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal:
+	case FilterGemini:
+		if f.RateLimit < 0 {
+			return fmt.Errorf("filters[%d].rate_limit must not be negative", i)
+		}
+		return validateAPIFilter(i, f)
+	case FilterClaude, FilterChatGPT, FilterTidal:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
@@ -1402,6 +1419,7 @@ func (g *GeoBlockConfig) validate() error {
 		rejectNegativeDur("geoblock.ttl", &g.TTL),
 		rejectNegativeDur("geoblock.gemini.timeout", &g.Gemini.Timeout),
 		rejectNegativeInt("geoblock.gemini.concurrency", &g.Gemini.Concurrency),
+		rejectNegativeInt("geoblock.gemini.rate_limit", &g.Gemini.RateLimit),
 		rejectNegativeDur("geoblock.claude.timeout", &g.Claude.Timeout),
 		rejectNegativeInt("geoblock.claude.concurrency", &g.Claude.Concurrency),
 		rejectNegativeDur("geoblock.chatgpt.timeout", &g.ChatGPT.Timeout),

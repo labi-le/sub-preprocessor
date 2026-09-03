@@ -92,7 +92,7 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 
 	cfg := config.Config{
 		GeoBlock: config.GeoBlockConfig{
-			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8},
+			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8, RateLimit: 120},
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 15 * time.Second, Concurrency: 8},
@@ -126,8 +126,9 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	if bw.MinMbps == nil || *bw.MinMbps != 9 || bw.TestURL != "https://speed/x" || bw.Timeout != 30*time.Second || bw.Concurrency != 2 {
 		t.Fatalf("bandwidth spec wrong: %+v", bw)
 	}
-	// gemini: overridden model, other fields inherited from geoblock base.
-	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" || got[2].Gemini.Marker != "base-marker" {
+	// gemini: overridden model, other fields inherited from geoblock base,
+	// rate_limit included.
+	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" || got[2].Gemini.Marker != "base-marker" || got[2].Gemini.RateLimit != 120 {
 		t.Fatalf("gemini merge wrong: %+v", got[2].Gemini)
 	}
 	// chatgpt: overridden concurrency, endpoint/marker inherited from the base.
@@ -138,6 +139,87 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	if got[4].Tidal.Timeout != 30*time.Second ||
 		got[4].Tidal.Endpoint != "https://tidal.base" || got[4].Tidal.Concurrency != 8 {
 		t.Fatalf("tidal merge wrong: %+v", got[4].Tidal)
+	}
+}
+
+// TestLoadGeminiRateLimit pins the gemini gate's read pacing. The gate fires
+// one GET per surviving node (400-550 a cycle) against Google's 200/min
+// per-project-per-region model_requests quota (measured 2026-09-03: 500 GETs
+// at concurrency 8 in 20s returned 202x 429 RESOURCE_EXHAUSTED), so without
+// pacing most of a large pool never reaches the verdict. The default is 150
+// (75% of the measured ceiling); an explicit value survives decoding; a
+// per-filter entry overrides the geoblock base.
+func TestLoadGeminiRateLimit(t *testing.T) {
+	t.Parallel()
+
+	// Absent key: the default lands on the geoblock base and on the merged spec.
+	cfg, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    timeout: 15s\n    concurrency: 8\nfilters:\n  - type: gemini\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GeoBlock.Gemini.RateLimit != 150 {
+		t.Fatalf("default rate_limit = %d, want 150", cfg.GeoBlock.Gemini.RateLimit)
+	}
+	specs := cfg.NodeFilterSpecs()
+	if len(specs) != 1 || specs[0].Gemini.RateLimit != 150 {
+		t.Fatalf("merged spec rate_limit = %+v, want 150", specs)
+	}
+
+	// An explicit value on the geoblock base survives decoding untouched.
+	explicit, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    rate_limit: 60\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.GeoBlock.Gemini.RateLimit != 60 {
+		t.Fatalf("explicit rate_limit = %d, want 60", explicit.GeoBlock.Gemini.RateLimit)
+	}
+
+	// A per-filter entry's rate_limit beats the geoblock base...
+	overridden, err := loadYAML(t, geoBase+
+		"geoblock:\n  gemini:\n    rate_limit: 200\n"+
+		"filters:\n  - type: gemini\n    rate_limit: 60\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := overridden.NodeFilterSpecs()[0].Gemini.RateLimit; got != 60 {
+		t.Fatalf("per-filter rate_limit = %d, want 60 over the base's 200", got)
+	}
+	// ...while an entry without the key inherits the base verbatim.
+	inherited, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    rate_limit: 200\nfilters:\n  - type: gemini\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inherited.NodeFilterSpecs()[0].Gemini.RateLimit; got != 200 {
+		t.Fatalf("entry without rate_limit = %d, want 200 (the base)", got)
+	}
+}
+
+// TestLoadRejectsNegativeGeminiRateLimit covers both spelling sites of a
+// negative rate_limit: the geoblock base, where a negative would survive
+// applyDefaults and reach the prober as a negative pace, and a gemini filter
+// entry, where the merge's >0 rule would silently ignore it -- the rejection
+// keeps a typo loud in both places.
+func TestLoadRejectsNegativeGeminiRateLimit(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"geoblock base": {geoBase + "geoblock:\n  gemini:\n    rate_limit: -1\n", "geoblock.gemini.rate_limit must not be negative"},
+		"filter entry":  {geoBase + "filters:\n  - type: gemini\n    rate_limit: -1\n", "filters[0].rate_limit must not be negative"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadYAML(t, tc.yaml)
+			if err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s: error %q does not contain %q", name, err, tc.wantErr)
+			}
+		})
 	}
 }
 

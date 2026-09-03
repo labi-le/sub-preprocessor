@@ -246,9 +246,14 @@ are gates that drop:
   skipped — and it cannot be made keyless: the API resolves caller identity
   and key validity before the location precondition, so the verdict this gate
   reads is invisible to anything but a working credential. For the same reason
-  a response that never reached the location check — key rotated or
-  restricted, wrong `model` (404), quota (429) — is not read as "not blocked":
-  those nodes are counted, warned about, and kept unverified.
+  a response that never reached the location check — most often a `429` from
+  the 200/min per-project-per-region read quota (measured 2026-09-03: 500
+  GETs at concurrency 8 returned 202), less often a rotated or restricted key
+  or a wrong `model` (404) — is not read as "not blocked": those nodes are
+  counted, warned about, and kept unverified.
+  `geoblock.gemini.rate_limit` (default 150/min, 0 = default) paces request
+  starts so one cycle's reads stay under that quota and every survivor gets a
+  verdict.
 - `claude` — same idea, keyless: the Anthropic endpoint answers 403
   `Request not allowed` from blocked regions. Also feeds the geoblock store.
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
@@ -591,8 +596,9 @@ Key sections:
   rejected as an unknown key by the strict decode instead of being silently
   dropped.
 - `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
-  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency)
-  for the through-node filters. Every tenant here is a gate; the
+  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency;
+  gemini also takes `rate_limit`) for the through-node filters. Every tenant
+  here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
@@ -653,7 +659,12 @@ at all, so `stable_gemini_gate_checks` / `stable_gemini_gate_unverified_checks`
 publish how many API responses it classified and how many of those arrived
 before the location check (401/403/404/429, or a 400 `API_KEY_INVALID`).
 Those nodes are **kept and published unverified**, so the pair is deliberately
-outside the per-filter drop counters. `stable_gemini_gate_enabled` separates
+outside the per-filter drop counters. A large unverified share is normally the
+read quota, not the credential: the gate fires one read per survivor against
+Google's 200/min per-project-per-region `model_requests` ceiling (measured
+2026-09-03), and a key problem reads as `400 API_KEY_INVALID`, not `429` —
+check the 429 share first, then suspect the key.
+`stable_gemini_gate_enabled` separates
 the third state: 0 means the gate is configured but has no usable key, so it
 checked nothing at all. All three are absent when the gate did not run, which
 is not the same as "not configured".
