@@ -20,7 +20,10 @@ vendor the dashboard into the nixos repo.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport` to
   `metrics.Metrics.Observe` on a published cycle and `ObserveError()` on any abort.
   **Adding/renaming a metric? Update
-  `deploy/grafana/sub-preprocessor.json` in the same commit.**
+  `deploy/grafana/sub-preprocessor.json` in the same commit.** One family currently ships
+  without that panel half, stated rather than implied: `stable_probe_refused_nodes`
+  (2026-09; the dead-cache bullet below documents it) has no target in
+  `deploy/grafana/sub-preprocessor.json`, so it is read by query until a tile lands.
 - **The cycle is timed per PHASE, and the probe phase is not what its name suggests.**
   `stable_cycle_phase_duration_seconds{phase}` carries `fetch`/`merge`/`dead_filter`/
   `probe`/`egress`/`publish`; they sum to slightly LESS than
@@ -118,7 +121,14 @@ vendor the dashboard into the nixos repo.
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
   yielded, survived the IP stage, survived the URL test, reached the published payload — with
   `stable_source_dropped_nodes{source,reason}` splitting the first gap by reason, `unsupported`
-  aside (it counts unparseable input LINES, which never entered `nodes_total`).
+  aside (it counts unparseable input LINES, which never entered `nodes_total`). The parse
+  boundary of that reason moved once, 2026-09: `parseVmess` now accepts the Xray VMessAEAD
+  form (`vmess://<user>@host:port`, dispatching on the `@` cue,
+  `internal/subscription/vmess.go:25-36`, the AEAD arm at :126) and re-encodes a url-safe
+  base64 body in the standard alphabet (:78-99), so a source serving either shape books
+  those lines as nodes instead of `unsupported` — one real source went from 0 to 411
+  accepted vmess nodes — and a residual `unsupported` count now means lines that are
+  genuinely not nodes, not "this source is Xray-flavoured".
   `dropped_nodes` alone carries no `feed` and no `owner`, by decision: it is 3507 of
   the 5511 per-source samples the exporter renders — 7 of every 11 per source, exact whatever the
   build — and no panel or rule asks for drops by owner, so per-source drops are the one question
@@ -138,7 +148,12 @@ vendor the dashboard into the nixos repo.
   3825 on the retired instance, so nine merged nodes in ten never reach
   the URL test at all and probe failure can account for at most the ~9% that did — read
   `stable_dead_skipped_nodes` against `stable_merged_nodes` before blaming a source's probe
-  results. The per-name source tables — panel 8 (`Crawler sources: top 25 (last cycle)`) and
+  results. Since the 2026-09 round that skip counts only liveness verdicts for the
+  production prober: `recordDead` never caches a converter-unmapped or parse-refused node,
+  so the standing refusal population re-enters the probe every cycle — visible in
+  `stable_probed_nodes` and `stable_probe_refused_nodes` — instead of inflating
+  `dead_skipped` after its first refusal (see the dead-cache bullet below).
+  The per-name source tables — panel 8 (`Crawler sources: top 25 (last cycle)`) and
   panel 22 (`Curated sources: top 25 (last cycle)`) beside it — rename the four columns
   `yielded`/`valid`/`kept`/`filtered`, so their `kept` column is `stable_source_tested_nodes` and
   their `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
@@ -383,41 +398,100 @@ vendor the dashboard into the nixos repo.
   skip), because the never-ran case also has no `filter_in`/`filter_kept` sample to anchor a
   reading.
 - **The dead cache turns one condemnation into several cycles of missing funnel.** A node
-  answering no round folds to `Successes: 0`, which `recordDead` blocks on (`internal/stable/checker.go:794`),
-  keyed by the endpoint's `server:port` AND the address the IP stage resolved for it that cycle
-  (a hostname re-pointed to a new address is a new server, not the old one's corpse; `deadKey`,
-  `internal/stable/deadset.go:39-41`); `filterDead` skips it for the TTL (the skip at
-  `checker.go:772-775`). The write is guarded by the same plausibility breaker as the pre-check
-  and the gates: a cycle where nearly every probed node failed leaves the cache unchanged
-  (`breakerTrips` at `checker.go:806-815`) — committing that verdict would freeze the list for
-  the whole TTL after the network recovered. The shipped config sets
+  answering no round folds to `Successes: 0`, and `recordDead` blocks exactly that — a
+  zero-success RESULT-MAP entry, whether every URL-test round failed through the tunnel or
+  the reachability pre-check condemned the endpoint: both are liveness verdicts
+  (`internal/stable/checker.go:845-851`, the write loop at :876-911) — keyed by the
+  endpoint's `server:port` AND the address the IP stage resolved for it that cycle
+  (a hostname re-pointed to a new address is a new server, not the old one's corpse;
+  `deadKey`, `internal/stable/deadset.go:16-19`); `filterDead` skips it for the TTL
+  (`checker.go:828-836`). A probed entry the result map never names is blocked ONLY when
+  the cycle's prober carries no refusal account: the absence-means-death rule survives
+  exactly there, and deliberately — nothing obliges a Prober implementation to name every
+  label (`recordDead`'s doc, `checker.go:863-866`;
+  `TestCheckerDeadCacheRecordsZeroSuccessAndAbsent`, `checker_test.go:393`). Under the
+  account the same miss is an attributed refusal (the next bullet) and is never written:
+  no URL-test round was spent on it, so caching it saves nothing, it carries no liveness
+  signal, a `server:port` entry would shadow a working sibling `Merge` admits on the same
+  key for the whole jittered TTL — the ssr-relabel regression's exact shape,
+  `scheme_contract_test.go` — and a mihomo bump that adds the scheme case or cipher would
+  find the line skipped past the bump. Re-judged every cycle instead, the class stays
+  attributable until the moment mihomo can dial it (`checker.go:852-861`). The write is
+  guarded by the same plausibility breaker as the pre-check and the gates
+  (`breakerTrips`, `prober.go:539-542`; the call at `checker.go:899`) — a cycle where
+  nearly every node the probe JUDGED failed leaves the cache unchanged: committing that
+  verdict would freeze the list for the whole TTL after the network recovered. Judged is
+  the result-present entries, or every entry for a no-account prober; the refusal classes
+  cannot be blocked, so counting them in the denominator would hold a wholly-refused pool
+  under the trip threshold exactly as unresolvable endpoints would in the pre-check's
+  (`checker.go:868-874`). The shipped config sets
   `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:174` and
   `:227`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
   it by a uniform [1, 1.5)
-  so the graveyard does not expire as one batch (`internal/stable/deadset.go:64-74`): [3h, 4.5h),
+  so the graveyard does not expire as one batch (`internal/stable/deadset.go:69-74`): [3h, 4.5h),
   three to four cycles. Stages (`internal/stable/select.go:22-52`): `passed` = a round answered,
   `connect` = no tunnel, `fetch` = tunnel up, GET failed, `condemned` = the pre-check refused the
-  server. `unknown` is no mis-assignment: `probeStages` walks the PROBED ENTRIES
-  (`checker.go:413-419`), so a label the prober never named reads as the zero `ProbeStage`, not
-  as an absence; a non-zero `unknown` COUNT is the payload's lines `adapter.ParseProxy` refused
-  (`parseLive`'s failure count, `prober.go:410-433`, the parse at :414). The pre-check runs
-  BEFORE that parse, so a line it condemns is never
-  parsed and reads `condemned` even when mihomo would also have refused it — the verdict is
-  about the endpoint, which the raw mapping carries in full, and both stages mean the same
-  thing to `recordDead` and to selection.
+  server. `unknown` no longer absorbs converter and adapter refusals: `probeStages` walks
+  the PROBED ENTRIES against the result map (`checker.go:458-477`) and, when the refusal
+  account is present, SKIPS every miss the account claims — such a label never indexes as
+  a stage at all, it indexes in the next bullet's family. A nonzero `stage="unknown"`
+  survives in exactly two shapes: a prober WITHOUT the account leaves each unnamed label
+  reading as the zero `ProbeStage` (`select.go:20-22`), and a named result whose folded
+  stage is the zero value — a rounds-0 fold of a live proxy — still lands there
+  (`prober_test.go:652-656`). The pre-check runs BEFORE that parse, so a line it condemns
+  is never parsed and reads `condemned` even when mihomo would also have refused it — the
+  verdict is about the endpoint, which the raw mapping carries in full, and that ordering
+  is all the two classes share: the condemned line is a liveness verdict and is
+  dead-cached, the refused mapping is neither.
+- **The probed nodes no URL test could be built for are their own family, absent-gated on
+  the trace's pattern.** `stable_probe_refused_nodes{reason="unconvertible"|"unparsable"}`
+  (`writeRefusals`, `internal/metrics/metrics.go:265-273`) counts precisely the result-map
+  misses the stage family above refuses to index. `unconvertible` = the node's line never
+  became a mapping: mihomo's `convert.ConvertsV2Ray` has no case for its scheme —
+  `wireguard`/`wg` 32 lines, `ssh` 10, `amneziawg` and `vmvless` 1 each in the measured
+  corpus — or its shape failed the decode; `unparsable` = the converter DID emit a mapping
+  and `adapter.ParseProxy` refused it: an unknown ss cipher, an invalid UUID, a structure
+  field out of range (`RefusalReport`'s doc, `internal/stable/report.go:238-264`). The
+  split is recorded, not guessed: `parseLive` files each refused mapping's label under the
+  same mapping-name derivation the result map would have folded under
+  (`internal/stable/prober.go:428-448`, `recordParseRefusal` at :455-462), and the checker
+  attributes every miss by whether the set holds it (`attributeRefusals`,
+  `checker.go:432-452`). Rendering is gated like the trace's: only a cycle whose probe
+  ACCOUNTED its parse renders the family — production's `Probe` does on every successful
+  cycle — and then BOTH reasons render, zeros included, because "the converter mapped
+  every probed node" is an answer (`writeRefusals`'s doc, `metrics.go:258-264`;
+  `TestMetricsRefusalStatesRenderApart`, `internal/metrics/metrics_test.go:554`). Stage
+  counts plus refusal counts then sum to `stable_probed_nodes` (`report.go:19-25`;
+  `metrics.go:231-236`). No sample at all means the prober has no account or its `Probe`
+  failed before the parse ran, and those cycles' misses index as `stage="unknown"`
+  instead: absent is NOT "nothing was refused" (`report.go:222-228`). What an operator
+  should conclude from each reason: neither is a probe outcome and neither is a death
+  sentence — no URL round was spent, a parse-refused node that passed the TCP pre-check
+  had its endpoint judged ALIVE, and both classes are VERSION-SENSITIVE, so read a spike
+  against a mihomo bump (the same line becomes a probed node the cycle the converter
+  learns its scheme or cipher) and a steady value as the corpus's standing share of lines
+  this worker's mihomo cannot dial — all four claims are in the `RefusalReport` doc cited
+  above and in the family's HELP text (`metrics.go:270`). The family ships with NO
+  dashboard panel — there is no `stable_probe_refused_nodes` target in
+  `deploy/grafana/sub-preprocessor.json`: panel 18 (`Probe outcome by stage`) reads
+  `stable_probe_outcome_nodes` and panel 5 (`Pipeline funnel`) draws
+  `stable_dead_skipped_nodes` as a line, and nothing draws the refusal pair — so it is
+  read by query until a tile lands; it is the one
+  live exception to the same-commit rule stated at the top of this guide, and the gap is
+  said here rather than implied.
 - **The breaker trips on a share of what the pre-check JUDGED, over a floor — and a total
-  refusal trips at any sample size.** `filterReachable` (`internal/stable/prober.go:598`) dials
+  refusal trips at any sample size.** `filterReachable` (`internal/stable/prober.go:643`) dials
   each distinct `server:port` the payload NAMES — parsable or not, since the parse comes
   after — and a position whose adapter would reach its server over UDP — hysteria2, tuic, mieru,
-  vless xhttp-over-QUIC — is not dialled at all (`dialsServerOverTCP`, `prober.go:539`), which
+  vless xhttp-over-QUIC — is not dialled at all (`dialsServerOverTCP`, `prober.go:584`), which
   is why these counts are endpoints (see above). The percentage arm needs both halves to hold:
-  at least 100 judged endpoints, at least 95% of them refused (`precheckBreakerMin` at :483,
-  `precheckBreakerPercent` at :479, the decided test at :655-657); the total-refusal arm fires on
-  one refused endpoint as surely as on ten thousand (`breakerTrips`, :494-497, shared with
-  `recordDead` and the through-node gates). Judged is dialled minus
+  at least 100 judged endpoints, at least 95% of them refused (`precheckBreakerMin` at :528,
+  `precheckBreakerPercent` at :524, the decided call at :701); the total-refusal arm fires on
+  one refused endpoint as surely as on ten thousand (`breakerTrips`, :539-542, shared with
+  `recordDead`'s guard at `checker.go:899` and the through-node gates). Judged is dialled minus
   unresolved: an unresolvable name is judged by nobody, so no resolver outage can fire the
   breaker, and every verdict but `verdictRefused` falls through to `live` (the loop at
-  :670-681).
+  :716-724).
 - **Two counters render BEFORE the cycle report exists, and they are all a no-data page has.**
   `writeMetrics` emits `stable_cycles_total` and `stable_cycle_failures_total`
   (`internal/metrics/metrics.go:109`, :110) BEFORE returning on a nil `m.last` (:112), so a worker

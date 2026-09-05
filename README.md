@@ -35,19 +35,27 @@ the router's own Mihomo can dial. That single dependency fixes the language.
 Node parsing is scheme-generic: any `scheme://` URI line is parsed (`vless`,
 `trojan`, `hysteria2`, `tuic`, …) — there is deliberately no whitelist of
 mihomo-known schemes. Four schemes need more than that generic walk, because
-the fields the pipeline needs are not in the URI: `vmess` hides server, port
-and name in a base64 payload, the legacy `ss` form hides server and port there
-(its name stays in the `#fragment`), `ssr` hides all three — its display name
-being a base64 `remarks` query value — and `mierus` carries its port list in
-the query. Each decoder mirrors mihomo's own accept rule, so a
+the fields the pipeline needs are not in the URI: `vmess` (V2RayN JSON form)
+hides server, port and name in a base64 payload, the legacy `ss` form hides
+server and port there (its name stays in the `#fragment`), `ssr` hides all
+three — its display name being a base64 `remarks` query value — and `mierus`
+carries its port list in the query. `vmess` is also accepted in its second,
+Xray VMessAEAD body — `vmess://<uuid>@<host>:<port>[?query][#name]` — whose
+fields live in the URI
+authority and fragment like `vless`'s, parsed under mihomo's own gates for
+that form (a non-empty host and a numeric port, both required). Each decoder
+mirrors mihomo's own accept rule, so a
 node kept here is a node the prober can convert. Portless lines are refused,
 and the refusal is not the http/socks one alone: portless
 `http`/`https`/`socks`/`socks5`/`socks5h` is refused because such a proxy is
 `host:port` by definition — so a bare `https://t.me/somechannel` in a source
 body counts as `unsupported=` (see `X-Preprocessor-Stats` below) — and so is
-a legacy `ss` payload whose base64 names no port, and any other scheme's
-portless form (`vless`, `trojan`, `tuic`, an unknown scheme), which is refused
-rather than published under a fabricated port the node does not have.
+a legacy `ss` payload whose base64 names no port, a `vmess` JSON body whose
+`port` reads empty (refused rather than defaulted to 443 as it once was), a
+portless Xray VMessAEAD authority (`vmess://uuid@host`), and any other
+scheme's portless form (`vless`, `trojan`, `tuic`, an unknown scheme), which
+is refused rather than published under a fabricated port the node does not
+have.
 `hysteria2`/`hy2` is the one scheme whose portless form survives: mihomo itself
 defaults it to port `443` (`convert/converter.go:85-89`), and the parser
 mirrors that. The portful form
@@ -348,11 +356,13 @@ repeat (two `GEO` entries with different chains publish two tags, and the
 country filter below consults both chains, so repetition changes the tag and
 not the verdict), and an empty `annotate` list disables annotation (original
 names pass through).
-Rewriting is scheme-aware: vmess folds tags into
-the base64 `ps` field, `ssr` into the base64 `remarks` query value, every other
-scheme into the `#fragment`. For `ssr` the fragment is not merely unused but
-corrupting — mihomo base64-decodes everything after `ssr://`, an appended
-`#name` included — so a payload neither rewriter can decode is published
+Rewriting is scheme-aware: the V2RayN JSON `vmess` body folds tags into
+the base64 `ps` field, `ssr` into the base64 `remarks` query value, and every
+other scheme — the Xray VMessAEAD `vmess` body included, which names its node
+in the `#fragment` — into the `#fragment`. For `ssr` the fragment is not
+merely unused but corrupting — mihomo base64-decodes everything after
+`ssr://`, an appended `#name` included — so a payload neither rewriter can
+decode is published
 verbatim: unannotated beats mangled. Known stale tags from upstream are
 stripped first.
 
