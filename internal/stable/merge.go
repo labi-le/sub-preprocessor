@@ -188,19 +188,26 @@ func appendPad3(b []byte, v int) []byte {
 }
 
 // relabelNode rewrites a node's display name to label so probe results map
-// back to entries. vmess and ssr both keep their name inside the base64
-// payload; every other scheme uses a URI #fragment.
+// back to entries. vmess and ssr keep their name inside their payloads — the
+// base64 "ps"/"remarks" — except the Xray VMessAEAD vmess body, which names
+// itself in a URI #fragment like every other scheme (see the SchemeVmess
+// arm). Every other scheme uses a URI #fragment.
 //
 // For ssr the fragment path is not merely unused but corrupting: mihomo
 // base64-decodes EVERYTHING after "ssr://", an appended "#label" included
 // (convert/converter.go:476-479), so the relabeled link yields no proxy at
-// all. The label then misses in the probe-result map, SelectSurvivors drops
-// the entry, and the checker books server:port into the dead cache
-// (deadcache.ttl, 3h shipped, jittered to [ttl, 1.5*ttl)), where Merge's
-// first-wins dedupe lets it shadow a working node of another scheme.
+// all. A node whose relabel mihomo cannot read never comes back out of the
+// probe: it is not selected, and it is counted among the cycle's unconvertible
+// refusals (stable_probe_refused_nodes) rather than dead-cached -- recordDead
+// excludes the refusal classes precisely because caching them shadowed a
+// working sibling on the same server:port for the jittered [3h, 4.5h)
+// deadcache.ttl, the shape TestSchemeContractSSRSurvivesRelabelFragmentFree
+// documents.
 //
 // A payload neither rewriter can decode returns false, which drops the node:
-// a node that cannot carry the label cannot be mapped back from a probe.
+// a node that cannot carry the label cannot be mapped back from a probe. The
+// vmess pair refuses only what the other arm owns, so nothing parseVmess
+// accepted is dropped there.
 //
 // The returned label is the string the Entry keeps: on the fragment path it is
 // a view into the relabeled line's tail, so a kept node pays nothing for it.
@@ -215,7 +222,16 @@ func relabelNode(n subscription.Node, label []byte, keys *keyArena) (raw, lbl st
 	switch n.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
 	case subscription.SchemeVmess:
 		lbl = keys.intern(label)
-		raw, ok = subscription.RewriteVmessName(n.Raw, lbl)
+		// Two share-link bodies parse as vmess: the V2RayN base64 JSON, whose
+		// name lives in the "ps" field, and the Xray VMessAEAD authority
+		// uuid@host:port?params, whose name lives in the URI fragment.
+		// RewriteVmessName refuses the AEAD body (it is not base64), so the
+		// counterpart rewrites the fragment; between them the pair renames
+		// everything parseVmess accepted, each arm refusing only the other's
+		// shapes.
+		if raw, ok = subscription.RewriteVmessName(n.Raw, lbl); !ok {
+			raw, ok = subscription.RewriteVmessAEADName(n.Raw, lbl)
+		}
 
 		return raw, lbl, ok
 	case subscription.SchemeSSR:

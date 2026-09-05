@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
 // vmessPayload builds a one-node vmess subscription payload on a port nothing
@@ -647,10 +649,19 @@ func TestProbeExpositionForAFixedPool(t *testing.T) {
 	}
 	// A partial literal on purpose: the histogram must carry no key for a stage
 	// nobody reached, which an exhaustive one cannot express. src-008 is the
-	// entry whose label no result names, so it indexes as unknown.
-	wantStages := map[ProbeStage]int{StageCondemned: 4, StageUnknown: 5} //nolint:exhaustive // see above
-	if got := probeStages(entries, res); !maps.Equal(got, wantStages) {
+	// entry whose label no result names: the parse-refusal account attributes
+	// it (unparsable) instead of leaving it to index as unknown, which is the
+	// whole difference this pool pins. The named-but-zero-stage entries --
+	// rounds-0 folds a live proxy without a round -- keep their StageUnknown.
+	wantStages := map[ProbeStage]int{StageCondemned: 4, StageUnknown: 4} //nolint:exhaustive // see above
+	if got := probeStages(entries, res, p.ParseRefusalReport()); !maps.Equal(got, wantStages) {
 		t.Errorf("probeStages = %v, want %v", got, wantStages)
+	}
+	// The account both classes of miss fold into. src-008's mapping exists and
+	// ParseProxy refused it; nothing in this pool was never mapped at all.
+	refusals := attributeRefusals(entries, res, p.ParseRefusalReport())
+	if refusals.State != RefusalRan || refusals.Unparsable != 1 || refusals.Unconvertible != 0 {
+		t.Errorf("refusal account = %+v, want State=RefusalRan Unparsable=1 Unconvertible=0", refusals)
 	}
 	if got, want := p.PrecheckReport(),
 		(PrecheckReport{State: PrecheckRan, Dialled: 5, Refused: 4}); got != want {
@@ -1001,5 +1012,259 @@ func TestProbeFailureRetainsNothing(t *testing.T) {
 	}
 	if got := p.TakeProbedAdapters(); got != nil {
 		t.Errorf("a failed probe retained %d adapters, want none", len(got))
+	}
+}
+
+// recordingDead mirrors fakeDeadCache from the external checker tests, which
+// this internal package cannot import; it records what recordDead writes.
+type recordingDead struct {
+	blocked []deadKey
+}
+
+func (d *recordingDead) Blocked(string, netip.Addr) bool { return false }
+func (d *recordingDead) Block(addr string, ip netip.Addr) error {
+	d.blocked = append(d.blocked, deadKey{addr: addr, ip: ip})
+	return nil
+}
+func (d *recordingDead) Prune() error { return nil }
+
+// TestRecordDeadExcludesAttributedRefusals pins the dead-cache decision in
+// code: a probed node whose label the result map never names carries no
+// liveness verdict when the prober can attribute the miss. Whether the
+// converter never mapped it or adapter.ParseProxy refused the mapping, the
+// endpoint was never judged (or, having passed the TCP pre-check, was judged
+// ALIVE), so caching server:port would shadow any working sibling Merge admits
+// on it for the jittered [3h, 4.5h) TTL -- the ssr-relabel regression's shape
+// (TestSchemeContractSSRSurvivesRelabelFragmentFree) -- and a mihomo bump that
+// learns the scheme or cipher would find the same line skipped past the bump.
+// Only the URL-tested zero-success entry is a death, and only it is written.
+func TestRecordDeadExcludesAttributedRefusals(t *testing.T) {
+	t.Parallel()
+
+	dead := &recordingDead{}
+	c := NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
+	probe := []Entry{
+		{Label: "src-001", Addr: "192.0.2.1:443"}, // URL-tested; every round failed
+		{Label: "src-002", Addr: "192.0.2.2:443"}, // mapping existed; ParseProxy refused it
+		{Label: "src-003", Addr: "192.0.2.3:443"}, // converter never emitted a mapping
+		{Label: "src-004", Addr: "192.0.2.4:443"}, // healthy
+	}
+	res := map[string]ProbeResult{
+		"src-001": {Stage: StageConnect},
+		"src-004": {Successes: 5, MeanMs: 100, Stage: StagePassed},
+	}
+	refusals := RefusalReport{State: RefusalRan, refused: map[string]struct{}{"src-002": {}}}
+	c.recordDead(probe, res, refusals)
+
+	want := []string{"192.0.2.1:443"}
+	got := make([]string, len(dead.blocked))
+	for i, k := range dead.blocked {
+		got[i] = k.addr
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("recordDead wrote %v, want only the URL-tested-dead %v", got, want)
+	}
+}
+
+// TestRecordDeadAbsenceKeepsBlockingWithoutTheAccount pins the other half of
+// the same rule: nothing obliges a Prober implementation to name every label,
+// so a prober WITHOUT the parse-refusal account keeps the absence-means-death
+// write. Removing it would silently empty the dead cache the moment such a
+// prober stops naming labels, with every counter still reading plausible.
+func TestRecordDeadAbsenceKeepsBlockingWithoutTheAccount(t *testing.T) {
+	t.Parallel()
+
+	dead := &recordingDead{}
+	c := NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
+	probe := []Entry{
+		{Label: "src-001", Addr: "192.0.2.1:443"},
+		{Label: "src-002", Addr: "192.0.2.2:443"},
+		{Label: "src-003", Addr: "192.0.2.3:443"},
+		{Label: "src-004", Addr: "192.0.2.4:443"},
+	}
+	res := map[string]ProbeResult{
+		"src-001": {Stage: StageConnect},
+		"src-004": {Successes: 5, MeanMs: 100, Stage: StagePassed},
+	}
+	c.recordDead(probe, res, RefusalReport{}) // State Absent: no account
+
+	want := []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443"}
+	got := make([]string, len(dead.blocked))
+	for i, k := range dead.blocked {
+		got[i] = k.addr
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("recordDead wrote %v, want the zero-success and both absent %v", got, want)
+	}
+}
+
+// TestRecordDeadBreakerIgnoresRefusedEntries: the write's plausibility breaker
+// must judge only the entries a write could block, exactly as the pre-check's
+// breaker judges only the endpoints it dialled. A probed set that is wholly
+// converter-unmapped has no verdict to disbelieve -- nothing is written and
+// nothing trips -- while a set whose judged entries are all dead still trips
+// and keeps the cache unchanged.
+func TestRecordDeadBreakerIgnoresRefusedEntries(t *testing.T) {
+	t.Parallel()
+
+	allRefused := make([]Entry, 8)
+	for i := range allRefused {
+		allRefused[i] = Entry{Label: fmt.Sprintf("src-%03d", i), Addr: fmt.Sprintf("192.0.2.%d:443", i+1)}
+	}
+	dead := &recordingDead{}
+	c := NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
+	c.recordDead(allRefused, map[string]ProbeResult{}, RefusalReport{State: RefusalRan})
+	if len(dead.blocked) != 0 {
+		t.Errorf("a wholly unconvertible set must write nothing, wrote %v", dead.blocked)
+	}
+
+	allDead := make([]Entry, 8)
+	res := make(map[string]ProbeResult, 8)
+	for i := range allDead {
+		label := fmt.Sprintf("src-%03d", i)
+		allDead[i] = Entry{Label: label, Addr: fmt.Sprintf("192.0.2.%d:443", i+1)}
+		res[label] = ProbeResult{Stage: StageConnect}
+	}
+	dead = &recordingDead{}
+	c = NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
+	c.recordDead(allDead, res, RefusalReport{State: RefusalRan})
+	if len(dead.blocked) != 0 {
+		t.Errorf("an all-dead judged set must trip the breaker and write nothing, wrote %v", dead.blocked)
+	}
+}
+
+// TestAttributeRefusalsSplitsTheTwoClasses pins the attribution seam itself:
+// result-map misses sort into the parse-refused labels the prober recorded and
+// everything else -- the converter never mapped it. A prober without the
+// account gets no attribution at all: its misses keep the legacy meaning
+// rather than being guessed at.
+func TestAttributeRefusalsSplitsTheTwoClasses(t *testing.T) {
+	t.Parallel()
+
+	probe := []Entry{
+		{Label: "src-001"}, {Label: "src-002"}, {Label: "src-003"}, {Label: "src-004"},
+	}
+	res := map[string]ProbeResult{
+		"src-001": {Successes: 5, MeanMs: 100, Stage: StagePassed},
+		"src-004": {Stage: StageCondemned},
+	}
+	refusals := RefusalReport{State: RefusalRan, refused: map[string]struct{}{"src-002": {}}}
+	got := attributeRefusals(probe, res, refusals)
+	if got.State != RefusalRan || got.Unparsable != 1 || got.Unconvertible != 1 {
+		t.Errorf("attributeRefusals = %+v, want State=Ran Unparsable=1 Unconvertible=1", got)
+	}
+	if unaccounted := attributeRefusals(probe, res, RefusalReport{}); unaccounted.State != RefusalAbsent ||
+		unaccounted.Unparsable != 0 || unaccounted.Unconvertible != 0 {
+		t.Errorf("an absent account must not be attributed, got %+v", unaccounted)
+	}
+}
+
+// twoNodeFilterer yields two nodes from one source, so a cycle can carry one
+// entry the result map names and one the refusal account carries.
+type twoNodeFilterer struct{}
+
+func (twoNodeFilterer) FilterNodes(
+	context.Context, preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return []preprocess.NodeResult{
+		{Raw: benchVlessLine("1.1.1.1", "443", "a")},
+		{Raw: benchVlessLine("2.2.2.2", "443", "b")},
+	}, preprocess.Stats{}, nil
+}
+
+//nolint:ireturn // implements Filterer; handing out the interface is the point
+func (twoNodeFilterer) Annotator() preprocess.Annotator { return nil }
+
+// refusingProber names src-001 as passed and reports whatever parse-refusal
+// account the test built, so the checker's attribution seam is exercised for a
+// report no other fake reports -- the precheckingProber pattern for
+// RefusalReport.
+type refusingProber struct {
+	oneNodeProber
+	refused map[string]struct{}
+}
+
+func (p *refusingProber) Probe(context.Context, []byte) (map[string]ProbeResult, error) {
+	return map[string]ProbeResult{"src-001": {Successes: 5, MeanMs: 100, Stage: StagePassed}}, nil
+}
+
+func (p *refusingProber) ParseRefusalReport() RefusalReport {
+	return RefusalReport{State: RefusalRan, refused: p.refused}
+}
+
+// passedOnlyProber names src-001 as passed and implements no refusal
+// capability: the legacy shape whose result-map miss must keep indexing as
+// stage="unknown".
+type passedOnlyProber struct{}
+
+func (passedOnlyProber) Probe(context.Context, []byte) (map[string]ProbeResult, error) {
+	return map[string]ProbeResult{"src-001": {Successes: 5, MeanMs: 100, Stage: StagePassed}}, nil
+}
+
+func (passedOnlyProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
+
+// TestRefusalReportReachesTheCycleReport walks the whole seam the refusal
+// metric rides: prober -> attributeRefusals -> CycleReport -> Reporter. The
+// result-map miss is attributed to the class the prober recorded (or to the
+// converter when it recorded none), and is then absent from the stage counts;
+// a prober without the account leaves the miss indexing as StageUnknown with
+// an absent Refusals, exactly the pre-account behaviour.
+func TestRefusalReportReachesTheCycleReport(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		desc     string
+		prober   Prober
+		wantRef  RefusalReport
+		wantUnkn int
+	}{
+		{
+			desc:    "parse refused",
+			prober:  &refusingProber{refused: map[string]struct{}{"src-002": {}}},
+			wantRef: RefusalReport{State: RefusalRan, Unparsable: 1},
+		},
+		{
+			desc:    "converter never mapped",
+			prober:  &refusingProber{},
+			wantRef: RefusalReport{State: RefusalRan, Unconvertible: 1},
+		},
+		{
+			desc:     "prober runs no refusal account",
+			prober:   passedOnlyProber{},
+			wantUnkn: 1,
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			rec := &cycleRecorder{}
+			ch := NewChecker(CheckerSpec{
+				Sources:       []config.SubscriptionSource{{Name: "src", Body: "ignored\n"}},
+				Interval:      time.Hour,
+				Rounds:        5,
+				MaxAvgMs:      1000,
+				SourceTimeout: time.Minute,
+				Prober:        tc.prober,
+			}, func() Filterer { return twoNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
+
+			if err := ch.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if rec.last == nil {
+				t.Fatal("a published cycle must reach the Reporter")
+			}
+			r := rec.last.Refusals
+			if r.State != tc.wantRef.State || r.Unparsable != tc.wantRef.Unparsable ||
+				r.Unconvertible != tc.wantRef.Unconvertible {
+				t.Errorf("CycleReport.Refusals = %+v, want %+v", r, tc.wantRef)
+			}
+			wantStages := map[ProbeStage]int{StagePassed: 1} //nolint:exhaustive // only the reached stage may carry a key
+			if tc.wantUnkn > 0 {
+				wantStages[StageUnknown] = tc.wantUnkn
+			}
+			if got := rec.last.ProbeStages; !maps.Equal(got, wantStages) {
+				t.Errorf("CycleReport.ProbeStages = %v, want %v", got, wantStages)
+			}
+		})
 	}
 }

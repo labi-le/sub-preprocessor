@@ -50,11 +50,15 @@ func goldenSpeeds() []int {
 func goldenCases() []goldenCase {
 	full := &stable.CycleReport{
 		SourcesOK: 6, SourcesTotal: 7,
-		Merged: 21000, DeadSkipped: 19391, Probed: 1609, Kept: 1509,
-		ProbeStages: map[stable.ProbeStage]int{
+		Merged: 21000, DeadSkipped: 19383, Probed: 1617, Kept: 1509,
+		// A capable prober attributes every result-map miss: the stage counts
+		// and the refusal counts together close on Probed (no unknown bucket).
+		ProbeStages: map[stable.ProbeStage]int{ //nolint:exhaustive // an attributed cycle carries no unknown bucket
 			stable.StageCondemned: 700, stable.StageConnect: 400,
 			stable.StageFetch: 100, stable.StagePassed: 405,
-			stable.StageUnknown: 4,
+		},
+		Refusals: stable.RefusalReport{
+			State: stable.RefusalRan, Unparsable: 4, Unconvertible: 8,
 		},
 		Precheck:   stable.PrecheckReport{State: stable.PrecheckRan, Dialled: 1200, Refused: 707, Unresolved: 61},
 		GeoUnknown: 12,

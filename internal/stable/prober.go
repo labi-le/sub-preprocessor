@@ -56,6 +56,13 @@ type MihomoProber struct {
 	// PrecheckReport after Probe returns, both on the cycle goroutine. Cycles
 	// never overlap (Controller.Apply swaps a spec, it does not run one).
 	precheck PrecheckReport
+	// parseRefusal is the parse-refusal account of the same Probe: parseLive
+	// records each mapping adapter.ParseProxy refused (the refused label set
+	// and the Ran state), and the checker reads it back through
+	// ParseRefusalReport beside PrecheckReport, also on the cycle goroutine.
+	// Probe resets it at its start like precheck, so a failed Probe can never
+	// leave a stale account describing a cycle that did not run.
+	parseRefusal RefusalReport
 	// probed holds the adapter objects a successful Probe kept alive for the
 	// checker's egress stage, which consumes them by label instead of parsing
 	// the survivor set again (see TakeProbedAdapters). Filled by Probe and
@@ -138,8 +145,11 @@ func betterProbe(a, b ProbeResult) bool {
 // adapters would be built only to be thrown away unread.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
 	// Never last cycle's verdict: a Probe that fails before the pre-check must
-	// report PrecheckAbsent, not the previous pool's numbers.
+	// report PrecheckAbsent, not the previous pool's numbers. The parse-refusal
+	// account resets beside it: a stale one would attribute a cycle whose parse
+	// never ran.
 	m.precheck = PrecheckReport{}
+	m.parseRefusal = RefusalReport{}
 	// Whatever a previous call retained was never taken (the take clears the
 	// field), so it is closed here rather than leaked. Cycles never overlap,
 	// so none of it can be in flight.
@@ -238,9 +248,11 @@ func foldProbeResults(nodes []probeNode, accs []delayAcc) map[string]ProbeResult
 			// for live positions too would be dead work (see probeNodes).
 			label = n.label
 		default:
-			// mihomo refused the mapping, so there is no result to fold;
-			// probeStages reads StageUnknown off the label's absence
-			// (checker.go:363).
+			// mihomo refused the mapping (adapter.ParseProxy), so there is no
+			// result to fold; parseLive recorded the refusal in the
+			// parse-refusal account, and probeStages attributes the label's
+			// absence to it instead of to a stage (see attributeRefusals). A
+			// prober without the account reads the absence as StageUnknown.
 			continue
 		}
 		r := ProbeResult{Successes: int(a.succ), Stage: a.stage}
@@ -314,7 +326,10 @@ type probeNode struct {
 // so probeSet derives it for those positions alone, while the raw mappings are
 // still in frame. Deriving it for every mapping was dead work for every live
 // position — the fold asks the adapter instead — and mislabelling a condemned
-// node buries it for deadcache.ttl, where losing the speedup costs one dial.
+// node files its verdict under a label no entry carries: the entry reads as a
+// result-map miss, is counted among the unconvertible refusals and is re-judged
+// next cycle, the one dial the dead-cache skip would have saved (recordDead no
+// longer caches an attributed miss, for the shadowing reasons its doc gives).
 func probeNodes(mappings []map[string]any) []probeNode {
 	nodes := make([]probeNode, len(mappings))
 	for i, mapping := range mappings {
@@ -406,13 +421,17 @@ func (m *MihomoProber) probeSet(
 
 // parseLive builds the adapter objects for the positions the pre-check spared
 // and returns those that yielded one, compacting live in place: filterReachable
-// hands over a slice nobody else holds.
+// hands over a slice nobody else holds. Every mapping the adapter refuses is
+// recorded in the parse-refusal account under its label, so the checker can
+// tell a node the CONVERTER never mapped (absent from the account) from one
+// whose mapping ParseProxy refused.
 func (m *MihomoProber) parseLive(mappings []map[string]any, nodes []probeNode, live []int) []int {
 	kept := live[:0]
 	failures := 0
 	for _, i := range live {
 		px, err := adapter.ParseProxy(mappings[i])
 		if err != nil {
+			m.recordParseRefusal(mappings[i])
 			failures++
 
 			continue
@@ -421,8 +440,34 @@ func (m *MihomoProber) parseLive(mappings []map[string]any, nodes []probeNode, l
 		kept = append(kept, i)
 	}
 	m.warnUnparsable(failures)
+	// Whatever the parse saw, a Probe that got here ran it: the account is
+	// complete and renders its zeros as an answer rather than as no account.
+	m.parseRefusal.State = RefusalRan
 
 	return kept
+}
+
+// recordParseRefusal files one parse-refused mapping in the account. The label
+// is derived exactly as probeSet derives a condemned position's -- the mapping
+// name through mappingLabel -- so the account names the same entry the result
+// map would have folded under; only the map insert allocates, and only for a
+// line the adapter actually refused.
+func (m *MihomoProber) recordParseRefusal(mapping map[string]any) {
+	if m.parseRefusal.refused == nil {
+		m.parseRefusal.refused = make(map[string]struct{})
+	}
+	typ, _ := mapping["type"].(string)
+	name, _ := mapping["name"].(string)
+	m.parseRefusal.refused[mappingLabel(name, typ)] = struct{}{}
+}
+
+// ParseRefusalReport returns the parse-refusal account of the last successful
+// Probe (see RefusalReport), or the zero report before any Probe ran or after
+// one that failed: Probe resets the field at its start, exactly as it does
+// precheck, so a stale account can never describe a cycle that did not produce
+// it.
+func (m *MihomoProber) ParseRefusalReport() RefusalReport {
+	return m.parseRefusal
 }
 
 // warnUnparsable is shared so the probe's parse and the survivor set's cannot

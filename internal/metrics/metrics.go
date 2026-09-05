@@ -117,8 +117,9 @@ func (m *Metrics) writeMetrics(dst io.Writer) {
 	gauge(w, "stable_sources_total", "Sources configured.", float64(r.SourcesTotal))
 	gauge(w, "stable_merged_nodes", "Unique nodes after merge/dedupe.", float64(r.Merged))
 	gauge(w, "stable_dead_skipped_nodes", "Nodes skipped before probing: a recent probe found them dead.", float64(r.DeadSkipped))
-	gauge(w, "stable_probed_nodes", "Nodes latency-probed.", float64(r.Probed))
+	gauge(w, "stable_probed_nodes", "Nodes handed to the prober last cycle (merged minus dead-cache skips), whether or not a URL test could be built for them.", float64(r.Probed))
 	writeProbeStages(w, r.ProbeStages)
+	writeRefusals(w, r.Refusals)
 	writePrecheck(w, r.Precheck)
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.", float64(r.GeoUnknown))
@@ -227,6 +228,13 @@ func writePhases(w *exposition, p stable.CyclePhases) {
 // answer -- while stage="unknown" appears only when the prober left nodes
 // unclassified, since a permanent zero there says nothing.
 //
+// The refused classes are NOT stages and never appear here: a prober with the
+// parse-refusal account attributes its result-map misses to
+// stable_probe_refused_nodes instead, and the two families sum to
+// stable_probed_nodes together. A prober without the account leaves those
+// misses indexing as unknown, which is what stage="unknown" has always been:
+// a hand-off the prober could not explain.
+//
 // A nil map renders nothing: the fold reaching CycleReport is the hand-off that
 // can be dropped, and an absent series says that, where four zeros beside a
 // non-zero stable_probed_nodes would read as a cycle that probed nobody.
@@ -235,7 +243,7 @@ func writeProbeStages(w *exposition, stages map[stable.ProbeStage]int) {
 		return
 	}
 	help(w, "stable_probe_outcome_nodes", "gauge",
-		"Probed nodes by how far the probe got, summing to stable_probed_nodes. stage=\"condemned\" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
+		"Probed nodes by how far the probe got. stage=\"condemned\" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage=\"connect\" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage=\"fetch\" got a tunnel and failed the GET through it. stage=\"passed\" answered at least one round. A node no URL test could be built for is in neither stage: it is attributed to stable_probe_refused_nodes, and the two families sum to stable_probed_nodes -- unless the prober cannot account its refusals, where such a node indexes as stage=\"unknown\" instead, a defect indicator that is permanent zero in a healthy cycle. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.")
 	// Progress order, unknown last: it is a defect indicator, not a stage.
 	for _, s := range []stable.ProbeStage{
 		stable.StageCondemned, stable.StageConnect, stable.StageFetch, stable.StagePassed,
@@ -245,6 +253,23 @@ func writeProbeStages(w *exposition, stages map[stable.ProbeStage]int) {
 	if n := stages[stable.StageUnknown]; n > 0 {
 		sampleEsc(w, "stable_probe_outcome_nodes", labelStage, stable.StageUnknown.String(), float64(n))
 	}
+}
+
+// writeRefusals renders the probed nodes no URL test could be built for, on
+// the trace family's gate: a RefusalRan account renders its two counts even at
+// zero -- "the converter mapped every probed node" is an answer -- while
+// RefusalAbsent -- a probe that never succeeded, or a Prober without the
+// parse-refusal capability, whose result-map misses index as
+// stage="unknown" instead -- renders NOTHING, so an absent account can never
+// read as a cycle that refused nobody.
+func writeRefusals(w *exposition, r stable.RefusalReport) {
+	if r.State != stable.RefusalRan {
+		return
+	}
+	help(w, "stable_probe_refused_nodes", "gauge",
+		"Nodes the last cycle's probe could not turn into a URL test, by reason. reason=\"unconvertible\" means convert.ConvertsV2Ray never emitted a mapping for the node's line: mihomo's share-link converter has no case for its scheme (wireguard/wg 32 lines, ssh 10, amneziawg and vmvless 1 each in the measured corpus) or its shape failed the decode. reason=\"unparsable\" means the converter DID build a mapping and adapter.ParseProxy refused it: an unknown ss cipher or an invalid UUID, among others. Neither reason ever spent a URL-test round, so neither appears in stable_probe_outcome_nodes; the two families together sum to stable_probed_nodes. Neither is a death sentence and neither is ever written to the dead cache -- each says nothing about the endpoint's liveness, the same line becomes a probed node the moment a mihomo bump learns its scheme or cipher, and a cached entry would shadow a working sibling on the same server:port -- so the same nodes are counted here again next cycle until they convert. No sample at all when the prober cannot account for its refusals, where its result-map misses index as stage=\"unknown\" instead.")
+	sampleEsc(w, "stable_probe_refused_nodes", labelReason, "unconvertible", float64(r.Unconvertible))
+	sampleEsc(w, "stable_probe_refused_nodes", labelReason, "unparsable", float64(r.Unparsable))
 }
 
 // writePrecheck renders the reachability pre-check's self-account. A tripped

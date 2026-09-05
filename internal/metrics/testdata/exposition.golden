@@ -23,17 +23,20 @@ stable_sources_total 7
 stable_merged_nodes 21000
 # HELP stable_dead_skipped_nodes Nodes skipped before probing: a recent probe found them dead.
 # TYPE stable_dead_skipped_nodes gauge
-stable_dead_skipped_nodes 19391
-# HELP stable_probed_nodes Nodes latency-probed.
+stable_dead_skipped_nodes 19383
+# HELP stable_probed_nodes Nodes handed to the prober last cycle (merged minus dead-cache skips), whether or not a URL test could be built for them.
 # TYPE stable_probed_nodes gauge
-stable_probed_nodes 1609
-# HELP stable_probe_outcome_nodes Probed nodes by how far the probe got, summing to stable_probed_nodes. stage="condemned" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage="connect" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage="fetch" got a tunnel and failed the GET through it. stage="passed" answered at least one round. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.
+stable_probed_nodes 1617
+# HELP stable_probe_outcome_nodes Probed nodes by how far the probe got. stage="condemned" never spent a URL test: the reachability pre-check proved the server accepts no TCP connection. It reads 0 both for a pre-check that condemned nobody and for one whose breaker discarded its verdict -- stable_precheck_trusted tells those apart -- and an endpoint whose name did not resolve is never condemned, since a failed lookup proves nothing. stage="connect" merges transport and crypto failures deliberately -- mihomo's vless adapter renders its dial error with %s, and vless dominates every pool this worker reads, so no error inspection can separate them. stage="fetch" got a tunnel and failed the GET through it. stage="passed" answered at least one round. A node no URL test could be built for is in neither stage: it is attributed to stable_probe_refused_nodes, and the two families sum to stable_probed_nodes -- unless the prober cannot account its refusals, where such a node indexes as stage="unknown" instead, a defect indicator that is permanent zero in a healthy cycle. This counts NODES, folded best-of-ports: it cannot express what share of ATTEMPTS burned the full check.timeout.
 # TYPE stable_probe_outcome_nodes gauge
 stable_probe_outcome_nodes{stage="condemned"} 700
 stable_probe_outcome_nodes{stage="connect"} 400
 stable_probe_outcome_nodes{stage="fetch"} 100
 stable_probe_outcome_nodes{stage="passed"} 405
-stable_probe_outcome_nodes{stage="unknown"} 4
+# HELP stable_probe_refused_nodes Nodes the last cycle's probe could not turn into a URL test, by reason. reason="unconvertible" means convert.ConvertsV2Ray never emitted a mapping for the node's line: mihomo's share-link converter has no case for its scheme (wireguard/wg 32 lines, ssh 10, amneziawg and vmvless 1 each in the measured corpus) or its shape failed the decode. reason="unparsable" means the converter DID build a mapping and adapter.ParseProxy refused it: an unknown ss cipher or an invalid UUID, among others. Neither reason ever spent a URL-test round, so neither appears in stable_probe_outcome_nodes; the two families together sum to stable_probed_nodes. Neither is a death sentence and neither is ever written to the dead cache -- each says nothing about the endpoint's liveness, the same line becomes a probed node the moment a mihomo bump learns its scheme or cipher, and a cached entry would shadow a working sibling on the same server:port -- so the same nodes are counted here again next cycle until they convert. No sample at all when the prober cannot account for its refusals, where its result-map misses index as stage="unknown" instead.
+# TYPE stable_probe_refused_nodes gauge
+stable_probe_refused_nodes{reason="unconvertible"} 8
+stable_probe_refused_nodes{reason="unparsable"} 4
 # HELP stable_precheck_trusted 1 when the TCP reachability pre-check's verdict was used last cycle, 0 when its breaker rejected it: refused at least 95% of the endpoints it judged, so the verdict was DISCARDED, every node was URL-tested and stable_probe_outcome_nodes{stage="condemned"} reads 0 exactly as it does for a pre-check that condemned nobody. stable_precheck_refused_endpoints is then the only trace of what was thrown away.
 # TYPE stable_precheck_trusted gauge
 stable_precheck_trusted 1
@@ -281,7 +284,7 @@ stable_merged_nodes 0
 # HELP stable_dead_skipped_nodes Nodes skipped before probing: a recent probe found them dead.
 # TYPE stable_dead_skipped_nodes gauge
 stable_dead_skipped_nodes 0
-# HELP stable_probed_nodes Nodes latency-probed.
+# HELP stable_probed_nodes Nodes handed to the prober last cycle (merged minus dead-cache skips), whether or not a URL test could be built for them.
 # TYPE stable_probed_nodes gauge
 stable_probed_nodes 0
 # HELP stable_precheck_trusted 1 when the TCP reachability pre-check's verdict was used last cycle, 0 when its breaker rejected it: refused at least 95% of the endpoints it judged, so the verdict was DISCARDED, every node was URL-tested and stable_probe_outcome_nodes{stage="condemned"} reads 0 exactly as it does for a pre-check that condemned nobody. stable_precheck_refused_endpoints is then the only trace of what was thrown away.

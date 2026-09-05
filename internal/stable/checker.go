@@ -235,10 +235,13 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	}
 
 	// Read while it still describes THIS probe: PrecheckAbsent afterwards would
-	// be indistinguishable from a prober that runs no pre-check.
+	// be indistinguishable from a prober that runs no pre-check. The refusal
+	// account rides the same rule -- a stale one would attribute a cycle that
+	// never probed.
 	precheck := precheckReportOf(spec.Prober)
+	refusals := refusalReportOf(spec.Prober)
 
-	c.recordDead(probe, res)
+	c.recordDead(probe, res, refusals)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	selectedAt := time.Now()
@@ -268,7 +271,8 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		DeadSkipped:   skipped,
 		Probed:        len(probe),
 		Kept:          len(survivors),
-		ProbeStages:   probeStages(probe, res),
+		ProbeStages:   probeStages(probe, res, refusals),
+		Refusals:      attributeRefusals(probe, res, refusals),
 		Precheck:      precheck,
 		GeoUnknown:    geoUnknownCount(survivors),
 		KeptCountries: keptCountries(survivors),
@@ -406,14 +410,69 @@ func precheckReportOf(p Prober) PrecheckReport {
 	return reporter.PrecheckReport()
 }
 
+// parseRefusalReporter is the optional half of a Prober that accounts the
+// probed nodes no URL test could be built for (see RefusalReport), read after
+// Probe exactly like the precheckReporter capability. A Prober without one
+// reports RefusalAbsent: every result-map miss then indexes as
+// stage="unknown", and recordDead keeps the absence-means-death rule, because
+// nothing obliges a Prober implementation to name every label.
+type parseRefusalReporter interface {
+	ParseRefusalReport() RefusalReport
+}
+
+func refusalReportOf(p Prober) RefusalReport {
+	reporter, ok := p.(parseRefusalReporter)
+	if !ok {
+		return RefusalReport{}
+	}
+
+	return reporter.ParseRefusalReport()
+}
+
+// attributeRefusals splits the probed entries the probe-result map never names
+// into the two classes the refusal account distinguishes, filling the counts
+// the report renders. Only a Ran account is attributed: a prober without one
+// has no refused set, and its misses keep the legacy meaning (stage="unknown",
+// dead-cache eligible) rather than being guessed at here. The refused labels
+// are those parseLive recorded under the mapping-name derivation, so an entry
+// whose mapping the converter dropped -- its line never became a mapping at
+// all -- is every miss the set does not hold.
+func attributeRefusals(probe []Entry, res map[string]ProbeResult, r RefusalReport) RefusalReport {
+	if r.State != RefusalRan {
+		return r
+	}
+	for _, e := range probe {
+		if _, ok := res[e.Label]; ok {
+			continue
+		}
+		if _, refused := r.refused[e.Label]; refused {
+			r.Unparsable++
+		} else {
+			r.Unconvertible++
+		}
+	}
+
+	return r
+}
+
 // probeStages counts the probed set by how far each probe got. It walks the
-// probed entries rather than the result map so the counts sum to len(probe): a
-// label the prober never named indexes to StageUnknown instead of vanishing,
-// which keeps the ratio against stable_probed_nodes closed.
-func probeStages(probe []Entry, res map[string]ProbeResult) map[ProbeStage]int {
+// probed entries rather than the result map so the counts stay closed against
+// len(probe): a label the prober never named -- its mapping did not parse and
+// its endpoint was never condemned -- indexes to StageUnknown when the prober
+// has no refusal account, and is attributed to the cycle's Refusals (never
+// counted here) when it has one, so the two sums add to Probed either way.
+func probeStages(probe []Entry, res map[string]ProbeResult, refusals RefusalReport) map[ProbeStage]int {
 	stages := make(map[ProbeStage]int)
 	for _, e := range probe {
-		stages[res[e.Label].Stage]++
+		r, ok := res[e.Label]
+		if !ok {
+			if refusals.State != RefusalRan {
+				stages[StageUnknown]++
+			}
+
+			continue
+		}
+		stages[r.Stage]++
 	}
 
 	return stages
@@ -783,36 +842,77 @@ func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, o
 	return probe, deadSkipped, true
 }
 
-// recordDead caches nodes that returned no successful probe so later cycles
-// skip them.
+// recordDead caches nodes whose probe proved them dead so later cycles skip
+// them.
+//
+// Proved dead is a zero-success entry in the result map: every URL-test round
+// failed through the tunnel, or the reachability pre-check condemned the
+// endpoint -- both are liveness verdicts. A probed node whose label the map
+// never names is NOT cached when the prober carries the refusal account
+// (RefusalRan): the converter never mapped its line, or adapter.ParseProxy
+// refused the mapping, and neither says anything about the endpoint's
+// liveness. The refusal classes cost no URL-test round to rediscover (a
+// dropped or refused mapping never spends one), so caching them would save
+// nothing while letting Merge's first-wins dedupe shadow a working sibling on
+// the same server:port for the jittered [3h, 4.5h) TTL -- the ssr-relabel
+// regression's exact shape (scheme_contract_test.go) -- and a mihomo bump that
+// adds the scheme case or cipher would keep the same line skipped past the
+// bump. Re-judged every cycle instead, the classes stay attributable in
+// stable_probe_refused_nodes until the moment mihomo can dial them.
+//
+// Only a prober WITHOUT the account keeps the absence-means-death rule, and
+// that is deliberate: nothing obliges a Prober implementation to name every
+// label, and an un-attributable absence must not silently stop blocking (the
+// lesson of TestCheckerDeadCacheRecordsZeroSuccessAndAbsent).
 //
 // The write carries the same plausibility breaker as the pre-check
-// (breakerTrips): when nearly every probed node failed, the fault is likelier
-// our egress than the pool, and committing that verdict would freeze the
-// published list for deadcache.ttl after the network recovers. The verdict
-// fails open instead, exactly as filterReachable's does.
-func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
+// (breakerTrips), over the entries the probe actually JUDGED -- res-present
+// ones, or every entry for a prober without the account. Refused entries
+// cannot be blocked, so counting them in the denominator would hold a wholly
+// refused pool under the trip threshold exactly as unresolvable endpoints
+// would in filterReachable's; the breaker must stay about our egress, and a
+// refusal is not an egress verdict. The verdict fails open instead, exactly as
+// filterReachable's does.
+func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals RefusalReport) {
 	if c.dead == nil {
 		return
 	}
-	blocked := 0
+	blocked, judged := 0, 0
 	for _, e := range probe {
-		// Zero successes, not absence: the prober emits an entry per label and
-		// a label reads zero only when every port failed (foldProbeResults
-		// folds best-of-ports), so an absence test would silently stop
-		// blocking anything the moment the map is fully populated.
-		if r, ok := res[e.Label]; !ok || r.Successes == 0 {
+		r, ok := res[e.Label]
+		if !ok {
+			if refusals.State == RefusalRan {
+				// Attributed refusal: no liveness signal, never cached (see
+				// the doc above).
+				continue
+			}
+			blocked++
+			judged++
+
+			continue
+		}
+		judged++
+		if r.Successes == 0 {
 			blocked++
 		}
 	}
-	if breakerTrips(blocked, len(probe)) {
-		c.logger.Warn().Int("blocked", blocked).Int("probed", len(probe)).
+	if breakerTrips(blocked, judged) {
+		c.logger.Warn().Int("blocked", blocked).Int("judged", judged).
 			Int("threshold_pct", precheckBreakerPercent).
 			Msg("nearly every probed node failed; treating the verdict as unreliable and keeping the dead cache unchanged")
 		return
 	}
 	for _, e := range probe {
-		if r, ok := res[e.Label]; !ok || r.Successes == 0 {
+		r, ok := res[e.Label]
+		if !ok {
+			if refusals.State == RefusalRan {
+				continue
+			}
+			_ = c.dead.Block(e.Addr, e.IP)
+
+			continue
+		}
+		if r.Successes == 0 {
 			_ = c.dead.Block(e.Addr, e.IP)
 		}
 	}

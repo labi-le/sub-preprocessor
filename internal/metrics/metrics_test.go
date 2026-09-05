@@ -41,6 +41,7 @@ func TestMetricsObserveRender(t *testing.T) {
 		Trace:         stable.TraceReport{State: stable.TraceRan, Answered: 157, Unanswered: 8, Moved: 47},
 		Gemini:        stable.GeminiReport{State: stable.GeminiGateRan, Checks: 306, Unverified: 22},
 		Precheck:      stable.PrecheckReport{State: stable.PrecheckRan, Dialled: 1907, Refused: 1119, Unresolved: 99},
+		Refusals:      stable.RefusalReport{State: stable.RefusalRan, Unparsable: 12, Unconvertible: 44},
 		KeptSpeeds:    []int{3, 7, 30, 120},
 		GeoUnknown:    3,
 		KeptCountries: map[string]int{"NL": 40, "FI": 12},
@@ -93,6 +94,9 @@ func TestMetricsObserveRender(t *testing.T) {
 		"stable_precheck_dialled_endpoints 1907",
 		"stable_precheck_refused_endpoints 1119",
 		"stable_precheck_unresolved_endpoints 99",
+		"# TYPE stable_probe_refused_nodes gauge",
+		`stable_probe_refused_nodes{reason="unconvertible"} 44`,
+		`stable_probe_refused_nodes{reason="unparsable"} 12`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {
@@ -532,6 +536,90 @@ func traceLines(out string) string {
 	var b strings.Builder
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(line, "stable_trace_") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// TestMetricsRefusalStatesRenderApart pins the refusal family's absent gate,
+// on the trace's pattern: a cycle from a prober that cannot account its
+// refusals renders NO sample -- its result-map misses index as stage="unknown"
+// instead -- while a Ran account renders both reasons even at zero, because
+// "the converter mapped every probed node" is an answer. The fixtures keep the
+// funnel closed -- stage counts plus refusal counts sum to Probed -- so a
+// renderer that double-counts refused nodes in the outcome family would fail
+// the sum a reader relies on.
+func TestMetricsRefusalStatesRenderApart(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[stable.RefusalState]string{}
+	for _, tc := range []struct {
+		name     string
+		probed   int
+		stages   map[stable.ProbeStage]int
+		rep      stable.RefusalReport
+		want     []string
+		noFamily bool
+	}{
+		{
+			name:     "absent (prober without the account)",
+			probed:   3,
+			stages:   map[stable.ProbeStage]int{stable.StageUnknown: 3}, //nolint:exhaustive // a no-account cycle's misses all index as unknown
+			noFamily: true,
+		},
+		{
+			name:   "ran and refused nothing",
+			probed: 1907,
+			stages: map[stable.ProbeStage]int{stable.StagePassed: 1907}, //nolint:exhaustive // only the reached stage carries a key
+			rep:    stable.RefusalReport{State: stable.RefusalRan},
+			want: []string{
+				`stable_probe_refused_nodes{reason="unconvertible"} 0`,
+				`stable_probe_refused_nodes{reason="unparsable"} 0`,
+			},
+		},
+		{
+			name:   "ran and refused both classes",
+			probed: 1907,
+			stages: map[stable.ProbeStage]int{stable.StagePassed: 1851}, //nolint:exhaustive // only the reached stage carries a key
+			rep:    stable.RefusalReport{State: stable.RefusalRan, Unparsable: 12, Unconvertible: 44},
+			want: []string{
+				`stable_probe_refused_nodes{reason="unconvertible"} 44`,
+				`stable_probe_refused_nodes{reason="unparsable"} 12`,
+			},
+		},
+	} {
+		m := metrics.New()
+		m.Observe(stable.CycleReport{Probed: tc.probed, ProbeStages: tc.stages, Refusals: tc.rep})
+		out := render(t, m)
+		for _, w := range tc.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: missing %q in:\n%s", tc.name, w, out)
+			}
+		}
+		if tc.noFamily && refusalLines(out) != "" {
+			t.Errorf("%s: must render no refusal sample:\n%s", tc.name, out)
+		}
+		rendered[tc.rep.State] = refusalLines(out)
+	}
+
+	// The assertion the three cases exist for: no two states may look alike.
+	for a, ra := range rendered {
+		for b, rb := range rendered {
+			if a != b && ra == rb {
+				t.Errorf("refusal states %d and %d render identically as %q", a, b, ra)
+			}
+		}
+	}
+}
+
+// refusalLines extracts the refusal family samples (HELP/TYPE headers
+// excluded) so two renderings can be compared for equality.
+func refusalLines(out string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_probe_refused_nodes{") {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}

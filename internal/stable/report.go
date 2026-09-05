@@ -16,11 +16,19 @@ type CycleReport struct {
 	DeadSkipped int
 	Probed      int
 	Kept        int
-	// ProbeStages counts the probed set by how far each node's probe got, and
-	// sums to Probed: a label the prober never named -- its mapping did not
-	// parse and its endpoint was never condemned -- counts as StageUnknown
-	// rather than falling out of the total.
+	// ProbeStages counts the probed set by how far each node's probe got. It
+	// sums with Refusals to Probed: when the prober carries the refusal
+	// account, a label the result map never named -- its mapping did not parse
+	// and its endpoint was never condemned -- is attributed there instead of
+	// vanishing; a prober without the account leaves such labels indexing as
+	// StageUnknown, so the counts stay closed either way.
 	ProbeStages map[ProbeStage]int
+	// Refusals accounts the probed nodes no URL test could be built for, split
+	// by whether the converter never mapped them or adapter.ParseProxy refused
+	// the mapping. Neither is a probe outcome and neither is a liveness
+	// verdict (see RefusalReport); the zero value renders as no refusal series
+	// at all, on the pre-check's and trace's absent pattern.
+	Refusals RefusalReport
 	// Precheck is what the reachability pre-check inside Probe did, in
 	// ENDPOINTS rather than nodes -- see PrecheckReport. It is the only place a
 	// discarded pre-check verdict survives: ProbeStages then holds no
@@ -209,6 +217,61 @@ type TraceReport struct {
 	Answered   int
 	Unanswered int
 	Moved      int
+}
+
+// RefusalState is whether the last successful Probe accounted the probed nodes
+// that no URL test could be built for. The zero value is RefusalAbsent: the
+// cycle's Prober does not implement the account, or Probe failed before its
+// parse ran. A report assembled then renders no refusal series at all, exactly
+// as an absent pre-check or trace renders none; absent is NOT "nothing was
+// refused", and those cycles leave every result-map miss indexing as
+// stage="unknown" instead (see probeStages).
+type RefusalState uint8
+
+const (
+	RefusalAbsent RefusalState = iota
+	// RefusalRan means Probe succeeded and its parse accounted every probed
+	// node the result map never names.
+	RefusalRan
+)
+
+// RefusalReport accounts the two classes of probed node that no URL test could
+// be built for, so a node the CONVERTER never mapped and one whose mapping
+// adapter.ParseProxy refused are attributable instead of both folding into one
+// anonymous stage="unknown" and a dead-cache entry that says nothing about the
+// endpoint.
+//
+// Unconvertible counts nodes whose line convert.ConvertsV2Ray dropped without
+// emitting a mapping: schemes mihomo's share-link converter has no case for
+// (wireguard/wg 32 lines, ssh 10, amneziawg and vmvless 1 each in the measured
+// corpus) plus shapes its decode refused. Unparsable counts nodes whose
+// mapping the converter DID emit and adapter.ParseProxy then refused: an
+// unknown ss cipher, an invalid UUID, a structure field out of range. The
+// converter's silent `continue` (mihomo common/convert/converter.go) and
+// parseLive's count-only warning used to be the whole account of both classes.
+//
+// Neither class is a probe outcome and neither is a liveness verdict: no URL
+// round was spent, and the parse-refused ones that passed the TCP pre-check
+// had their endpoint judged ALIVE. Both are version-sensitive -- a mihomo bump
+// that adds a converter case or a cipher turns the same line into a probed
+// node -- so recordDead deliberately never writes them into the dead cache: a
+// cached entry would shadow a working sibling Merge admits on the same
+// server:port for a verdict that never dialled the endpoint (see recordDead).
+//
+// The checker fills the counts (attributeRefusals) from the probe entries and
+// the result map it holds; the prober records which labels its parse refused
+// in the unexported refused set, which is what lets the two classes be told
+// apart. Sums with ProbeStages to Probed.
+type RefusalReport struct {
+	State         RefusalState
+	Unparsable    int
+	Unconvertible int
+	// refused holds the Entry.Label of every probed node whose mapping
+	// adapter.ParseProxy refused. Filled by parseLive under the same
+	// mappingLabel derivation the fold uses for a condemned position, so the
+	// account names the same entry the result map would have. Unconsumed by
+	// any other package: internal/metrics reads the two counts alone.
+	refused map[string]struct{}
 }
 
 // SourceReport is one source's contribution to a cycle. Total and the drop

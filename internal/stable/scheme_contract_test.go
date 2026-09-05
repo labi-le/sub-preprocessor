@@ -30,10 +30,11 @@ import (
 // error: convert.ConvertsV2Ray drops a line it cannot decode with `continue`
 // and returns no error as long as some other line converted, so a mapping bug
 // surfaces as a missing node rather than as a failure. In production that is a
-// node which is parsed, merged, published and probed, never answers, and ends
-// up in the dead cache (deadcache.ttl, 3h shipped, jittered to [ttl, 1.5*ttl))
-// under its server:port — where Merge's first-wins dedupe lets it shadow a
-// working node of another scheme.
+// node which is parsed, merged and published into the probe pool but never
+// comes back out of it: the cycle counts it as an unconvertible refusal
+// (stable_probe_refused_nodes{reason="unconvertible"}, on the absence recordDead
+// no longer dead-caches -- a cached server:port used to shadow a working node
+// of another scheme for deadcache.ttl under Merge's first-wins dedupe).
 //
 // The chain is conversion and parsing only: adapter.ParseProxy builds an
 // outbound without dialling anything, so the table stays a sub-second unit
@@ -170,6 +171,15 @@ func contractVmessLine(server, port, name string) string {
 	return "vmess://" + base64.StdEncoding.EncodeToString([]byte(doc))
 }
 
+// contractVmessAEADLine renders the Xray VMessAEAD vmess:// form: an authority
+// of uuid@host:port plus params, with the display name in the URI fragment
+// exactly where vless keeps it. mihomo takes this branch whenever the body
+// after "vmess://" does not base64-decode (convert/converter.go:236-239).
+func contractVmessAEADLine(server, port, name string) string {
+	return "vmess://" + contractUUID + "@" + server + ":" + port +
+		"?encryption=auto&security=tls&type=tcp#" + name
+}
+
 func schemeContracts(t *testing.T) []schemeContract {
 	t.Helper()
 
@@ -198,6 +208,22 @@ func schemeContracts(t *testing.T) []schemeContract {
 		port:   "443",
 		typ:    mihomo.Vmess,
 		addrs:  []string{"1.2.3.3:443"},
+	}, {
+		// The other body parseVmess accepts, and the reason the vmess merge arm
+		// has two rewriters: this line's name lives in the URI fragment, not in
+		// a base64 "ps", so Merge must relabel the fragment and publish must
+		// rewrite it -- a JSON ps splice cannot apply to a body that is not
+		// base64, and a generic-fragment relabel cannot run because the scheme
+		// dispatches to the vmess arm. mihomo converts it through the same
+		// handleVShareLink as vless (converter.go:236-249), which is the only
+		// reason the two vmess bodies coexist here.
+		name:   "vmess_aead_authority",
+		line:   contractVmessAEADLine("1.2.3.19", "443", contractOriginName),
+		scheme: subscription.SchemeVmess,
+		server: "1.2.3.19",
+		port:   "443",
+		typ:    mihomo.Vmess,
+		addrs:  []string{"1.2.3.19:443"},
 	}, {
 		name:   "trojan",
 		line:   "trojan://secret@1.2.3.4:443?sni=a.example&type=tcp#" + contractOriginName,
@@ -577,9 +603,11 @@ func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 // motivated RewriteSSRName. mihomo base64-decodes EVERYTHING after "ssr://"
 // (common/convert/converter.go:476-479), so the generic "<raw>#<label>" relabel
 // yields a link that converts to NOTHING: the label then misses in the
-// probe-result map, SelectSurvivors drops the entry, and the checker books
-// server:port into the dead cache (deadcache.ttl, 3h shipped, jittered to
-// [ttl, 1.5*ttl)) where it can shadow a working node.
+// probe-result map and SelectSurvivors drops the entry, leaving a node the
+// cycle counts as an unconvertible refusal every cycle -- the shadowing
+// consequence of dead-caching that class (a server:port entry hiding a working
+// sibling for deadcache.ttl) is what recordDead's refusal exclusion exists to
+// prevent.
 //
 // Both halves are asserted, because the published line being fragment-free is
 // only meaningful if a fragment is what would break it.

@@ -144,13 +144,45 @@ func ssrLink(remarks string) string {
 	return "ssr://" + b64(payload)
 }
 
+// TestMergeRelabelsVmessAEADViaFragment is the AEAD twin of
+// TestMergeRelabelsVmessViaPs: the Xray VMessAEAD body uuid@host:port?params
+// is not base64, so no "ps" exists to splice and the relabel has to rewrite
+// the URI fragment exactly as the generic path does for vless. mihomo
+// converts the relabeled line through handleVShareLink
+// (convert/converter.go:236-249), naming the proxy from that fragment.
+func TestMergeRelabelsVmessAEADViaFragment(t *testing.T) {
+	t.Parallel()
+
+	line := "vmess://uuid@1.2.3.4:443?encryption=auto&security=tls#Original"
+	entries := stable.Merge([]stable.SourceBody{sourceBody("avia", line)})
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Label != "avia-001" {
+		t.Errorf("label: got %q, want avia-001", e.Label)
+	}
+	if e.Addr != "1.2.3.4:443" {
+		t.Errorf("addr: got %q, want the authority's 1.2.3.4:443", e.Addr)
+	}
+	if want := "vmess://uuid@1.2.3.4:443?encryption=auto&security=tls#avia-001"; e.Raw != want {
+		t.Errorf("Raw = %q, want the fragment relabeled %q", e.Raw, want)
+	}
+
+	m := mihomoProxyMap(t, e.Raw)
+	wantString(t, m, "name", "avia-001")
+	wantString(t, m, "server", "1.2.3.4")
+	wantString(t, m, "type", "vmess")
+}
+
 // mihomoProxyMap runs one already-relabeled share link through the production
 // convert path and returns the single proxy map it must yield.
 //
 // The count assertion is the point: ConvertsV2Ray drops a link it cannot
 // decode with `continue` and returns no error, so a relabel that corrupts the
 // link surfaces here as zero proxies rather than as a failure — and in
-// production as a permanently unselectable node plus a poisoned dead cache.
+// production as a node that is never selected, counted every cycle among the
+// unconvertible refusals.
 func mihomoProxyMap(t *testing.T, link string) map[string]any {
 	t.Helper()
 
