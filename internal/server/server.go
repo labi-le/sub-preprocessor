@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"domains.lst/sub-preprocessor/internal/fetch"
@@ -147,7 +148,20 @@ func newRecoveryMiddleware(logger zerolog.Logger) fiber.Handler {
 // minutes, not the inter-cycle interval.
 const stableRetryAfter = "30"
 
+// stableStatsMemo caches one snapshot's X-Stable-Stats rendering: the inputs
+// (UpdatedAt, Stats) are immutable between cycles, so re-formatting per
+// request is pure waste; recompute only when the holder publishes a new
+// snapshot pointer. atomic.Pointer keeps racing first requests race-free —
+// redundant computes store equal entries, and a stale entry costs a later
+// recompute, never a wrong header, since only the entry matching the snapshot
+// loaded in the same request is served.
+type stableStatsMemo struct {
+	snap *stable.Snapshot
+	hdr  string
+}
+
 func newStableHandler(holder *stable.Holder) fiber.Handler {
+	var memo atomic.Pointer[stableStatsMemo]
 	return func(c *fiber.Ctx) error {
 		snap := holder.Load()
 		if snap == nil || len(snap.Payload) == 0 {
@@ -155,54 +169,156 @@ func newStableHandler(holder *stable.Holder) fiber.Handler {
 			return fiber.NewError(fiber.StatusServiceUnavailable, "stable list not ready")
 		}
 
+		var hdr string
+		if m := memo.Load(); m != nil && m.snap == snap {
+			hdr = m.hdr
+		} else {
+			hdr = fmt.Sprintf(
+				"updated=%s sources=%d/%d merged=%d tested=%d kept=%d",
+				snap.UpdatedAt.Format(time.RFC3339),
+				snap.Stats.SourcesOK, snap.Stats.SourcesTotal,
+				snap.Stats.Merged, snap.Stats.Tested, snap.Stats.Kept,
+			)
+			memo.Store(&stableStatsMemo{snap: snap, hdr: hdr})
+		}
+
 		c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
-		c.Set("X-Stable-Stats", fmt.Sprintf(
-			"updated=%s sources=%d/%d merged=%d tested=%d kept=%d",
-			snap.UpdatedAt.Format(time.RFC3339),
-			snap.Stats.SourcesOK, snap.Stats.SourcesTotal,
-			snap.Stats.Merged, snap.Stats.Tested, snap.Stats.Kept,
-		))
+		c.Set("X-Stable-Stats", hdr)
 		return c.Send(snap.Payload)
 	}
+}
+
+// indexQueryKeys are the query parameters GET / reads; each is single-valued.
+// fiber answers the FIRST value of a repeated key (fasthttp's Peek scans to
+// the first match), so a duplicate would be silently dropped — a second
+// exclude_countries= could serve exactly the jurisdictions the caller asked to
+// exclude, a second countries= would silently narrow the allow-list. The scan
+// stops at the first duplicate.
+var indexQueryKeys = [...]string{
+	"subscription_url",
+	"countries",
+	"groups",
+	"exclude_countries",
+	"exclude_groups",
+}
+
+func repeatedIndexQueryParam(c *fiber.Ctx) string {
+	dup := -1
+	var seen [len(indexQueryKeys)]bool
+	c.Request().URI().QueryArgs().VisitAll(func(k, _ []byte) {
+		if dup >= 0 {
+			return
+		}
+		for i, key := range indexQueryKeys {
+			if string(k) == key {
+				if seen[i] {
+					dup = i
+					return
+				}
+				seen[i] = true
+			}
+		}
+	})
+	if dup < 0 {
+		return ""
+	}
+	return indexQueryKeys[dup]
+}
+
+// countryTokenPresent reports whether raw holds at least one non-blank
+// comma-separated token — the same tokenization buildCountrySet applies below.
+// The parameter gate counts only such values, because a value made of blanks
+// (",," or " , ") carries no country: treating it as present would let an
+// exclusion-only request through with an empty deny list and answer 200 with
+// the FULL subscription, where the identically vacuous countries=,, already
+// 400s.
+func countryTokenPresent(raw string) bool {
+	for part := range strings.SplitSeq(raw, ",") {
+		if strings.TrimSpace(part) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// countryPolicy resolves the four country query parameters into the allow/deny
+// pair the pipeline enforces, refusing the requests the handler must not
+// answer:
+//
+//   - neither family carries a non-blank token — the no-parameter request;
+//   - every one of the four names a country policy that only a
+//     filters[].type: country or asn entry can enforce, so a snapshot without
+//     one (countryFilter false) cannot serve any of them;
+//   - a token no group map or country-code parse can resolve;
+//   - an allow-list the exclusions empty completely.
+//
+// The exclusions are enforced downstream as a deny-list so an IP no geo source
+// covers survives them; the subtraction here only answers the documented
+// "nothing is left to serve" case.
+func countryPolicy(rawCountries, rawGroups, rawExcludeCountries, rawExcludeGroups string, countryFilter bool, groups map[string][]string) (filter.CountrySet, filter.CountrySet, error) {
+	allowRequested := countryTokenPresent(rawCountries) || countryTokenPresent(rawGroups)
+	excludeRequested := countryTokenPresent(rawExcludeCountries) || countryTokenPresent(rawExcludeGroups)
+	if !allowRequested && !excludeRequested {
+		return filter.CountrySet{}, filter.CountrySet{}, fiber.NewError(fiber.StatusBadRequest, "countries, groups, exclude_countries or exclude_groups is required")
+	}
+	if !countryFilter {
+		return filter.CountrySet{}, filter.CountrySet{}, fiber.NewError(fiber.StatusBadRequest,
+			"no country-capable filter configured (filters[].type: country or asn): cannot honor countries/groups/exclude_countries/exclude_groups")
+	}
+
+	allowed, bad := buildCountrySet(rawCountries, rawGroups, groups)
+	denied, badExclude := buildCountrySet(rawExcludeCountries, rawExcludeGroups, groups)
+	bad = append(bad, badExclude...)
+	if len(bad) > 0 {
+		return filter.CountrySet{}, filter.CountrySet{}, fiber.NewError(fiber.StatusBadRequest, "unknown group or country code: "+strings.Join(bad, ","))
+	}
+	if !allowRequested {
+		// Exclusion-only: the full set means "no allow-list", which constrains
+		// nothing; see filter.Permits.
+		allowed = filter.All()
+	}
+	remaining := allowed
+	remaining.Exclude(denied)
+	if filter.IsEmpty(remaining) {
+		return filter.CountrySet{}, filter.CountrySet{}, fiber.NewError(fiber.StatusBadRequest, "no allowed countries left after exclusions")
+	}
+	return allowed, denied, nil
+}
+
+// responseTooLargeText is the fetch layer's body-overrun refusal. GET /'s byte
+// ceiling binds before preprocess's 50k-node count for realistic URI lengths,
+// and the error reaches this handler wrapped with no sentinel errors.Is can
+// reach from the server package (fetch is outside this package's file set), so
+// the text is the handle; preprocess's node ceiling keeps its sentinel.
+const responseTooLargeText = "response too large: over "
+
+func isResponseTooLarge(err error) bool {
+	return strings.Contains(err.Error(), responseTooLargeText)
 }
 
 func newIndexHandler(holder *Holder) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		snap := holder.Load()
+		if key := repeatedIndexQueryParam(c); key != "" {
+			return fiber.NewError(fiber.StatusBadRequest, "repeated query parameter: "+key)
+		}
+
 		rawSubscriptionURL := strings.TrimSpace(c.Query("subscription_url"))
 		subURL := fetch.SubscriptionURL(rawSubscriptionURL)
-		rawCountries := c.Query("countries")
-		rawGroups := c.Query("groups")
-		rawExcludeCountries := c.Query("exclude_countries")
-		rawExcludeGroups := c.Query("exclude_groups")
-
 		if rawSubscriptionURL == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "subscription_url is required")
-		}
-		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" &&
-			strings.TrimSpace(rawExcludeCountries) == "" && strings.TrimSpace(rawExcludeGroups) == "" {
-			return fiber.NewError(fiber.StatusBadRequest, "countries, groups, exclude_countries or exclude_groups is required")
 		}
 		if err := fetch.ValidatePublicHTTPSURL(subURL); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 
-		allowed, bad := buildCountrySet(rawCountries, rawGroups, snap.Groups)
-		denied, badExclude := buildCountrySet(rawExcludeCountries, rawExcludeGroups, snap.Groups)
-		bad = append(bad, badExclude...)
-		if len(bad) > 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "unknown group or country code: "+strings.Join(bad, ","))
-		}
-		if strings.TrimSpace(rawCountries) == "" && strings.TrimSpace(rawGroups) == "" {
-			allowed = filter.All()
-		}
-		// The exclusions are enforced downstream as a deny-list so an IP no geo
-		// source covers survives them; this only answers the documented "nothing
-		// is left to serve" case, which needs the subtraction spelled out.
-		remaining := allowed
-		remaining.Exclude(denied)
-		if filter.IsEmpty(remaining) {
-			return fiber.NewError(fiber.StatusBadRequest, "no allowed countries left after exclusions")
+		allowed, denied, err := countryPolicy(
+			c.Query("countries"), c.Query("groups"),
+			c.Query("exclude_countries"), c.Query("exclude_groups"),
+			snap.CountryFilter, snap.Groups,
+		)
+		if err != nil {
+			return err
 		}
 
 		var sb bytes.Buffer
@@ -222,7 +338,10 @@ func newIndexHandler(holder *Holder) fiber.Handler {
 		stats, err := snap.Svc.Filter(reqCtx, &sb, req)
 		if err != nil {
 			switch {
-			case errors.Is(err, preprocess.ErrTooManyNodes):
+			case errors.Is(err, preprocess.ErrTooManyNodes), isResponseTooLarge(err):
+				// The 50k-node count and the 10 MiB byte cap are one ceiling
+				// split across two layers; both refusals answer the documented
+				// 413 so oversize stays distinguishable from an upstream fault.
 				return fiber.NewError(fiber.StatusRequestEntityTooLarge, err.Error())
 			case errors.Is(err, context.DeadlineExceeded):
 				return fiber.NewError(fiber.StatusGatewayTimeout, "subscription preprocessing timed out")

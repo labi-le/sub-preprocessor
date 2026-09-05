@@ -16,6 +16,15 @@ func (s *stubFilterer) Filter(_ context.Context, _ *bytes.Buffer, _ preprocess.F
 	return preprocess.Stats{}, nil
 }
 
+func TestNewSnapshotDefaultsCountryFilter(t *testing.T) {
+	// Production wiring builds snapshots through NewSnapshot and only sets the
+	// field when the config has no country/asn filter; forgetting that
+	// override must keep the shipped deployment serving, never 400 it.
+	if snap := server.NewSnapshot(&stubFilterer{}, nil, nil); !snap.CountryFilter {
+		t.Fatal("NewSnapshot must default CountryFilter to true")
+	}
+}
+
 func TestHolder_StoreLoad(t *testing.T) {
 	snap1 := &server.Snapshot{Svc: &stubFilterer{}, Groups: map[string][]string{"g": {"US"}}}
 	h := server.NewHolder(snap1)

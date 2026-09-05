@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,7 +64,9 @@ func nopLogger() zerolog.Logger {
 }
 
 func newServer(svc server.Filterer, groups map[string][]string) *server.Server {
-	holder := server.NewHolder(&server.Snapshot{Svc: svc, Groups: groups})
+	// CountryFilter: true — every fake below stands in for a processor whose
+	// IP-stage chain enforces the request's country policy.
+	holder := server.NewHolder(&server.Snapshot{Svc: svc, Groups: groups, CountryFilter: true})
 	return server.New(nopLogger(), ":8080", holder, stable.NewHolder())
 }
 
@@ -571,8 +574,9 @@ func TestServerReadsSnapshotPerRequest(t *testing.T) {
 
 	stubA := &snapStub{marker: "SNAP-A"}
 	holder := server.NewHolder(&server.Snapshot{
-		Svc:    stubA,
-		Groups: map[string][]string{"ga": {"FI"}},
+		Svc:           stubA,
+		Groups:        map[string][]string{"ga": {"FI"}},
+		CountryFilter: true,
 	})
 	srv := server.New(nopLogger(), ":8080", holder, stable.NewHolder())
 
@@ -589,8 +593,9 @@ func TestServerReadsSnapshotPerRequest(t *testing.T) {
 
 	stubB := &snapStub{marker: "SNAP-B"}
 	holder.Store(&server.Snapshot{
-		Svc:    stubB,
-		Groups: map[string][]string{"gb": {"DE"}},
+		Svc:           stubB,
+		Groups:        map[string][]string{"gb": {"DE"}},
+		CountryFilter: true,
 	})
 
 	statusB, bodyB := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&groups=gb")
@@ -649,12 +654,16 @@ func TestServerBoundsPipelineWithDeadline(t *testing.T) {
 		t.Fatalf("unexpected status: %d", status)
 	}
 
+	// The handler installs indexRequestTimeout (60s, server.go) on the
+	// pipeline context. Assert that budget, not merely "some deadline under
+	// five minutes": the 55s floor absorbs this test's own request round-trip
+	// while still failing a budget loosened to minutes.
 	deadline, ok := svc.ctx.Deadline()
 	if !ok {
 		t.Fatal("pipeline context carries no deadline: an abandoned request would resolve nodes unbounded")
 	}
-	if until := time.Until(deadline); until > 5*time.Minute {
-		t.Fatalf("pipeline deadline is %v away, far too loose to bound one request", until)
+	if until := time.Until(deadline); until <= 55*time.Second || until > 60*time.Second {
+		t.Fatalf("pipeline deadline is %v away, want indexRequestTimeout's 60s budget", until)
 	}
 }
 
@@ -692,7 +701,7 @@ func TestLoggedSubscriptionURLIsRedacted(t *testing.T) {
 	t.Parallel()
 
 	var logs bytes.Buffer
-	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}, Groups: nil})
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}, Groups: nil, CountryFilter: true})
 	srv := server.New(zerolog.New(&logs), ":8080", holder, stable.NewHolder())
 
 	const secret = "https://provider.example/api/v1/client/subscribe?token=s3cr3t"
@@ -742,4 +751,273 @@ func TestLoggedSubscriptionURLIsRedacted(t *testing.T) {
 	if other := digestOf(); other == first {
 		t.Fatal("a different subscription URL must render a different digest")
 	}
+}
+
+func TestServerRejectsBlankOnlyCountryParams(t *testing.T) {
+	t.Parallel()
+
+	// Each is the vacuous shape in one family: ",," / "," / whitespace-only
+	// tokens carry no country, so the request is exactly the no-parameter one
+	// and must 400 — in the exclusion family it used to pass the gate, exclude
+	// nothing, and answer 200 with the full unfiltered subscription.
+	for _, target := range []string{
+		"/?subscription_url=https://mifa.world/vless&exclude_countries=,,",
+		"/?subscription_url=https://mifa.world/vless&exclude_groups=,",
+		"/?subscription_url=https://mifa.world/vless&exclude_countries=%20,%20",
+		"/?subscription_url=https://mifa.world/vless&countries=,,",
+		"/?subscription_url=https://mifa.world/vless&groups=%20,%20",
+	} {
+		svc := &recordingService{}
+		srv := newServer(svc, nil)
+		status, _ := doGet(t, srv, target)
+		if status != http.StatusBadRequest {
+			t.Fatalf("%s: blank-only country params must 400, got %d", target, status)
+		}
+		if svc.called {
+			t.Fatalf("%s: service must not be called", target)
+		}
+	}
+
+	// Blanks between valid tokens stay tolerated: they contribute nothing, the
+	// valid tokens still filter.
+	svc := &recordingService{}
+	srv := newServer(svc, nil)
+	status, _ := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,,EE&exclude_countries=EE,")
+	if status != http.StatusOK {
+		t.Fatalf("valid tokens with stray blanks must still serve, got %d", status)
+	}
+}
+
+func TestServerRejectsRepeatedQueryKeys(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"subscription_url":  "/?subscription_url=https://a.example.com/sub&subscription_url=https://b.example.com/sub&countries=FI",
+		"countries":         "/?subscription_url=https://mifa.world/vless&countries=DE&countries=FR",
+		"groups":            "/?subscription_url=https://mifa.world/vless&groups=a&groups=a",
+		"exclude_countries": "/?subscription_url=https://mifa.world/vless&exclude_countries=US&exclude_countries=RU",
+		"exclude_groups":    "/?subscription_url=https://mifa.world/vless&exclude_groups=a&exclude_groups=b",
+	}
+	for name, target := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &recordingService{}
+			srv := newServer(svc, map[string][]string{"a": {"FI"}, "b": {"DE"}})
+			status, body := doGet(t, srv, target)
+			if status != http.StatusBadRequest {
+				t.Fatalf("a repeated %s must 400, got %d", name, status)
+			}
+			// fiber answers the FIRST value of a repeated key, so the second
+			// occurrence is otherwise dropped without a trace; the 400 must say
+			// which parameter repeated.
+			if !strings.Contains(body, "repeated query parameter: "+name) {
+				t.Fatalf("400 must name the repeated parameter: %q", body)
+			}
+			if svc.called {
+				t.Fatal("service must not be called with a repeated query key")
+			}
+		})
+	}
+
+	// A comma-joined list under one key is the documented way to pass several
+	// values, not a repetition.
+	svc := &recordingService{}
+	srv := newServer(svc, nil)
+	status, _ := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=DE,FR")
+	if status != http.StatusOK {
+		t.Fatalf("a comma-joined list must still serve, got %d", status)
+	}
+}
+
+func TestServerRejectsOversizeBodyWith413(t *testing.T) {
+	t.Parallel()
+
+	// The 10 MiB byte ceiling binds before the 50k-node count for realistic
+	// URI lengths; the fetch layer refuses the body with this text, wrapped by
+	// subscription.Load and the preprocess loader on its way here.
+	oversize := &recordingService{err: errors.New("load subscription: fetch subscription: response too large: over 10485760 bytes")}
+	srv := newServer(oversize, nil)
+	status, body := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a body over the byte ceiling must answer 413, got %d", status)
+	}
+	if !strings.Contains(body, "too large") {
+		t.Fatalf("client should learn the body was too large: %q", body)
+	}
+
+	// An upstream fault keeps its 502: oversize must stay distinguishable from
+	// upstream failure by status.
+	upstream := &recordingService{err: errors.New("load subscription: fetch subscription: bad status: 500 Internal Server Error")}
+	srvUp := newServer(upstream, nil)
+	status, _ = doGet(t, srvUp, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusBadGateway {
+		t.Fatalf("an upstream fetch error must stay 502, got %d", status)
+	}
+}
+
+func TestServerRejectsCountryParamsWithoutCountryFilter(t *testing.T) {
+	t.Parallel()
+
+	// CountryFilter: false is the snapshot of a processor built from a config
+	// whose filters list has no country/asn entry (empty or cidr-only). GET /
+	// cannot then honor any of its four parameters; 200 would be a list the
+	// parameters never constrained.
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}, CountryFilter: false})
+	srv := server.New(nopLogger(), ":8080", holder, stable.NewHolder())
+
+	for _, target := range []string{
+		"/?subscription_url=https://mifa.world/vless&countries=FI",
+		"/?subscription_url=https://mifa.world/vless&groups=gb",
+		"/?subscription_url=https://mifa.world/vless&exclude_countries=DE",
+		"/?subscription_url=https://mifa.world/vless&exclude_groups=gb",
+	} {
+		status, body := doGet(t, srv, target)
+		if status != http.StatusBadRequest {
+			t.Fatalf("%s: no country-capable filter must 400, got %d", target, status)
+		}
+		if !strings.Contains(body, "country") || !strings.Contains(body, "filters[].type") {
+			t.Fatalf("400 must name the missing filter and the enabling config key: %q", body)
+		}
+	}
+
+	// The asn/cidr-only deployment stays legal: only the country-gated
+	// endpoint refuses, the rest of the server answers normally.
+	if status, body := doGet(t, srv, "/healthz"); status != http.StatusOK || body != "ok" {
+		t.Fatalf("healthz must stay up without a country filter: status=%d body=%q", status, body)
+	}
+}
+
+func TestServerServesCountryParamsWithDefaultSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// NewSnapshot defaults CountryFilter to true, which is the shipped
+	// deployment shape; a country-gated request must keep serving.
+	svc := &recordingService{}
+	holder := server.NewHolder(server.NewSnapshot(svc, nil, nil))
+	srv := server.New(nopLogger(), ":8080", holder, stable.NewHolder())
+
+	status, _ := doGet(t, srv, "/?subscription_url=https://mifa.world/vless&countries=FI,EE")
+	if status != http.StatusOK {
+		t.Fatalf("unexpected status: %d", status)
+	}
+	if !svc.called {
+		t.Fatal("service should be called")
+	}
+}
+
+func TestStableStatsHeaderTracksSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stableHolder := stable.NewHolder()
+	stableHolder.Store(&stable.Snapshot{
+		Payload:   []byte("vless://x#a-001\n"),
+		UpdatedAt: time.Date(2026, 7, 7, 3, 4, 5, 0, time.UTC),
+		Stats:     stable.Stats{SourcesOK: 1, SourcesTotal: 2, Merged: 3, Tested: 2, Kept: 1},
+	})
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}})
+	srv := server.New(nopLogger(), ":8080", holder, stableHolder)
+
+	fetch := func() (hdr, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/stable.txt", nil)
+		resp, err := srv.TestApp().Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Header.Get("X-Stable-Stats"), string(b)
+	}
+
+	want1 := "updated=" + time.Date(2026, 7, 7, 3, 4, 5, 0, time.UTC).Format(time.RFC3339) + " sources=1/2 merged=3 tested=2 kept=1"
+	if hdr, body := fetch(); body != "vless://x#a-001\n" || hdr != want1 {
+		t.Fatalf("snapshot A:\nbody %q\nhdr  %q\nwant %q", body, hdr, want1)
+	}
+	// A second request against the same snapshot must render the identical
+	// header (the memoized value, not a fresh format).
+	if hdr, _ := fetch(); hdr != want1 {
+		t.Fatalf("repeated request header changed: got %q want %q", hdr, want1)
+	}
+
+	// A Store of a NEW snapshot must be served with ITS header on the next
+	// request: the memo is keyed on the snapshot pointer, never on the first
+	// one seen.
+	stableHolder.Store(&stable.Snapshot{
+		Payload:   []byte("vless://x#b-002\n"),
+		UpdatedAt: time.Date(2026, 8, 8, 4, 5, 6, 0, time.UTC),
+		Stats:     stable.Stats{SourcesOK: 3, SourcesTotal: 4, Merged: 5, Tested: 4, Kept: 2},
+	})
+	want2 := "updated=" + time.Date(2026, 8, 8, 4, 5, 6, 0, time.UTC).Format(time.RFC3339) + " sources=3/4 merged=5 tested=4 kept=2"
+	if hdr, body := fetch(); body != "vless://x#b-002\n" || hdr != want2 {
+		t.Fatalf("snapshot B:\nbody %q\nhdr  %q\nwant %q", body, hdr, want2)
+	}
+}
+
+// stablePairingOK fails t when one /stable.txt response pairs snapshot A's or
+// B's payload with the other snapshot's X-Stable-Stats header.
+func stablePairingOK(t *testing.T, srv *server.Server, snapA, snapB *stable.Snapshot) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/stable.txt", nil)
+	resp, err := srv.TestApp().Test(req)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	hdr := resp.Header.Get("X-Stable-Stats")
+	switch string(body) {
+	case "A\n":
+		if want := "updated=" + snapA.UpdatedAt.Format(time.RFC3339) + " "; !strings.HasPrefix(hdr, want) {
+			t.Errorf("header %q paired with payload %q", hdr, body)
+		}
+	case "B\n":
+		if want := "updated=" + snapB.UpdatedAt.Format(time.RFC3339) + " "; !strings.HasPrefix(hdr, want) {
+			t.Errorf("header %q paired with payload %q", hdr, body)
+		}
+	default:
+		t.Errorf("unexpected payload %q", body)
+	}
+}
+
+func TestStableStatsHeaderNeverMixesSnapshots(t *testing.T) {
+	stableHolder := stable.NewHolder()
+	holder := server.NewHolder(&server.Snapshot{Svc: stubService{}})
+	srv := server.New(nopLogger(), ":8080", holder, stableHolder)
+
+	snapA := &stable.Snapshot{Payload: []byte("A\n"), UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Stats: stable.Stats{SourcesOK: 1, SourcesTotal: 1, Merged: 1, Tested: 1, Kept: 1}}
+	snapB := &stable.Snapshot{Payload: []byte("B\n"), UpdatedAt: time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC), Stats: stable.Stats{SourcesOK: 1, SourcesTotal: 1, Merged: 1, Tested: 1, Kept: 1}}
+	stableHolder.Store(snapA)
+
+	// The memo is read and written on every request while the worker swaps
+	// snapshots; no response may mix one snapshot's payload with the other's
+	// header, and the shared memo state must stay race-free.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 8 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					stablePairingOK(t, srv, snapA, snapB)
+				}
+			}
+		})
+	}
+	for range 20 {
+		stableHolder.Store(snapA)
+		stableHolder.Store(snapB)
+	}
+	close(stop)
+	wg.Wait()
 }
