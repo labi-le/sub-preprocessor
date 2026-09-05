@@ -92,16 +92,20 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 
 	cfg := config.Config{
 		GeoBlock: config.GeoBlockConfig{
-			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", Timeout: 15 * time.Second, Concurrency: 8, RateLimit: 120},
+			// The base carries DIFFERENT key values than the entries below on
+			// purpose: an override assertion only binds the merge when the
+			// inherited value would differ from the entry's, so deleting the
+			// merge line fails here rather than silently asserting the base.
+			Gemini:  config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "base-model", APIKey: "base-key", KeyFile: "/run/base-key", KeyVar: "BASE_KEY", Timeout: 15 * time.Second, Concurrency: 8, RateLimit: 120},
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
 			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
-			{Type: config.FilterClaude, Marker: "override-claude"},
+			{Type: config.FilterClaude, Marker: "override-claude", Version: "2024-01-01"},
 			{Type: config.FilterBandwidth, MinMbps: new(9), TestURL: "https://speed/x", Timeout: 30 * time.Second, Concurrency: 2},
-			{Type: config.FilterGemini, Model: "override-model"},
+			{Type: config.FilterGemini, Model: "override-model", APIKey: "entry-key", KeyFile: "/run/entry-key", KeyVar: "ENTRY_KEY"},
 			{Type: config.FilterChatGPT, Concurrency: 3},
 			{Type: config.FilterTidal, Timeout: 30 * time.Second},
 		},
@@ -117,8 +121,8 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 		t.Fatalf("order = %s,%s,%s,%s,%s", got[0].Type, got[1].Type, got[2].Type, got[3].Type, got[4].Type)
 	}
 
-	// claude: overridden marker, other fields inherited from geoblock base.
-	if got[0].Claude.Marker != "override-claude" || got[0].Claude.Endpoint != "https://claude.base" || got[0].Claude.Version != "2023-06-01" {
+	// claude: overridden marker and version, endpoint inherited from the base.
+	if got[0].Claude.Marker != "override-claude" || got[0].Claude.Endpoint != "https://claude.base" || got[0].Claude.Version != "2024-01-01" {
 		t.Fatalf("claude merge wrong: %+v", got[0].Claude)
 	}
 	// bandwidth: params come entirely from the entry.
@@ -126,9 +130,11 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	if bw.MinMbps == nil || *bw.MinMbps != 9 || bw.TestURL != "https://speed/x" || bw.Timeout != 30*time.Second || bw.Concurrency != 2 {
 		t.Fatalf("bandwidth spec wrong: %+v", bw)
 	}
-	// gemini: overridden model, other fields inherited from geoblock base,
-	// rate_limit included.
-	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" || got[2].Gemini.Marker != "base-marker" || got[2].Gemini.RateLimit != 120 {
+	// gemini: overridden model plus the three key spellings (api_key/key_file/
+	// key_var) beat the base's own values; endpoint/marker/rate_limit inherit.
+	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" ||
+		got[2].Gemini.Marker != "base-marker" || got[2].Gemini.RateLimit != 120 ||
+		got[2].Gemini.APIKey != "entry-key" || got[2].Gemini.KeyFile != "/run/entry-key" || got[2].Gemini.KeyVar != "ENTRY_KEY" {
 		t.Fatalf("gemini merge wrong: %+v", got[2].Gemini)
 	}
 	// chatgpt: overridden concurrency, endpoint/marker inherited from the base.
@@ -152,8 +158,10 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 func TestLoadGeminiRateLimit(t *testing.T) {
 	t.Parallel()
 
-	// Absent key: the default lands on the geoblock base and on the merged spec.
-	cfg, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    timeout: 15s\n    concurrency: 8\nfilters:\n  - type: gemini\n")
+	// A rate_limit is inherited from the base like every other knob; a key is
+	// set so the armed gate loads (an armed gemini filter with no key material
+	// is now refused at load).
+	cfg, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    api_key: test-key\n    timeout: 15s\n    concurrency: 8\nfilters:\n  - type: gemini\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +184,7 @@ func TestLoadGeminiRateLimit(t *testing.T) {
 
 	// A per-filter entry's rate_limit beats the geoblock base...
 	overridden, err := loadYAML(t, geoBase+
-		"geoblock:\n  gemini:\n    rate_limit: 200\n"+
+		"geoblock:\n  gemini:\n    api_key: test-key\n    rate_limit: 200\n"+
 		"filters:\n  - type: gemini\n    rate_limit: 60\n")
 	if err != nil {
 		t.Fatal(err)
@@ -184,13 +192,53 @@ func TestLoadGeminiRateLimit(t *testing.T) {
 	if got := overridden.NodeFilterSpecs()[0].Gemini.RateLimit; got != 60 {
 		t.Fatalf("per-filter rate_limit = %d, want 60 over the base's 200", got)
 	}
-	// ...while an entry without the key inherits the base verbatim.
-	inherited, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    rate_limit: 200\nfilters:\n  - type: gemini\n")
+	// ...while an entry without a rate_limit inherits the base verbatim.
+	inherited, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    api_key: test-key\n    rate_limit: 200\nfilters:\n  - type: gemini\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := inherited.NodeFilterSpecs()[0].Gemini.RateLimit; got != 200 {
 		t.Fatalf("entry without rate_limit = %d, want 200 (the base)", got)
+	}
+}
+
+// TestLoadGeminiGateRequiresKeyMaterial pins the load-time half of the
+// keyless-gate refusal: an armed gemini filter whose merged spec carries
+// neither api_key nor key_file is rejected -- the stable worker would
+// otherwise resolve no key, silently skip the check and keep every
+// geo-blocked node while its metrics read "disabled". A declared key_file is
+// NOT read here (Load must not depend on a secret mount): resolvability of
+// the file itself is judged at Apply, where it is read.
+func TestLoadGeminiGateRequiresKeyMaterial(t *testing.T) {
+	t.Parallel()
+
+	// Armed and keyless: refused at load.
+	if _, err := loadYAML(t, geoBase+"filters:\n  - type: gemini\n"); err == nil {
+		t.Fatal("an armed gemini filter with no key must be refused at load")
+	} else if !strings.Contains(err.Error(), "needs a key") || !strings.Contains(err.Error(), "geoblock.gemini") {
+		t.Fatalf("error %q must name the key and its configuration site", err)
+	}
+
+	// A key on the geoblock base arms the entry; so does one on the entry.
+	if _, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    api_key: base-secret\nfilters:\n  - type: gemini\n"); err != nil {
+		t.Fatalf("a geoblock-level api_key must arm the entry: %v", err)
+	}
+	if _, err := loadYAML(t, geoBase+"filters:\n  - type: gemini\n    api_key: entry-secret\n"); err != nil {
+		t.Fatalf("an entry-level api_key must arm the entry: %v", err)
+	}
+
+	// A declared key_file (the shipped shape) loads without the file existing:
+	// resolution happens at Apply, never in config.Load.
+	if _, err := loadYAML(t, geoBase+
+		"geoblock:\n  gemini:\n    key_file: /run/agenix/litellm-env\n    key_var: LITELLM_GOOGLE_API_KEY\n"+
+		"filters:\n  - type: gemini\n"); err != nil {
+		t.Fatalf("a declared key_file must load without the file being read: %v", err)
+	}
+
+	// A keyed base with NO filter entry stays valid: the base is inert until a
+	// filter arms the gate.
+	if _, err := loadYAML(t, geoBase+"geoblock:\n  gemini:\n    api_key: secret\n"); err != nil {
+		t.Fatalf("an unarmed geoblock base needs no consumer: %v", err)
 	}
 }
 
@@ -331,11 +379,84 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"cidr bad file_type":    {geoBase + cidrFilters(cidrItem(cidrURL)+"    file_type: bzip2\n"), `filters[0].file_type: unsupported file type: "bzip2"`},
 		"cidr neg refresh":      {geoBase + cidrFilters(cidrItem(cidrURL)+"    refresh_interval: -1s\n"), "filters[0].refresh_interval must not be negative"},
 		"two cidr filters":      {geoBase + cidrFilters(cidrItem(cidrURL), cidrItem("https://example.com/x.txt")), "filters[1]: only one cidr filter is supported"},
+		// One spec per through-node entry becomes one Prometheus series per
+		// entry, so a second entry of the same type would publish duplicate
+		// series in a single scrape; each of the five types is a singleton.
+		"two gemini filters":    {geoBase + "filters:\n  - type: gemini\n    api_key: a\n  - type: gemini\n    api_key: b\n", "filters[1]: only one gemini filter is supported"},
+		"two claude filters":    {geoBase + "filters:\n  - type: claude\n  - type: claude\n", "filters[1]: only one claude filter is supported"},
+		"two chatgpt filters":   {geoBase + "filters:\n  - type: chatgpt\n  - type: chatgpt\n", "filters[1]: only one chatgpt filter is supported"},
+		"two tidal filters":     {geoBase + "filters:\n  - type: tidal\n  - type: tidal\n", "filters[1]: only one tidal filter is supported"},
+		"two bandwidth filters": {geoBase + "filters:\n  - type: bandwidth\n  - type: bandwidth\n", "filters[1]: only one bandwidth filter is supported"},
+		"duplicate mid-list":    {geoBase + "filters:\n  - type: claude\n  - type: gemini\n    api_key: a\n  - type: gemini\n", "filters[2]: only one gemini filter is supported"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			_, err := loadYAML(t, tc.yaml)
+			if err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s: error %q does not contain %q", name, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadAllowsRepeatedCountryAndASNEntries proves the two filter types a
+// second entry is LEGAL for: country exclusions accumulate into
+// DeniedCountries over every country entry, and asn deny patterns chain, so
+// repetition has defined semantics there -- unlike a second through-node entry,
+// which would publish a duplicate Prometheus series.
+func TestLoadAllowsRepeatedCountryAndASNEntries(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+
+		"filters:\n"+
+		"  - type: country\n    provider: geofeed\n    exclude_countries: [RU]\n"+
+		"  - type: country\n    provider: asn\n    exclude_countries: [CN]\n"+
+		"  - type: asn\n    deny_patterns: [\"(?i)hetzner\"]\n"+
+		"  - type: asn\n    deny_patterns: [\"spammy\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(cfg.IPFilterSpecs()); n != 4 {
+		t.Fatalf("IPFilterSpecs len=%d, want all four IP-stage entries", n)
+	}
+}
+
+// TestLoadRejectsBadAPIEndpoints pins endpoint validation on the five leaves
+// that had none: the four geoblock sub-block endpoints and a filter entry's own
+// override. Every other URL-shaped key is checked at load; these five used to
+// boot clean with a typo and then make the gate drop every survivor as
+// unreachable, blaming the nodes.
+func TestLoadRejectsBadAPIEndpoints(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"gemini geoblock non-http scheme":     {geoBase + "geoblock:\n  gemini:\n    endpoint: ftp://nope.example/v1\n", "geoblock.gemini.endpoint: must be an absolute http(s) URL"},
+		"claude geoblock missing host":        {geoBase + "geoblock:\n  claude:\n    endpoint: https:///v1\n", "geoblock.claude.endpoint: must be an absolute http(s) URL"},
+		"chatgpt geoblock hostless":           {geoBase + "geoblock:\n  chatgpt:\n    endpoint: openai.example.com\n", "geoblock.chatgpt.endpoint: must be an absolute http(s) URL"},
+		"tidal geoblock unparsable":           {geoBase + "geoblock:\n  tidal:\n    endpoint: \"not a url\"\n", "geoblock.tidal.endpoint"},
+		"gemini entry override":               {geoBase + "filters:\n  - type: gemini\n    endpoint: httpx://nope.example\n", "filters[0].endpoint: must be an absolute http(s) URL"},
+		"claude entry override":               {geoBase + "filters:\n  - type: claude\n    endpoint: anthropic.example.com\n", "filters[0].endpoint: must be an absolute http(s) URL"},
+		"chatgpt entry override missing host": {geoBase + "filters:\n  - type: chatgpt\n    endpoint: https:///v1\n", "filters[0].endpoint: must be an absolute http(s) URL"},
+		"tidal entry override":                {geoBase + "filters:\n  - type: tidal\n    endpoint: ftp://x.example\n", "filters[0].endpoint: must be an absolute http(s) URL"},
+		"entry override blank inherited":      {geoBase + "filters:\n  - type: gemini\n    api_key: a\n", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadYAML(t, tc.yaml)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("entry without an endpoint must stay valid: %v", err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatalf("expected error for %s", name)
 			}

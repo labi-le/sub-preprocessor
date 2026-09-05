@@ -131,9 +131,14 @@ func (r *Reloader) Reload(ctx context.Context) {
 		return
 	}
 
+	// SetLevel cannot fail here: config.Load already ran Validate, which
+	// rejects any level zerolog.ParseLevel refuses — the very call SetLevel
+	// wraps — so a bad level fails the reload at Load and keeps the previous
+	// processor before this line is ever reached. A non-nil error would mean
+	// the load gate was bypassed, which is worth an error, not a warn.
 	if levelErr := log.SetLevel(newCfg.Log.Level); levelErr != nil {
-		r.logger.Warn().Err(levelErr).Str("level", newCfg.Log.Level).
-			Msg("invalid log level in reloaded config; keeping current level")
+		r.logger.Error().Err(levelErr).Str("level", newCfg.Log.Level).
+			Msg("log level failed to parse after config.Validate accepted it; keeping current level")
 	}
 
 	if config.ListenChanged(r.currentCfg, newCfg) {
@@ -155,7 +160,9 @@ func (r *Reloader) Reload(ctx context.Context) {
 			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl/subscriptions.snapshot_path change requires restart; stores are built once at startup")
 	}
 
-	r.holder.Store(server.NewSnapshot(newProc, newProc, newCfg.Groups))
+	snap := server.NewSnapshot(newProc, newProc, newCfg.Groups)
+	snap.CountryFilter = newCfg.CountryFilterConfigured()
+	r.holder.Store(snap)
 
 	// The stable worker derives its allow set and through-node filters from the
 	// unified filters list, plus subscriptions, groups, the through-node prober
@@ -175,7 +182,10 @@ func (r *Reloader) Reload(ctx context.Context) {
 			r.logger.Error().Err(applyErr).
 				Msg("applying subscriptions config failed; stable worker keeps previous settings")
 		} else {
-			r.logger.Info().Msg("subscriptions config applied")
+			// Apply only swaps the checker's spec and pokes it; Run starts a
+			// cycle on the ticker alone, so the new settings are live from the
+			// NEXT scheduled cycle, not from this log line.
+			r.logger.Info().Msg("subscriptions config staged; the stable worker takes it up at its next scheduled cycle")
 		}
 	}
 

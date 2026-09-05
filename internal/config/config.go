@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 const (
 	defaultTimeout          = 5 * time.Second
 	schemeHTTPS             = "https"
+	schemeHTTP              = "http"
 	defaultLogLevel         = "info"
 	defaultDNSCacheTTL      = 30 * time.Minute
 	defaultDNSNegativeCache = 10 * time.Minute
@@ -98,6 +100,10 @@ const (
 	FilterChatGPT   = "chatgpt"
 	FilterTidal     = "tidal"
 	FilterBandwidth = "bandwidth"
+
+	// numThroughNodeFilterTypes is how many singleton through-node filter
+	// types exist, so the seen-map in validateFilters can pre-size itself.
+	numThroughNodeFilterTypes = 5
 
 	// ProviderCloudflare answers from Cloudflare's own geo-IP database, read
 	// through cdn-cgi/trace from the node itself (the stable worker runs it
@@ -385,6 +391,20 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 	return specs
 }
 
+// CountryFilterConfigured reports whether the IP-stage chain can enforce a
+// request's country allow/deny sets. Only a country entry (either provider)
+// and an asn entry consult them — a cidr entry never does — so a cidr-only
+// deployment cannot answer a country-gated GET / request at all, and the
+// server refuses it rather than serving a list the parameters never narrowed.
+func (cfg *Config) CountryFilterConfigured() bool {
+	for _, f := range cfg.Filters {
+		if f.Type == FilterCountry || f.Type == FilterASN {
+			return true
+		}
+	}
+	return false
+}
+
 // DeniedCountries builds the stable worker's country deny-set: every code the
 // country filter entries exclude, directly or through a group. It is a deny-set
 // rather than the complement allow-set so a node whose IP no geo source covers
@@ -541,6 +561,9 @@ func (f FilterConfig) refreshInterval() time.Duration {
 }
 
 type SubscriptionsConfig struct {
+	// Interval is the cadence between check cycles. 0 is rebound to the 30m
+	// built-in default by applyDefaults before the floor can see it, so 0 can
+	// never mean "never" -- an empty sources list is the off switch.
 	Interval time.Duration        `yaml:"interval"`
 	Check    CheckConfig          `yaml:"check"`
 	Sources  []SubscriptionSource `yaml:"sources"`
@@ -557,15 +580,39 @@ type SubscriptionsConfig struct {
 // top-level filters list, not here. Mostly URL-test params, with one
 // exception: Timeout also sets the reachability pre-check's dial budget
 // (halved per attempt), so lowering it widens the condemned set.
+//
+// An explicit 0 on these knobs (and on SubscriptionsConfig.Interval) means
+// "use the built-in default": applyDefaults rebinds it BEFORE the validation
+// floors below run, so the floors can only ever fire on a negative value. The
+// one exception is MaxFail, deliberately never defaulted -- its 0 is the
+// strictest setting. This 0-convention is the opposite of the disable/no-floor
+// keys elsewhere (deadcache.ttl, bandwidth MinMbps, geofeed RefreshInterval),
+// where an explicit 0 survives and means "off".
 type CheckConfig struct {
-	Rounds         int           `yaml:"rounds"`
-	Timeout        time.Duration `yaml:"timeout"`
-	TestURL        string        `yaml:"test_url"`
-	ExpectedStatus string        `yaml:"expected_status"`
-	MaxFail        int           `yaml:"max_fail"`
-	MaxAvgMs       int           `yaml:"max_avg_ms"`
-	SourceTimeout  time.Duration `yaml:"source_timeout"`
-	Concurrency    int           `yaml:"concurrency"`
+	// Rounds is how many times each surviving node is URL-tested per cycle.
+	// 0 -> defaultCheckRounds.
+	Rounds int `yaml:"rounds"`
+	// Timeout caps one URL-test attempt and, halved, each pre-check dial
+	// attempt (precheckDialBudget), so lowering it widens the condemned set.
+	// 0 -> defaultCheckTimeout.
+	Timeout time.Duration `yaml:"timeout"`
+	// TestURL is the latency probe fetched through each node. Empty ->
+	// defaultCheckTestURL.
+	TestURL string `yaml:"test_url"`
+	// ExpectedStatus is the accepted URL-test status(es), mihomo IntRanges
+	// syntax. Empty -> "204".
+	ExpectedStatus string `yaml:"expected_status"`
+	// MaxFail is the number of rounds a node may lose and still survive. 0 is
+	// NOT defaulted: it means every round must pass, the strictest setting and
+	// the opposite of every other knob's 0.
+	MaxFail int `yaml:"max_fail"`
+	// MaxAvgMs drops a node whose mean delay across rounds exceeds it. 0 ->
+	// defaultCheckMaxAvgMs.
+	MaxAvgMs int `yaml:"max_avg_ms"`
+	// SourceTimeout caps one subscription fetch. 0 -> defaultSourceTimeout.
+	SourceTimeout time.Duration `yaml:"source_timeout"`
+	// Concurrency bounds in-flight URL tests. 0 -> defaultCheckConcurr.
+	Concurrency int `yaml:"concurrency"`
 }
 
 // BandwidthConfig configures the through-node download-speed gate (the
@@ -628,6 +675,12 @@ type GeofeedConfig struct {
 func (g *GeofeedConfig) applyDefaults() {
 	if g.RefreshInterval == nil {
 		g.RefreshInterval = new(defaultGeoDBRefresh)
+	}
+	// URL trimming lives here, not in Validate: every validator is read-only,
+	// and a write on the reload path would make config.Equal decide a no-op
+	// against a value Validate already changed.
+	for i := range g.Sources {
+		g.Sources[i].URL = strings.TrimSpace(g.Sources[i].URL)
 	}
 }
 
@@ -704,6 +757,22 @@ func validateDownloadURL(name, raw string) error {
 	}
 	if u.Scheme != schemeHTTPS || u.Host == "" {
 		return fmt.Errorf("%s: must be an absolute https URL, got %q", name, raw)
+	}
+	return nil
+}
+
+// validateAPIEndpoint requires an absolute http(s) URL with a host -- the shape
+// the through-node checks dial (stable.hostPort). Every other URL leaf is
+// validated at load; these five are the ones a one-character typo silently
+// routed through, until the gate dropped every survivor as unreachable and
+// blamed the nodes.
+func validateAPIEndpoint(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
+		return fmt.Errorf("%s: must be an absolute http(s) URL, got %q", name, raw)
 	}
 	return nil
 }
@@ -927,7 +996,10 @@ func (g *GeoBlockConfig) applyDefaults() {
 
 // APIKeyResolved returns the inline api_key, or the value of key_var read from
 // key_file (an env-style KEY=VALUE file, e.g. the agenix secret). Empty without
-// error when neither is set, which disables the Gemini check.
+// error when neither is set -- the shape Validate refuses for an armed gemini
+// filter, so a caller that sees it from YAML should treat the gate as
+// misconfigured, not disabled. A declared key_file that cannot be read or
+// lacks key_var is an error, and Apply fails the load on it.
 func (g GeminiConfig) APIKeyResolved() (string, error) {
 	if g.APIKey != "" {
 		return g.APIKey, nil
@@ -1011,6 +1083,17 @@ func Load(path string) (Config, error) {
 	cfg.DeadCache.applyDefaults()
 	cfg.Fetch.applyDefaults()
 
+	// The curated-ownership rule is policed per FILE, before any append blurs
+	// the origin: this pass refuses a managed mark in config.yaml's own list
+	// naming config.yaml, mergeSourcesOverlay refuses one in sources.yaml
+	// naming sources.yaml, and only the private.yaml merge that follows runs
+	// validateSources with the mark allowed. Validating the list here also
+	// keeps a bad config.yaml entry from being reported as the overlay's once
+	// the merged list is checked after the append.
+	if err := cfg.Subscriptions.validateSources(filepath.Base(path)); err != nil {
+		return Config{}, err
+	}
+
 	// Merge the tracked sources.yaml overlay BEFORE validation so the appended
 	// sources are validated together with the rest of the config.
 	if err := mergeSourcesOverlay(filepath.Dir(path), &cfg); err != nil {
@@ -1072,9 +1155,12 @@ const privateOverlayFile = "private.yaml"
 const sourcesOverlayFile = "sources.yaml"
 
 // errManagedInCuratedFile is the one wording for a refused mark, so the message
-// does not depend on which gate caught it.
+// does not depend on which gate caught it. file names the curated file whose
+// entry carried the mark: Load's pre-merge pass passes the config file's base
+// name for config.yaml's own list, and mergeSourcesOverlay passes
+// sourcesOverlayFile for the entries it loads.
 func errManagedInCuratedFile(file, name string) error {
-	return fmt.Errorf("subscriptions.sources.%s: managed: true is the crawler's own mark and belongs in private.yaml; %s and config.yaml are curated", name, file)
+	return fmt.Errorf("subscriptions.sources.%s: managed: true is the crawler's own mark and belongs in private.yaml; %s is curated", name, file)
 }
 
 func mergeSourcesOverlay(dir string, cfg *Config) error {
@@ -1170,7 +1256,7 @@ func (cfg *Config) Validate() error {
 	if err := cfg.GeoBlock.validate(); err != nil {
 		return err
 	}
-	if err := cfg.Geo.Geofeed.Validate(); err != nil {
+	if err := cfg.validateGeofeed(); err != nil {
 		return err
 	}
 	if err := cfg.Geo.DBIP.validate(); err != nil {
@@ -1236,7 +1322,10 @@ func (cfg *Config) validateNonNegative() error {
 // net.Dialer receives verbatim for every DNS query. A portless value dials
 // nothing, so every lookup fails and every node is dropped as a DNS failure:
 // a total outage produced by one missing ":53", previously accepted silently by
-// both startup and reload. An empty address keeps the system resolver.
+// both startup and reload. SplitHostPort range-checks neither side, so the
+// port is validated numerically too: an out-of-range one (1.1.1.1:99999)
+// dials the same nothing and produces the same outage one typo later. An empty
+// address keeps the system resolver.
 func validateResolverAddress(addr string) error {
 	if addr == "" {
 		return nil
@@ -1248,19 +1337,37 @@ func validateResolverAddress(addr string) error {
 	if host == "" || port == "" {
 		return fmt.Errorf("resolver.address %q: must be host:port, e.g. 1.1.1.1:53", addr)
 	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("resolver.address %q: port %q is outside 1-65535; a value outside it dials nothing and drops every node as a DNS failure", addr, port)
+	}
 	return nil
 }
 
-// validateFilters rejects unknown filter types and type-specific bad values.
+// validateFilters rejects unknown filter types, type-specific bad values, and a
+// second entry of a type only one instance can serve. cidr is the oldest
+// singleton (urls: is already a union; a second entry could only mean
+// intersection), and every through-node type is one too: the stable worker
+// renders one Prometheus series per entry, so two gemini entries would publish
+// duplicate series in a single scrape and the gate's own counts would silently
+// disagree. country and asn entries repeat legally -- DeniedCountries expands
+// over every country entry, and asn deny patterns chain.
 func (cfg *Config) validateFilters() error {
 	seenCIDR := false
+	seenThroughNode := make(map[string]bool, numThroughNodeFilterTypes)
 	for i, f := range cfg.Filters {
 		if f.Type == FilterCIDR {
-			// urls: is already the union; a second entry could only mean intersection.
 			if seenCIDR {
 				return fmt.Errorf("filters[%d]: only one cidr filter is supported", i)
 			}
 			seenCIDR = true
+		}
+		switch f.Type {
+		case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterBandwidth:
+			if seenThroughNode[f.Type] {
+				return fmt.Errorf("filters[%d]: only one %s filter is supported", i, f.Type)
+			}
+			seenThroughNode[f.Type] = true
 		}
 		if err := cfg.validateFilter(i, f); err != nil {
 			return err
@@ -1281,7 +1388,20 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		if f.RateLimit < 0 {
 			return fmt.Errorf("filters[%d].rate_limit must not be negative", i)
 		}
-		return validateAPIFilter(i, f)
+		if err := validateAPIFilter(i, f); err != nil {
+			return err
+		}
+		// A keyless gemini gate is not a gate: the stable worker resolves the
+		// key and silently skips the check when none comes back, keeping every
+		// node this entry exists to drop while its metrics read "disabled". The
+		// file itself is not read here (Load must not depend on a secret mount);
+		// a declared key_file that is missing or lacks key_var fails later, at
+		// Apply, where the file is actually read.
+		merged := f.mergedGemini(cfg.GeoBlock.Gemini)
+		if merged.APIKey == "" && merged.KeyFile == "" {
+			return fmt.Errorf("filters[%d] (type gemini): the gate needs a key -- set api_key, or key_file + key_var, on the entry or on geoblock.gemini; without one every geo-block claim it makes is vacuous", i)
+		}
+		return nil
 	case FilterClaude, FilterChatGPT, FilterTidal:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
@@ -1344,6 +1464,13 @@ func validateAPIFilter(i int, f FilterConfig) error {
 	if f.Concurrency < 0 {
 		return fmt.Errorf("filters[%d].concurrency must not be negative", i)
 	}
+	// An empty endpoint means "inherit the geoblock sub-block"; a non-empty
+	// override must be dialable or the gate drops every survivor as unreachable.
+	if f.Endpoint != "" {
+		if err := validateAPIEndpoint(fmt.Sprintf("filters[%d].endpoint", i), f.Endpoint); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1373,7 +1500,7 @@ func (f FilterConfig) validateBandwidth(i int) error {
 		if err != nil {
 			return fmt.Errorf("filters[%d].test_url: %w", i, err)
 		}
-		if (u.Scheme != "http" && u.Scheme != schemeHTTPS) || u.Host == "" {
+		if (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
 			return fmt.Errorf("filters[%d].test_url: must be an absolute http(s) URL, got %q", i, f.TestURL)
 		}
 	}
@@ -1413,19 +1540,32 @@ func validateProviderChain(i int, providers []string) error {
 
 // validate rejects values that would panic or misbehave downstream: a negative
 // concurrency reaches make(chan struct{}, n) in the prober workers, and
-// negative timeouts/TTLs bypass the ==0 default guards.
+// negative timeouts/TTLs bypass the ==0 default guards. The four endpoints are
+// checked too -- applyDefaults fills an empty one with a built-in, so a
+// non-empty value here is operator-written and must be dialable; the empty
+// guard keeps a code-built config valid without a defaults pass.
 func (g *GeoBlockConfig) validate() error {
+	endpoint := func(name, raw string) error {
+		if raw == "" {
+			return nil
+		}
+		return validateAPIEndpoint(name, raw)
+	}
 	return errors.Join(
 		rejectNegativeDur("geoblock.ttl", &g.TTL),
 		rejectNegativeDur("geoblock.gemini.timeout", &g.Gemini.Timeout),
 		rejectNegativeInt("geoblock.gemini.concurrency", &g.Gemini.Concurrency),
 		rejectNegativeInt("geoblock.gemini.rate_limit", &g.Gemini.RateLimit),
+		endpoint("geoblock.gemini.endpoint", g.Gemini.Endpoint),
 		rejectNegativeDur("geoblock.claude.timeout", &g.Claude.Timeout),
 		rejectNegativeInt("geoblock.claude.concurrency", &g.Claude.Concurrency),
+		endpoint("geoblock.claude.endpoint", g.Claude.Endpoint),
 		rejectNegativeDur("geoblock.chatgpt.timeout", &g.ChatGPT.Timeout),
 		rejectNegativeInt("geoblock.chatgpt.concurrency", &g.ChatGPT.Concurrency),
+		endpoint("geoblock.chatgpt.endpoint", g.ChatGPT.Endpoint),
 		rejectNegativeDur("geoblock.tidal.timeout", &g.Tidal.Timeout),
 		rejectNegativeInt("geoblock.tidal.concurrency", &g.Tidal.Concurrency),
+		endpoint("geoblock.tidal.endpoint", g.Tidal.Endpoint),
 	)
 }
 
@@ -1457,8 +1597,9 @@ func (s *SubscriptionsConfig) applyDefaults() {
 	}
 }
 
-// Validate checks the prober parameters unconditionally, then the merged source
-// list. The parameters are independent of where sources come from, and in this
+// Validate checks the prober parameters unconditionally, then the source list
+// (config.yaml's own entries plus whatever sources.yaml appended). The
+// parameters are independent of where sources come from, and in this
 // deployment every source arrives from an overlay -- gating their validation on
 // a non-empty list meant a bad subscriptions.interval in config.yaml booted
 // clean and then failed EVERY reload from the moment the crawler wrote the
@@ -1470,20 +1611,63 @@ func (s *SubscriptionsConfig) Validate() error {
 	if err := s.Check.validate(); err != nil {
 		return err
 	}
+	if err := s.checkCycleBudget(); err != nil {
+		return err
+	}
 	return s.validateSources(sourcesOverlayFile)
 }
 
-// validateSources checks the merged source list alone. Load re-runs it after
-// merging an overlay, so the error it blames on that overlay is always about
-// entries the overlay actually contributed.
+// checkCycleBudget guards the cycle knobs against absurd-but-valid pairs.
+// RunOnce (stable/checker.go) has no wall-clock deadline -- the cycle context
+// is cancelled only at shutdown -- so these two rules are the only config-side
+// bound on a pathological combination. Each rule carries config-only
+// arithmetic:
 //
-// curatedFile names the git-tracked origin of these entries, and is empty only
-// once the crawler's private.yaml is merged, where managed: true is the whole
-// point. This is the second gate on the mark: mergeSourcesOverlay refuses it in
-// the file it loads, so a curated overlay stays policed wherever it is appended,
-// and this pass covers config.yaml's own list as well.
+//   - rounds × timeout is the per-node worst case ONLY if the attempts
+//     serialize; the probe launches all rounds concurrently behind
+//     check.concurrency (stable/prober.go), so a hung node's attempts overlap
+//     and hold it for about one timeout, and the whole-phase bound scales with
+//     the live node count -- not config-checkable. The rule is a conservative
+//     absurd-knob guard (it refuses pairs whose serialized worst case alone
+//     cannot fit the interval), not a feasibility proof.
+//   - sources are fetched at most 16 at a time, each capped at
+//     `source_timeout`, so one hung source stalls the fetch phase for the
+//     whole value; above the interval, a single routine outage pushes the
+//     cycle past its own cadence.
+//
+// The first comparison is done by division so an absurd pair (rounds: 1e9,
+// timeout: 24h) is rejected before the duration product can overflow.
+func (s *SubscriptionsConfig) checkCycleBudget() error {
+	if int64(s.Check.Rounds) > int64(s.Interval/s.Check.Timeout) {
+		return fmt.Errorf("subscriptions.check.rounds (%d) × subscriptions.check.timeout (%v) exceeds subscriptions.interval (%v): rounds × timeout is the per-node worst case only when the attempts serialize (concurrency 1) -- the probe runs the rounds concurrently behind subscriptions.check.concurrency, so a hung node holds it for about one timeout and the real whole-phase bound depends on the live node count, which no config-only check can express; this refusal is a conservative absurd-knob guard, not a feasibility proof",
+			s.Check.Rounds, s.Check.Timeout, s.Interval)
+	}
+	if s.Check.SourceTimeout > s.Interval {
+		return fmt.Errorf("subscriptions.check.source_timeout (%v) exceeds subscriptions.interval (%v): sources are fetched at most 16 at a time, each capped at source_timeout, so one hung source alone can stall the fetch phase for the whole value -- longer than the interval, and every publication waits behind it",
+			s.Check.SourceTimeout, s.Interval)
+	}
+	return nil
+}
+
+// validateSources checks one source list. Load walks the list three times, each
+// naming the file whose entries it holds: config.yaml's own list before the
+// sources.yaml merge (curatedFile = the config file's base name), the merged
+// config.yaml + sources.yaml list from Validate (curatedFile =
+// sourcesOverlayFile), and the full list once private.yaml is appended
+// (curatedFile = "", the one pass where managed: true is legal). A merged pass
+// can only blame one curated file for entries that came from two, so each
+// curated origin is refused by its own first gate before the append:
+// mergeSourcesOverlay refuses the overlay's entries as it loads them, and
+// Load's pre-merge pass refuses config.yaml's. The mark rule here stays as the
+// second gate for any other statement order.
 func (s *SubscriptionsConfig) validateSources(curatedFile string) error {
 	seen := make(map[string]struct{}, len(s.Sources))
+	// Fetch identity, not URL identity: BytesWithTypeHWID sends x-hwid only
+	// when hwid is non-empty, and the measured Remnawave panel answers the
+	// same URL with a placeholder body without the header and the real node
+	// list with it -- so two hwids over one URL are distinct fetches.
+	type fetchKey struct{ url, hwid string }
+	urlOwner := make(map[fetchKey]string, len(s.Sources))
 	for _, src := range s.Sources {
 		if curatedFile != "" && src.Managed {
 			return errManagedInCuratedFile(curatedFile, src.Name)
@@ -1501,6 +1685,21 @@ func (s *SubscriptionsConfig) validateSources(curatedFile string) error {
 			if err := fetch.ValidatePublicHTTPSURL(fetch.SubscriptionURL(src.URL)); err != nil {
 				return fmt.Errorf("subscriptions.sources.%s: %w", src.Name, err)
 			}
+		}
+		// Name is not a uniqueness key for the WORK: two names fetching the
+		// same URL under the same hwid fetch the same payload twice every
+		// cycle while Merge's first-source-wins dedupe keeps the later one's
+		// nodes out of the list -- dead weight the crawler's curatedURLs guard
+		// cannot catch (it only covers URLs it saw at its own cycle start).
+		// The hwid is part of that identity because it changes the request, so
+		// a differing hwid (the empty one included) is a distinct fetch whose
+		// payload can contribute. Body sources carry no URL and are skipped.
+		if url := strings.TrimSpace(src.URL); url != "" {
+			key := fetchKey{url: url, hwid: src.HWID}
+			if owner, dup := urlOwner[key]; dup {
+				return fmt.Errorf("subscriptions.sources.%s: url %s is already fetched as %s with the same hwid %q; sources sharing a url AND hwid fetch the same payload twice and the later one contributes no node", src.Name, url, owner, src.HWID)
+			}
+			urlOwner[key] = src.Name
 		}
 		if err := validateSourceHWID(src); err != nil {
 			return err
@@ -1555,7 +1754,7 @@ func (c *CheckConfig) validate() error {
 		if err != nil {
 			return fmt.Errorf("subscriptions.check.test_url: %w", err)
 		}
-		if (u.Scheme != "http" && u.Scheme != schemeHTTPS) || u.Host == "" {
+		if (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
 			return fmt.Errorf("subscriptions.check.test_url: must be an absolute http(s) URL, got %q", c.TestURL)
 		}
 	}
@@ -1644,19 +1843,48 @@ func AnnotateChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.Annotate, newCfg.Annotate)
 }
 
-func (g *GeofeedConfig) Validate() error {
-	if len(g.Sources) == 0 {
-		return errors.New("geo.geofeed.sources must contain at least one source")
+// validateGeofeed checks the geofeed block once the whole config is in view:
+// GeofeedConfig.Validate covers each source that IS listed, and this adds the
+// one rule the block alone cannot judge -- a source must exist whenever a
+// country filter or annotate chain names the geofeed provider. A deployment
+// that never asks it anything (annotate cloudflare/dbip/registry only, or
+// asn/cidr filters only) legitimately carries none.
+func (cfg *Config) validateGeofeed() error {
+	if err := cfg.Geo.Geofeed.Validate(); err != nil {
+		return err
 	}
+	if len(cfg.Geo.Geofeed.Sources) > 0 || !cfg.referencesGeofeed() {
+		return nil
+	}
+	return errors.New("geo.geofeed.sources must contain at least one source: a country filter or annotate chain references the geofeed provider")
+}
+
+// referencesGeofeed reports whether any country filter or annotate chain names
+// the geofeed provider -- the two consumers that would ask the lookup a
+// question. applyFilterDefaults and applyAnnotateDefaults run before Validate,
+// so a defaulted country provider or GEO chain counts here too.
+func (cfg *Config) referencesGeofeed() bool {
+	for _, f := range cfg.Filters {
+		if f.Type == FilterCountry && f.Provider == ProviderGeofeed {
+			return true
+		}
+	}
+	return cfg.AnnotateUsesProvider(ProviderGeofeed)
+}
+
+// Validate checks each listed geofeed source is well-formed and read-only:
+// URL trimming happens in applyDefaults. Whether a source must exist at all is
+// Config.validateGeofeed's rule, because it needs the whole config.
+func (g *GeofeedConfig) Validate() error {
 	for i := range g.Sources {
-		g.Sources[i].URL = strings.TrimSpace(g.Sources[i].URL)
-		if g.Sources[i].URL == "" {
+		src := g.Sources[i]
+		if strings.TrimSpace(src.URL) == "" {
 			return errors.New("geo.geofeed.sources.url must not be empty")
 		}
-		if g.Sources[i].Type == "" {
+		if src.Type == "" {
 			return errors.New("geo.geofeed.sources.type must not be empty")
 		}
-		if errValidate := fetch.ValidateFileType(g.Sources[i].Type); errValidate != nil {
+		if errValidate := fetch.ValidateFileType(src.Type); errValidate != nil {
 			return fmt.Errorf("validate source type: %w", errValidate)
 		}
 	}

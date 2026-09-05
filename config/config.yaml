@@ -24,6 +24,10 @@ geo:
       - url: https://raw.githubusercontent.com/Simonadascalu/Freedomtech-Geofeed/refs/heads/main/Freedomtech%20solutions%20-%20ALL
         type: raw
   asn:
+    # The shipped filters list and annotate chain arm NO asn consumer -- no
+    # `{type: asn}` or `{type: country, provider: asn}` filter, and `asn` is
+    # not in the GEO chain below -- so these two leaves configure nothing until
+    # one is armed. Tuning them now changes no lookup.
     timeout: 5s
     cache_ttl: 24h # in-memory cache of Cymru ASN lookups; geolocations rarely change (0 = default 24h)
 resolver:
@@ -76,7 +80,7 @@ filters:
   - type: country
     provider: geofeed
     # exclude_groups: [geo_blocked]  # TEMP: left empty so inline (mostly RU/IR/CN) nodes pass the geo filter; empty => no country drop. NOTE: this key only ever affects /stable.txt -- on / the countries come from the query params
-  - type: gemini # needs a valid key (geoblock.gemini.key_file/key_var): a rejected one is answered before the location check, and those nodes are kept, counted in stable_gemini_gate_unverified_checks rather than dropped
+  - type: gemini # needs a valid key (geoblock.gemini.key_file/key_var): a rejected one is answered before the location check, and those nodes are kept, counted in stable_gemini_gate_unverified_checks rather than dropped. Arming this filter without api_key/key_file fails the load; a key_file that is then missing or lacks key_var fails Apply (the boot refuses, the reload keeps the previous settings) instead of booting the gate silently off
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: tidal # keyless reachability, status only: keep a node if api.tidal.com/v1/country answered 2xx. A refused egress (e.g. RU) dies at CloudFront with a 403, so there is no refusal marker to match. The body is not read at all -- the country it reports gates where a subscription can be bought, not where an existing one plays
@@ -214,6 +218,16 @@ groups:
     - "CN"
     - "BY"
 subscriptions:
+  # Cadence between check cycles. An explicit 0 is rebound to the 30m built-in
+  # default before validation (like every subscriptions.check.* knob below), so
+  # 0 can never mean "never" -- an empty sources list is the off switch.
+  # Minimum 1m; the probe budget (rounds x timeout) and source_timeout must fit
+  # inside it or the load fails. That product rule is a conservative
+  # absurd-knob guard, not a feasibility proof: rounds x timeout is the
+  # per-node worst case only when attempts serialize -- the probe runs the
+  # rounds concurrently behind check.concurrency, so a hung node holds it for
+  # about one timeout and the real whole-phase bound depends on the live node
+  # count, which no config-only check can express.
   interval: 1h
   # Where the last published list is kept so a restart serves it immediately;
   # without it /stable.txt answers 503 for a whole cycle (measured 58 minutes
@@ -236,6 +250,15 @@ subscriptions:
     # pre-check's dial budget (timeout / precheckAttempts per attempt), so
     # lowering it here widens the condemned set -- and condemnation is
     # terminal plus dead-cached, not one failed round.
+    #
+    # An explicit 0 on any of these keys (and on subscriptions.interval) means
+    # "use the built-in default": the loader rebinds 0 before the validation
+    # floors run, so a floor can only catch a negative value. The one exception
+    # is max_fail, which is NEVER defaulted -- its 0 means every round must
+    # pass, the strictest setting. Both conventions differ from the
+    # disable-style 0s elsewhere in this file (deadcache.ttl 0s disables the
+    # cache, bandwidth min_mbps 0 removes the speed floor, geofeed
+    # refresh_interval 0s loads once and never refreshes).
     rounds: 2
     timeout: 1000ms # per-attempt cap for the URL test AND, halved, for each of the pre-check's two dial attempts; live nodes near max_avg_ms need headroom, tighter values false-fail them under load
     max_fail: 1

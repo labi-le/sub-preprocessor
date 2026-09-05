@@ -188,9 +188,13 @@ func coverageBase() config.Config {
 			Cloudflare: config.CloudflareConfig{Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
+			// ExcludeCountries is deliberately NOT the group's country: a
+			// mutator removing only exclude_groups must shrink the
+			// DeniedCountries set, or the row's worker reach rests on the
+			// FiltersChanged DeepEqual alone.
 			{
 				Type: config.FilterCountry, Provider: config.ProviderGeofeed,
-				ExcludeGroups: []string{"blocked"}, ExcludeCountries: []string{"RU"},
+				ExcludeGroups: []string{"blocked"}, ExcludeCountries: []string{"US"},
 			},
 			{Type: config.FilterASN, DenyPatterns: []string{"spammy"}},
 			{
@@ -408,11 +412,20 @@ func TestReloadClassificationMatchesBehaviour(t *testing.T) {
 	}
 }
 
-// reachedPaths is which of the reloader's three paths one config edit trips.
+// reachedPaths is which of the reloader's three paths one config edit trips,
+// plus how far a filters[] edit reaches into what the worker consumes.
 type reachedPaths struct {
 	proc    bool
 	worker  bool
 	restart bool
+	// filtersChanged reports whether the edit touched the unified filters
+	// list at all.
+	filtersChanged bool
+	// workerSpec reports whether the edit changed a value the stable worker
+	// READS OUT of the filters list -- a NodeFilterSpec the per-type merge
+	// produced, or the DeniedCountries set -- as opposed to merely tripping
+	// the whole-list FiltersChanged DeepEqual.
+	workerSpec bool
 }
 
 // mutatedReach edits key in isolation on a pristine config and measures where
@@ -435,10 +448,17 @@ func mutatedReach(t *testing.T, key, class string) (reachedPaths, bool) {
 		return reachedPaths{}, false
 	}
 
+	// workerSpec is measured through the two real consumers, not the
+	// FiltersChanged gate: a through-node override (marker/endpoint/version/
+	// key_*/...) only matters if it lands in the NodeFilterSpec the worker
+	// builds, and an exclude_* only via the deny set it expands into.
 	return reachedPaths{
-		proc:    requestPathAffected(base, changed),
-		worker:  workerAffected(base, changed),
-		restart: restartAffected(base, changed),
+		proc:           requestPathAffected(base, changed),
+		worker:         workerAffected(base, changed),
+		restart:        restartAffected(base, changed),
+		filtersChanged: !reflect.DeepEqual(base.Filters, changed.Filters),
+		workerSpec: !reflect.DeepEqual(base.NodeFilterSpecs(), changed.NodeFilterSpecs()) ||
+			!reflect.DeepEqual(base.DeniedCountries(), changed.DeniedCountries()),
 	}, true
 }
 
@@ -458,6 +478,16 @@ func checkClassReach(t *testing.T, key, class string, reach reachedPaths) {
 	case liveWorker:
 		if proc || !worker {
 			t.Errorf("%q is %s but proc=%v worker=%v: a live-worker key must trip a subsAffected gate and not change the processor inputs", key, class, proc, worker)
+		}
+		// A filters[] live-worker row that trips the worker only through the
+		// whole-list FiltersChanged DeepEqual binds nothing: the worker is
+		// re-applied, but nothing proves the value reaches the spec it
+		// builds. The row must land in a NodeFilterSpec (through the per-type
+		// merge) or in the DeniedCountries set — deleting the merge a
+		// per-entry override feeds (e.g. mergedClaude's Version copy) must
+		// fail here.
+		if reach.filtersChanged && !reach.workerSpec {
+			t.Errorf("%q is %s but its edit reaches the worker only through FiltersChanged: nothing proves it lands in the NodeFilterSpecs or DeniedCountries the worker builds", key, class)
 		}
 	case liveBoth:
 		if !proc || !worker {

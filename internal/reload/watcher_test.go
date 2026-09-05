@@ -1,9 +1,12 @@
 package reload_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,6 +170,76 @@ func TestWatcherIgnoresOtherFiles(t *testing.T) {
 	}
 }
 
+// TestWatcherRecoversAfterDirectoryReplaced proves the watcher does not go
+// permanently deaf when the watched directory itself is replaced (a bind mount
+// re-created, rm -rf + restore): fsnotify drops the watch on the old inode and
+// the replacement directory's events would never arrive. Run must notice the
+// loss, log it at error level and re-add the watch, then keep delivering
+// events -- with one onChange fired at recovery so the reload catches whatever
+// changed while deaf.
+func TestWatcherRecoversAfterDirectoryReplaced(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		calls  atomic.Int64
+		logBuf syncBuffer
+	)
+	w, err := reload.NewWatcher(cfgPath, func(context.Context) { calls.Add(1) }, zerolog.New(&logBuf))
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond) // let the Run select loop start
+
+	// Replace the whole directory: move it aside, recreate the path, write a
+	// fresh config into it. The watch was on the moved inode, so the write is
+	// invisible until Run re-adds the watch on the new directory.
+	moved := filepath.Join(t.TempDir(), "config-moved")
+	if renameErr := os.Rename(dir, moved); renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	if mkdirErr := os.Mkdir(dir, 0o755); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if writeErr := os.WriteFile(cfgPath, []byte("a: 2\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	// The recheck ticker runs once a second; give it room to re-add and fire.
+	deadline := time.Now().Add(4 * time.Second)
+	for calls.Load() == 0 || !strings.Contains(logBuf.String(), "lost the config directory watch") {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher stayed deaf: calls=%d logs:\n%s", calls.Load(), logBuf.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The watch is live again: a further write must reach onChange.
+	before := calls.Load()
+	if writeErr := os.WriteFile(cfgPath, []byte("a: 3\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if calls.Load() == before {
+		t.Fatal("after recovery, a config write must still trigger onChange")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 // TestWatcherDetectsPrivateOverlay proves a write to the private.yaml overlay
 // sibling triggers onChange, because config.Load merges it into the effective
 // config and the stable worker's sources come from that merge.
@@ -211,4 +284,26 @@ func TestWatcherDetectsPrivateOverlay(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after ctx cancel")
 	}
+}
+
+// syncBuffer serialises the log writes Run makes from its own goroutine
+// against the assertions the test body reads them with; zerolog offers no
+// synchronisation of its own, so a bare bytes.Buffer races.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
 }

@@ -228,13 +228,19 @@ func TestReloadNoOpOnIdenticalConfig(t *testing.T) {
 // TestReloadKeepsOldOnError covers AC2, AC3, AC9 (plus malformed YAML): every
 // load/validate/build failure must keep the previous settings — the holder
 // snapshot pointer must never change.
+//
+// Empty YAML and a geofeed-less file are no longer load errors: since the
+// geofeed-source requirement became reference-gated, a config that never names
+// the geofeed provider may ship without a source. The fixtures below are
+// therefore a strict-decode failure (AC2) and a geofeed block that IS
+// referenced but carries no source (AC3).
 func TestReloadKeepsOldOnError(t *testing.T) {
 	cases := []struct {
 		name    string
 		content string
 	}{
-		{"empty file (AC2)", ""},
-		{"valid yaml but empty geofeed sources (AC3)", "server:\n  listen: \":7777\"\n"},
+		{"unknown key (AC2)", "bogus_block:\n  x: 1\n"},
+		{"geofeed referenced but no sources (AC3)", "server:\n  listen: \":7777\"\nannotate:\n  - tag: GEO\n    providers: [geofeed]\n"},
 		{"malformed yaml", "key: [a, b, c"},
 		{"invalid asn regex (AC9)", baseGeofeedYAML + "filters:\n  - type: asn\n    deny_patterns:\n      - \"(\"\n"},
 	}
@@ -397,7 +403,7 @@ const subsYAML = baseGeofeedYAML + subsBlock
 
 // TestReloadAppliesSubscriptions: adding a subscriptions block must trigger
 // Controller.Apply on the wired controller (observed via the reloader's own
-// "subscriptions config applied" log, written only on a successful Apply).
+// "subscriptions config staged" log, written only on a successful Apply).
 // The controller gets a Nop logger and a failing filterer so its worker
 // goroutine stays silent and offline.
 func TestReloadAppliesSubscriptions(t *testing.T) {
@@ -416,14 +422,14 @@ func TestReloadAppliesSubscriptions(t *testing.T) {
 	r.Reload(t.Context())
 	ctl.Stop()
 
-	if logs := logBuf.String(); !strings.Contains(logs, "subscriptions config applied") {
-		t.Fatalf("expected 'subscriptions config applied' log, got:\n%s", logs)
+	if logs := logBuf.String(); !strings.Contains(logs, "subscriptions config staged") {
+		t.Fatalf("expected 'subscriptions config staged' log, got:\n%s", logs)
 	}
 }
 
 // TestReloadSkipsApplyOnUnrelatedChange: an asn.deny_patterns edit (what the
 // gemini sidecar rewrites periodically) must NOT restart the stable worker —
-// no "subscriptions config applied" log may appear.
+// no "subscriptions config staged" log may appear.
 func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := zerolog.New(&logBuf)
@@ -444,7 +450,7 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 	if holder.Load() == before {
 		t.Fatal("valid asn edit must still swap the snapshot")
 	}
-	if logs := logBuf.String(); strings.Contains(logs, "subscriptions config applied") {
+	if logs := logBuf.String(); strings.Contains(logs, "subscriptions config staged") {
 		t.Fatalf("unrelated change must not re-apply subscriptions, got:\n%s", logs)
 	}
 }

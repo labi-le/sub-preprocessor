@@ -80,6 +80,51 @@ func TestLoadRejectsMissingGeofeedType(t *testing.T) {
 	}
 }
 
+// TestLoadGeofeedRequiredOnlyWhenReferenced pins the reference-gated source
+// rule: geo.geofeed.sources is mandatory exactly when a country filter or an
+// annotate chain names the geofeed provider, and optional for a deployment
+// that never asks geofeed anything.
+func TestLoadGeofeedRequiredOnlyWhenReferenced(t *testing.T) {
+	t.Parallel()
+
+	// Annotate chain naming geofeed, no sources: rejected, naming the rule.
+	if _, err := loadRaw(t, "annotate:\n  - tag: GEO\n    providers: [geofeed]\n"); err == nil {
+		t.Fatal("a GEO chain naming geofeed requires a geofeed source")
+	} else if !strings.Contains(err.Error(), "geo.geofeed.sources must contain at least one source") {
+		t.Fatalf("error %q does not name the geofeed source rule", err)
+	}
+
+	// A country filter defaulting to the geofeed provider is a reference too.
+	if _, err := loadRaw(t, "filters:\n  - type: country\n"); err == nil {
+		t.Fatal("a country filter with the default geofeed provider requires a geofeed source")
+	}
+
+	// dbip/registry-only annotation and no country filter: loads source-less.
+	cfg, err := loadRaw(t, "annotate:\n  - tag: GEO\n    providers: [dbip, registry]\n")
+	if err != nil {
+		t.Fatalf("a deployment that never queries geofeed needs no geofeed source: %v", err)
+	}
+	if len(cfg.Geo.Geofeed.Sources) != 0 {
+		t.Fatalf("sources = %+v, want none", cfg.Geo.Geofeed.Sources)
+	}
+}
+
+// TestGeofeedValidateIsReadOnly pins the validator's read-only contract: a
+// whitespace-padded URL must validate (on its trimmed form) without the value
+// being rewritten, since Validate runs on the reload path where config.Equal
+// decides whether a reload is a no-op. Trimming belongs to applyDefaults.
+func TestGeofeedValidateIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	g := config.GeofeedConfig{Sources: []geofeed.Source{{URL: "  https://example.com/feed.csv  ", Type: "raw"}}}
+	if err := g.Validate(); err != nil {
+		t.Fatalf("a padded URL must validate on its trimmed form: %v", err)
+	}
+	if g.Sources[0].URL != "  https://example.com/feed.csv  " {
+		t.Fatalf("Validate must not mutate the config it validates, got %q", g.Sources[0].URL)
+	}
+}
+
 // TestLoadGeofeedRefreshInterval covers the two explicit forms: a duration is
 // kept verbatim, and an explicit 0 survives defaulting because the processor
 // reads a non-positive interval as "load once, never refresh".
@@ -429,6 +474,167 @@ func TestLoadRejectsBadSubscriptions(t *testing.T) {
 		if _, err := writeConfig(t, block); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+// TestLoadRejectsOutOfRangeResolverPort: SplitHostPort does not range-check
+// the port, and resolver.New dials the address verbatim for every DNS query --
+// so 1.1.1.1:99999 used to boot clean and produce the same total DNS outage
+// the portless rejection was added to kill. The shipped config carries no
+// resolver.address (system resolver), so this rule never touches it.
+func TestLoadRejectsOutOfRangeResolverPort(t *testing.T) {
+	t.Parallel()
+
+	for _, addr := range []string{"1.1.1.1:0", "1.1.1.1:99999", "1.1.1.1:65536", "1.1.1.1:port"} {
+		if _, err := writeConfig(t, "resolver:\n  address: "+addr+"\n"); err == nil {
+			t.Fatalf("resolver.address %q must be rejected", addr)
+		} else if !strings.Contains(err.Error(), "resolver.address") || !strings.Contains(err.Error(), "1-65535") {
+			t.Fatalf("resolver.address %q error %q must name the address and the range", addr, err)
+		}
+	}
+	for _, addr := range []string{"1.1.1.1:1", "1.1.1.1:53", "1.1.1.1:65535"} {
+		if _, err := writeConfig(t, "resolver:\n  address: "+addr+"\n"); err != nil {
+			t.Fatalf("resolver.address %q must load: %v", addr, err)
+		}
+	}
+}
+
+// TestLoadRejectsUnfinishableCycleBudget pins the cycle-budget guard: the
+// serialized worst case rounds × timeout (what a single dead-but-reachable
+// node would hold at concurrency 1) and source_timeout (what one hung source
+// stalls the fetch phase for) must each fit inside the interval. The product
+// rule is a conservative absurd-knob guard, not a feasibility proof -- the
+// probe runs the rounds concurrently behind check.concurrency, so the real
+// whole-phase bound depends on the live node count -- and refusing a pair
+// whose serialized worst case alone cannot fit is the deliberate direction.
+// The shipped values (interval 1h, rounds 2, timeout 1000ms, source_timeout
+// 5m) and the product-equality boundary stay valid.
+func TestLoadRejectsUnfinishableCycleBudget(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		block   string
+		wantErr string
+	}{
+		"absurd rounds":    {"subscriptions:\n  check:\n    rounds: 1000000000\n", "subscriptions.check.rounds"},
+		"absurd timeout":   {"subscriptions:\n  check:\n    timeout: 24h\n", "exceeds subscriptions.interval"},
+		"absurd source to": {"subscriptions:\n  check:\n    source_timeout: 30h\n", "subscriptions.check.source_timeout"},
+		"moderate overrun": {"subscriptions:\n  interval: 30m\n  check:\n    rounds: 5\n    timeout: 10m\n", "× subscriptions.check.timeout"},
+	}
+	for name, tc := range cases {
+		if _, err := writeConfig(t, tc.block); err == nil {
+			t.Fatalf("%s: expected error", name)
+		} else if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: error %q does not contain %q", name, err, tc.wantErr)
+		}
+	}
+
+	// Product exactly equal to the interval is the boundary and stays valid
+	// (the fetch budget must fit the interval too, so it is set explicitly).
+	if _, err := writeConfig(t, "subscriptions:\n  interval: 10m\n  check:\n    rounds: 300\n    timeout: 2s\n    source_timeout: 2m\n"); err != nil {
+		t.Fatalf("rounds × timeout equal to the interval must load: %v", err)
+	}
+	// The shipped operating point stays valid under all three rules.
+	if _, err := writeConfig(t, "subscriptions:\n  interval: 1h\n  check:\n    rounds: 2\n    timeout: 1000ms\n    source_timeout: 5m\n"); err != nil {
+		t.Fatalf("the shipped check values must load: %v", err)
+	}
+}
+
+// TestLoadRejectsDuplicateSourceURLs pins fetch-identity uniqueness across
+// the three files a source list can come from: two names fetching one URL
+// under the same hwid (the empty one included) fetch the SAME payload twice
+// every cycle while Merge's first-source-wins dedupe keeps the later one's
+// nodes out of the published list -- dead weight a name-only check never saw.
+// A differing hwid changes the x-hwid header and is a distinct fetch, allowed
+// by TestLoadAllowsSameURLWithDistinctHwids.
+func TestLoadRejectsDuplicateSourceURLs(t *testing.T) {
+	t.Parallel()
+
+	// Two entries in one config.yaml sharing a URL under different names.
+	if _, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n    - name: b\n      url: https://a.example.com/s\n"); err == nil {
+		t.Fatal("two config.yaml sources sharing a URL must be rejected")
+	} else if !strings.Contains(err.Error(), "already fetched as a") {
+		t.Fatalf("error %q must name both sources", err)
+	}
+
+	// The same pair is refused when both carry the SAME non-empty hwid; the
+	// error names the hwid so the operator sees why the fetches are identical.
+	if _, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n      hwid: abcdefghij\n    - name: b\n      url: https://a.example.com/s\n      hwid: abcdefghij\n"); err == nil {
+		t.Fatal("two sources sharing a URL and hwid must be rejected")
+	} else if !strings.Contains(err.Error(), "already fetched as a") || !strings.Contains(err.Error(), `hwid "abcdefghij"`) {
+		t.Fatalf("error %q must name both sources and the shared hwid", err)
+	}
+
+	// A private.yaml entry duplicating a config.yaml URL is caught on the
+	// post-append pass and reported as the overlay's.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := geoPreamble + "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: b\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("a private.yaml source duplicating a config.yaml URL must be rejected")
+	} else if !strings.Contains(err.Error(), "private config") || !strings.Contains(err.Error(), "already fetched as") {
+		t.Fatalf("error %q must blame the private overlay and the duplicate URL", err)
+	}
+
+	// A sources.yaml entry duplicating a config.yaml URL is caught at the
+	// merged Validate pass.
+	dir2 := t.TempDir()
+	path2 := filepath.Join(dir2, "config.yaml")
+	if err := os.WriteFile(path2, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	curated := "subscriptions:\n  sources:\n    - name: c\n      url: https://a.example.com/s\n"
+	if err := os.WriteFile(filepath.Join(dir2, "sources.yaml"), []byte(curated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path2); err == nil {
+		t.Fatal("a sources.yaml source duplicating a config.yaml URL must be rejected")
+	}
+
+	// Distinct URLs under distinct names stay valid.
+	if _, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n    - name: b\n      url: https://b.example.com/s\n"); err != nil {
+		t.Fatalf("distinct source URLs must load: %v", err)
+	}
+}
+
+// TestLoadAllowsSameURLWithDistinctHwids: a shared URL is NOT a duplicate when
+// the x-hwid header differs, because the header changes what the panel serves
+// (measured: the same Remnawave URL answers a placeholder body without it and
+// the real node list with it) -- so two hwids over one URL are two distinct
+// fetches whose payloads can both contribute. The empty hwid (no header) is a
+// third identity.
+func TestLoadAllowsSameURLWithDistinctHwids(t *testing.T) {
+	t.Parallel()
+
+	// Two different non-empty hwids over one URL in a single config.yaml.
+	if _, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n      hwid: abcdefghij\n    - name: b\n      url: https://a.example.com/s\n      hwid: abcdefghik\n"); err != nil {
+		t.Fatalf("same URL under different hwids must load: %v", err)
+	}
+	// A hwid-carrying source alongside a header-less one over the same URL.
+	if _, err := writeConfig(t, "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n    - name: b\n      url: https://a.example.com/s\n      hwid: abcdefghij\n"); err != nil {
+		t.Fatalf("same URL under empty vs set hwid must load: %v", err)
+	}
+	// The allowance holds across files too: a private.yaml entry may share a
+	// config.yaml URL when their hwids differ.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	base := geoPreamble + "subscriptions:\n  sources:\n    - name: a\n      url: https://a.example.com/s\n      hwid: abcdefghij\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priv := "subscriptions:\n  sources:\n    - name: b\n      url: https://a.example.com/s\n      hwid: abcdefghik\n"
+	if err := os.WriteFile(filepath.Join(dir, "private.yaml"), []byte(priv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("cross-file same URL under different hwids must load: %v", err)
 	}
 }
 
@@ -1151,8 +1357,17 @@ func TestLoadRejectsManagedInGitTrackedSources(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: managed: true must be rejected in a git-tracked file", file)
 		}
-		if !strings.Contains(err.Error(), "sources.yaml") || !strings.Contains(err.Error(), "curated-one") {
-			t.Fatalf("%s: error %q names neither the curated file nor the source", file, err)
+		// The blame must land on the file the entry was actually written in:
+		// config.yaml's own list is refused by Load's pre-merge pass (naming
+		// config.yaml), sources.yaml's by mergeSourcesOverlay (naming
+		// sources.yaml) — pointing an operator at the sibling file they never
+		// touched is the failure this assertion exists for.
+		other := "sources.yaml"
+		if file == "sources.yaml" {
+			other = "config.yaml"
+		}
+		if !strings.Contains(err.Error(), file) || strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), "curated-one") {
+			t.Fatalf("%s: error %q must blame %s, not %s, and name the source", file, err, file, other)
 		}
 	}
 
