@@ -46,6 +46,21 @@ func vmessPayloadAt(t *testing.T, addr string) []byte {
 	return []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(node)) + "\n")
 }
 
+// vmessNamedPayloadAt is vmessPayloadAt with an explicit node name, so a
+// payload can carry several nodes that stay distinguishable in the result map.
+func vmessNamedPayloadAt(t *testing.T, name, addr string) []byte {
+	t.Helper()
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := `{"v":"2","ps":"` + name + `","add":"` + host + `","port":"` + port + `",` +
+		`"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":"0","net":"tcp","type":"none","tls":"","scy":"auto"}`
+
+	return []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(node)) + "\n")
+}
+
 // liveTCPAddr returns an address accepting TCP for the test's lifetime. It
 // accepts and never answers, which is all the pre-check asks of it.
 func liveTCPAddr(t *testing.T) string {
@@ -174,10 +189,11 @@ func TestProbeZeroConcurrencyDoesNotDeadlock(t *testing.T) {
 
 	// NewMihomoProber is exported and validates nothing but expected_status, so
 	// a hand-built prober can carry Concurrency 0 — the residual case
-	// fanoutSem's doc comment names. runRound acquires the semaphore on the
-	// producer goroutine before any releasing worker exists, so an unbuffered
-	// channel blocks forever. The failure mode is a HANG, not a wrong value,
-	// hence the deadline + done channel: without them this wedges the suite.
+	// fanoutSem's doc comment names. runRound acquires the semaphore in its
+	// spawning loop before any worker exists, so an unbuffered channel would
+	// block the spawner forever; only fanoutSem's >= 1 clamp keeps that shape
+	// safe. The failure mode is a HANG, not a wrong value, hence the deadline
+	// + done channel: without them this wedges the suite.
 	//
 	// The node needs a LIVE listener: a condemned one never reaches runRound,
 	// and this test would then pass with the semaphore unbounded.
@@ -250,7 +266,10 @@ func dialsAddrOverTCP(typ mihomo.AdapterType, mapping map[string]any) bool {
 // assertNodesMatchTheAdapter checks the reorder's whole premise: what probeNodes
 // reads off a mapping is what the adapter it may now skip would have answered.
 // An unreadable endpoint is not a defect but must cost the speedup, which the
-// verdict comparison is what catches.
+// verdict comparison is what catches. The label is deliberately NOT compared:
+// the fold asks the adapter for a live position and probeSet derives the
+// condemned position's label from the raw mapping, so probeNodes must leave it
+// empty everywhere.
 func assertNodesMatchTheAdapter(t *testing.T, payload string, nodes []probeNode) {
 	t.Helper()
 
@@ -267,8 +286,8 @@ func assertNodesMatchTheAdapter(t *testing.T, payload string, nodes []probeNode)
 			t.Fatalf("ParseProxy(%v): %v", mapping, parseErr)
 		}
 		t.Cleanup(func() { _ = px.Close() })
-		if got := nodes[i].label; got != entryLabel(px) {
-			t.Errorf("position %d: label = %q, the adapter answers %q", i, got, entryLabel(px))
+		if got := nodes[i].label; got != "" {
+			t.Errorf("position %d: probeNodes derived label %q; the fold derives labels (the adapter answers %q)", i, got, entryLabel(px))
 		}
 		if got := nodes[i].addr; got != "" && got != px.Addr() {
 			t.Errorf("position %d: addr = %q, the adapter dials %q", i, got, px.Addr())
@@ -323,7 +342,7 @@ func TestProbeNodesKeyTheTCPVerdictOnTheTransport(t *testing.T) {
 				t.Fatalf("converted %d mappings, want 1", len(nodes))
 			}
 			if nodes[0].tcpServer != c.want {
-				t.Errorf("%q: tcp verdict = %v, want %v", nodes[0].label, nodes[0].tcpServer, c.want)
+				t.Errorf("%s: tcp verdict = %v, want %v", c.desc, nodes[0].tcpServer, c.want)
 			}
 			assertNodesMatchTheAdapter(t, c.line, nodes)
 		})
@@ -421,12 +440,14 @@ func TestProbeNodesKeepPositionsAcrossAnUnparsableNode(t *testing.T) {
 	}, "\n")
 
 	nodes := testProbeNodes(t, payload)
+	// No labels: probeNodes leaves them empty, the fold derives them from the
+	// adapter or from the raw mapping of a condemned position (see probeNodes).
 	want := []probeNode{
-		{label: "tcp-first", addr: addr, tcpServer: true},
-		{label: "unparsable", addr: addr, tcpServer: true},
+		{addr: addr, tcpServer: true},
+		{addr: addr, tcpServer: true},
 		// No endpoint: the pre-check will not dial this position, so probeNodes
 		// never derives one.
-		{label: "quic-only"},
+		{},
 	}
 	if len(nodes) != len(want) {
 		t.Fatalf("converted %d mappings, want %d", len(nodes), len(want))
@@ -461,48 +482,46 @@ func TestFilterReachableSparesWhatItMayNotJudge(t *testing.T) {
 	}
 }
 
-// The pre-check earns its place only by not spending check.timeout on a node it
-// condemned, so the assertion is the ABSENCE of a url-test event: the result
-// map cannot show it, because both nodes fold to a zero-success entry either
-// way. The stage is what tells them apart afterwards.
+// A node the pre-check condemns is never URL-tested, and the condemned
+// verdict is only believed on a PARTIAL refusal: a single refused endpoint is
+// a total refusal and the breaker disbelieves it (see breakerTrips), so the
+// refused node here sits beside a live one and is condemned unprobed.
 func TestProbeNeverURLTestsACondemnedNode(t *testing.T) {
 	t.Parallel()
 
-	for _, c := range []struct {
-		name      string
-		addr      string
-		urlTested bool
-		wantStage ProbeStage
-	}{
-		{name: "condemned", addr: deadTCPAddr(t), urlTested: false, wantStage: StageCondemned},
-		// The listener accepts and never answers, so mihomo's dial succeeds
-		// and the GET through the tunnel is what times out.
-		{name: "reachable", addr: liveTCPAddr(t), urlTested: true, wantStage: StageFetch},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
+	var buf bytes.Buffer
+	logger := zerolog.New(zerolog.SyncWriter(&buf)).Level(zerolog.DebugLevel)
+	p := testProberWith(t, config.CheckConfig{
+		Rounds:         2,
+		Concurrency:    1,
+		Timeout:        200 * time.Millisecond,
+		TestURL:        "http://127.0.0.1:1/",
+		ExpectedStatus: "204",
+	}, config.BandwidthConfig{}, logger)
 
-			var buf bytes.Buffer
-			logger := zerolog.New(zerolog.SyncWriter(&buf)).Level(zerolog.DebugLevel)
-			p := testProberWith(t, config.CheckConfig{
-				Rounds:         2,
-				Concurrency:    1,
-				Timeout:        200 * time.Millisecond,
-				TestURL:        "http://127.0.0.1:1/",
-				ExpectedStatus: "204",
-			}, config.BandwidthConfig{}, logger)
-
-			res, probeErr := p.Probe(context.Background(), vmessPayloadAt(t, c.addr))
-			if probeErr != nil {
-				t.Fatal(probeErr)
-			}
-			if got := res["node"]; got != (ProbeResult{Stage: c.wantStage}) {
-				t.Fatalf("result = %+v, want a zero-success entry at stage %v", got, c.wantStage)
-			}
-			if tested := strings.Contains(buf.String(), `"message":"url-test"`); tested != c.urlTested {
-				t.Errorf("url-tested = %v, want %v; log: %s", tested, c.urlTested, buf.String())
-			}
-		})
+	// The listener accepts and never answers, so mihomo's dial succeeds
+	// and the GET through the tunnel is what times out.
+	payload := append(vmessNamedPayloadAt(t, "condemned", deadTCPAddr(t)),
+		vmessNamedPayloadAt(t, "probed", liveTCPAddr(t))...)
+	res, probeErr := p.Probe(context.Background(), payload)
+	if probeErr != nil {
+		t.Fatal(probeErr)
+	}
+	if got := res["condemned"]; got != (ProbeResult{Stage: StageCondemned}) {
+		t.Fatalf("condemned node = %+v, want a zero-success entry at stage condemned", got)
+	}
+	if got := res["probed"]; got != (ProbeResult{Stage: StageFetch}) {
+		t.Fatalf("probed node = %+v, want a zero-success entry at stage fetch", got)
+	}
+	// The url-test log lines name their node: the condemned one must not be
+	// among them.
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if !strings.Contains(line, `"message":"url-test"`) {
+			continue
+		}
+		if strings.Contains(line, `"node":"condemned"`) {
+			t.Errorf("a condemned node reached the URL test; log: %s", line)
+		}
 	}
 }
 
@@ -563,14 +582,19 @@ func TestProbeNeverParsesACondemnedNode(t *testing.T) {
 // survives selection: the membership of the result map is then visible in the
 // published bytes, which no loadable config can be — max_fail is bounded to
 // [0, rounds), so a zero-success node is always dropped, as the last assertion
-// pins. The fixtures sit on refusedAddrs' network, which no concurrent test can
-// bind, so every verdict below is fixed without a listener.
+// pins. The refused fixtures sit on refusedAddrs' network, which no concurrent
+// test can bind, so their verdicts are fixed without a listener; src-009 binds
+// one real listener so the pool is not a total refusal (see breakerTrips).
 func TestProbeExpositionForAFixedPool(t *testing.T) {
 	t.Parallel()
 
 	ssLine := func(addr, name string) string {
 		return "ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:secret")) +
 			"@" + addr + "#" + name
+	}
+	liveHost, livePort, err := net.SplitHostPort(liveTCPAddr(t))
+	if err != nil {
+		t.Fatal(err)
 	}
 	entries := []Entry{
 		{Label: "src-001", Raw: benchVlessLine("127.0.1.1", "1", "src-001")},
@@ -590,18 +614,24 @@ func TestProbeExpositionForAFixedPool(t *testing.T) {
 		// it stays out of the result map exactly as it did when every mapping
 		// was parsed up front.
 		{Label: "src-008", Raw: "hy2://auth@127.0.1.8:1?obfs=salamander#src-008"},
+		// The one live endpoint. A pool whose every judged endpoint refused is
+		// a total refusal and the breaker disbelieves it (see breakerTrips),
+		// so this fixture needs a reachable endpoint to stay in the believed
+		// regime whose exposition it pins.
+		{Label: "src-009", Raw: benchVlessLine(liveHost, livePort, "src-009")},
 	}
 	payload := entriesPayload(entries)
 
-	p := testProber(t)
+	p := precheckProber(t)
 	res, err := p.Probe(context.Background(), payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Only the three TCP-dialled nodes are condemned: xhttp-over-h3 and
+	// Only the three TCP-dialled refused nodes are condemned: xhttp-over-h3 and
 	// hysteria2 reach their server over UDP and mieru is unlisted, so the
-	// pre-check may not judge them.
+	// pre-check may not judge them. src-009's dial succeeds, so it is probed
+	// (rounds-0 folds it to a named zero-success entry).
 	wantRes := map[string]ProbeResult{
 		"src-001": {Stage: StageCondemned},
 		"src-002": {Stage: StageUnknown},
@@ -610,24 +640,27 @@ func TestProbeExpositionForAFixedPool(t *testing.T) {
 		"src-005": {Stage: StageUnknown},
 		"src-006": {Stage: StageCondemned},
 		"src-007": {Stage: StageCondemned},
+		"src-009": {Stage: StageUnknown},
 	}
 	if !maps.Equal(res, wantRes) {
 		t.Errorf("probe results = %+v, want %+v", res, wantRes)
 	}
 	// A partial literal on purpose: the histogram must carry no key for a stage
-	// nobody reached, which an exhaustive one cannot express.
-	wantStages := map[ProbeStage]int{StageCondemned: 4, StageUnknown: 4} //nolint:exhaustive // see above
+	// nobody reached, which an exhaustive one cannot express. src-008 is the
+	// entry whose label no result names, so it indexes as unknown.
+	wantStages := map[ProbeStage]int{StageCondemned: 4, StageUnknown: 5} //nolint:exhaustive // see above
 	if got := probeStages(entries, res); !maps.Equal(got, wantStages) {
 		t.Errorf("probeStages = %v, want %v", got, wantStages)
 	}
 	if got, want := p.PrecheckReport(),
-		(PrecheckReport{State: PrecheckRan, Dialled: 4, Refused: 4}); got != want {
+		(PrecheckReport{State: PrecheckRan, Dialled: 5, Refused: 4}); got != want {
 		t.Errorf("PrecheckReport() = %+v, want %+v", got, want)
 	}
 	survivors := SelectSurvivors(entries, res, 0, 0, 0)
-	// Every node but the unparsable one, which is named by nobody.
+	// Every node but the unparsable one (src-008), which is named by nobody.
+	wantPayload := entriesPayload(append(slices.Clone(entries[:7]), entries[8]))
 	if got, want := BuildPayload(context.Background(), nil, survivors),
-		entriesPayload(entries[:len(entries)-1]); !bytes.Equal(got, want) {
+		wantPayload; !bytes.Equal(got, want) {
 		t.Errorf("published payload = %q, want %q", got, want)
 	}
 	// Nothing config.Load accepts publishes any of them: rounds >= 1 and
@@ -642,10 +675,11 @@ func TestProbeExpositionForAFixedPool(t *testing.T) {
 // deadcache.ttl — three cycles at the shipped 3h against a 1h interval. So the
 // pre-check disbelieves itself and condemns nobody.
 //
-// Both sides of the threshold are pinned: lowering it would fail the case just
-// under, raising it the case at 100%. precheckBreakerMin is pinned from the
-// other side by TestProbeNeverURLTestsACondemnedNode, whose single node is 100%
-// condemned and must still be judged on its merits.
+// Both sides of the share threshold are pinned: lowering it would fail the
+// case just under, raising it the case at 100%. The sample-size floor bounds
+// only partial refusal — a verdict that refused EVERYTHING it judged is
+// disbelieved below it too (breakerTrips), which the two small-pool cases
+// below pin.
 func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 	t.Parallel()
 
@@ -654,35 +688,49 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 	for _, c := range []struct {
 		desc          string
 		live          int
+		total         int
 		wantCondemned int
 		wantRep       PrecheckReport
 	}{
 		{
-			"every endpoint refused", 0, 0,
+			"every endpoint refused", 0, total, 0,
 			PrecheckReport{State: PrecheckTripped, Dialled: total, Refused: total},
 		},
 		// 95 of 101 refused is 94.05%, just under the threshold.
 		{
-			"just under the threshold", total - 95, 95,
+			"just under the threshold", total - 95, total, 95,
 			PrecheckReport{State: PrecheckRan, Dialled: total, Refused: 95},
+		},
+		// Total refusal below the floor is disbelieved too: a cold-start pool
+		// of three refused endpoints carries the same ~100% signature as a big
+		// one, and believing it dead-caches the whole pool for deadcache.ttl.
+		{
+			"total refusal below the floor", 0, 3, 0,
+			PrecheckReport{State: PrecheckTripped, Dialled: 3, Refused: 3},
+		},
+		// ... but a small pool that is not wholly refused keeps its verdict:
+		// one dead endpoint beside two live ones is an ordinary pool.
+		{
+			"partial refusal below the floor", 2, 3, 1,
+			PrecheckReport{State: PrecheckRan, Dialled: 3, Refused: 1},
 		},
 	} {
 		t.Run(c.desc, func(t *testing.T) {
 			t.Parallel()
 
-			addrs := make([]string, 0, total)
+			addrs := make([]string, 0, c.total)
 			for range c.live {
 				addrs = append(addrs, liveTCPAddr(t))
 			}
-			addrs = append(addrs, refusedAddrs(total-c.live)...)
+			addrs = append(addrs, refusedAddrs(c.total-c.live)...)
 
 			p := precheckProber(t)
 			live, condemned := p.filterReachable(context.Background(), zerolog.Nop(), precheckNodes(addrs...))
 			if len(condemned) != c.wantCondemned {
-				t.Errorf("condemned %d of %d, want %d", len(condemned), total, c.wantCondemned)
+				t.Errorf("condemned %d of %d, want %d", len(condemned), c.total, c.wantCondemned)
 			}
-			if len(live)+len(condemned) != total {
-				t.Errorf("live %d + condemned %d != %d probe positions", len(live), len(condemned), total)
+			if len(live)+len(condemned) != c.total {
+				t.Errorf("live %d + condemned %d != %d probe positions", len(live), len(condemned), c.total)
 			}
 			// A tripped breaker condemns nobody, which is also what a pool of
 			// reachable servers looks like: the state is the only thing that
@@ -872,9 +920,11 @@ func TestPrecheckReportReachesTheCycleReport(t *testing.T) {
 	}
 }
 
-// A Probe that fails before the pre-check must publish PrecheckAbsent, never the
-// previous cycle's verdict: a stale PrecheckRan claims a pre-check that this
-// cycle never performed.
+// A Probe that fails before the pre-check must publish PrecheckAbsent, never
+// the previous cycle's verdict: a stale report claims a pre-check that this
+// cycle never performed. The setup's single refused endpoint is a total
+// refusal, so the breaker trips — Tripped is still a completed pre-check's
+// report, and the failing probe must clear it all the same.
 func TestProbeClearsLastCyclesPrecheckReport(t *testing.T) {
 	t.Parallel()
 
@@ -882,8 +932,8 @@ func TestProbeClearsLastCyclesPrecheckReport(t *testing.T) {
 	if _, err := p.Probe(context.Background(), vmessPayload(t)); err != nil {
 		t.Fatalf("setup probe: %v", err)
 	}
-	if got := p.PrecheckReport(); got.State != PrecheckRan {
-		t.Fatalf("setup: a completed pre-check must report PrecheckRan, got %+v", got)
+	if got := p.PrecheckReport(); got.State != PrecheckTripped {
+		t.Fatalf("setup: a completed pre-check must report the tripped breaker, got %+v", got)
 	}
 
 	if _, err := p.Probe(context.Background(), []byte("no nodes here\n")); err == nil {
@@ -891,5 +941,65 @@ func TestProbeClearsLastCyclesPrecheckReport(t *testing.T) {
 	}
 	if got := p.PrecheckReport(); got != (PrecheckReport{}) {
 		t.Errorf("PrecheckReport() = %+v, want the zero report", got)
+	}
+}
+
+// A successful Probe keeps the adapters it built alive past its return, which
+// is the whole premise of the egress-stage handover (probedAdapterSource): the
+// survivor set's raw must not be converted and parsed a second time. The take
+// clears the field, so a second take owes nothing, and the caller closes each
+// proxy exactly once.
+func TestProbeRetainsAdaptersUntilTaken(t *testing.T) {
+	t.Parallel()
+
+	p := testProberWith(t, config.CheckConfig{
+		Rounds:         1,
+		Concurrency:    1,
+		Timeout:        200 * time.Millisecond,
+		TestURL:        "http://127.0.0.1:1/",
+		ExpectedStatus: "204",
+	}, config.BandwidthConfig{}, zerolog.Nop())
+	payload := vmessNamedPayloadAt(t, "n1", liveTCPAddr(t))
+
+	if _, err := p.Probe(context.Background(), payload); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	taken := p.TakeProbedAdapters()
+	if len(taken) != 1 {
+		t.Fatalf("a one-node probe retained %d adapters, want 1", len(taken))
+	}
+	if got := taken[0].Name(); got != "n1" {
+		t.Errorf("retained adapter name = %q, want the probed node's n1", got)
+	}
+	if again := p.TakeProbedAdapters(); again != nil {
+		t.Errorf("second take returned %d adapters; the take must clear the field", len(again))
+	}
+	for _, px := range taken {
+		_ = px.Close()
+	}
+}
+
+// The checker only takes after a successful Probe, so every failure shape must
+// leave nothing behind: a cancelled probe closes its own adapters before
+// returning, and a probe that never parsed retains nothing to close.
+func TestProbeFailureRetainsNothing(t *testing.T) {
+	t.Parallel()
+
+	p := precheckProber(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Probe(ctx, vmessNamedPayloadAt(t, "n1", liveTCPAddr(t))); err == nil {
+		t.Fatal("a cancelled probe must fail")
+	}
+	if got := p.TakeProbedAdapters(); got != nil {
+		t.Errorf("cancelled probe retained %d adapters, want none", len(got))
+	}
+
+	if _, err := p.Probe(context.Background(), []byte("no nodes here\n")); err == nil {
+		t.Fatal("a payload with no parsable proxy must fail the probe")
+	}
+	if got := p.TakeProbedAdapters(); got != nil {
+		t.Errorf("a failed probe retained %d adapters, want none", len(got))
 	}
 }

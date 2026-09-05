@@ -179,14 +179,33 @@ type GeminiReport struct {
 	Unverified int
 }
 
+// TraceState is whether the cloudflare annotation stage ran in a cycle. The
+// zero value is TraceAbsent, so a CycleReport assembled without a trace — or
+// one whose whole egress stage was skipped — says so without anyone setting a
+// field.
+type TraceState uint8
+
+const (
+	// TraceAbsent means no trace ran: the stage was not configured, the prober
+	// lacks trace support, or nothing reached the egress stage. Its
+	// Answered/Unanswered/Moved are all zero and must not be read as a trace
+	// that ran and nobody answered.
+	TraceAbsent TraceState = iota
+	// TraceRan means the trace issued its checks, however few answered.
+	TraceRan
+)
+
 // TraceReport accounts the cloudflare annotation stage: how many survivors told
 // us where their traffic actually leaves from, and how much that changed.
 //
 // Moved is the number the trace exists to justify — a published country that
 // differs from the one the offline chain gives for the RESOLVED address — and
 // Answered/Unanswered bound how far it can be trusted, since an unanswered
-// node simply keeps the offline guess.
+// node simply keeps the offline guess. State tells a cycle in which the whole
+// stage never ran from one where it ran and nothing answered: both read
+// Answered 0 / Unanswered 0, and only State separates them.
 type TraceReport struct {
+	State      TraceState
 	Answered   int
 	Unanswered int
 	Moved      int
@@ -216,10 +235,15 @@ type SourceReport struct {
 	// carries no structure a reader is allowed to trust. Feed is empty where
 	// there was no channel to record, such as the mint that saw no origin;
 	// ownership does not enter it, and a curated entry may carry one.
-	Managed      bool
-	Feed         string
-	Total        int
-	Valid        int
+	Managed bool
+	Feed    string
+	Total   int
+	Valid   int
+	// Tested is one source's share of the survivors SelectSurvivors kept — the
+	// nodes that PASSED the probe. It is the other quantity from Stats.Tested
+	// (the nodes handed TO the prober, == CycleReport.Probed), which is why
+	// sum(Tested) is the cycle's post-probe survivor set (== Stats.Kept in a cycle with no
+	// through-node filters), never its probed= log.
 	Tested       int
 	Filtered     int
 	DNSDrop      int
@@ -231,14 +255,42 @@ type SourceReport struct {
 	Unsupported  int
 }
 
+// FilterState is what the cycle did with a through-node filter's verdict. The
+// zero value is FilterAbsent, so a FilterReport assembled by a filter that
+// never reached its check — the gemini filter skipped for want of a key, a
+// check cancelled mid-cycle — says so without anyone setting a field.
+type FilterState uint8
+
+const (
+	// FilterAbsent means the filter reached no verdict: it was skipped before
+	// its check ran or cancelled with partial outcomes, so its In==Kept and
+	// empty Dropped map say nothing about the nodes.
+	FilterAbsent FilterState = iota
+	// FilterTripped means the batch breaker disbelieved the verdict: blocked
+	// plus unreachable was the whole survivor set (or >=95% of >=100,
+	// breakerTrips), so it read as the endpoint's or our egress's story and
+	// every survivor was KEPT. In==Kept with zero drops renders exactly like a
+	// filter that verified everyone clean — the case this state exists to tell
+	// apart, on the pre-check's and gemini gate's precedent.
+	FilterTripped
+	// FilterRan means the verdict was believed and its drops enacted, however
+	// few.
+	FilterRan
+)
+
 // FilterReport is one through-node filter's effect on the survivor set: how
 // many entered, how many it kept, and how many it dropped keyed by reason
 // (blocked/slow/unreachable).
+//
+// State is what a kept-everything report does not say on its own: both a
+// verified clean pass and a disbelieved wholesale refusal read In==Kept with
+// zero drops, and only State separates them (see FilterState).
 type FilterReport struct {
 	Name    string
 	In      int
 	Kept    int
 	Dropped map[string]int
+	State   FilterState
 }
 
 // Reporter receives the outcome of each cycle. A nil Reporter disables

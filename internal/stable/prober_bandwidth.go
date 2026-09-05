@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -97,8 +98,23 @@ func measure(ctx context.Context, client *http.Client, target string) (bool, int
 // window, so a deadline-truncated read is a legitimate sample of a slow node
 // and is kept; every other read error means the transfer was cut by the peer
 // and its byte count is not a rate.
+//
+// The error, not the clock, decides. Our own deadline closes the transfer two
+// ways: the HTTP/1.1 transport cancels the connection (the read surfaces as
+// net.ErrClosed once the request context is done), and HTTP/2 returns the
+// context error itself; a Client.Timeout-only wiring wraps any error in a
+// timeout-shaped one. A peer reset or a short Content-Length can land in the
+// same instant and must still be discarded.
 func deadlineTruncated(ctx context.Context, err error) bool {
-	return ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+
+	return ctx.Err() != nil && errors.Is(err, net.ErrClosed)
 }
 
 // bandwidthProbeOne dials target through px, downloads it over a fixed-conn
@@ -163,8 +179,8 @@ func (m *MihomoProber) BandwidthCheck(ctx context.Context, proxies []mihomo.Prox
 	var wg sync.WaitGroup
 	sem := fanoutSem(concurrency)
 	for _, px := range proxies {
+		sem <- struct{}{} // bound goroutine creation, not just execution
 		wg.Go(func() {
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			reachable, mbps := bandwidthProbeOne(ctx, px, target, timeout)

@@ -31,8 +31,9 @@ import (
 // and returns no error as long as some other line converted, so a mapping bug
 // surfaces as a missing node rather than as a failure. In production that is a
 // node which is parsed, merged, published and probed, never answers, and ends
-// up in the 2h dead cache under its server:port — where Merge's first-wins
-// dedupe lets it shadow a working node of another scheme.
+// up in the dead cache (deadcache.ttl, 3h shipped, jittered to [ttl, 1.5*ttl))
+// under its server:port — where Merge's first-wins dedupe lets it shadow a
+// working node of another scheme.
 //
 // The chain is conversion and parsing only: adapter.ParseProxy builds an
 // outbound without dialling anything, so the table stays a sub-second unit
@@ -351,8 +352,11 @@ func TestSchemeContractEndToEnd(t *testing.T) {
 // TestSchemeContractProbeNodesMatchTheAdapter runs the same corpus through the
 // derivation the TCP pre-check now judges on, before any adapter exists: for
 // every mapping the relabeled Entry.Raw converts to, what probeNodes read off
-// the raw mapping must be what the adapter would have answered, and the label a
-// condemned node is filed under must be the Entry's own.
+// the raw mapping must be what the adapter would have answered. probeNodes
+// leaves every label empty — the fold asks the adapter for a live position and
+// probeSet derives a condemned one's label from the raw mapping — so the two
+// derivations are pinned equal to the Entry's own label here, where the raw
+// mappings are still in hand.
 func TestSchemeContractProbeNodesMatchTheAdapter(t *testing.T) {
 	t.Parallel()
 
@@ -361,13 +365,22 @@ func TestSchemeContractProbeNodesMatchTheAdapter(t *testing.T) {
 			t.Parallel()
 
 			e := c.assertMerged(t, subscription.Normalize([]byte(c.line+"\n")))
-			nodes := testProbeNodes(t, e.Raw)
+			mappings, err := convert.ConvertsV2Ray([]byte(e.Raw))
+			if err != nil {
+				t.Fatalf("ConvertsV2Ray(%q): %v", e.Raw, err)
+			}
+			nodes := probeNodes(mappings)
 			if len(nodes) != len(c.addrs) {
 				t.Fatalf("converted %d mappings, want %d", len(nodes), len(c.addrs))
 			}
 			for i := range nodes {
-				if nodes[i].label != e.Label {
-					t.Errorf("position %d files under %q, want the entry label %q", i, nodes[i].label, e.Label)
+				if nodes[i].label != "" {
+					t.Errorf("position %d: probeNodes derived label %q; the fold derives labels", i, nodes[i].label)
+				}
+				typ, _ := mappings[i]["type"].(string)
+				name, _ := mappings[i]["name"].(string)
+				if got := mappingLabel(name, typ); got != e.Label {
+					t.Errorf("position %d condemns under %q, want the entry label %q", i, got, e.Label)
 				}
 			}
 			assertNodesMatchTheAdapter(t, e.Raw, nodes)
@@ -565,7 +578,8 @@ func TestSchemeContractWireguardConvertsToNothing(t *testing.T) {
 // (common/convert/converter.go:476-479), so the generic "<raw>#<label>" relabel
 // yields a link that converts to NOTHING: the label then misses in the
 // probe-result map, SelectSurvivors drops the entry, and the checker books
-// server:port into the 2h dead cache where it can shadow a working node.
+// server:port into the dead cache (deadcache.ttl, 3h shipped, jittered to
+// [ttl, 1.5*ttl)) where it can shadow a working node.
 //
 // Both halves are asserted, because the published line being fragment-free is
 // only meaningful if a fragment is what would break it.

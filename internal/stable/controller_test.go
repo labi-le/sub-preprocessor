@@ -3,6 +3,8 @@ package stable //nolint:testpackage // asserts the Controller's internal worker 
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +140,93 @@ func TestApplyCarriesCloudflareTimeoutToRunningWorker(t *testing.T) {
 	}
 }
 
+// TestApplyGeminiKeyLoudFailure pins the second half of the gemini-key gate:
+// config validation refuses an armed filter that declares no key material, and
+// Apply is where a declared key_file is actually read -- so a missing mount or
+// a missing var must fail Apply (refusing boot, or keeping the previous worker
+// on reload), never warn and run the gate disabled. The unarmed base needs no
+// key anywhere and must still boot.
+func TestApplyGeminiKeyLoudFailure(t *testing.T) {
+	t.Parallel()
+
+	armed := func() config.Config {
+		cfg := testControllerConfig("alpha")
+		cfg.Filters = []config.FilterConfig{{Type: config.FilterGemini}}
+		cfg.GeoBlock.Gemini.KeyVar = "TEST_KEY"
+		return cfg
+	}
+
+	// Armed with no key material at all: error naming the key source.
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, "", zerolog.Nop(), nil)
+	defer ctl.Stop()
+	err := ctl.Apply(armed())
+	if err == nil {
+		t.Fatal("an armed gemini filter with no key must fail Apply")
+	}
+	if !strings.Contains(err.Error(), "gemini gate is configured") || !strings.Contains(err.Error(), "api_key") {
+		t.Fatalf("error must name the key source, got: %v", err)
+	}
+	if ctl.checker != nil {
+		t.Fatal("a failed Apply must not start a worker")
+	}
+
+	// Armed with a key_file that does not exist: error names the path tried.
+	cfg := armed()
+	cfg.GeoBlock.Gemini.KeyFile = filepath.Join(t.TempDir(), "missing-env")
+	err = ctl.Apply(cfg)
+	if err == nil {
+		t.Fatal("an armed gemini filter with an unreadable key_file must fail Apply")
+	}
+	if !strings.Contains(err.Error(), cfg.GeoBlock.Gemini.KeyFile) {
+		t.Fatalf("error must name the key_file it tried, got: %v", err)
+	}
+
+	// Armed with a key_file that lacks the var: error names key_var.
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "env")
+	if writeErr := os.WriteFile(keyFile, []byte("OTHER_KEY=x\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg = armed()
+	cfg.GeoBlock.Gemini.KeyFile = keyFile
+	err = ctl.Apply(cfg)
+	if err == nil {
+		t.Fatal("an armed gemini filter whose key_file lacks key_var must fail Apply")
+	}
+	if !strings.Contains(err.Error(), "TEST_KEY not found") {
+		t.Fatalf("error must name the missing var, got: %v", err)
+	}
+
+	// Armed with a resolvable key: Apply succeeds and the gate is enabled.
+	cfg = armed()
+	goodFile := filepath.Join(dir, "good-env")
+	if writeErr := os.WriteFile(goodFile, []byte("TEST_KEY=secret\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg.GeoBlock.Gemini.KeyFile = goodFile
+	if applyErr := ctl.Apply(cfg); applyErr != nil {
+		t.Fatalf("an armed gemini filter with a resolvable key must apply: %v", applyErr)
+	}
+	if prober, ok := ctl.checker.spec.Load().Prober.(*MihomoProber); !ok || !prober.GeminiEnabled() {
+		t.Fatal("the applied worker must run with the gemini gate enabled")
+	}
+
+	// Unarmed: no filter entry means no key is needed anywhere.
+	ctl.Stop()
+	idle := NewController(t.Context(), NewHolder(),
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, "", zerolog.Nop(), nil)
+	defer idle.Stop()
+	if applyErr := idle.Apply(testControllerConfig("alpha")); applyErr != nil {
+		t.Fatalf("a config with no gemini filter must boot keyless: %v", applyErr)
+	}
+	if prober, ok := idle.checker.spec.Load().Prober.(*MihomoProber); !ok || prober.GeminiEnabled() {
+		t.Fatal("a config with no gemini filter must not arm the gate")
+	}
+}
+
 // TestApplyKeepsWorkerWhenSourcesGone: an empty merged source list is refused,
 // not obeyed. Every source of this deployment arrives from an overlay, so an
 // empty list is nearly always a missing or truncated sources.yaml/private.yaml;
@@ -146,8 +235,6 @@ func TestApplyCarriesCloudflareTimeoutToRunningWorker(t *testing.T) {
 // live and the refusal is logged. With no worker running it stays a no-op, so a
 // genuine zero-source deployment still never starts one.
 func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
-	t.Parallel()
-
 	var logBuf syncBuf
 	holder := NewHolder()
 	ctl := NewController(t.Context(), holder,

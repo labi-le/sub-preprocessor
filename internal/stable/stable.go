@@ -16,8 +16,12 @@ type Stats struct {
 	SourcesOK    int `json:"sources_ok"`
 	SourcesTotal int `json:"sources_total"`
 	Merged       int `json:"merged"`
-	Tested       int `json:"tested"`
-	Kept         int `json:"kept"`
+	// Tested is the nodes handed TO the prober (== CycleReport.Probed), NOT
+	// the probe's survivors -- SourceReport.Tested is that other quantity, so
+	// the snapshot's stats.tested reconciles with a cycle's probed=, never
+	// with sum(stable_source_tested_nodes).
+	Tested int `json:"tested"`
+	Kept   int `json:"kept"`
 }
 
 // Snapshot is an immutable result of one successful check cycle.

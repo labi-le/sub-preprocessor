@@ -89,18 +89,25 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 	var wg sync.WaitGroup
 	sem := fanoutSem(c.Concurrency)
 	for _, px := range proxies {
+		sem <- struct{}{}
 		wg.Go(func() {
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout)
 			res, ok := parseTrace(body)
 			host := proxyHost(px)
 			n := prog.step()
-			opLog.Debug().Str("node", px.Name()).Str("server", host).
+			ev := opLog.Debug().Str("node", px.Name()).Str("server", host).
 				Bool("reachable", reachable).Int("status", status).
-				Stringer("loc", res.Country).Stringer("egress", res.IP).
-				Int64("n", n).Int64("of", prog.total).Msg("cloudflare trace")
+				Bool("answered", ok).
+				Int64("n", n).Int64("of", prog.total)
+			// loc and egress exist only for a parsed answer: the zero Country
+			// would log as two NUL bytes and a zero Addr as "invalid IP",
+			// which reads like a real location where none was measured.
+			if ok {
+				ev = ev.Stringer("loc", res.Country).Stringer("egress", res.IP)
+			}
+			ev.Msg("cloudflare trace")
 			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok {
 				return
 			}
@@ -205,8 +212,8 @@ func parseTrace(body string) (TraceResult, bool) {
 //
 // The letters test is case-EXACT, and the reserved-code guard leans on that: a
 // case-folding test would admit "xx", the very code the guard exists to reject.
-// It would also admit any lowercase loc, while both geo databases upper-fold
-// theirs (geofeed.parseLine and its dbip twin parseCountry), so one country
+// It would also admit any lowercase loc, while every geo database upper-folds
+// its input through the shared parseCountry (geofeed/dbip.go), so one country
 // would reach stable_kept_country_nodes under two label values. Cloudflare
 // documents loc uppercase, and a rejection here reads as no answer, so being
 // wrong about that costs the node its correction, never a wrong tag.

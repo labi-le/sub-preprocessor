@@ -82,12 +82,19 @@ func (p *gcProber) Probe(_ context.Context, _ []byte) (map[string]stable.ProbeRe
 func (p *gcProber) ParseProxies([]byte) ([]mihomo.Proxy, error) { return nil, nil }
 
 // keepOnly mimics the production dead cache, which rules out 74% of the merged
-// pool before the probe; keeping two nodes leaves the rest collectable.
+// pool before the probe; keeping two nodes leaves the rest collectable. The
+// keys are addr-only because every fixture node carries the SAME resolved
+// address — poolFilterer assigns netip.MustParseAddr("1.2.3.4") to each
+// NodeResult.IP, which Merge carries into Entry.IP — so filterDead consults
+// Blocked with one (addr, 1.2.3.4) pair across the pool and an addr-only key
+// matches them all. What the fixture cannot exercise is the ip half of the
+// dead key: a hostname re-pointed to a different address is re-probed
+// (LogicCycle#2), which the DeadSet unit test pins instead.
 type keepOnly struct{ keep map[string]bool }
 
-func (d keepOnly) Blocked(key string) bool { return !d.keep[key] }
-func (d keepOnly) Block(string) error      { return nil }
-func (d keepOnly) Prune() error            { return nil }
+func (d keepOnly) Blocked(addr string, _ netip.Addr) bool { return !d.keep[addr] }
+func (d keepOnly) Block(string, netip.Addr) error         { return nil }
+func (d keepOnly) Prune() error                           { return nil }
 
 func retentionCycle(
 	t *testing.T, perSource, padBytes int, dead stable.DeadCache,

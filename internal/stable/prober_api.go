@@ -63,11 +63,15 @@ func apiOutcomeRank(o APIOutcome) int {
 	}
 }
 
-// fanoutSem returns the semaphore bounding a through-node fan-out. The acquire
-// runs on the caller's goroutine before the worker that releases it exists, so
-// a zero or negative bound would deadlock on the first node rather than degrade
-// to serial execution. Config defaults and validation keep the real values >=1;
-// this guards hand-constructed probers.
+// fanoutSem returns the semaphore bounding a through-node fan-out. It is
+// ALWAYS buffered with capacity >= 1, which is what lets every caller acquire
+// in the spawning loop, BEFORE wg.Go (like filterReachable): the first send
+// never blocks, and later sends park the spawner only while concurrency
+// workers are in flight, so goroutine creation is bounded as well as
+// execution. A raw zero-buffer channel would deadlock under that shape — the
+// first send would have no receiver until a worker exists, and the spawner
+// would never spawn one — which is why the clamp below guards the hand-built
+// Concurrency 0 that config validation never lets through.
 func fanoutSem(concurrency int) chan struct{} {
 	if concurrency < 1 {
 		concurrency = 1
@@ -118,8 +122,8 @@ func (m *MihomoProber) apiCheck(
 		defer ticker.Stop()
 	}
 	for _, px := range proxies {
+		sem <- struct{}{}
 		wg.Go(func() {
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			if ticker != nil {
 				select {

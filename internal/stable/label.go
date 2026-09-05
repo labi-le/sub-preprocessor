@@ -41,13 +41,14 @@ func mappingLabel(name, typ string) string {
 // perfectly healthy mieru node is never selected, never checked, and booked
 // into the dead cache.
 //
-// The suffix starts at the LAST ':' because neither a port ("2999",
-// "9998-9999") nor a transport ("TCP"/"UDP") can contain one, while a source
-// name can — "weird:src-001:2999/TCP" must fold to "weird:src-001". The
-// colonless / leading-colon guard describes no shape mihomo emits (it builds
-// every mieru name from that exact format, and uniqueName only appends
-// "-%02d" to the tail); it is there so that a future naming change degrades
-// into an unfolded name rather than collapsing every mieru proxy onto "".
+// The suffix starts at the LAST ':' because that is where mihomo's own
+// "<label>:<port>/<protocol>" grammar puts the split: neither a port ("2999",
+// "9998-9999") nor a transport ("TCP"/"UDP") can contain one, so the last
+// colon is always the suffix's. The colonless / leading-colon guard describes
+// no shape mihomo emits (it builds every mieru name from that exact format,
+// and uniqueName only appends "-%02d" to the tail); it is there so that a
+// future naming change degrades into an unfolded name rather than collapsing
+// every mieru proxy onto "".
 func foldMieruName(name string, mieru bool) string {
 	if !mieru {
 		return name
@@ -60,8 +61,9 @@ func foldMieruName(name string, mieru bool) string {
 }
 
 // sourceOfLabel maps an Entry.Label back onto the source that produced it.
-// Merge builds every label as "<source>-NNN", so the split is at the LAST '-':
-// a source name may contain '-' and ':' while the pad-3 counter tail cannot.
+// Merge builds every label as "<source>-NNN", so the split is at the LAST '-': a
+// source name may contain '-' (config.yaml ships "file-vpn-2") while the pad-3
+// counter tail cannot.
 //
 // It returns a substring, never a copy, because countSourceStages calls it from
 // both of its passes -- over tested and over the filtered subset of it -- so a

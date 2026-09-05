@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,20 @@ type traceChecker interface {
 	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
 }
 
+// probedAdapterSource is the optional half of a Prober that keeps the adapter
+// objects its last successful Probe built alive past the call, so the egress
+// stage can consume them by label instead of converting and re-parsing the
+// survivors' byte-identical raw. Asserted like traceChecker, so the base
+// Prober contract is unchanged and a Prober without the capability falls back
+// to ParseProxies in filterAndMeasureEgress.
+//
+// Taking transfers ownership: the taker MUST Close each proxy exactly once. A
+// Prober that retained adapters and then errored or was cancelled closes them
+// itself before returning, so a nil take means nothing is owed.
+type probedAdapterSource interface {
+	TakeProbedAdapters() []mihomo.Proxy
+}
+
 // Blocklist records nodes that failed a through-node API check; declared
 // locally to avoid importing geoblock. A nil Blocklist disables persistence.
 // Prune is part of the contract for the same reason DeadCache has one: a TTL
@@ -45,16 +60,22 @@ type Blocklist interface {
 
 // DeadCache skips re-probing recently-dead nodes; a nil DeadCache disables it.
 //
-// Neither method may retain key. The checker passes Entry.Addr, a view into
+// The block is keyed on the endpoint's server:port AND the address the IP
+// stage resolved for it that cycle: a hostname re-pointed to a different
+// address is a different server for the cache's purposes, and skipping it
+// unprobed would keep a healthy node out of the list for the whole jittered
+// [3h, 4.5h) TTL (see LogicCycle#2).
+//
+// Neither method may retain addr. The checker passes Entry.Addr, a view into
 // Merge's key arena; the bytes stay valid, but a retained view pins its whole
 // 1 KiB block (see keyArena) for the jittered [3h, 4.5h) a DeadCache holds an
 // entry, so an implementation that remembers the key MUST remember a copy.
 // Asking the caller to allocate instead cost one string per merged node —
 // 36342 of them per cycle at the 2026-08-15 production shape — to spare the
-// far smaller set that actually probes dead.
+// far smaller set that actually probes dead. ip is a value and needs no copy.
 type DeadCache interface {
-	Blocked(key string) bool
-	Block(key string) error
+	Blocked(addr string, ip netip.Addr) bool
+	Block(addr string, ip netip.Addr) error
 	Prune() error
 }
 
@@ -200,6 +221,13 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		c.reportError()
 		return fmt.Errorf("probe: %w", err)
 	}
+	// A capable prober kept its adapters open past Probe for the egress stage
+	// below. Take them before any further exit; the deferred close pays
+	// exactly once whatever path the rest of the cycle takes — cancellation,
+	// zero survivors, an egress stage that never runs, or a normal
+	// publication.
+	probed := takeProbedAdapters(spec.Prober)
+	defer closeProxies(probed)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled after probe; keeping previous stable list")
 		c.reportError()
@@ -214,7 +242,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	selectedAt := time.Now()
-	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors, sourceReports)
+	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors, sourceReports, probed)
 	filteredAt := time.Now()
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
@@ -228,24 +256,10 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
-	publishingAt := time.Now()
-	// Before observe, not merely before Store: this is what fills
-	// Survivor.Country, which the gauges below then count.
-	ann := svc.Annotator()
-	payload := BuildPayload(ctx, ann, survivors)
-	trace.Moved = movedCount(ctx, ann, survivors)
-
-	// Only ever len()-ed from here down, which needs the length word alone:
-	// the three pools are already collected, and a full-slice read added here
-	// pins them across the probe (checker_retention_test.go).
-	c.publish(payload, Stats{
-		SourcesOK:    len(bodies),
-		SourcesTotal: len(spec.Sources),
-		Merged:       len(entries),
-		Tested:       len(probe),
-		Kept:         len(survivors),
-	}, skipped)
-	publishedAt := time.Now()
+	publishingAt, publishedAt, err := c.annotateAndPublish(ctx, svc, spec, survivors, len(bodies), len(entries), len(probe), skipped, &trace)
+	if err != nil {
+		return err
+	}
 
 	c.observe(CycleReport{
 		SourcesOK:     len(bodies),
@@ -276,6 +290,45 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+// annotateAndPublish is the publish tail of RunOnce, split out as one step so
+// the cancellation verdict cannot separate from the write it guards: the list
+// is only swapped and persisted after a ctx gate that resolved the same chain
+// BuildPayload just ran, so a cycle cancelled mid-render never commits its
+// degraded payload. It returns the window it occupied; observe folds that into
+// the Publish phase, having run on the other side of the return.
+func (c *Checker) annotateAndPublish(
+	ctx context.Context, svc Filterer, spec *CheckerSpec,
+	survivors []Survivor, sourcesOK, merged, tested, skipped int, trace *TraceReport,
+) (time.Time, time.Time, error) {
+	publishingAt := time.Now()
+	// Before observe, not merely before Store: this is what fills
+	// Survivor.Country, which the gauges below then count.
+	ann := svc.Annotator()
+	payload := BuildPayload(ctx, ann, survivors)
+	// A cancellation that lands inside BuildPayload must not commit its output:
+	// a chain member that honours ctx resolves nothing, so the payload would
+	// publish with every tag degraded. movedCount would burn the same cancelled
+	// chain, so it is skipped too.
+	if err := ctx.Err(); err != nil {
+		c.logger.Warn().Err(err).Msg("cycle cancelled during publish; keeping previous stable list")
+		c.reportError()
+		return publishingAt, time.Time{}, fmt.Errorf("cycle cancelled during publish: %w", err)
+	}
+	trace.Moved = movedCount(ctx, ann, survivors)
+
+	// Only ever len()-ed from here down, which needs the length word alone:
+	// the three pools are already collected, and a full-slice read added here
+	// pins them across the probe (checker_retention_test.go).
+	c.publish(payload, Stats{
+		SourcesOK:    sourcesOK,
+		SourcesTotal: len(spec.Sources),
+		Merged:       merged,
+		Tested:       tested,
+		Kept:         len(survivors),
+	}, skipped)
+	return publishingAt, time.Now(), nil
 }
 
 // publish swaps the new list in, persists it and logs the cycle. The save runs
@@ -416,16 +469,81 @@ func movedCount(ctx context.Context, ann preprocess.Annotator, survivors []Survi
 	return moved
 }
 
+// takeProbedAdapters takes the adapters a capable prober retained for the
+// egress stage (see probedAdapterSource), or returns nil for a prober without
+// the capability.
+func takeProbedAdapters(prober Prober) []mihomo.Proxy {
+	src, capable := prober.(probedAdapterSource)
+	if !capable {
+		return nil
+	}
+	return src.TakeProbedAdapters()
+}
+
+// closeProxies closes each proxy exactly once; a nil or empty slice closes
+// nothing.
+func closeProxies(proxies []mihomo.Proxy) {
+	for _, px := range proxies {
+		_ = px.Close()
+	}
+}
+
+// parseEgressProxies parses the survivor set for a prober without the
+// retention capability. The caller owns the returned proxies' close.
+func parseEgressProxies(spec *CheckerSpec, kept []Survivor) ([]mihomo.Proxy, error) {
+	entries := make([]Entry, len(kept))
+	for i, s := range kept {
+		entries[i] = s.Entry
+	}
+	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
+	if err != nil {
+		return nil, fmt.Errorf("parse egress proxies: %w", err)
+	}
+	return proxies, nil
+}
+
+// proxiesByLabel groups proxies by the label their Entry folds onto — entryLabel,
+// not px.Name(): a mierus:// survivor parses into one proxy per configured port,
+// and the filters look this map up by Entry.Label. Every port is kept, in
+// mihomo's emission order, because collapsing them here would hand the filters
+// an arbitrary port: a node whose last port is filtered on our egress would be
+// measured unreachable and dropped even though the probe selected it on a live
+// one. The checks fold the OUTCOMES instead (see betterAPIOutcome,
+// betterBandwidthOutcome).
+//
+// Only labels the survivor set carries are kept — the filters and the trace
+// never look up any other — which matters because the retained path hands over
+// adapters for the WHOLE live probe set, and an entry per dropped label would
+// cost this stage a slice allocation per probed-but-dropped node.
+func proxiesByLabel(survivors []Survivor, proxies []mihomo.Proxy) map[string][]mihomo.Proxy {
+	wanted := make(map[string]struct{}, len(survivors))
+	for _, s := range survivors {
+		wanted[s.Label] = struct{}{}
+	}
+	byLabel := make(map[string][]mihomo.Proxy, len(survivors))
+	for _, px := range proxies {
+		label := entryLabel(px)
+		if _, ok := wanted[label]; !ok {
+			continue
+		}
+		byLabel[label] = append(byLabel[label], px)
+	}
+	return byLabel
+}
+
 // filterAndMeasureEgress runs the through-node NodeFilter chain over the
 // survivors and then asks the ones still standing where their traffic actually
-// leaves from. It parses the survivor set into proxies ONCE (regardless of
-// filter count) and shares them across every filter and the trace, which select
-// the subset for their current (narrowed) survivors by node label. The checker
-// owns the proxies' lifecycle: they are closed exactly once at the end
-// (deferred), and nothing else closes them. Probe parses and closes its own
-// full set independently. Parsing is skipped entirely when there is nothing to
-// run or no survivor; a parse failure logs and passes survivors through
-// unchanged (matching the previous per-filter skip-on-no-proxies behavior).
+// leaves from. The proxies are shared across every filter and the trace, which
+// select the subset for their current (narrowed) survivors by node label; each
+// is built exactly once and closed exactly once. A prober with the
+// probedAdapterSource capability hands its adapters over via probed, which the
+// probe built for the WHOLE live set; RunOnce took them and owns their close,
+// so nothing is closed here. A prober without the capability is parsed here —
+// the survivor set alone — and THIS scope owns that parse's close, deferred so
+// every exit accounts for itself. Parsing is skipped entirely when there is
+// nothing to run or no survivor; a parse failure logs and passes survivors
+// through unchanged (matching the previous per-filter skip-on-no-proxies
+// behavior).
 //
 // The trace runs LAST, on the final survivor set, because its answer only
 // annotates: measuring a node a later gate drops would spend a request on a
@@ -439,12 +557,12 @@ func movedCount(ctx context.Context, ann preprocess.Annotator, survivors []Survi
 // The per-source stage counts are folded in here rather than in RunOnce because
 // this is the only scope that holds both sides of the narrowing at once: tested
 // is what the probe passed over, kept is what the chain left. Deferred so every
-// exit accounts for itself: the two early returns -- nothing to filter, and a
-// ParseProxies failure -- the two normal ones, and a panic unwinding through.
-// A cancelled check is not an exit here at all: the filters test ctx.Err()
-// inside apply and hand their survivors back to the loop below.
+// exit accounts for itself: the early return -- nothing to filter or no
+// survivor -- the ParseProxies failure, the normal exits, and a panic
+// unwinding through. A cancelled check is not an exit here at all: the filters
+// test ctx.Err() inside apply and hand their survivors back to the loop below.
 func (c *Checker) filterAndMeasureEgress(
-	ctx context.Context, spec *CheckerSpec, tested []Survivor, sources []SourceReport,
+	ctx context.Context, spec *CheckerSpec, tested []Survivor, sources []SourceReport, probed []mihomo.Proxy,
 ) (kept []Survivor, reports []FilterReport, tr TraceReport, gemini GeminiReport) {
 	defer func() { c.countSourceStages(sources, tested, kept) }()
 	kept = tested
@@ -457,33 +575,20 @@ func (c *Checker) filterAndMeasureEgress(
 		return kept, nil, TraceReport{}, GeminiReport{}
 	}
 
-	entries := make([]Entry, len(kept))
-	for i, s := range kept {
-		entries[i] = s.Entry
-	}
-	proxies, err := spec.Prober.ParseProxies(entriesPayload(entries))
-	if err != nil {
-		c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-		return kept, nil, TraceReport{}, GeminiReport{}
-	}
-	defer func() {
-		for _, px := range proxies {
-			_ = px.Close()
+	proxies := probed
+	if proxies == nil {
+		// A prober without the retention capability: parse the survivor set
+		// here and own those proxies, exactly as before the capability existed.
+		var err error
+		proxies, err = parseEgressProxies(spec, kept)
+		if err != nil {
+			c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
+			return kept, nil, TraceReport{}, GeminiReport{}
 		}
-	}()
-
-	// entryLabel, not px.Name(): a mierus:// survivor parses into one proxy per
-	// configured port, and the filters below look this map up by Entry.Label.
-	// Every port is kept, in mihomo's emission order, because collapsing them
-	// here would hand the filters an arbitrary port: a node whose last port is
-	// filtered on our egress would be measured unreachable and dropped even
-	// though the probe selected it on a live one. The checks fold the
-	// OUTCOMES instead (see betterAPIOutcome, betterBandwidthOutcome).
-	byLabel := make(map[string][]mihomo.Proxy, len(proxies))
-	for _, px := range proxies {
-		label := entryLabel(px)
-		byLabel[label] = append(byLabel[label], px)
+		defer closeProxies(proxies)
 	}
+
+	byLabel := proxiesByLabel(kept, proxies)
 	reports = make([]FilterReport, 0, len(spec.Filters))
 	for _, f := range spec.Filters {
 		var rep FilterReport
@@ -546,11 +651,15 @@ func (c *Checker) countSourceStages(reports []SourceReport, tested, filtered []S
 // applyTrace records what each survivor reported about its own egress. It
 // drops nothing: a node whose trace fails keeps its place and is annotated
 // from the offline chain instead.
+//
+// Only this function marks the report TraceRan: reaching it means the trace
+// stage actually issued its checks, which every other exit of
+// filterAndMeasureEgress leaves at the zero value.
 func applyTrace(
 	ctx context.Context, tracer traceChecker, survivors []Survivor, byLabel map[string][]mihomo.Proxy,
 ) TraceReport {
 	traced := tracer.TraceCheck(ctx, filterSubset(survivors, byLabel))
-	var rep TraceReport
+	rep := TraceReport{State: TraceRan}
 	for i := range survivors {
 		res, ok := traced[survivors[i].Label]
 		if !ok {
@@ -660,7 +769,7 @@ func (c *Checker) fetchSources(
 func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, ok bool) {
 	probe = make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		if c.dead != nil && c.dead.Blocked(e.Addr) {
+		if c.dead != nil && c.dead.Blocked(e.Addr, e.IP) {
 			deadSkipped++
 			continue
 		}
@@ -676,17 +785,35 @@ func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, o
 
 // recordDead caches nodes that returned no successful probe so later cycles
 // skip them.
+//
+// The write carries the same plausibility breaker as the pre-check
+// (breakerTrips): when nearly every probed node failed, the fault is likelier
+// our egress than the pool, and committing that verdict would freeze the
+// published list for deadcache.ttl after the network recovers. The verdict
+// fails open instead, exactly as filterReachable's does.
 func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult) {
 	if c.dead == nil {
 		return
 	}
+	blocked := 0
 	for _, e := range probe {
 		// Zero successes, not absence: the prober emits an entry per label and
 		// a label reads zero only when every port failed (foldProbeResults
 		// folds best-of-ports), so an absence test would silently stop
 		// blocking anything the moment the map is fully populated.
 		if r, ok := res[e.Label]; !ok || r.Successes == 0 {
-			_ = c.dead.Block(e.Addr)
+			blocked++
+		}
+	}
+	if breakerTrips(blocked, len(probe)) {
+		c.logger.Warn().Int("blocked", blocked).Int("probed", len(probe)).
+			Int("threshold_pct", precheckBreakerPercent).
+			Msg("nearly every probed node failed; treating the verdict as unreliable and keeping the dead cache unchanged")
+		return
+	}
+	for _, e := range probe {
+		if r, ok := res[e.Label]; !ok || r.Successes == 0 {
+			_ = c.dead.Block(e.Addr, e.IP)
 		}
 	}
 }

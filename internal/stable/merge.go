@@ -195,8 +195,9 @@ func appendPad3(b []byte, v int) []byte {
 // base64-decodes EVERYTHING after "ssr://", an appended "#label" included
 // (convert/converter.go:476-479), so the relabeled link yields no proxy at
 // all. The label then misses in the probe-result map, SelectSurvivors drops
-// the entry, and the checker books server:port into the 2h dead cache, where
-// Merge's first-wins dedupe lets it shadow a working node of another scheme.
+// the entry, and the checker books server:port into the dead cache
+// (deadcache.ttl, 3h shipped, jittered to [ttl, 1.5*ttl)), where Merge's
+// first-wins dedupe lets it shadow a working node of another scheme.
 //
 // A payload neither rewriter can decode returns false, which drops the node:
 // a node that cannot carry the label cannot be mapped back from a probe.

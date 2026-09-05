@@ -56,6 +56,13 @@ type MihomoProber struct {
 	// PrecheckReport after Probe returns, both on the cycle goroutine. Cycles
 	// never overlap (Controller.Apply swaps a spec, it does not run one).
 	precheck PrecheckReport
+	// probed holds the adapter objects a successful Probe kept alive for the
+	// checker's egress stage, which consumes them by label instead of parsing
+	// the survivor set again (see TakeProbedAdapters). Filled by Probe and
+	// emptied by the take, both on the cycle goroutine like precheck; a Probe
+	// that errors closes what it retained, and the next Probe closes anything
+	// a previous call left untaken.
+	probed []mihomo.Proxy
 	// traceEndpoint overrides the cdn-cgi/trace URL for tests, which point it
 	// at an httptest server. It is a field rather than a config key because
 	// the answer is only parseable from Cloudflare (see cloudflareTraceURL);
@@ -121,6 +128,11 @@ func betterProbe(a, b ProbeResult) bool {
 // (see entryLabel) for every node that reached the prober, failures included:
 // Successes == 0 is what marks a node dead, never absence.
 //
+// On success the parsed adapters are NOT closed here: the checker's egress
+// stage consumes them by label through TakeProbedAdapters (probedAdapterSource)
+// instead of re-parsing the survivors, and closing them would force that
+// second parse. Every failure path releases them.
+//
 // The pre-check runs BEFORE the parse because it reads nothing an adapter
 // computes (see probeNodes), and at the measured condemned share most of those
 // adapters would be built only to be thrown away unread.
@@ -128,16 +140,22 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	// Never last cycle's verdict: a Probe that fails before the pre-check must
 	// report PrecheckAbsent, not the previous pool's numbers.
 	m.precheck = PrecheckReport{}
+	// Whatever a previous call retained was never taken (the take clears the
+	// field), so it is closed here rather than leaked. Cycles never overlap,
+	// so none of it can be in flight.
+	m.releaseProbed()
 	opLog := log.Op(m.logger, "stable.Probe")
 	nodes, live, condemned, err := m.probeSet(ctx, opLog, payload)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		for _, i := range live {
-			_ = nodes[i].proxy.Close()
-		}
-	}()
+	// Collect the spared adapters before anything else can exit: every proxy
+	// the parse built is then owned by exactly one place, m.probed, which the
+	// failure path closes below and the egress stage takes on success.
+	m.probed = make([]mihomo.Proxy, 0, len(live))
+	for _, i := range live {
+		m.probed = append(m.probed, nodes[i].proxy)
+	}
 	prog := newProgress(opLog, "url-test progress", m.cfg.Rounds*len(live))
 
 	// Indexed by probe position, so a node's state is one slice element rather
@@ -154,8 +172,9 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	var wg sync.WaitGroup
 	// One semaphore shared by every round so the effective number of in-flight
 	// URL tests honors check.concurrency instead of rounds*concurrency.
-	// fanoutSem, not a raw channel: runRound acquires on the producer
-	// goroutine before any releaser exists, so a zero bound would deadlock.
+	// runRound acquires it in its spawning loop, before each worker exists, so
+	// goroutine creation is bounded too; fanoutSem's >= 1 clamp is what makes
+	// that pre-spawn acquire safe (see fanoutSem).
 	sem := fanoutSem(m.cfg.Concurrency)
 	for range m.cfg.Rounds {
 		wg.Go(func() {
@@ -166,11 +185,33 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// Partial results from a cancelled probe would masquerade as a
-		// truncated-but-successful cycle; report the cancellation instead.
+		// truncated-but-successful cycle; report the cancellation instead. The
+		// egress stage never runs, so the retained adapters die here.
+		m.releaseProbed()
 		return nil, fmt.Errorf("probe interrupted: %w", ctxErr)
 	}
 
+	// Hand the retained adapters to the egress stage (see the Probe doc).
 	return foldProbeResults(nodes, accs), nil
+}
+
+// TakeProbedAdapters hands the adapters a successful Probe retained to the
+// caller and clears the field, transferring ownership: the caller MUST Close
+// each proxy exactly once. This is the probedAdapterSource capability the
+// checker asserts; a Probe that errored or was cancelled retains nothing, so
+// this returns nil then.
+func (m *MihomoProber) TakeProbedAdapters() []mihomo.Proxy {
+	pxs := m.probed
+	m.probed = nil
+	return pxs
+}
+
+// releaseProbed closes whatever a Probe retained and nobody took.
+func (m *MihomoProber) releaseProbed() {
+	for _, px := range m.probed {
+		_ = px.Close()
+	}
+	m.probed = nil
 }
 
 // foldProbeResults collapses the per-position accumulators onto entry labels.
@@ -187,11 +228,16 @@ func foldProbeResults(nodes []probeNode, accs []delayAcc) map[string]ProbeResult
 	res := make(map[string]ProbeResult, len(nodes))
 	for i := range nodes {
 		n, a := &nodes[i], &accs[i]
-		label := n.label
+		var label string
 		switch {
 		case n.proxy != nil:
 			label = entryLabel(n.proxy)
-		case a.stage != StageCondemned:
+		case a.stage == StageCondemned:
+			// The pre-check's verdict files under the label probeSet derived
+			// from the raw mapping — no adapter exists to ask, and deriving it
+			// for live positions too would be dead work (see probeNodes).
+			label = n.label
+		default:
 			// mihomo refused the mapping, so there is no result to fold;
 			// probeStages reads StageUnknown off the label's absence
 			// (checker.go:363).
@@ -211,9 +257,10 @@ func foldProbeResults(nodes []probeNode, accs []delayAcc) map[string]ProbeResult
 
 var errNoParsableProxies = errors.New("no parsable proxies in payload")
 
-// ParseProxies parses the whole payload for the checker's survivor set, which
-// is live by definition and so defers nothing. The caller owns closing every
-// returned proxy exactly once.
+// ParseProxies parses a whole payload into live proxies, which is live by
+// definition and so defers nothing. The caller owns closing every returned
+// proxy exactly once. It is the egress stage's fallback for a Prober without
+// the retention capability; see probedAdapterSource in checker.go.
 func (m *MihomoProber) ParseProxies(payload []byte) ([]mihomo.Proxy, error) {
 	mappings, err := convert.ConvertsV2Ray(payload)
 	if err != nil {
@@ -239,8 +286,9 @@ func (m *MihomoProber) ParseProxies(payload []byte) ([]mihomo.Proxy, error) {
 }
 
 // probeNode is one converted mapping's position in the probe: where the
-// pre-check dials — empty where it will not — the label its result folds onto,
-// and the adapter object, which exists only for a node the pre-check spared.
+// pre-check dials — empty where it will not — the label a condemned position's
+// verdict folds onto, and the adapter object, which exists only for a node the
+// pre-check spared.
 type probeNode struct {
 	label     string
 	addr      string
@@ -255,20 +303,23 @@ type probeNode struct {
 // out of the mapping its constructor was handed.
 //
 // A mapping whose name or endpoint is unreadable that way keeps its URL test.
-// label is authoritative only where no adapter was built, and mislabelling a
-// node buries it for deadcache.ttl where losing the speedup costs one dial.
-//
-// The endpoint is derived only where the pre-check will dial it: both readers of
-// addr are gated on tcpServer, and probeAddr costs 2 allocations. Over 300
+// The endpoint is derived only where the pre-check will dial it: both readers
+// of addr are gated on tcpServer, and probeAddr costs 2 allocations. Over 300
 // mappings (-count=5 medians, 2026-08-18) that is 601 allocations either way
 // with every mapping TCP-typed, 601 -> 481 at a 20% hysteria2 share, 601 -> 301
 // at 50%.
+//
+// The label a position folds under is NOT derived here: the fold reads it only
+// where no adapter was built, which is exactly the pre-check's condemned set,
+// so probeSet derives it for those positions alone, while the raw mappings are
+// still in frame. Deriving it for every mapping was dead work for every live
+// position — the fold asks the adapter instead — and mislabelling a condemned
+// node buries it for deadcache.ttl, where losing the speedup costs one dial.
 func probeNodes(mappings []map[string]any) []probeNode {
 	nodes := make([]probeNode, len(mappings))
 	for i, mapping := range mappings {
 		typ, _ := mapping["type"].(string)
-		name, named := mapping["name"].(string)
-		nodes[i].label = mappingLabel(name, typ)
+		_, named := mapping["name"].(string)
 		if !named || !dialsServerOverTCP(typ, mapping) {
 			continue
 		}
@@ -331,6 +382,16 @@ func (m *MihomoProber) probeSet(
 	}
 	nodes = probeNodes(mappings)
 	live, condemned = m.filterReachable(ctx, opLog, nodes)
+	// The fold reads a position's label only where no adapter exists, which is
+	// exactly the condemned set; derive it here while the mappings are in
+	// frame (they are gone by the fold). The parse below builds nothing for a
+	// condemned position, and the error arm returns no adapter either, so a
+	// probeSet error can never leak one.
+	for _, i := range condemned {
+		typ, _ := mappings[i]["type"].(string)
+		name, _ := mappings[i]["name"].(string)
+		nodes[i].label = mappingLabel(name, typ)
+	}
 	live = m.parseLive(mappings, nodes, live)
 	if len(live) == 0 && len(condemned) == 0 {
 		// A failed Probe reports no pre-check whatever phase it failed in: the
@@ -401,7 +462,6 @@ const (
 	// Kept at 128 because lowering it is not the lever: occupancy is
 	// min(flows created, rate * 120s) and the rate is proportional to this
 	// constant, so every value above ~37 peaks at the same ~24700, while the
-	// ~12 that would fit 8192 stretches the phase to ~6min against a gross
 	// saving of ~465s — below a break-even near 10 the pre-check costs more
 	// than it saves.
 	precheckConcurrency = 128
@@ -413,11 +473,28 @@ const (
 	// endpoint they touch, so their signature is ~100% and the 36-point margin
 	// costs no real verdict. DNS down is no longer one of them: it leaves
 	// nothing judged, and an empty judged set condemns nobody anyway.
+	//
+	// The URL-test path reuses these two: recordDead guards the same
+	// dead-cache write on the verdict its probes produce (see recordDead).
 	precheckBreakerPercent = 95
-	// A share over a handful of judged endpoints carries no signal; production
-	// cycles dial thousands.
+	// A share over a handful of judged endpoints carries no signal, so the
+	// floor bounds only PARTIAL refusal: breakerTrips disbelieves a verdict
+	// that refused everything it judged at any sample size.
 	precheckBreakerMin = 100
 )
+
+// breakerTrips is the mass-failure plausibility breaker shared by the
+// pre-check and the dead-cache write: both refuse a verdict that condemns the
+// whole pool, because a cycle that rejects everything is evidence about our
+// egress, not about the nodes. The total-refusal arm fires at any sample size
+// (one refused endpoint tells the same story as ten thousand), while the
+// percentage arm needs the minimum judged count behind it — a partial refusal
+// is only evidence once it has enough judged endpoints to mean anything.
+// recordDead's guard shares these constants; see recordDead.
+func breakerTrips(blocked, total int) bool {
+	return blocked == total && total > 0 ||
+		total >= precheckBreakerMin && blocked*100 >= total*precheckBreakerPercent
+}
 
 // precheckDialBudget is the per-attempt dial deadline. Derived, never a
 // constant: 500ms was 8x tighter than the max_avg_ms of 4000 measured on the
@@ -576,7 +653,7 @@ func (m *MihomoProber) filterReachable(
 	// resolver outage must not dilute the denominator until the breaker stops
 	// firing.
 	decided := len(addrs) - unresolved
-	if decided >= precheckBreakerMin && refused*100 >= decided*precheckBreakerPercent {
+	if breakerTrips(refused, decided) {
 		m.precheck = PrecheckReport{
 			State: PrecheckTripped, Dialled: len(addrs), Refused: refused, Unresolved: unresolved,
 		}
@@ -690,8 +767,10 @@ func (m *MihomoProber) runRound(
 	var wg sync.WaitGroup
 	for _, i := range live {
 		px := nodes[i].proxy
+		// Acquired by the spawner so goroutine creation is bounded too, not
+		// just execution; workers only ever release (see fanoutSem).
+		sem <- struct{}{}
 		wg.Go(func() {
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			tctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)

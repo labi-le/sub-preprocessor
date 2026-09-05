@@ -375,3 +375,52 @@ func TestTraceCheckAccountsForEveryNode(t *testing.T) {
 		t.Fatalf("ordinals logged = %v, want one per node", seen)
 	}
 }
+
+// A trace that did not answer must not log a location: the zero geofeed
+// CountryCode stringifies to two NUL bytes and the zero Addr to "invalid IP",
+// so rendering them unconditionally put control characters in the operator
+// stream for every non-answering node. loc and egress ride on answered only.
+func TestTraceCheckLogsLocOnlyWhenAnswered(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(zerolog.SyncWriter(&buf)).Level(zerolog.DebugLevel)
+	srv := traceServer(t, http.StatusOK, traceAnswer("5.6.7.8", "DE"))
+	pxs := []mihomo.Proxy{
+		adapter.NewProxy(outbound.NewDirect()), // answers
+		&tracePort{name: "src-001:2999/TCP", addr: "1.2.3.4:2999"},
+	}
+	got := traceProber(srv.URL, logger).TraceCheck(context.Background(), pxs)
+	if len(got) != 1 {
+		t.Fatalf("outcomes = %v, want only the answering proxy", mapKeys(got))
+	}
+
+	var answered, unanswered bool
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var ev struct {
+			Message  string  `json:"message"`
+			Answered bool    `json:"answered"`
+			Loc      *string `json:"loc"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if ev.Message != "cloudflare trace" {
+			continue
+		}
+		if ev.Answered {
+			answered = true
+			if ev.Loc == nil || *ev.Loc != "DE" {
+				t.Errorf("answered trace logged loc = %v, want \"DE\"", ev.Loc)
+			}
+		} else {
+			unanswered = true
+			if ev.Loc != nil {
+				t.Errorf("unanswered trace logged a loc (%q); a zero Country must not render", *ev.Loc)
+			}
+		}
+	}
+	if !answered || !unanswered {
+		t.Errorf("saw answered=%v unanswered=%v, want both in the log", answered, unanswered)
+	}
+}

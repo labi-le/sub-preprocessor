@@ -3,8 +3,13 @@ package stable //nolint:testpackage // exercises unexported stable internals
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -160,6 +165,49 @@ func TestMeasureKeepsDeadlineTruncatedRead(t *testing.T) {
 	}
 	if read != sent {
 		t.Fatalf("bytesRead = %d, want %d", read, sent)
+	}
+}
+
+// expiredCtx is the context state a probe whose own deadline has fired is in:
+// measure's tctx is a WithTimeout parent of the cycle, so once it expires any
+// read error arrives alongside ctx.Err() != nil. deadlineTruncated must then
+// still tell the peer's cut from our own.
+func TestDeadlineTruncatedReadsTheErrorClass(t *testing.T) {
+	t.Parallel()
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	timeoutErr := &url.Error{Op: "Get", URL: "http://example.com/", Err: context.DeadlineExceeded}
+	var timeoutNet net.Error = &net.DNSError{Err: "lookup timed out", IsTimeout: true}
+	rst := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	for _, c := range []struct {
+		desc string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		// Our own deadline, HTTP/1.1: the transport cancels the conn and the
+		// read surfaces as net.ErrClosed once the context is done.
+		{"h1 self-cancel: ErrClosed with the context done", expired, net.ErrClosed, true},
+		{"ErrClosed with a live context is not our deadline", context.Background(), net.ErrClosed, false},
+		// HTTP/2 hands the context error back directly.
+		{"h2 self-cancel: DeadlineExceeded", expired, context.DeadlineExceeded, true},
+		{"wrapped DeadlineExceeded", expired, fmt.Errorf("read body: %w", context.DeadlineExceeded), true},
+		{"os.ErrDeadlineExceeded", expired, os.ErrDeadlineExceeded, true},
+		// A Client.Timeout-only wiring rewraps any read error once the client
+		// deadline passed; the httpError it builds is a net.Error with
+		// Timeout() true and Is(DeadlineExceeded) true (client.go).
+		{"client-timeout url.Error wrapping DeadlineExceeded", context.Background(), timeoutErr, true},
+		{"a timeout-shaped net.Error", context.Background(), timeoutNet, true},
+		// The peer's cuts stay discarded even when our deadline lands in the
+		// same instant: their byte count is not a rate.
+		{"peer reset at the deadline", expired, rst, false},
+		{"short body at the deadline", expired, io.ErrUnexpectedEOF, false},
+		{"clean EOF at the deadline", expired, io.EOF, false},
+	} {
+		if got := deadlineTruncated(c.ctx, c.err); got != c.want {
+			t.Errorf("%s: deadlineTruncated = %v, want %v", c.desc, got, c.want)
+		}
 	}
 }
 

@@ -129,8 +129,10 @@ func TestEntryLabelFoldsRealMieruProxies(t *testing.T) {
 }
 
 // sourceOfLabelCases are the shapes attribution has to survive: source names
-// carrying '-' and ':', a name whose own tail is digits, a counter past 999,
-// and the malformed labels Merge cannot emit today.
+// carrying '-' (the shipped config's own "file-vpn-2"), a name whose own tail
+// is digits, a counter past 999, and the malformed labels Merge cannot emit
+// today. The ':' in "weird:src-1-002" is out-of-grammar — no configured source
+// name may contain one — and survives only as split hardening.
 var sourceOfLabelCases = []struct {
 	label string
 	want  string
@@ -176,16 +178,18 @@ func TestSourceOfLabelAllocatesNothing(t *testing.T) {
 }
 
 // TestSourceOfLabelRoundTripsMergeOutput pins attribution against the only
-// authority on label shape: Merge's own output. The fixture is what could break
-// the split at the last '-' — names carrying '-' and ':', a name ending in a
-// digit, and a source past 999 nodes, where the pad-3 tail grows a fourth digit.
+// authority on label shape: Merge's own output. The fixture is what could
+// break the split at the last '-' — names carrying '-', a name ending in a
+// digit, and a source past 999 nodes, where the pad-3 tail grows a fourth
+// digit. Names are sourceNameRe-validated at load (^[a-z0-9-]+$), so no shape
+// outside it appears here.
 func TestSourceOfLabelRoundTripsMergeOutput(t *testing.T) {
 	t.Parallel()
 
-	want := map[string]int{"tg-file-vpn-2": 3, "weird:src-1": 2, "big": 1002, "plain": 1}
+	want := map[string]int{"tg-file-vpn-2": 3, "big": 1002, "plain": 1}
 	host := 0
 	bodies := make([]SourceBody, 0, len(want))
-	for _, name := range []string{"tg-file-vpn-2", "weird:src-1", "big", "plain"} {
+	for _, name := range []string{"tg-file-vpn-2", "big", "plain"} {
 		nodes := make([]preprocess.NodeResult, want[name])
 		for i := range nodes {
 			host++
@@ -468,7 +472,7 @@ func TestFilterMieruSurvivorEntersSubset(t *testing.T) {
 		Filters: []NodeFilter{&apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}},
 	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
-	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors, nil)
+	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors, nil, nil)
 
 	if len(checked) != 2 {
 		t.Fatalf("check saw %v, want one proxy per survivor (the mieru node must reach the subset)", checked)
@@ -537,7 +541,7 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 		},
 	}, nil, nil, nil, nil, "", zerolog.Nop(), nil)
 
-	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors, nil)
+	kept, reports, _, _ := c.filterAndMeasureEgress(context.Background(), c.spec.Load(), survivors, nil, nil)
 
 	if len(subset) != 2 || !strings.Contains(subset[len(subset)-1], deadPort) {
 		t.Fatalf("filter subset was %v, want both ports with the dead one last", subset)

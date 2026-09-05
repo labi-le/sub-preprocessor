@@ -84,11 +84,13 @@ func (c *Controller) Apply(cfg config.Config) error {
 	geo := cfg.GeoBlock
 	var bandwidth config.BandwidthConfig
 	names := make([]string, 0, len(nodeSpecs))
+	geminiArmed := false
 	for _, spec := range nodeSpecs {
 		names = append(names, spec.Type)
 		switch spec.Type {
 		case config.FilterGemini:
 			geo.Gemini = spec.Gemini
+			geminiArmed = true
 		case config.FilterClaude:
 			geo.Claude = spec.Claude
 		case config.FilterChatGPT:
@@ -100,9 +102,11 @@ func (c *Controller) Apply(cfg config.Config) error {
 		}
 	}
 
-	geminiKey, keyErr := geo.Gemini.APIKeyResolved()
-	if keyErr != nil {
-		c.logger.Warn().Err(keyErr).Msg("gemini key unavailable; geo-block check disabled")
+	// A configured gemini gate with no usable key must fail, not boot silently
+	// off (see resolveGeminiKey); the unarmed base is left unread.
+	geminiKey, err := resolveGeminiKey(geo.Gemini, geminiArmed)
+	if err != nil {
+		return err
 	}
 	prober, err := NewMihomoProber(subs.Check, bandwidth, geo, cfg.Geo.Cloudflare, geminiKey, c.logger)
 	if err != nil {
@@ -126,7 +130,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	if c.checker != nil {
 		c.checker.Reconfigure(spec)
 		c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).
-			Msg("subscription checker reconfigured")
+			Msg("subscription checker reconfigured; the new settings apply from its next scheduled cycle")
 
 		return nil
 	}
@@ -144,6 +148,29 @@ func (c *Controller) Apply(cfg config.Config) error {
 	c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).Msg("subscription checker started")
 
 	return nil
+}
+
+// resolveGeminiKey returns the key an ARMED gemini gate will check with, or an
+// error when it cannot be resolved: the check is the only gate reading a
+// location verdict, and a disabled one keeps every geo-blocked node while its
+// metrics read "disabled". config validation already refuses an armed entry
+// that declares no key material; this is the second half, where the declared
+// key_file is actually read -- a missing mount or missing var refuses boot and
+// fails the reload instead of degrading the gate. An unarmed base resolves to
+// no key and is not read at all: no filter entry, no key needed, no file I/O
+// on every reload.
+func resolveGeminiKey(g config.GeminiConfig, armed bool) (string, error) {
+	if !armed {
+		return "", nil
+	}
+	key, err := g.APIKeyResolved()
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("gemini gate is configured but its key cannot be resolved: %w", err)
+	case key == "":
+		return "", fmt.Errorf("gemini gate is configured but resolves no key: set api_key, or a key_file (%q) holding key_var %s, on the filter entry or geoblock.gemini", g.KeyFile, g.KeyVar)
+	}
+	return key, nil
 }
 
 // Stop cancels the running checker, if any, and waits for it to exit. This is

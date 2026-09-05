@@ -86,6 +86,11 @@ const (
 // gemini/claude/chatgpt, a refused request for tidal. A nil enabled func means
 // the check is always active (e.g. Anthropic geo-blocks before authentication,
 // so its check is keyless).
+//
+// A verdict that condemns the whole survivor batch is disbelieved before any
+// drop or store write, like the pre-check's (breakerTrips, in apply): every
+// node dials the SAME endpoint, so a wholesale refusal is the endpoint's or
+// our egress's story, not the nodes'.
 type apiFilter struct {
 	filterName string
 	enabled    func() bool
@@ -103,10 +108,6 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 
 	subset := filterSubset(survivors, proxies)
 	outcomes := f.check(ctx, subset)
-	if outcomes == nil {
-		f.logger.Warn().Str("filter", f.filterName).Msg("filter skipped: no outcomes")
-		return survivors, rep
-	}
 	if ctx.Err() != nil {
 		// A cancelled check yields partial outcomes; don't record blocks or
 		// drop survivors based on them.
@@ -114,18 +115,46 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		return survivors, rep
 	}
 
+	// Count the batch verdict first, and believe it only below the
+	// whole-batch share (breakerTrips, shared with recordDead and
+	// filterReachable): every node dials the same endpoint, so a wholesale
+	// unreachable/blocked verdict is the endpoint's or our egress's story, not
+	// the nodes'. Dropping on it empties the survivor set for the outage, and
+	// persisting it would evict every survivor host from the geoblock store --
+	// so the count precedes the drops and the store writes, and a disbelieved
+	// batch is kept, warned about and re-checked next cycle.
+	blocked, unreachable := 0, 0
+	for _, s := range survivors {
+		switch o := outcomes[s.Label]; {
+		case o.Blocked:
+			blocked++
+		case !o.Reachable:
+			unreachable++
+		}
+	}
+	if breakerTrips(blocked+unreachable, len(survivors)) {
+		f.logger.Warn().Str("filter", f.filterName).Int("survivors", len(survivors)).
+			Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).
+			Int("threshold_pct", precheckBreakerPercent).
+			Msg("gate refused every survivor; treating the batch verdict as the endpoint's or our egress's, not the nodes', and keeping all survivors")
+		rep.Dropped[dropBlocked] = 0
+		rep.Dropped[dropUnreachable] = 0
+		rep.State = FilterTripped
+		return survivors, rep
+	}
+
 	kept := make([]Survivor, 0, len(survivors))
-	var blocked, unreachable int
 	for _, s := range survivors {
 		o := outcomes[s.Label]
 		switch {
 		case o.Blocked:
-			blocked++
 			// Persisted only when this check is trusted enough to act on the
 			// verdict beyond this cycle, which is exactly what a non-nil store
-			// means. tidal is the one exception and says why at construction:
-			// its verdict is a bare status code, so a single 429 from
-			// api.tidal.com marks the whole batch Blocked.
+			// means. Blast radius of one write: the store is keyed by the bare
+			// host (no port, no service), so this node's refusal evicts every
+			// node sharing its hostname -- other ports, sources, endpoints --
+			// in preprocess for the whole store TTL. tidal never pays it (no
+			// store, see buildNodeFilters): its verdict is a bare status code.
 			if f.store != nil {
 				if err := f.store.Block(o.Server); err != nil {
 					f.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
@@ -135,7 +164,6 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 			// Never persisted: a node that answered the latency probe but not
 			// this endpoint is as likely to be a transient path failure as a
 			// standing one, and the next cycle is cheap enough to find out.
-			unreachable++
 		default:
 			kept = append(kept, s)
 		}
@@ -144,6 +172,7 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{dropBlocked: blocked, dropUnreachable: unreachable}
+	rep.State = FilterRan
 	return kept, rep
 }
 
@@ -151,11 +180,17 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 // of that gate's verdict the cycle actually obtained. It exists as its own
 // type for two reasons a shared field on apiFilter could not serve.
 //
-// The concept is gemini's alone. claude and chatgpt geo-block BEFORE
-// authentication and tidal's verdict is a bare status code, so none of them
-// can be answered ahead of their own verdict; a field on apiFilter would
-// publish a permanently-zero series for each of them, and a zero reads as
-// "measured, fine" — the exact misreading this metric exists to remove.
+// The concept is gemini's alone. Only gemini's check holds a credential the
+// API can refuse before the location verdict exists, so only it can be
+// answered AHEAD of its own verdict and only its misses can be exposed as an
+// account of the gate: geminiInconclusive counts every answer that is neither
+// a 2xx nor the marker-400 -- 401/403/404/429, API_KEY_INVALID, a 5xx server
+// fault, a misworded refusal. claude and chatgpt geo-block before
+// authentication and carry no credential — a non-marker refusal (429, a CDN
+// challenge) is read as "not blocked" and is not accounted for anywhere — and
+// tidal's verdict is a bare status code. A field on apiFilter would publish a
+// permanently-zero series for each of them, and a zero reads as "measured,
+// fine" — the exact misreading this metric exists to remove.
 //
 // And the DISABLED state has to survive to the report. apiFilter.apply returns
 // before it calls check when enabled() is false, so nothing the check produces
@@ -201,11 +236,14 @@ func (f *geminiFilter) checkAndAccount(ctx context.Context, proxies []mihomo.Pro
 }
 
 // bandwidthFilter keeps only survivors whose measured through-node download
-// speed is at least minMbps (minMbps==0 disables the floor and keeps all
-// reachable nodes) and records Mbps on each kept survivor, which the
-// publication turns into the [SPD:] tag. No store: a speed measurement is far
-// too volatile for the host-keyed, month-long geoblock store, so a sub-floor
-// node is dropped for this cycle and re-measured next.
+// speed is at least minMbps and records Mbps on each kept survivor, which the
+// publication turns into the [SPD:] tag. minMbps==0 removes only the speed
+// THRESHOLD: a survivor whose download failed outright (dial error, refused or
+// reset transfer) is still dropped, so "no floor" is not "annotate only" --
+// only a whole batch is spared, by the same breaker as the API filters (see
+// apiFilter.apply). No store: a speed measurement is far too volatile for the
+// host-keyed, month-long geoblock store, so a sub-floor node is dropped for
+// this cycle and re-measured next.
 type bandwidthFilter struct {
 	minMbps int
 	check   func(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -216,17 +254,39 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 	rep := FilterReport{Name: bandwidthFilterName, In: len(survivors), Kept: len(survivors), Dropped: map[string]int{}}
 	subset := filterSubset(survivors, proxies)
 	outcomes := f.check(ctx, subset)
-	if outcomes == nil {
-		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter skipped: no outcomes")
-		return survivors, rep
-	}
 	if ctx.Err() != nil {
 		f.logger.Warn().Str("filter", bandwidthFilterName).Msg("filter cancelled; keeping survivors unchanged")
 		return survivors, rep
 	}
 
+	// Count the batch verdict first, with the same plausibility breaker as the
+	// API filters (apiFilter.apply): every download shares one test endpoint
+	// and one host uplink, so a batch that ALL failed to download or ALL came
+	// in under the floor is the endpoint's mood or a dip on our side as much
+	// as a pool of bad nodes -- the slow-drop comment below quotes config.yaml
+	// on under-reporting. A disbelieved batch is kept, left untagged (its
+	// numbers were measured under the same doubt), and re-measured next cycle.
+	slow, unreachable := 0, 0
+	for _, s := range survivors {
+		switch o := outcomes[s.Label]; {
+		case !o.Reachable:
+			unreachable++
+		case f.minMbps > 0 && o.Mbps < f.minMbps:
+			slow++
+		}
+	}
+	if breakerTrips(slow+unreachable, len(survivors)) {
+		f.logger.Warn().Str("filter", bandwidthFilterName).Int("survivors", len(survivors)).
+			Int(dropSlow, slow).Int(dropUnreachable, unreachable).
+			Int("threshold_pct", precheckBreakerPercent).
+			Msg("bandwidth check condemned every survivor; treating the batch verdict as the test endpoint's or our uplink's, not the nodes', and keeping all survivors")
+		rep.Dropped[dropSlow] = 0
+		rep.Dropped[dropUnreachable] = 0
+		rep.State = FilterTripped
+		return survivors, rep
+	}
+
 	kept := make([]Survivor, 0, len(survivors))
-	var slow, unreachable int
 	for _, s := range survivors {
 		o := outcomes[s.Label]
 		switch {
@@ -234,14 +294,12 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 			// Never persisted: measure returns unreachable for a refused or
 			// reset transfer too, which is the endpoint's mood as much as the
 			// node's.
-			unreachable++
 		case f.minMbps > 0 && o.Mbps < f.minMbps:
 			// Never persisted either, for a related reason: the concurrent
 			// downloads share one host uplink -- config.yaml says outright that
 			// this "can under-report fast nodes" -- so a dip on our side puts
 			// the whole batch under the floor. Re-measuring next cycle is
 			// cheap; carrying the verdict forward would hide good nodes.
-			slow++
 		default:
 			s.Mbps = o.Mbps
 			kept = append(kept, s)
@@ -251,6 +309,7 @@ func (f *bandwidthFilter) apply(ctx context.Context, survivors []Survivor, proxi
 		Int("kept", len(kept)).Int(dropSlow, slow).Int(dropUnreachable, unreachable).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{dropSlow: slow, dropUnreachable: unreachable}
+	rep.State = FilterRan
 	return kept, rep
 }
 
@@ -324,8 +383,9 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 			// checks match. The store is keyed by host with no service
 			// dimension and lives for its whole TTL, so a transient CDN error
 			// or rate-limit would evict the node from every endpoint. With no
-			// store nothing outlives the cycle, so a rate-limited batch costs
-			// this one cycle.
+			// store nothing outlives the cycle, and the batch breaker in
+			// apiFilter.apply keeps a whole batch this status-only verdict
+			// would condemn, so a wholesale rate-limit costs nothing at all.
 			filters = append(filters, &apiFilter{
 				filterName: tidalFilterName,
 				check:      td.TidalCheck,

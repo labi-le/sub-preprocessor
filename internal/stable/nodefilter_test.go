@@ -138,14 +138,26 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 
 	// Drive the blocked branch on the filter as built: the `store != nil` guard
 	// in apply is all that stands between this path and a nil interface call,
-	// and no other test reaches it with a nil store.
+	// and no other test reaches it with a nil store. The batch must be a
+	// BELIEVED (partial) verdict -- a one-node batch condemned outright is a
+	// total refusal and the batch breaker keeps it (breakerTrips, pinned in
+	// TestApiFilterBatchBreakerSkipsStoreOnWholeBatchBlocked).
 	tidal.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
-		return map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Blocked: true}}
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true},
+			"s-002": {Server: "h2", Reachable: true},
+		}
 	}
 	kept, rep := tidal.apply(context.Background(),
-		[]Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
-	if len(kept) != 0 || rep.Dropped["blocked"] != 1 {
-		t.Fatalf("blocked survivor must drop without a store: kept=%d rep=%+v", len(kept), rep)
+		[]Survivor{
+			{Entry: Entry{Label: "s-001", Addr: "h1:443"}},
+			{Entry: Entry{Label: "s-002", Addr: "h2:443"}},
+		}, nil)
+	if len(kept) != 1 || kept[0].Label != "s-002" || rep.Dropped["blocked"] != 1 {
+		t.Fatalf("blocked survivor must drop without a store: kept=%+v rep=%+v", kept, rep)
+	}
+	if rep.State != FilterRan {
+		t.Fatalf("a believed partial verdict must report FilterRan: %+v", rep)
 	}
 }
 
@@ -195,6 +207,211 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 	for _, s := range kept {
 		if s.Label == "s-003" {
 			t.Fatal("s-003 (absent from proxy map) must be dropped as unreachable")
+		}
+	}
+}
+
+// recordingBlocklist records the hosts a filter persists, so a test can tell a
+// geoblock write from a skip.
+type recordingBlocklist struct{ blocked []string }
+
+func (b *recordingBlocklist) Block(host string) error {
+	b.blocked = append(b.blocked, host)
+	return nil
+}
+
+func (b *recordingBlocklist) Prune() error { return nil }
+
+// threeSurvivors is the smallest pool a whole-batch verdict can condemn.
+func threeSurvivors() []Survivor {
+	return []Survivor{
+		{Entry: Entry{Label: "s-001", Addr: "h1:443"}},
+		{Entry: Entry{Label: "s-002", Addr: "h2:443"}},
+		{Entry: Entry{Label: "s-003", Addr: "h3:443"}},
+	}
+}
+
+// TestApiFilterBatchBreakerKeepsSurvivorsOnWholeBatchUnreachable pins the
+// whole-batch plausibility breaker (LogicGates#1): when the vendor endpoint is
+// down, every through-node dial fails and apiFilter used to drop the ENTIRE
+// survivor set as reason="unreachable" — blaming the nodes for the endpoint —
+// which emptied the cycle into reportError. The batch verdict is disbelieved
+// (breakerTrips, the same guard recordDead and filterReachable use) and
+// everyone is kept, with the report saying the filter dropped nobody.
+func TestApiFilterBatchBreakerKeepsSurvivorsOnWholeBatchUnreachable(t *testing.T) {
+	t.Parallel()
+
+	check := func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: false},
+			"s-002": {Server: "h2", Reachable: false},
+			"s-003": {Server: "h3", Reachable: false},
+		}
+	}
+	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved whole-batch unreachable verdict keeps every survivor: kept %d", len(kept))
+	}
+	if rep.Kept != 3 || rep.Dropped[dropUnreachable] != 0 || rep.Dropped[dropBlocked] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+}
+
+// TestApiFilterBatchBreakerSkipsStoreOnWholeBatchBlocked pins the write side of
+// the same breaker: a batch whose every node reads blocked (a CDN error page
+// carrying the marker, a wholesale geo-sweep) must not persist every survivor
+// host into the month-long geoblock store — that would evict the whole pool in
+// preprocess for the store TTL, undoing the fail-open one cycle later.
+func TestApiFilterBatchBreakerSkipsStoreOnWholeBatchBlocked(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingBlocklist{}
+	check := func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true},
+			"s-002": {Server: "h2", Reachable: true, Blocked: true},
+			"s-003": {Server: "h3", Reachable: true, Blocked: true},
+		}
+	}
+	f := &apiFilter{filterName: "test", check: check, store: store, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved whole-batch blocked verdict keeps every survivor: kept %d", len(kept))
+	}
+	if len(store.blocked) != 0 {
+		t.Fatalf("a disbelieved batch must not be persisted: store holds %v", store.blocked)
+	}
+	if rep.Dropped[dropBlocked] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+}
+
+// TestApiFilterBelievesPartialVerdict pins that the breaker only disbelieves
+// the whole-batch share: a mixed verdict (some blocked, some not) is per-node
+// evidence and still drops the blocked nodes and persists their hosts exactly
+// as before.
+func TestApiFilterBelievesPartialVerdict(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingBlocklist{}
+	check := func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true},
+			"s-002": {Server: "h2", Reachable: true, Blocked: true},
+			"s-003": {Server: "h3", Reachable: true},
+		}
+	}
+	f := &apiFilter{filterName: "test", check: check, store: store, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 1 || kept[0].Label != "s-003" {
+		t.Fatalf("the live survivor must be kept, blocked ones dropped: %+v", kept)
+	}
+	if rep.Dropped[dropBlocked] != 2 || rep.Kept != 1 {
+		t.Fatalf("a partial verdict is believed: %+v", rep)
+	}
+	if rep.State != FilterRan {
+		t.Fatalf("a believed verdict must report FilterRan: %+v", rep)
+	}
+	if len(store.blocked) != 2 || store.blocked[0] != "h1" || store.blocked[1] != "h2" {
+		t.Fatalf("a believed partial verdict persists its blocked hosts: %v", store.blocked)
+	}
+}
+
+// TestGeminiFilterBatchBreakerKeepsSurvivors is the gemini gate family's
+// instance of the batch breaker: a whole-batch unreachable verdict through the
+// concrete gemini filter keeps every survivor and leaves the gate's account of
+// itself intact.
+func TestGeminiFilterBatchBreakerKeepsSurvivors(t *testing.T) {
+	t.Parallel()
+
+	gc := &fakeGeminiChecker{
+		enabled: true,
+		outcomes: map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: false},
+			"s-002": {Server: "h2", Reachable: false},
+			"s-003": {Server: "h3", Reachable: false},
+		},
+		rep: GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 0},
+	}
+	f := newGeminiFilter(gc, nil, zerolog.Nop())
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved batch keeps every survivor: kept %d", len(kept))
+	}
+	if rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+	if got := f.verification(); got != gc.rep {
+		t.Fatalf("verification() = %+v, want %+v", got, gc.rep)
+	}
+}
+
+// TestBandwidthFilterBatchBreakerKeepsSurvivorsOnWholeBatchUnreachable is the
+// bandwidth family's endpoint-outage arm: the download test endpoint down for
+// every egress used to drop the whole survivor set as unreachable even at
+// minMbps=0; the batch verdict is disbelieved and everyone kept.
+func TestBandwidthFilterBatchBreakerKeepsSurvivorsOnWholeBatchUnreachable(t *testing.T) {
+	t.Parallel()
+
+	check := func(context.Context, []mihomo.Proxy) map[string]BandwidthOutcome {
+		return map[string]BandwidthOutcome{
+			"s-001": {Server: "h1", Reachable: false},
+			"s-002": {Server: "h2", Reachable: false},
+			"s-003": {Server: "h3", Reachable: false},
+		}
+	}
+	f := &bandwidthFilter{minMbps: 0, check: check, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved batch keeps every survivor: kept %d", len(kept))
+	}
+	if rep.Kept != 3 || rep.Dropped[dropUnreachable] != 0 || rep.Dropped[dropSlow] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+}
+
+// TestBandwidthFilterBatchBreakerKeepsWholeBatchUnderTheFloor is the slow arm:
+// the concurrent downloads share one host uplink, so a batch that ALL measured
+// under the floor is as likely a dip on our side as a pool of bad nodes — the
+// whole-batch slow verdict is disbelieved, the survivors kept untagged and
+// re-measured next cycle.
+func TestBandwidthFilterBatchBreakerKeepsWholeBatchUnderTheFloor(t *testing.T) {
+	t.Parallel()
+
+	check := func(context.Context, []mihomo.Proxy) map[string]BandwidthOutcome {
+		return map[string]BandwidthOutcome{
+			"s-001": {Server: "h1", Reachable: true, Mbps: 3},
+			"s-002": {Server: "h2", Reachable: true, Mbps: 4},
+			"s-003": {Server: "h3", Reachable: true, Mbps: 2},
+		}
+	}
+	f := &bandwidthFilter{minMbps: 10, check: check, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved whole-batch slow verdict keeps every survivor: kept %d", len(kept))
+	}
+	if rep.Dropped[dropSlow] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+	for _, s := range kept {
+		if s.Mbps != 0 {
+			t.Fatalf("a disbelieved measurement must not be tagged: %s carries Mbps %d", s.Label, s.Mbps)
 		}
 	}
 }
@@ -249,6 +466,9 @@ func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
 	if len(rep.Dropped) != 2 || rep.Dropped[dropBlocked] != 0 || rep.Dropped[dropUnreachable] != 0 {
 		t.Fatalf("gemini must report only its two drop reasons, both zero here: %+v", rep.Dropped)
 	}
+	if rep.State != FilterRan {
+		t.Fatalf("a believed clean verdict must report FilterRan: %+v", rep)
+	}
 }
 
 // TestGeminiFilterDisabledIsNotAGateThatRanClean covers the state the metric
@@ -271,10 +491,13 @@ func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	}
 
 	gc.enabled = false
-	kept, _ := f.apply(context.Background(), survivors, nil)
+	kept, rep := f.apply(context.Background(), survivors, nil)
 
 	if len(kept) != 1 {
 		t.Fatalf("a skipped gate passes survivors through: kept %d", len(kept))
+	}
+	if rep.State != FilterAbsent {
+		t.Fatalf("a skipped gate reaches no verdict and must not read as a clean pass: State = %v", rep.State)
 	}
 	if gc.calls != 1 {
 		t.Fatalf("the disabled branch must not call the check: calls = %d", gc.calls)

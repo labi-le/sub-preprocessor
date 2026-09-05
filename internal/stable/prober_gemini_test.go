@@ -78,6 +78,7 @@ func TestGeminiInconclusive(t *testing.T) {
 		ok = `{"name":"models/gemini-2.0-flash","version":"2.0"}`
 	)
 
+	const marker = "User location is not supported for the API use"
 	tests := map[string]struct {
 		status int
 		body   string
@@ -89,18 +90,22 @@ func TestGeminiInconclusive(t *testing.T) {
 		"quota":            {429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`, true},
 		"location refused": {400, geoBlocked, false},
 		"egress fine":      {200, ok, false},
+		"server fault":     {503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, true},
+		"gateway fault":    {502, `{"error":{"code":502,"status":"BAD_GATEWAY"}}`, true},
+		"internal fault":   {500, `{"error":{"code":500,"status":"INTERNAL"}}`, true},
+		"redirect":         {302, "", true},
+		"reworded refusal": {400, `{"error":{"message":"User location is not supported in your region.","status":"FAILED_PRECONDITION"}}`, true},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := geminiInconclusive(tc.status, tc.body); got != tc.want {
+			if got := geminiInconclusive(tc.status, tc.body, marker); got != tc.want {
 				t.Fatalf("geminiInconclusive(%d) = %v, want %v", tc.status, got, tc.want)
 			}
 		})
 	}
 
 	// The two 400s must stay distinguishable: only the location one is a block.
-	const marker = "User location is not supported for the API use"
 	if !markerBlocked(geoBlocked, marker) || markerBlocked(keyInvalid, marker) {
 		t.Fatal("only the FAILED_PRECONDITION body is a geo-block")
 	}
@@ -134,6 +139,10 @@ func TestGeminiCheckAccountsWhatItCouldNotVerify(t *testing.T) {
 		},
 		"a rotated key answers before it too": {
 			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0,
+			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
+		},
+		"a server fault answers before it too": {
+			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0,
 			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
 		},
 		"a refused location is a verdict": {

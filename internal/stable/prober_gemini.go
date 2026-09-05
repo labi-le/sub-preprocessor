@@ -58,7 +58,7 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 		m.geminiURL(), nil, g.Timeout, g.Concurrency, pace,
 		func(status int, body string) bool {
 			checks.Add(1)
-			if geminiInconclusive(status, body) {
+			if geminiInconclusive(status, body, g.Marker) {
 				inconclusive.Add(1)
 			}
 			return markerBlocked(body, g.Marker)
@@ -74,11 +74,13 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 		// of= stays the proxy count the fan-out was handed, so the gap between
 		// them is the PROXIES that never answered -- not the node-level
 		// reason="unreachable" drop, which needs every proxy of a node dead --
-		// and the log still matches the series.
-		opLog.Warn().Int("nodes", rep.Unverified).Int("classified", rep.Checks).Int("of", len(proxies)).
-			Msg("gemini gate verified nothing for these nodes: the API rejected the request " +
-				"before the location check (key rotated/restricted, wrong model, or quota) -- they were kept")
+		// and the log still matches the series. The leading count is classifier
+		// calls, not nodes (see GeminiReport), so it is keyed like the metric.
+		opLog.Warn().Int("unverified_checks", rep.Unverified).Int("classified", rep.Checks).Int("of", len(proxies)).
+			Msg("gemini gate verified nothing for these checks: the API answered without a location " +
+				"verdict (key rotated/restricted, wrong model, quota, a server fault, or a reworded refusal) -- their nodes were kept")
 	}
+
 	return out, rep
 }
 
@@ -87,20 +89,24 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 // a geo-blocked egress, the API answers in this order: caller identity (403,
 // "unregistered callers", when no key is sent), then key validity (400
 // API_KEY_INVALID for a junk key), and only then the location precondition (400
-// FAILED_PRECONDITION, the marker). So a rejected credential, a wrong model path
-// (404) or a throttled request (429) is answered BEFORE the location verdict
-// exists; reading those as "not blocked" turns the whole gate into a silent
-// no-op the moment the key rotates -- the node then egresses to a country where
-// Gemini refuses it, which is exactly what this gate exists to prevent.
-func geminiInconclusive(status int, body string) bool {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
-		return true
-	case http.StatusBadRequest:
-		// 400 is shared: API_KEY_INVALID (inconclusive) vs FAILED_PRECONDITION
-		// (the location verdict this gate reads).
-		return strings.Contains(body, "API_KEY_INVALID")
-	default:
+// FAILED_PRECONDITION, the marker). So only two responses carry the verdict: a
+// 2xx (every gate, the location one included, passed) and the marker-400 (the
+// location gate refused -- a real block, which the caller drops via
+// markerBlocked). Everything else -- a rejected credential, a wrong model path
+// (404), throttling (429), a 5xx server fault, an unfollowed redirect, or a 400
+// whose wording no longer carries the marker -- was answered BEFORE the location
+// verdict existed or without readable evidence of it; reading those as "not
+// blocked" turns the whole gate into a silent no-op the moment the key rotates
+// or the marker drifts -- the node then egresses to a country where Gemini
+// refuses it, which is exactly what this gate exists to prevent. The marker is
+// an argument because it is per-check configurable.
+func geminiInconclusive(status int, body, marker string) bool {
+	switch {
+	case status >= http.StatusOK && status < http.StatusMultipleChoices:
 		return false
+	case status == http.StatusBadRequest && markerBlocked(body, marker):
+		return false
+	default:
+		return true
 	}
 }

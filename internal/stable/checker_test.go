@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"os"
@@ -14,11 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/common/convert"
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/stable"
 )
@@ -316,18 +320,29 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 	}
 }
 
-// fakeDeadCache remembers what it was told, so like *DeadSet it must clone the
-// caller's key (see the DeadCache contract) rather than pin the arena view.
-type fakeDeadCache struct {
-	blocked  map[string]bool
-	recorded []string
+// deadKey mirrors the DeadCache key: server:port plus the resolved address
+// (Entry.IP) the checker passed. The filterers below carry one ip for every
+// node they yield (fakeFilterer.ip), zero when unset, so assertions spell the
+// pair out exactly as the checker keyed it.
+type deadKey struct {
+	addr string
+	ip   netip.Addr
 }
 
-func (d *fakeDeadCache) Blocked(key string) bool { return d.blocked[key] }
-func (d *fakeDeadCache) Block(key string) error {
-	key = strings.Clone(key)
-	d.recorded = append(d.recorded, key)
-	d.blocked[key] = true
+// fakeDeadCache remembers what it was told, so like *DeadSet it must clone the
+// caller's addr (see the DeadCache contract) rather than pin the arena view.
+type fakeDeadCache struct {
+	blocked  map[deadKey]bool
+	recorded []deadKey
+}
+
+func (d *fakeDeadCache) Blocked(addr string, ip netip.Addr) bool {
+	return d.blocked[deadKey{addr: addr, ip: ip}]
+}
+func (d *fakeDeadCache) Block(addr string, ip netip.Addr) error {
+	addr = strings.Clone(addr)
+	d.recorded = append(d.recorded, deadKey{addr: addr, ip: ip})
+	d.blocked[deadKey{addr: addr, ip: ip}] = true
 	return nil
 }
 func (d *fakeDeadCache) Prune() error { return nil }
@@ -341,7 +356,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 	}}
 	// alpha-001 is dead (absent from probe results); beta-001 is alive.
 	prober := &fakeProber{res: map[string]stable.ProbeResult{"beta-001": {Successes: 5, MeanMs: 100}}}
-	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
 	holder := stable.NewHolder()
 	c := stable.NewChecker(
 		testCheckerSpec(prober),
@@ -350,7 +365,7 @@ func TestCheckerDeadCacheSkipsAndRecords(t *testing.T) {
 
 	// Cycle 1: both nodes probed; alpha fails -> recorded dead.
 	_ = c.RunOnce(context.Background())
-	if !dead.blocked["1.1.1.1:443"] {
+	if !dead.blocked[deadKey{addr: "1.1.1.1:443"}] {
 		t.Fatalf("dead alpha should be recorded, got %v", dead.recorded)
 	}
 	if !strings.Contains(string(prober.gotPayload), "1.1.1.1:443") {
@@ -388,7 +403,7 @@ func TestCheckerDeadCacheRecordsZeroSuccessAndAbsent(t *testing.T) {
 		"gamma-001": {Successes: 5, MeanMs: 100},
 		// beta-001 is named by no entry at all.
 	}}
-	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
 	spec := testCheckerSpec(prober)
 	spec.Sources = append(spec.Sources, config.SubscriptionSource{
 		Name: "gamma", URL: "https://gamma.example/sub",
@@ -401,13 +416,13 @@ func TestCheckerDeadCacheRecordsZeroSuccessAndAbsent(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	if !dead.blocked["1.1.1.1:443"] {
+	if !dead.blocked[deadKey{addr: "1.1.1.1:443"}] {
 		t.Errorf("a reported zero-success node must be recorded dead, got %v", dead.recorded)
 	}
-	if !dead.blocked["2.2.2.2:443"] {
+	if !dead.blocked[deadKey{addr: "2.2.2.2:443"}] {
 		t.Errorf("a node absent from the results must be recorded dead, got %v", dead.recorded)
 	}
-	if dead.blocked["3.3.3.3:443"] {
+	if dead.blocked[deadKey{addr: "3.3.3.3:443"}] {
 		t.Errorf("the live node must not be recorded dead, got %v", dead.recorded)
 	}
 }
@@ -483,7 +498,7 @@ func TestCheckerProbeErrorKeepsSnapshotAndDeadCache(t *testing.T) {
 		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
 	}}
 	prober := &fakeProber{err: context.Canceled}
-	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
 	holder := stable.NewHolder()
 	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
 	holder.Store(previous)
@@ -517,7 +532,7 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 	prober := &cancellingProber{cancel: cancel, res: map[string]stable.ProbeResult{
 		"alpha-001": {Successes: 5, MeanMs: 100},
 	}}
-	dead := &fakeDeadCache{blocked: map[string]bool{}}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
 	holder := stable.NewHolder()
 	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
 	holder.Store(previous)
@@ -535,6 +550,131 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 	}
 	if len(dead.recorded) != 0 {
 		t.Errorf("dead cache must not be written after cancellation, recorded %v", dead.recorded)
+	}
+}
+
+// A cycle in which every probed node returned zero successes (our egress down,
+// say) must not write the verdict into the dead cache: committing it would
+// freeze the published list for deadcache.ttl after the network recovers.
+// verdict into the dead cache: committing it would freeze the published list
+// for deadcache.ttl after the network recovers.
+func TestCheckerDeadCacheNotWrittenWhenWholeProbeSetFails(t *testing.T) {
+	t.Parallel()
+
+	const n = 8
+	var sb strings.Builder
+	for i := range n {
+		fmt.Fprintf(&sb, "vless://u@10.%d.%d.%d:443#a%d\n", i/65536, i/256%256, i%256, i)
+	}
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{"https://alpha.example/sub": sb.String()}}
+	res := make(map[string]stable.ProbeResult, n)
+	for i := range n {
+		res[fmt.Sprintf("alpha-%03d", i+1)] = stable.ProbeResult{Successes: 0}
+	}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
+	holder := stable.NewHolder()
+	holder.Store(&stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()})
+	c := stable.NewChecker(
+		testCheckerSpec(&fakeProber{res: res}),
+		func() stable.Filterer { return filterer }, nil, dead, holder, "", zerolog.Nop(), nil,
+	)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(dead.recorded) != 0 {
+		t.Errorf("a whole-pool failure must not be written to the dead cache, got %v", dead.recorded)
+	}
+}
+
+// A mixed verdict is still believed: with most nodes alive, the dead ones are
+// cached exactly as before. This pins that the recordDead guard only trips on
+// the implausible ~100% failure, not on an ordinary pool's dead share.
+func TestCheckerDeadCacheWrittenForPlausibleShare(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+		"https://gamma.example/sub": "vless://u@3.3.3.3:443#c\n",
+	}}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 0}, // dead: cached
+		"beta-001":  {Successes: 5, MeanMs: 100},
+		"gamma-001": {Successes: 5, MeanMs: 100},
+	}}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
+	spec := testCheckerSpec(prober)
+	spec.Sources = append(spec.Sources, config.SubscriptionSource{
+		Name: "gamma", URL: "https://gamma.example/sub",
+	})
+	c := stable.NewChecker(
+		spec,
+		func() stable.Filterer { return filterer }, nil, dead, stable.NewHolder(), "", zerolog.Nop(), nil,
+	)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !dead.blocked[deadKey{addr: "1.1.1.1:443"}] {
+		t.Errorf("a one-in-three failure is a plausible verdict; the dead node must be cached, got %v", dead.recorded)
+	}
+	if dead.blocked[deadKey{addr: "2.2.2.2:443"}] || dead.blocked[deadKey{addr: "3.3.3.3:443"}] {
+		t.Errorf("live nodes must not be cached, got %v", dead.recorded)
+	}
+}
+
+// cancellingAnnotator cancels the cycle context on its first annotate call, so
+// a cancellation lands inside BuildPayload — after every earlier ctx check has
+// passed. RunOnce must then refuse to publish the degraded payload.
+type cancellingAnnotator struct {
+	offline geofeed.CountryCode
+	cancel  context.CancelFunc
+	once    sync.Once
+}
+
+func (a *cancellingAnnotator) Annotate(
+	_ context.Context, _, _ *bytes.Buffer, _ preprocess.AnnotateRequest,
+) geofeed.CountryCode {
+	a.once.Do(a.cancel)
+	return a.offline
+}
+
+func TestCheckerCancellationDuringPublishKeepsPrevious(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		"https://beta.example/sub":  "vless://u@2.2.2.2:443#b\n",
+	}}
+	filterer.ann = &cancellingAnnotator{offline: country(t, "NL"), cancel: cancel}
+	prober := &fakeProber{res: map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}}
+	holder := stable.NewHolder()
+	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
+	holder.Store(previous)
+	rep := &fakeReporter{}
+	c := stable.NewChecker(
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer }, nil, nil, holder, "", zerolog.Nop(), rep,
+	)
+
+	err := c.RunOnce(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce must surface the publish-phase cancellation, got %v", err)
+	}
+	if holder.Load() != previous {
+		t.Error("the previous snapshot must be kept when the publish phase is cancelled")
+	}
+	if rep.last != nil {
+		t.Error("a cancelled cycle must not observe a published list")
+	}
+	if rep.errs != 1 {
+		t.Errorf("ObserveError calls = %d, want 1", rep.errs)
 	}
 }
 
@@ -996,7 +1136,7 @@ func TestCheckerAnnotatesBeforeCountingCountries(t *testing.T) {
 	if rep.last.GeoUnknown != 0 {
 		t.Errorf("GeoUnknown = %d, want 0", rep.last.GeoUnknown)
 	}
-	wantTrace := stable.TraceReport{Answered: 1, Unanswered: 1, Moved: 1}
+	wantTrace := stable.TraceReport{State: stable.TraceRan, Answered: 1, Unanswered: 1, Moved: 1}
 	if rep.last.Trace != wantTrace {
 		t.Errorf("Trace = %+v, want %+v", rep.last.Trace, wantTrace)
 	}
@@ -1031,7 +1171,7 @@ func TestCheckerTraceAgreeingWithOfflineChainIsNotMoved(t *testing.T) {
 	if rep.last == nil {
 		t.Fatal("reporter.Observe must fire on a published cycle")
 	}
-	wantTrace := stable.TraceReport{Answered: 1, Unanswered: 0, Moved: 0}
+	wantTrace := stable.TraceReport{State: stable.TraceRan, Answered: 1, Unanswered: 0, Moved: 0}
 	if rep.last.Trace != wantTrace {
 		t.Errorf("Trace = %+v, want %+v", rep.last.Trace, wantTrace)
 	}
@@ -1063,6 +1203,41 @@ func TestCheckerTraceSkippedWithoutProberSupport(t *testing.T) {
 	}
 	if rep.last.Trace != (stable.TraceReport{}) {
 		t.Errorf("Trace = %+v, want the zero report", rep.last.Trace)
+	}
+}
+
+// A trace that RAN but nobody answered must still report TraceRan: the
+// metrics slice renders nothing while State is TraceAbsent, so a skipped stage
+// and a ran-but-empty one must not read alike (answered=0/unanswered=0 either
+// way).
+func TestCheckerTraceRanReportsStateWhenNobodyAnswered(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{
+		bodies: map[fetch.SubscriptionURL]string{
+			"https://alpha.example/sub": "vless://u@1.1.1.1:443#a\n",
+		},
+		ip:  addr(t, "9.9.9.9"),
+		ann: tagAnnotator{offline: country(t, "NL")},
+	}
+	prober := &tracingProber{
+		fakeProber: fakeProber{res: map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}}},
+		trace:      map[string]stable.TraceResult{}, // every node unanswered
+	}
+	spec := testCheckerSpec(prober)
+	spec.Trace = true
+	rep := &fakeReporter{}
+	c := stable.NewChecker(spec, func() stable.Filterer { return filterer }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), rep)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rep.last == nil {
+		t.Fatal("reporter.Observe must fire on a published cycle")
+	}
+	want := stable.TraceReport{State: stable.TraceRan, Unanswered: 1}
+	if rep.last.Trace != want {
+		t.Errorf("Trace = %+v, want %+v (the stage ran; only the answers are zero)", rep.last.Trace, want)
 	}
 }
 
@@ -1234,5 +1409,330 @@ func TestCheckerCarriesEachSourcesHWID(t *testing.T) {
 	}
 	if !maps.Equal(filterer.seen, want) {
 		t.Errorf("hwids per source = %q, want %q", filterer.seen, want)
+	}
+}
+
+// probedUUID is the vless credential the retention fixtures below parse: the
+// fake prober turns the probed payload into REAL mihomo adapters, so the lines
+// must be ones convert + adapter.ParseProxy accept (plain vless, no query).
+const probedUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
+
+func probedVlessLine(host, port, name string) string {
+	return "vless://" + probedUUID + "@" + host + ":" + port + "#" + name
+}
+
+// countingProxy wraps a real mihomo adapter so a test can observe its Close.
+type countingProxy struct {
+	mihomo.Proxy
+	closes int
+}
+
+func (p *countingProxy) Close() error {
+	p.closes++
+	return p.Proxy.Close()
+}
+
+// retainingProber is fakeProber with the probedAdapterSource capability: its
+// Probe parses the payload it is handed into REAL mihomo adapters (wrapped to
+// count Close) and retains them for TakeProbedAdapters, exactly as MihomoProber
+// does, so a full cycle's adapter lifecycle is observable end to end.
+type retainingProber struct {
+	fakeProber
+	closers []*countingProxy
+	takes   int
+}
+
+func (p *retainingProber) Probe(ctx context.Context, payload []byte) (map[string]stable.ProbeResult, error) {
+	res, err := p.fakeProber.Probe(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	mappings, convErr := convert.ConvertsV2Ray(payload)
+	if convErr != nil {
+		return nil, convErr
+	}
+	for _, m := range mappings {
+		px, perr := adapter.ParseProxy(m)
+		if perr != nil {
+			return nil, perr
+		}
+		p.closers = append(p.closers, &countingProxy{Proxy: px})
+	}
+
+	return res, nil
+}
+
+func (p *retainingProber) ParseProxies([]byte) ([]mihomo.Proxy, error) {
+	return nil, errors.New("ParseProxies must not run when the prober retains its probe adapters")
+}
+
+func (p *retainingProber) TakeProbedAdapters() []mihomo.Proxy {
+	p.takes++
+	out := make([]mihomo.Proxy, len(p.closers))
+	for i, w := range p.closers {
+		out[i] = w
+	}
+
+	return out
+}
+
+func assertEachClosedOnce(t *testing.T, closers []*countingProxy) {
+	t.Helper()
+
+	for i, w := range closers {
+		if w.closes != 1 {
+			t.Errorf("adapter %d (%s) was closed %d times, want exactly 1", i, w.Name(), w.closes)
+		}
+	}
+}
+
+// retentionFixtures are two parseable vless nodes, one per source.
+func retentionFixtures() fakeFilterer {
+	return fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": probedVlessLine("192.0.2.1", "443", "a") + "\n",
+		"https://beta.example/sub":  probedVlessLine("192.0.2.2", "443", "b") + "\n",
+	}}
+}
+
+func aliveTwo() map[string]stable.ProbeResult {
+	return map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 5, MeanMs: 100},
+		"beta-001":  {Successes: 5, MeanMs: 100},
+	}
+}
+
+// The egress stage is skipped entirely (no filters, no trace), so the adapters
+// the probe retained are consumed by nobody: RunOnce's own close is the only
+// one, and each must fire exactly once.
+func TestProbedAdaptersClosedOnceWhenEgressStageSkipped(t *testing.T) {
+	t.Parallel()
+
+	prober := &retainingProber{}
+	prober.res = aliveTwo()
+	holder := stable.NewHolder()
+
+	if err := newTestChecker(retentionFixtures(), prober, holder).RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if holder.Load() == nil {
+		t.Fatal("the cycle must publish")
+	}
+	if prober.takes != 1 {
+		t.Errorf("TakeProbedAdapters calls = %d, want exactly 1", prober.takes)
+	}
+	if len(prober.closers) != 2 {
+		t.Fatalf("probe retained %d adapters, want 2", len(prober.closers))
+	}
+	assertEachClosedOnce(t, prober.closers)
+}
+
+// tracingRetainingProber is retainingProber that also answers the egress
+// trace, recording the proxies it was actually handed.
+type tracingRetainingProber struct {
+	*retainingProber
+	trace map[string]stable.TraceResult
+	seen  []mihomo.Proxy
+}
+
+func (p *tracingRetainingProber) TraceCheck(_ context.Context, proxies []mihomo.Proxy) map[string]stable.TraceResult {
+	p.seen = append(p.seen, proxies...)
+	return p.trace
+}
+
+// The egress stage consumes the RETAINED adapters (the trace sees the very
+// objects Probe built) and never re-parses: ParseProxies fails loudly on this
+// prober, so a fallback would have surfaced as a skipped stage. Each adapter
+// is still closed exactly once, by RunOnce.
+func TestProbedAdaptersConsumedByEgressAndClosedOnce(t *testing.T) {
+	t.Parallel()
+
+	prober := &tracingRetainingProber{
+		retainingProber: &retainingProber{},
+		trace: map[string]stable.TraceResult{
+			"alpha-001": {IP: addr(t, "5.6.7.8"), Country: country(t, "DE")},
+			"beta-001":  {IP: addr(t, "5.6.7.9"), Country: country(t, "NL")},
+		},
+	}
+	prober.res = aliveTwo()
+	spec := testCheckerSpec(prober)
+	spec.Trace = true
+	holder := stable.NewHolder()
+	c := stable.NewChecker(spec, func() stable.Filterer { return retentionFixtures() },
+		nil, nil, holder, "", zerolog.Nop(), nil)
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if holder.Load() == nil {
+		t.Fatal("the cycle must publish")
+	}
+	if len(prober.seen) != 2 {
+		t.Fatalf("trace saw %d proxies, want the 2 retained adapters", len(prober.seen))
+	}
+	seen := make(map[*countingProxy]int, len(prober.seen))
+	for _, px := range prober.seen {
+		w, ok := px.(*countingProxy)
+		if !ok {
+			t.Fatalf("trace consumed a %T, not a probe adapter", px)
+		}
+		seen[w]++
+	}
+	for _, w := range prober.closers {
+		if seen[w] != 1 {
+			t.Errorf("adapter %s reached the trace %d times, want exactly 1", w.Name(), seen[w])
+		}
+	}
+	assertEachClosedOnce(t, prober.closers)
+}
+
+// A cancellation landing after Probe returns still owes the retained adapters
+// their close: the take happens before the ctx gate, and the deferred close
+// covers the early return.
+func TestProbedAdaptersClosedOnceWhenCycleCancelledAfterProbe(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prober := &retainingProber{}
+	prober.res = aliveTwo()
+	holder := stable.NewHolder()
+	previous := &stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()}
+	holder.Store(previous)
+	// cancel inside Probe, as cancellingProber does; results still come back.
+	c2 := &cancellingRetainingProber{retainingProber: prober, cancel: cancel}
+	c := stable.NewChecker(
+		testCheckerSpec(c2),
+		func() stable.Filterer { return retentionFixtures() },
+		nil, nil, holder, "", zerolog.Nop(), nil,
+	)
+
+	err := c.RunOnce(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce must surface the cancellation, got %v", err)
+	}
+	if holder.Load() != previous {
+		t.Error("previous snapshot must be kept after cancellation")
+	}
+	if prober.takes != 1 {
+		t.Errorf("TakeProbedAdapters calls = %d, want exactly 1", prober.takes)
+	}
+	assertEachClosedOnce(t, prober.closers)
+}
+
+// cancellingRetainingProber cancels the cycle context inside Probe and returns
+// the results anyway, like cancellingProber, so the cancellation lands on the
+// checker's post-probe gate.
+type cancellingRetainingProber struct {
+	*retainingProber
+	cancel context.CancelFunc
+}
+
+func (p *cancellingRetainingProber) Probe(ctx context.Context, payload []byte) (map[string]stable.ProbeResult, error) {
+	p.cancel()
+	return p.retainingProber.Probe(ctx, payload)
+}
+
+// A probe error means nothing was retained and nothing was taken: the
+// prober's own error path owns its adapters (see MihomoProber.releaseProbed).
+func TestProbeErrorLeavesNothingToTakeOrClose(t *testing.T) {
+	t.Parallel()
+
+	prober := &retainingProber{}
+	prober.err = context.Canceled
+	holder := stable.NewHolder()
+	holder.Store(&stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()})
+
+	c := newTestChecker(retentionFixtures(), prober, holder)
+	if err := c.RunOnce(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce must return the probe error, got %v", err)
+	}
+	if prober.takes != 0 {
+		t.Errorf("TakeProbedAdapters calls = %d, want 0 after a failed probe", prober.takes)
+	}
+	if len(prober.closers) != 0 {
+		t.Errorf("a failed probe retained %d adapters, want none", len(prober.closers))
+	}
+}
+
+// Zero survivors still close the retained adapters exactly once: selection
+// happens after the take, and the no-survivor exit is one more path the
+// deferred close covers.
+func TestProbedAdaptersClosedOnceWhenNothingSurvives(t *testing.T) {
+	t.Parallel()
+
+	prober := &retainingProber{}
+	prober.res = map[string]stable.ProbeResult{
+		"alpha-001": {Successes: 0},
+		"beta-001":  {Successes: 0},
+	}
+	holder := stable.NewHolder()
+	holder.Store(&stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()})
+
+	c := newTestChecker(retentionFixtures(), prober, holder)
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if holder.Load() == nil || string(holder.Load().Payload) != "old\n" {
+		t.Error("the previous list must be kept when nothing survives")
+	}
+	assertEachClosedOnce(t, prober.closers)
+}
+
+// LogicCycle#2: the dead cache is keyed on the RESOLVED address as well as the
+// host:port, so a hostname re-pointed to a live server is re-probed instead of
+// skipped for the jittered TTL, while the same hostname at the same dead
+// address stays skipped. beta rides along so alpha's failure is a plausible
+// 1-in-2 share and the recordDead breaker lets the write through.
+func TestCheckerDeadCacheReProbesWhenResolvedAddressChanges(t *testing.T) {
+	t.Parallel()
+
+	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+		"https://alpha.example/sub": "vless://u@dead.example:443#a\n",
+		"https://beta.example/sub":  "vless://u@192.0.2.2:443#b\n",
+	}}
+	prober := &fakeProber{}
+	dead := &fakeDeadCache{blocked: map[deadKey]bool{}}
+	holder := stable.NewHolder()
+	holder.Store(&stable.Snapshot{Payload: []byte("old\n"), UpdatedAt: time.Now()})
+	c := stable.NewChecker(
+		testCheckerSpec(prober),
+		func() stable.Filterer { return filterer },
+		nil, dead, holder, "", zerolog.Nop(), nil,
+	)
+
+	// Cycle 1: dead.example resolves to 192.0.2.10 and fails; the entry is
+	// booked under that address.
+	filterer.ip = addr(t, "192.0.2.10")
+	prober.res = map[string]stable.ProbeResult{"beta-001": {Successes: 5, MeanMs: 100}}
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	want := deadKey{addr: "dead.example:443", ip: addr(t, "192.0.2.10")}
+	if !dead.blocked[want] {
+		t.Fatalf("cycle 1 must book dead.example:443 at 192.0.2.10, recorded %v", dead.recorded)
+	}
+
+	// Cycle 2: the host now resolves to a live address; the old verdict must
+	// not follow the hostname, so the node is probed again.
+	filterer.ip = addr(t, "192.0.2.20")
+	prober.res = aliveTwo()
+	prober.gotPayload = nil
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if !strings.Contains(string(prober.gotPayload), "dead.example:443") {
+		t.Errorf("a re-pointed host must be re-probed; cycle 2 probed %q", prober.gotPayload)
+	}
+
+	// Cycle 3: the host is back on the booked dead address, so the standing
+	// entry applies again and the node is skipped unprobed.
+	filterer.ip = addr(t, "192.0.2.10")
+	prober.res = map[string]stable.ProbeResult{"beta-001": {Successes: 5, MeanMs: 100}}
+	prober.gotPayload = nil
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("cycle 3: %v", err)
+	}
+	if strings.Contains(string(prober.gotPayload), "dead.example:443") {
+		t.Errorf("the dead address must stay skipped; cycle 3 probed %q", prober.gotPayload)
 	}
 }
