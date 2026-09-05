@@ -3,6 +3,8 @@ package preprocess //nolint:testpackage // exercises the unexported processBody 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
 	"net/netip"
 	"strconv"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/cidrset"
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/fetch"
 	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"github.com/rs/zerolog"
@@ -148,14 +151,71 @@ func benchIPBody(nodes int) []byte {
 		if i > 0 {
 			buf.WriteByte('\n')
 		}
-		buf.WriteString("vless://b831381d-6324-4d53-ad4f-8cda48b30811@198.51.100.")
-		buf.WriteString(strconv.Itoa(i%254 + 1))
-		buf.WriteString(":443?security=reality&sni=www.example.org&fp=chrome")
-		buf.WriteString("&pbk=UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA")
-		buf.WriteString("&sid=4e9b0c2d1a3f5768&type=tcp&flow=xtls-rprx-vision#Node ")
-		buf.WriteString(strconv.Itoa(i))
+		benchWriteVless(&buf, i%254+1, i)
 	}
 	return buf.Bytes()
+}
+
+// benchWriteVless writes one vless line of benchIPBody's shape: server
+// 198.51.100.host inside benchGeofeed's NL block.
+func benchWriteVless(buf *bytes.Buffer, host, n int) {
+	buf.WriteString("vless://b831381d-6324-4d53-ad4f-8cda48b30811@198.51.100.")
+	buf.WriteString(strconv.Itoa(host))
+	buf.WriteString(":443?security=reality&sni=www.example.org&fp=chrome")
+	buf.WriteString("&pbk=UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA")
+	buf.WriteString("&sid=4e9b0c2d1a3f5768&type=tcp&flow=xtls-rprx-vision#Node ")
+	buf.WriteString(strconv.Itoa(n))
+}
+
+// benchMixedBody is benchIPBody's size and block with a scheme mix: 92% vless,
+// 4% vmess, 2% ss-legacy and 2% ssr per 100 nodes. The three decoders each
+// allocate a base64 buffer per node inside Parse (two for ssr), before the IP
+// stage can drop anything, so the all-vless fixtures leave those buffers
+// outside the guarded envelope — this body puts them back in.
+func benchMixedBody(nodes int) []byte {
+	var buf bytes.Buffer
+	buf.Grow(nodes * 300)
+	for i := range nodes {
+		if i > 0 {
+			buf.WriteByte('\n')
+		}
+		host, n := i%254+1, i
+		switch i % 100 {
+		case 92, 93, 94, 95:
+			benchWriteVmess(&buf, host, n)
+		case 96, 97:
+			benchWriteSS(&buf, host, n)
+		case 98, 99:
+			benchWriteSSR(&buf, host, n)
+		default:
+			benchWriteVless(&buf, host, n)
+		}
+	}
+	return buf.Bytes()
+}
+
+func benchWriteVmess(buf *bytes.Buffer, host, n int) {
+	buf.WriteString("vmess://")
+	payload := fmt.Sprintf(`{"add":"198.51.100.%d","port":443,"ps":"Node %d"}`, host, n)
+	buf.WriteString(base64.StdEncoding.EncodeToString([]byte(payload)))
+}
+
+func benchWriteSS(buf *bytes.Buffer, host, n int) {
+	buf.WriteString("ss://")
+	payload := fmt.Sprintf("aes-256-gcm:pass@198.51.100.%d:443", host)
+	buf.WriteString(base64.RawStdEncoding.EncodeToString([]byte(payload)))
+	buf.WriteString("#Node ")
+	buf.WriteString(strconv.Itoa(n))
+}
+
+func benchWriteSSR(buf *bytes.Buffer, host, n int) {
+	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	payload := fmt.Sprintf("198.51.100.%d:443:origin:aes-256-cfb:plain:%s", host, b64("secret")) +
+		"/?obfsparam=" + b64("obfs.example.com") +
+		"&remarks=" + b64(fmt.Sprintf("Node %d", n)) +
+		"&group=" + b64("grp")
+	buf.WriteString("ssr://")
+	buf.WriteString(b64(payload))
 }
 
 func benchProcessBodySlice(b *testing.B, bodies [][]byte, wantKept int) {
@@ -202,6 +262,14 @@ func BenchmarkProcessBodySlice_ManySmallSources(b *testing.B) {
 		bodies[i] = benchIPBody(benchSmallNodes)
 	}
 	benchProcessBodySlice(b, bodies, benchSmallSources*benchSmallNodes)
+}
+
+// BenchmarkProcessBodySlice_MixedSchemes is LargestSource's size and block with
+// a vmess/ss-legacy/ssr minority in the body: their per-node decoders allocate
+// base64 buffers inside Parse, before the IP stage can drop anything, so the
+// flagship all-vless fixtures keep those buffers outside every guarded figure.
+func BenchmarkProcessBodySlice_MixedSchemes(b *testing.B) {
+	benchProcessBodySlice(b, [][]byte{benchMixedBody(benchSliceNodes)}, benchSliceNodes)
 }
 
 // The benchmarks below drive the /stable.txt worker's sink at the two shapes
@@ -370,4 +438,92 @@ func BenchmarkCollectSurvivors_LargestSourcePermissive(b *testing.B) {
 func BenchmarkCollectSurvivors_LargestSourceFiltering(b *testing.B) {
 	bodies, kept := benchShapeBodies(1, benchLargestLines, benchLargestJunk, benchLargestKeptFiltering)
 	benchCollectSurvivors(b, bodies, kept)
+}
+
+// benchShippedProcessor is newBenchProcessor with the shipped GEO order —
+// geofeed, dbip, registry, dbip/registry preloaded so nothing downloads — so
+// countryChain's per-request chainLookup is inside the measured figure.
+func benchShippedProcessor(b *testing.B) *Processor {
+	b.Helper()
+	empty := geofeed.NewRangeLookup(nil)
+	p, err := NewProcessor(context.Background(), zerolog.Nop(), Options{
+		PreloadedGeofeed:  GeoState{Lookup: benchGeofeed(), LoadedAt: time.Now()},
+		PreloadedDBIP:     GeoState{Lookup: empty, LoadedAt: time.Now()},
+		PreloadedRegistry: GeoState{Lookup: empty, LoadedAt: time.Now()},
+		// SSRF-unreachable: the preloads prove no download is attempted.
+		DBIP:     config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)},
+		Registry: config.RegistryConfig{URLs: []string{"https://127.0.0.1:1/delegated"}, RefreshInterval: new(time.Hour)},
+		IPFilters: []config.IPFilterSpec{
+			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
+		},
+		Annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{
+			config.ProviderGeofeed, config.ProviderDBIP, config.ProviderRegistry,
+		}}},
+	})
+	if err != nil {
+		b.Fatalf("NewProcessor: %v", err)
+	}
+	return p
+}
+
+// benchEntryRequest drives one Filter/FilterNodes call per iteration with the
+// URL the real endpoints use, the loadSubscription seam standing in for the
+// network — so every request-level fixed cost of filterInto is measured: the
+// SubscriptionURL label copy, the logger context clone, the PipelineContext
+// and Stats escape, and countryChain's per-request chainLookup. The
+// processBody-only benchmarks above construct pctx by hand and bypass all of
+// them, which is exactly the gap this pair closes.
+func benchEntryRequest(b *testing.B, filterEntry bool) {
+	b.Helper()
+	p := benchShippedProcessor(b)
+	body := benchBody()
+	const url = "https://sub.example.com/feed"
+	original := loadSubscription
+	b.Cleanup(func() { loadSubscription = original })
+	loadSubscription = func(context.Context, fetch.SubscriptionURL, string) ([]byte, error) {
+		return body, nil
+	}
+	ctx := context.Background()
+	buf := &bytes.Buffer{}
+	buf.Grow(64 << 10)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if filterEntry {
+			buf.Reset()
+			stats, err := p.Filter(ctx, buf, FilterRequest{
+				SubscriptionURL:  url,
+				AllowedCountries: filter.ParseAllowed("NL"),
+			})
+			if err != nil {
+				b.Fatalf("Filter: %v", err)
+			}
+			if stats.Kept != 100 {
+				b.Fatalf("kept = %d, want 100", stats.Kept)
+			}
+			continue
+		}
+		nodes, stats, err := p.FilterNodes(ctx, FilterRequest{
+			SubscriptionURL:  url,
+			AllowedCountries: filter.All(),
+			DeniedCountries:  filter.ParseAllowed("RU,CN"),
+		})
+		if err != nil {
+			b.Fatalf("FilterNodes: %v", err)
+		}
+		if stats.Kept != 100 || len(nodes) != 100 {
+			b.Fatalf("kept = %d, nodes = %d, want 100", stats.Kept, len(nodes))
+		}
+	}
+}
+
+// BenchmarkFilterRequest prices the GET / path end to end minus the network.
+func BenchmarkFilterRequest(b *testing.B) {
+	benchEntryRequest(b, true)
+}
+
+// BenchmarkFilterNodesRequest prices the worker's per-source entry the same
+// way.
+func BenchmarkFilterNodesRequest(b *testing.B) {
+	benchEntryRequest(b, false)
 }

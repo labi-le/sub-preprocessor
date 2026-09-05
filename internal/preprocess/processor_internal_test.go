@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,6 +134,31 @@ func TestProcessBodyCancelledContextReturnsError(t *testing.T) {
 	}
 }
 
+// TestProcessNodeCancelledBooksNothing pins the gate's ordering: processNode
+// counts Total only past its own cancellation check, so a node the deadline
+// catches between the parse callback's Done check and the pipeline books no
+// counter at all. Counted first, it would sit in Total with no drop reason to
+// balance it, breaking the Kept + drops == Total identity the stats rely on.
+func TestProcessNodeCancelledBooksNothing(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pctx := &PipelineContext{
+		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		Resolved: map[string][]netip.Addr{},
+		Stats:    &Stats{},
+	}
+
+	p := &Processor{}
+	p.processNode(ctx, subscription.Node{Raw: "vless://u@example.com:443#A", Server: "example.com", Port: "443"}, pctx)
+
+	if pctx.Stats.Total != 0 || pctx.Stats.Kept != 0 {
+		t.Fatalf("a node cancelled before judgment must book nothing, got Total=%d Kept=%d",
+			pctx.Stats.Total, pctx.Stats.Kept)
+	}
+}
+
 // TestFilterInlineBodyNoFetch drives Filter with an inline Body request: the
 // nodes use bare IP servers so resolveNode handles them without DNS, proving the
 // Body path filters directly with no subscription.Load / HTTP fetch. The payload
@@ -211,6 +237,67 @@ func TestFilterNodesHandsTheRequestHWIDToTheLoad(t *testing.T) {
 
 	if want := []string{"abcdef0123456789", ""}; !slices.Equal(seen, want) {
 		t.Errorf("hwids handed to the load = %q, want %q", seen, want)
+	}
+}
+
+// TestFilterFetchBudgetSplit pins LogicRequest#2. The URL fetch on the
+// on-demand path (Filter, GET /) used to run under the same fetch.timeout as
+// the worker, so a subscription that answered 200 but streamed past the 3s cap
+// was answered 504 with ~57s of the handler's 60s request budget unused. Filter
+// now inherits the caller's deadline; FilterNodes keeps the fail-fast
+// fetch.timeout so an unresponsive source abandons its 16-way slot quickly
+// instead of holding it for a per-source deadline of minutes. The seam records
+// the fetch context's deadline, so no timer needs to fire. The loadSubscription
+// swap is package-global, so this test may not call t.Parallel.
+func TestFilterFetchBudgetSplit(t *testing.T) {
+	original := loadSubscription
+	t.Cleanup(func() { loadSubscription = original })
+
+	const (
+		requestBudget = 60 * time.Second
+		failFast      = time.Second
+	)
+	body := []byte("vless://a@192.0.2.1:443#n1\n")
+	url := fetch.SubscriptionURL("https://example.com/sub")
+	var deadlines []time.Time
+	loadSubscription = func(ctx context.Context, _ fetch.SubscriptionURL, _ string) ([]byte, error) {
+		dl, _ := ctx.Deadline()
+		deadlines = append(deadlines, dl)
+		return body, nil
+	}
+
+	svc := newInlineProcessor()
+	svc.fetchTimeout = failFast
+
+	// On-demand: the handler's own 60s context must BE the fetch budget. The
+	// old code cut the fetch at the 1s fail-fast cap, which this assertion
+	// (deadline equality with the request context) fails.
+	reqCtx, cancel := context.WithTimeout(context.Background(), requestBudget)
+	defer cancel()
+	var buf bytes.Buffer
+	if _, err := svc.Filter(reqCtx, &buf, FilterRequest{
+		SubscriptionURL:  url,
+		AllowedCountries: filter.All(),
+	}); err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	outer, _ := reqCtx.Deadline()
+	if got := deadlines[0]; !got.Equal(outer) {
+		t.Fatalf("Filter fetched under a %s deadline, want the request's whole %s budget",
+			time.Until(got).Round(time.Second), requestBudget)
+	}
+
+	// Worker: the fail-fast cap stays. A deadline ~1s out, not the unbounded
+	// background context it was passed.
+	if _, _, err := svc.FilterNodes(context.Background(), FilterRequest{
+		SubscriptionURL:  url,
+		AllowedCountries: filter.All(),
+	}); err != nil {
+		t.Fatalf("FilterNodes: %v", err)
+	}
+	got := deadlines[1]
+	if left := time.Until(got); left > failFast || left <= 0 {
+		t.Fatalf("FilterNodes fetched under a ~%s deadline, want the fail-fast %s", left.Round(time.Millisecond), failFast)
 	}
 }
 
@@ -507,6 +594,113 @@ func TestGeoDBDoReloadPartialLoadKeepsExistingLookup(t *testing.T) {
 		t.Fatal("the retry must be throttled immediately after the refused swap")
 	}
 	if !db.staleLocked(now.Add(reloadRetryInterval + time.Minute)) {
+		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+// TestDoReloadPartialAcceptedFromEmptyKeepsRetry pins the empty-current half
+// of the swap guards: with nothing to protect, a partial reload is swapped in
+// rather than refused, so the success arm itself must arm the retry. A live
+// geofeed cannot hold an empty lookup (its initial load is fatal on error), so
+// the geoDB twin below is the reachable registry/dbip path.
+func TestDoReloadPartialAcceptedFromEmptyKeepsRetry(t *testing.T) {
+	t.Parallel()
+
+	p := &Processor{
+		logger:          zerolog.Nop(),
+		countryLookup:   geofeed.NewLookup(nil),
+		loadedAt:        time.Now().Add(-25 * time.Hour),
+		refreshInterval: 24 * time.Hour,
+		loadEntries: func(context.Context) ([]geofeed.Entry, int, error) {
+			return geoEntries(3), 1, nil
+		},
+	}
+
+	p.doReload(context.Background())
+
+	if got := lookupLen(p.countryLookup); got != 3 {
+		t.Fatalf("a partial load into an empty database must be swapped in, got %d ranges", got)
+	}
+	if p.retryAt.IsZero() || p.reloadFailures == 0 {
+		t.Fatalf("an accepted partial reload must keep the retry armed, retryAt=%v failures=%d",
+			p.retryAt, p.reloadFailures)
+	}
+	now := time.Now()
+	if p.shouldReloadGeofeedLocked(now) {
+		t.Fatal("the retry must be throttled immediately after the swap")
+	}
+	if !p.shouldReloadGeofeedLocked(now.Add(reloadRetryInterval + time.Minute)) {
+		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+// TestGeoDBDoReloadPartialAcceptedFromEmptyKeepsRetry is the reachable shape
+// of the defect: newGeoDB's failed-start arm leaves an empty lookup, so the
+// first background reload can be accepted-but-partial, and the success arm
+// must arm the retry the refusal arms would have armed.
+func TestGeoDBDoReloadPartialAcceptedFromEmptyKeepsRetry(t *testing.T) {
+	t.Parallel()
+
+	db := &geoDB{
+		name:     "registry",
+		lookup:   geofeed.NewRangeLookup(nil),
+		loadedAt: time.Now().Add(-25 * time.Hour),
+		interval: 24 * time.Hour,
+		load: func(context.Context) ([]geofeed.Range, int, error) {
+			return geoRanges(3), 1, nil
+		},
+	}
+
+	db.doReload(context.Background(), zerolog.Nop())
+
+	if got := lookupLen(db.lookup); got != 3 {
+		t.Fatalf("a partial load into an empty database must be swapped in, got %d ranges", got)
+	}
+	if db.retryAt.IsZero() || db.reloadFailures == 0 {
+		t.Fatalf("an accepted partial reload must keep the retry armed, retryAt=%v failures=%d",
+			db.retryAt, db.reloadFailures)
+	}
+	now := time.Now()
+	if db.staleLocked(now) {
+		t.Fatal("the retry must be throttled immediately after the swap")
+	}
+	if !db.staleLocked(now.Add(reloadRetryInterval + time.Minute)) {
+		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+// TestCIDRStoreDoReloadPartialAcceptedFromEmptyKeepsRetry mirrors the geo
+// databases on the allow-list: an empty live set (only the type system can
+// hold one) lets a partial reload swap, and the success arm must arm the retry
+// the refusal arms would have armed.
+func TestCIDRStoreDoReloadPartialAcceptedFromEmptyKeepsRetry(t *testing.T) {
+	t.Parallel()
+
+	loaded := mustCIDRSet(t, "198.51.100.0/24")
+	s := &cidrStore{
+		set:      cidrset.Set{},
+		loadedAt: time.Now().Add(-25 * time.Hour),
+		interval: 24 * time.Hour,
+		load: func(context.Context) (cidrset.Set, int, error) {
+			return loaded, 1, nil
+		},
+	}
+
+	s.doReload(context.Background(), zerolog.Nop())
+
+	if s.set.Covered() != loaded.Covered() {
+		t.Fatalf("a partial load into an empty list must be swapped in, covers %d want %d",
+			s.set.Covered(), loaded.Covered())
+	}
+	if s.retryAt.IsZero() || s.reloadFailures == 0 {
+		t.Fatalf("an accepted partial reload must keep the retry armed, retryAt=%v failures=%d",
+			s.retryAt, s.reloadFailures)
+	}
+	now := time.Now()
+	if s.staleLocked(now) {
+		t.Fatal("the retry must be throttled immediately after the swap")
+	}
+	if !s.staleLocked(now.Add(reloadRetryInterval + time.Minute)) {
 		t.Fatal("the retry must be due within minutes, not a full refresh interval")
 	}
 }
@@ -878,6 +1072,52 @@ func TestFilterIPv6LiteralIsNotADNSFailure(t *testing.T) {
 	}
 	if stats.Total != stats.Kept+stats.IPv6Drop {
 		t.Errorf("total %d must equal kept+drops %d", stats.Total, stats.Kept+stats.IPv6Drop)
+	}
+}
+
+// TestFilterIPv4MappedIPv6LiteralRunsAsIPv4 pins LogicGeo#3. netip parses
+// ::ffff:a.b.c.d with Is4() == false (Is4In6), so resolveNode used to refuse
+// the literal as an unusable v6 — while every lookup in the chain (geofeed,
+// cidrset) unmaps 4-in-6 to v4 before testing, so the databases could have
+// placed it. Unmapping before the Is4 check sends the literal down the v4
+// path: the geo stage must still place and tag it by 203.0.113.9, and only a
+// genuinely v6 literal may book IPv6Drop.
+func TestFilterIPv4MappedIPv6LiteralRunsAsIPv4(t *testing.T) {
+	t.Parallel()
+
+	ip := netip.MustParseAddr("203.0.113.9")
+	geofeedNL := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.PrefixFrom(ip, 32), Country: geofeed.CountryCode{'N', 'L'}},
+	})
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
+		PreloadedGeofeed: GeoState{Lookup: geofeedNL, LoadedAt: time.Now()},
+		IPFilters:        []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+		Annotate:         []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+		Body: []byte("vless://u@[::ffff:203.0.113.9]:443#mapped\n" +
+			"vless://u@[2001:db8::1]:8443#v6\n"),
+		AllowedCountries: filter.ParseAllowed("NL"),
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if stats.IPv6Drop != 1 {
+		t.Errorf("ipv6_drop = %d, want 1 (the plain v6 literal only)", stats.IPv6Drop)
+	}
+	if stats.Kept != 1 {
+		t.Errorf("kept = %d, want 1 (the mapped literal is IPv4)", stats.Kept)
+	}
+	if stats.Total != stats.Kept+stats.IPv6Drop {
+		t.Errorf("total %d must equal kept+drops %d", stats.Total, stats.Kept+stats.IPv6Drop)
+	}
+	if got := buf.String(); !strings.Contains(got, "[GEO:NL]") {
+		t.Errorf("published %q, want the mapped node tagged NL: it must be judged and annotated as 203.0.113.9", got)
 	}
 }
 
@@ -1309,6 +1549,112 @@ func TestGeofeedFilterNeverDropsATagThatPlacesTheNode(t *testing.T) {
 	}
 }
 
+// midRequestSwapFilter swaps the live databases once, on the first node that
+// reaches it — standing in for the background doReload a stale request arms
+// via currentEntries. It sits AFTER the country filter, so the node's verdict
+// is already made on the request-start generation when the live tables change
+// under the annotator.
+type midRequestSwapFilter struct {
+	once sync.Once
+	swap func()
+}
+
+func (f *midRequestSwapFilter) Process(_ context.Context, ips []netip.Addr, _ *PipelineContext) []netip.Addr {
+	f.once.Do(f.swap)
+	return ips
+}
+
+// TestFilterAndAnnotateReadOneGeoGeneration pins LogicRequest#3 / LogicGeo#5.
+// filterInto captures the country chain once at request start and the filter
+// judges every node with it, but the annotator's providers used to re-read the
+// LIVE databases per node — so a reload that landed between a node's verdict
+// and its [GEO:xx] tag split one response across two generations: an
+// exclude_countries=NL request could keep a node as DE and publish [GEO:NL].
+// The swap filter fires in exactly that window; the rendered tag must still
+// come from the generation the filter judged.
+func TestFilterAndAnnotateReadOneGeoGeneration(t *testing.T) {
+	t.Parallel()
+
+	ip := netip.MustParseAddr("203.0.113.9")
+	entry := func(code geofeed.CountryCode) []geofeed.Entry {
+		return []geofeed.Entry{{Prefix: netip.PrefixFrom(ip, 32), Country: code}}
+	}
+	geofeedElsewhere := geofeed.NewLookup([]geofeed.Entry{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'N', 'L'}},
+	})
+	body := []byte("vless://u@203.0.113.9:443#n\n")
+
+	cases := []struct {
+		name     string
+		annotate []config.AnnotateSpec
+		geofeed  geofeed.CountryLookup
+		dbip     geofeed.CountryLookup
+		// swap moves the LIVE database to the second generation (NL).
+		swap func(p *Processor)
+	}{
+		{
+			name:     "geofeed-only chain",
+			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
+			geofeed:  geofeed.NewLookup(entry(geofeed.CountryCode{'D', 'E'})),
+			swap: func(p *Processor) {
+				p.mu.Lock()
+				p.countryLookup = geofeed.NewLookup(entry(geofeed.CountryCode{'N', 'L'}))
+				p.mu.Unlock()
+			},
+		},
+		{
+			name:     "dbip behind an unplacing geofeed",
+			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}}},
+			geofeed:  geofeedElsewhere,
+			dbip:     geofeed.NewRangeLookup([]geofeed.Range{{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}}}),
+			swap: func(p *Processor) {
+				p.dbip.mu.Lock()
+				p.dbip.lookup = geofeed.NewRangeLookup([]geofeed.Range{{Start: ip, End: ip, Country: geofeed.CountryCode{'N', 'L'}}})
+				p.dbip.mu.Unlock()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := Options{
+				RefreshInterval:  24 * time.Hour,
+				DNSTimeout:       time.Second,
+				PreloadedGeofeed: GeoState{Lookup: tc.geofeed, LoadedAt: time.Now()},
+				IPFilters:        []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
+				Annotate:         tc.annotate,
+			}
+			if tc.dbip != nil {
+				opts.PreloadedDBIP = GeoState{Lookup: tc.dbip, LoadedAt: time.Now()}
+				// SSRF-unreachable: the preload proves no download is attempted.
+				opts.DBIP = config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)}
+			}
+			p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
+			if err != nil {
+				t.Fatalf("NewProcessor: %v", err)
+			}
+			p.filters = append(p.filters, &midRequestSwapFilter{swap: func() { tc.swap(p) }})
+
+			var buf bytes.Buffer
+			stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+				Body:             body,
+				AllowedCountries: filter.All(),
+				DeniedCountries:  filter.ParseAllowed("NL"),
+			})
+			if err != nil {
+				t.Fatalf("Filter: %v", err)
+			}
+			if stats.Kept != 1 || stats.GeoDrop != 0 {
+				t.Fatalf("stats = %+v, want kept=1: the request-start generation places the node in DE, which NL's exclusion admits", stats)
+			}
+			if got := buf.String(); !strings.Contains(got, "[GEO:DE]") || strings.Contains(got, "[GEO:NL]") {
+				t.Fatalf("published %q, want the DE tag of the generation the filter judged — a live lookup would render the swapped-in NL", got)
+			}
+		})
+	}
+}
+
 // TestCountryChainOrderDerivation covers the rest of VP-03: asn is never a
 // filter source (it is a per-IP Cymru round trip, not a local table), a
 // provider the process did not build is dropped before it can be dereferenced,
@@ -1677,8 +2023,8 @@ func TestASNFilterFormsStillBuild(t *testing.T) {
 		t.Fatalf("filters[2] = %T, want *GeofeedFilter for `{type: country, provider: geofeed}`", p.filters[2])
 	}
 	// Both must be able to actually resolve: buildFilters hands them the one
-	// resolver NewProcessor constructed, and a typed-nil behind the interface
-	// would make Process fall open on every IP.
+	// resolver NewProcessor constructed, and a typed nil behind the interface
+	// would skip the `== nil` guard and panic on the first IPv4 lookup.
 	for i, f := range []*ASNFilter{denyFilter, countryASN} {
 		r, isReal := f.resolver.(*asn.Resolver)
 		if !isReal || r == nil {
@@ -1687,6 +2033,43 @@ func TestASNFilterFormsStillBuild(t *testing.T) {
 		if r != p.ASNState() {
 			t.Fatalf("filters[%d] holds a different resolver than ASNState()", i)
 		}
+	}
+}
+
+// TestBuildFiltersRefusesASNSpecsWithoutAResolver pins the build gate: a nil
+// resolver handed to NewASNFilter would ride as a typed nil past the Process
+// guard and panic on the first IPv4 lookup, so the build must refuse it.
+func TestBuildFiltersRefusesASNSpecsWithoutAResolver(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		spec config.IPFilterSpec
+	}{
+		{"an asn filter", config.IPFilterSpec{Type: config.FilterASN}},
+		{"a country filter over the asn provider", config.IPFilterSpec{Type: config.FilterCountry, Provider: config.ProviderASN}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := buildFilters([]config.IPFilterSpec{tc.spec}, nil, nil); !errors.Is(err, errNoASNResolver) {
+				t.Fatalf("buildFilters without a resolver = %v, want errNoASNResolver", err)
+			}
+		})
+	}
+
+	// The country/geofeed arm shares the case list but needs no resolver.
+	filters, err := buildFilters([]config.IPFilterSpec{
+		{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("a geofeed country filter must build without a resolver: %v", err)
+	}
+	if len(filters) != 1 {
+		t.Fatalf("built %d filters, want 1", len(filters))
+	}
+	if _, ok := filters[0].(*GeofeedFilter); !ok {
+		t.Fatalf("filters[0] = %T, want *GeofeedFilter", filters[0])
 	}
 }
 

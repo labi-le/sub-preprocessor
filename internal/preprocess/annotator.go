@@ -15,8 +15,9 @@ import (
 
 // UnknownCountry is the marker a GEO tag renders when no provider in its
 // chain resolved a country ([GEO:??]). The stable_geo_unknown_nodes gauge
-// counts published nodes carrying it, so the spelling is part of that
-// gauge's contract and must not drift from the annotator's render.
+// counts nodes whose FIRST rendered GEO tag carries it — the lead tag is the
+// country Annotate returns — so the spelling is part of that gauge's contract
+// and must not drift from the annotator's render.
 const UnknownCountry = "??"
 
 // Egress is what a node reported about itself through the cloudflare probe. The
@@ -52,9 +53,10 @@ type AnnotateRequest struct {
 // Annotator renders the tag prefix into a node's name.
 type Annotator interface {
 	// Annotate writes the annotated node line to dst and returns the country
-	// the GEO chain resolved (the zero code when nothing resolved it, or when
-	// no GEO tag is configured). scratch is caller-owned and reused across
-	// nodes to keep prefix assembly allocation-light.
+	// the first rendered [GEO:xx] tag carries — the one a reader of the name
+	// takes — the zero code when that tag is [GEO:??] or no GEO tag is
+	// configured. scratch is caller-owned and reused across nodes to keep
+	// prefix assembly allocation-light.
 	Annotate(ctx context.Context, dst, scratch *bytes.Buffer, req AnnotateRequest) geofeed.CountryCode
 }
 
@@ -126,35 +128,56 @@ func newAnnotator(logger zerolog.Logger, specs []config.AnnotateSpec, providers 
 	return &annotator{tags: tags}
 }
 
+// Annotate renders the configured tags with the providers' LIVE getters: the
+// no-capture path (the worker's post-probe rendering, which resolves on its
+// own clock, and any direct caller).
 func (a *annotator) Annotate(
 	ctx context.Context,
 	dst, scratch *bytes.Buffer,
 	req AnnotateRequest,
 ) geofeed.CountryCode {
+	return a.annotate(ctx, dst, scratch, req, nil)
+}
+
+// annotate is Annotate with the request's country-database capture: bufferSink
+// passes the capture countryChain built (pctx.geo), so each tag's LOCAL steps
+// resolve through the same generation the filter judged with — a background
+// reload landing mid-request moves neither the verdict nor the published tag.
+func (a *annotator) annotate(
+	ctx context.Context,
+	dst, scratch *bytes.Buffer,
+	req AnnotateRequest,
+	geo *countryCapture,
+) geofeed.CountryCode {
 	scratch.Reset()
 	scratch.WriteString(req.Prefix)
 	var country geofeed.CountryCode
+	tookLead := false
 	for _, t := range a.tags {
 		// GEO is the only tag config.validateAnnotate accepts, so a spec with
 		// any other key renders nothing rather than a "[??]" of unknown kind.
 		if t.key != config.TagGEO {
 			continue
 		}
-		c := t.lookupCountry(ctx, req)
-		// Nothing forbids a second GEO entry with a different chain; the
-		// caller gets the leftmost tag that resolved, which is the one a
-		// reader of the name takes for the node's country. That cross-entry
-		// rule is the country FILTER's too: countryChainOrder concatenates
-		// every GEO entry's chain, so no LOCAL database a tag resolved
-		// through went unconsulted by the filter. asn and cloudflare are the
-		// standing exceptions — neither is a local table (see countryChain),
-		// so a tag either of them answered still names a country the filter
-		// never asked about. Measured on `[{GEO,[cloudflare,geofeed]}]`, the
-		// shipped chain's first two providers, with a geofeed that cannot
-		// place the IP: countryChainOrder comes back empty, the node survives
+		c := t.lookupCountry(ctx, req, geo)
+		// Nothing forbids a second GEO entry with a different chain. The
+		// return is the country the FIRST rendered tag carries — the one a
+		// reader of the name takes — so a lead [GEO:??] books zero even when
+		// a later entry resolved; stable_geo_unknown_nodes counts a node
+		// exactly when its lead tag is [GEO:??]. That cross-entry rule is the
+		// country FILTER's
+		// too: countryChainOrder concatenates every GEO entry's chain, so no
+		// LOCAL database a tag resolved through went unconsulted by the
+		// filter. asn and cloudflare are the standing exceptions — neither is
+		// a local table (see countryChain), so a tag either of them answered
+		// still names a country the filter never asked about. Measured on
+		// `[{GEO,[cloudflare,geofeed]}]`, the shipped chain's first two
+		// providers, with a geofeed that cannot place the IP:
+		// countryChainOrder comes back empty, the node survives
 		// exclude_countries=DE, and the traced egress publishes [GEO:DE].
-		if country == (geofeed.CountryCode{}) {
+		if !tookLead {
 			country = c
+			tookLead = true
 		}
 		scratch.WriteString("[GEO:")
 		if c == (geofeed.CountryCode{}) {
@@ -175,7 +198,7 @@ func (a *annotator) Annotate(
 // all-miss returns the zero code (rendered as ??). The cloudflare step answers
 // only when the trace ran: an unmeasured egress is a miss, so a chain that
 // names cloudflare first still annotates every node the probe skipped.
-func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofeed.CountryCode {
+func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest, geo *countryCapture) geofeed.CountryCode {
 	for _, step := range t.chain {
 		if step.prov == nil {
 			if req.Egress.Valid() {
@@ -183,9 +206,32 @@ func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofe
 			}
 			continue
 		}
-		if c := step.prov.Lookup(ctx, req.IP).Country; c != (geofeed.CountryCode{}) {
+		if c := stepCountry(ctx, step.prov, req.IP, geo); c != (geofeed.CountryCode{}) {
 			return c
 		}
 	}
 	return geofeed.CountryCode{}
+}
+
+// stepCountry resolves one non-cloudflare step. geofeed/dbip/registry answer
+// from the request capture when it holds them — the same objects the filter
+// judged with; a step the capture lacks (asn, or any step under a nil
+// capture, which is the live-getter path the worker's post-probe annotation
+// takes) falls back to the provider itself.
+func stepCountry(ctx context.Context, prov geo.Provider, ip netip.Addr, geo *countryCapture) geofeed.CountryCode {
+	var lookup geofeed.CountryLookup
+	if geo != nil {
+		switch prov.Name() {
+		case config.ProviderGeofeed:
+			lookup = geo.geofeed
+		case config.ProviderDBIP:
+			lookup = geo.dbip
+		case config.ProviderRegistry:
+			lookup = geo.registry
+		}
+	}
+	if lookup != nil {
+		return geofeed.LookupCountry(lookup, ip)
+	}
+	return prov.Lookup(ctx, ip).Country
 }

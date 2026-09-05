@@ -108,30 +108,59 @@ func TestAnnotatorTagListOrder(t *testing.T) {
 	}
 }
 
-// TestAnnotatorUnknownRendersQuestionMarks: a tag whose whole chain missed
-// renders [GEO:??] in place, and does NOT claim the node's country — the
-// reported code is the leftmost entry that RESOLVED, not the leftmost entry.
-func TestAnnotatorUnknownRendersQuestionMarks(t *testing.T) {
+// TestAnnotatorSplitChainReturnMatchesTheLeadTag: with a GEO entry per
+// database, each entry renders its own tag, so a split chain publishes a
+// [GEO:??] next to a resolved country whenever exactly one database can place
+// the IP. The returned code is what the LEADING rendered tag carries — the one
+// a reader of the name takes, and the one stable's booking reads — so a lead
+// miss returns zero even when a later entry resolved, and a resolved lead
+// keeps its country past a trailing miss. Returning the leftmost entry that
+// RESOLVED instead booked a name leading [GEO:??] under the later entry's
+// country, hiding the node from the gauge that counts published [GEO:??].
+func TestAnnotatorSplitChainReturnMatchesTheLeadTag(t *testing.T) {
 	t.Parallel()
 
-	a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
-		{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}},
-		{Tag: config.TagGEO, Providers: []string{config.ProviderDBIP}},
-	}, map[string]geo.Provider{
-		config.ProviderGeofeed: fakeProvider{name: "geofeed"},
-		config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
-	})
+	for _, tc := range []struct {
+		name     string
+		order    []string
+		wantName string
+		wantCode geofeed.CountryCode
+	}{
+		{
+			name:     "a lead miss returns zero however a later entry resolved",
+			order:    []string{config.ProviderGeofeed, config.ProviderDBIP},
+			wantName: "vless://u@example.com:443#[GEO:??][GEO:SE] Old",
+			wantCode: geofeed.CountryCode{},
+		},
+		{
+			name:     "a resolved lead keeps its country past a trailing miss",
+			order:    []string{config.ProviderDBIP, config.ProviderGeofeed},
+			wantName: "vless://u@example.com:443#[GEO:SE][GEO:??] Old",
+			wantCode: geofeed.CountryCode{'S', 'E'},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	node := parseOneNode(t)
-	var buf, tagBuf bytes.Buffer
-	got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{Node: node, IP: netip.MustParseAddr("9.9.9.9")})
+			a := newAnnotator(zerolog.Nop(), []config.AnnotateSpec{
+				{Tag: config.TagGEO, Providers: []string{tc.order[0]}},
+				{Tag: config.TagGEO, Providers: []string{tc.order[1]}},
+			}, map[string]geo.Provider{
+				config.ProviderGeofeed: fakeProvider{name: "geofeed"},
+				config.ProviderDBIP:    fakeProvider{name: "dbip", info: geo.Info{Country: geofeed.CountryCode{'S', 'E'}}},
+			})
 
-	want := "vless://u@example.com:443#[GEO:??][GEO:SE] Old"
-	if buf.String() != want {
-		t.Fatalf("got %q, want %q", buf.String(), want)
-	}
-	if got != (geofeed.CountryCode{'S', 'E'}) {
-		t.Fatalf("got country %q, want SE: a missed tag must not claim the node's country", got)
+			var buf, tagBuf bytes.Buffer
+			got := a.Annotate(context.Background(), &buf, &tagBuf, AnnotateRequest{
+				Node: parseOneNode(t), IP: netip.MustParseAddr("9.9.9.9"),
+			})
+			if buf.String() != tc.wantName {
+				t.Fatalf("got %q, want %q", buf.String(), tc.wantName)
+			}
+			if got != tc.wantCode {
+				t.Fatalf("got country %q, want %q: the returned code must be what the leading rendered tag carries", got, tc.wantCode)
+			}
+		})
 	}
 }
 

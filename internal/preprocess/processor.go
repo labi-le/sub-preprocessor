@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,8 +101,9 @@ type GeoState struct {
 	Lookup   geofeed.CountryLookup
 	LoadedAt time.Time
 	// RetryAt, when non-zero, is the next-attempt deadline armed by a reload
-	// that failed or was refused; Failures counts the consecutive ones that
-	// drove its backoff. See retryDelay.
+	// that failed, was refused, or was accepted while sources failed;
+	// Failures counts the consecutive ones that drove its backoff. See
+	// retryDelay.
 	RetryAt  time.Time
 	Failures int
 }
@@ -147,7 +149,8 @@ type Processor struct {
 	countryLookup geofeed.CountryLookup
 	loadedAt      time.Time
 	// retryAt, when non-zero, is the authoritative next-attempt time after a
-	// reload that failed or was refused. loadedAt keeps pointing at the last
+	// reload that failed, was refused, or was accepted while sources failed.
+	// loadedAt keeps pointing at the last
 	// GOOD data (callers carry it across config reloads), so without retryAt a
 	// failure would either read as fresh for a full interval or as stale on
 	// every single request. reloadFailures counts consecutive failures and
@@ -189,8 +192,9 @@ type geoDB struct {
 	name     string
 	lookup   geofeed.CountryLookup
 	loadedAt time.Time
-	// retryAt mirrors Processor.retryAt: the next-attempt gate after a failed
-	// or refused reload, with reloadFailures driving its backoff.
+	// retryAt mirrors Processor.retryAt: the next-attempt gate after a failed,
+	// refused, or partially-accepted reload, with reloadFailures driving its
+	// backoff.
 	retryAt        time.Time
 	reloadFailures int
 	interval       time.Duration
@@ -208,8 +212,9 @@ type cidrStore struct {
 	reloadMu sync.Mutex
 	set      cidrset.Set
 	loadedAt time.Time
-	// retryAt mirrors geoDB.retryAt: the next-attempt gate after a failed or
-	// refused reload, with reloadFailures driving its backoff.
+	// retryAt mirrors geoDB.retryAt: the next-attempt gate after a failed,
+	// refused, or partially-accepted reload, with reloadFailures driving its
+	// backoff.
 	retryAt        time.Time
 	reloadFailures int
 	interval       time.Duration
@@ -252,7 +257,15 @@ type PipelineContext struct {
 	// — a chain naming only dbip leaves the geofeed out — and never asn or
 	// cloudflare, which are not local tables, so the verdict and the published
 	// [GEO:xx] tag agree on everything but those two; see countryChain.
-	Lookup   geofeed.CountryLookup
+	Lookup geofeed.CountryLookup
+	// geo is the SAME request-start read, kept per provider. Lookup is the
+	// merged verdict chain; a tag renders its own entry's chain (a split
+	// two-entry config publishes [GEO:??][GEO:DE], not the merged first
+	// answer), so inline annotation needs the members, not the merge — and it
+	// must read them from the generation the filter judged, or a background
+	// reload landing mid-request splits the two. Zero when a caller built pctx
+	// by hand; bufferSink then falls back to the annotator's live getters.
+	geo      countryCapture
 	Allowed  filter.CountrySet
 	Denied   filter.CountrySet
 	Resolved map[string][]netip.Addr
@@ -275,8 +288,12 @@ type NodeResult struct {
 	IP  netip.Addr
 }
 
+// geo is pctx.geo: the members the annotator must resolve inline tags through
+// so a rendered [GEO:xx] cannot straddle a reload the filter did not. The
+// sliceSink ignores it — the worker annotates after probing, on its own clock,
+// with no request left to capture.
 type nodeSink interface {
-	emit(ctx context.Context, node subscription.Node, ip netip.Addr)
+	emit(ctx context.Context, node subscription.Node, ip netip.Addr, geo *countryCapture)
 }
 
 // bufferSink renders nodes into the response buffer as they survive. The
@@ -289,7 +306,7 @@ type bufferSink struct {
 	wrote     bool
 }
 
-func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.Addr) {
+func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.Addr, geo *countryCapture) {
 	if s.wrote {
 		s.buf.WriteByte('\n')
 	}
@@ -298,7 +315,7 @@ func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.
 		s.buf.WriteString(node.Raw)
 		return
 	}
-	s.annotator.Annotate(ctx, s.buf, &s.tagBuf, AnnotateRequest{Node: node, IP: ip})
+	s.annotator.annotate(ctx, s.buf, &s.tagBuf, AnnotateRequest{Node: node, IP: ip}, geo)
 }
 
 // sliceSink collects survivors for a caller that annotates later. arena packs
@@ -311,7 +328,7 @@ type sliceSink struct {
 	byteBound int
 }
 
-func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Addr) {
+func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Addr, _ *countryCapture) {
 	s.nodes = append(s.nodes, NodeResult{Raw: s.intern(node.Raw), IP: ip})
 }
 
@@ -426,10 +443,20 @@ func initialGeofeedState(ctx context.Context, initLog zerolog.Logger, opts Optio
 	if failed > 0 {
 		// Startup takes a partial feed because there is nothing better to
 		// keep, but must not wait a whole refresh interval to complete it.
-		delay := retryDelay(0, opts.RefreshInterval)
-		state.RetryAt = time.Now().Add(delay)
-		initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
-			Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
+		if opts.RefreshInterval <= 0 {
+			// An explicit zero disables the refresh (GeofeedConfig keeps it),
+			// so no retry will ever fire: say the feed stays partial.
+			initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
+				Msg("initial geofeed load is partial; refresh disabled, feed stays partial")
+		} else {
+			delay := retryDelay(0, opts.RefreshInterval)
+			state.RetryAt = time.Now().Add(delay)
+			// Failures = 1, as scheduleRetryLocked would have left it, so the
+			// first background retry backs off like the geoDB/cidr siblings.
+			state.Failures = 1
+			initLog.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
+				Dur("retry_in", delay).Msg("initial geofeed load is partial; retrying shortly")
+		}
 	}
 	initLog.Info().Int("entries", len(entries)).Msg("geofeed loaded")
 	state.Lookup = geofeed.NewLookup(entries)
@@ -543,7 +570,11 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 // Filter renders the surviving nodes as the published subscription text,
 // annotated inline: `GET /` has no post-probe stage to annotate in.
 func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
-	return p.filterInto(ctx, &bufferSink{buf: b, annotator: p.annotator}, req)
+	// The on-demand URL fetch inherits the caller's own deadline — GET /'s 60s
+	// request context, answered 504 on expiry. fetch.timeout is the worker's
+	// fail-fast knob, and shared use cut a slow-but-healthy subscription at 3s
+	// with most of the advertised request budget unused; 0 means no sub-budget.
+	return p.filterInto(ctx, &bufferSink{buf: b, annotator: p.annotator}, req, 0)
 }
 
 // FilterNodes runs the same pipeline but hands the survivors back unannotated,
@@ -553,11 +584,16 @@ func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterReque
 // same hostname.
 func (p *Processor) FilterNodes(ctx context.Context, req FilterRequest) ([]NodeResult, Stats, error) {
 	sink := &sliceSink{}
-	stats, err := p.filterInto(ctx, sink, req)
+	// The worker keeps fetch.timeout as its URL-fetch budget: sixteen sources
+	// fetch concurrently under per-source deadlines of minutes, so an
+	// unresponsive one must fail fast instead of holding its slot.
+	stats, err := p.filterInto(ctx, sink, req, p.fetchTimeout)
 	return sink.fit(), stats, err
 }
 
-func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterRequest) (Stats, error) {
+// filterInto runs the shared pipeline. fetchBudget bounds the URL fetch when
+// req.Body is empty; 0 lets it inherit ctx (the caller's own deadline).
+func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterRequest, fetchBudget time.Duration) (Stats, error) {
 	label := string(req.SubscriptionURL)
 	if len(req.Body) > 0 {
 		label = "inline"
@@ -566,7 +602,7 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	start := time.Now()
 
 	p.maybeRefreshDatabases(ctx)
-	lookup := p.countryChain(ctx)
+	lookup, capture := p.countryChain(ctx)
 
 	allowed := req.AllowedCountries
 	if filter.IsEmpty(allowed) {
@@ -580,9 +616,9 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 		body = subscription.Normalize(req.Body)
 	} else {
 		fetchCtx := ctx
-		if p.fetchTimeout > 0 {
+		if fetchBudget > 0 {
 			var cancelFetch context.CancelFunc
-			fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
+			fetchCtx, cancelFetch = context.WithTimeout(ctx, fetchBudget)
 			defer cancelFetch()
 		}
 		loaded, errLoad := loadSubscription(fetchCtx, req.SubscriptionURL, req.HWID)
@@ -600,6 +636,7 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	pctx := &PipelineContext{
 		sink:     sink,
 		Lookup:   lookup,
+		geo:      capture,
 		Allowed:  allowed,
 		Denied:   req.DeniedCountries,
 		Resolved: resolved,
@@ -708,6 +745,26 @@ func countNodes(body []byte, limit int) int {
 	return count
 }
 
+// ipLiteralShape reports whether server could parse as an IP literal at all:
+// netip accepts dotted-decimal IPv4 and colon-bearing IPv6, nothing else, so a
+// host with neither has no parseable answer. resolveNode runs netip.ParseAddr
+// only when this passes — ParseAddr heap-allocates its error on a domain, and
+// most servers are domains (mirrors fetch.parseIPHost).
+func ipLiteralShape(server string) bool {
+	if strings.Contains(server, ":") {
+		return true
+	}
+	dot := false
+	for i := range len(server) {
+		if c := server[i]; c == '.' {
+			dot = true
+		} else if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return dot
+}
+
 // resolveNode returns the IPv4 addresses for a node's server and reports
 // whether the server's address family is supported at all. Bare IPs are
 // handled inline without touching the resolver cache: the address is written
@@ -724,13 +781,23 @@ func (p *Processor) resolveNode(ctx context.Context, server string, pctx *Pipeli
 		return cached, true
 	}
 	// Bare IPs skip DNS, the cache, and the request map: re-parsing on repeat
-	// is allocation-free, so no memoization is needed.
-	if addr, err := netip.ParseAddr(server); err == nil {
-		if !addr.Is4() {
-			return nil, false
+	// is allocation-free, so no memoization is needed — but the failing parse
+	// is not: netip heap-allocates its error, and the parse only runs for
+	// strings that could be a literal at all (mirrors fetch.parseIPHost).
+	if ipLiteralShape(server) {
+		if addr, err := netip.ParseAddr(server); err == nil {
+			// A 4-in-6 spelling (::ffff:a.b.c.d) IS an IPv4 address: every
+			// lookup downstream (geofeed, cidrset) unmaps it to v4 before
+			// testing, so refusing it here as a v6 literal drops a node the
+			// rest of the chain could place — and books IPv6Drop for a server
+			// this pipeline can use.
+			addr = addr.Unmap()
+			if !addr.Is4() {
+				return nil, false
+			}
+			pctx.addrScratch[0] = addr
+			return pctx.addrScratch[:1], true
 		}
-		pctx.addrScratch[0] = addr
-		return pctx.addrScratch[:1], true
 	}
 	resolved, resolveErr := p.resolver.Resolve(ctx, server)
 	if resolveErr != nil || len(resolved) == 0 {
@@ -744,12 +811,14 @@ func (p *Processor) resolveNode(ctx context.Context, server string, pctx *Pipeli
 }
 
 func (p *Processor) processNode(ctx context.Context, node subscription.Node, pctx *PipelineContext) {
-	pctx.Stats.Total++
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
+	// Counted only past the gate: booked first, a cancelled node would sit in
+	// Total with no drop reason to balance it (Kept + drops == Total).
+	pctx.Stats.Total++
 	if p.blocklist != nil && p.blocklist.Blocked(node.Server) {
 		pctx.Stats.GeoBlockDrop++
 		return
@@ -776,7 +845,7 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		}
 	}
 
-	pctx.sink.emit(ctx, node, ips[0])
+	pctx.sink.emit(ctx, node, ips[0], &pctx.geo)
 	pctx.Stats.Kept++
 }
 
@@ -793,8 +862,11 @@ func (p *Processor) Annotator() Annotator {
 }
 
 // snapshotLookup returns the processor's current geofeed lookup under the read
-// lock. It backs the annotator's geofeed provider so per-node GEO annotation
-// reflects background reloads instead of a captured snapshot.
+// lock. It backs the annotator's geofeed provider for the paths that annotate
+// on the live getters — the worker's post-probe rendering above all — where
+// per-node lookups SHOULD reflect background reloads. GET /'s inline tags do
+// not come through here: filterInto captures the generation once (countryChain)
+// and the rendering sink resolves through the capture instead.
 //
 //nolint:ireturn // returns the CountryLookup interface for the geo.Provider getter
 func (p *Processor) snapshotLookup() geofeed.CountryLookup {
@@ -823,62 +895,53 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	return lookup
 }
 
-// countryChain returns the lookup the country filter judges nodes with: the
-// local country databases the configured GEO annotate chains name, in the
-// order they name them.
-//
-// Filtering and annotation ask one question — "which country is this IP in?" —
-// and used to answer it from different sources: the filter saw the geofeed
-// alone, so a node DB-IP places in DE was geo-dropped as unknown while the tag
-// it would have been published with said [GEO:DE]. Reading the order off the
-// annotate config keeps the two answers identical over the LOCAL databases for
-// any ordering an operator writes, not just the one config.yaml ships. EVERY
-// GEO entry contributes, because Annotate resolves across entries too — it
-// returns the leftmost country any of them placed — so a filter reading one
-// entry judged nodes without a database their own published tag had already
-// consulted. The databases are already in memory (the lazy-build rule in
-// NewProcessor downloads them only when an annotate entry names them), so
-// consulting them costs a binary search on the IPs the earlier providers miss
-// and nothing else.
-//
-// LOCAL is the whole of the promise, and it has two exceptions -- ONE of which
-// the shipped chain still names. The asn provider stays out: it is a per-IP
-// Cymru round trip, not a local table, and the config exposes it as an explicit
-// `{type: country, provider: asn}` filter for operators who want it. Since it
-// left the shipped annotate chain it costs the default config nothing, and only
-// a config that puts it back reopens that half of the gap. cloudflare stays out
-// for a harder reason (countryChainOrder's doc carries it): it is not a lookup
-// this stage can make, so there is no filter form to expose -- and it IS in the
-// shipped chain, which is what keeps the gap a DEFAULT rather than a corner
-// config. A GEO chain resolving through either can therefore still name a
-// country the filter treated as unknown. Measured on config.yaml's own
-// `[cloudflare, geofeed, dbip, registry]`, which merges to
-// [geofeed, dbip, registry]: with all three loaded and none of them
-// able to place the IP, `exclude_countries=DE` keeps the node while the stable
-// worker's traced egress publishes [GEO:DE].
+// countryCapture is one request's read of the LOCAL country databases — the
+// geofeed plus whichever downloadable tables the GEO chains name — every one
+// read at the same instant as the merged chain countryChain builds. Inline
+// annotation resolves each tag's local steps through these same objects, so a
+// background reload that swaps p.countryLookup or a geoDB mid-request moves
+// neither the filter verdict nor the rendered tag. A nil member falls back to
+// the step's live getter: that is the no-capture path (a pctx built by hand,
+// or the worker's post-probe Annotate, which passes no capture at all).
+type countryCapture struct {
+	geofeed  geofeed.CountryLookup
+	dbip     geofeed.CountryLookup
+	registry geofeed.CountryLookup
+}
+
+// countryChain returns the lookup the country filter judges nodes with — the
+// local country databases the configured GEO annotate chains name, in written
+// order — and the per-provider capture of that same read. The capture is the
+// annotator's half of the agreement: GET / renders each [GEO:xx] tag through
+// it, so a background reload landing mid-request moves neither the verdict nor
+// the published name (see countryCapture).
 //
 //nolint:ireturn // returns the CountryLookup interface, like currentEntries
-func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
+func (p *Processor) countryChain(ctx context.Context) (geofeed.CountryLookup, countryCapture) {
 	// currentEntries doubles as the opportunistic background-reload trigger, so
 	// it runs on every request whether or not the geofeed is in the chain.
 	lookup := p.currentEntries(ctx)
+	var capture countryCapture
+	capture.geofeed = lookup
 	if len(p.countryOrder) == 0 {
-		return lookup
+		return lookup, capture
 	}
 	chain := make(chainLookup, len(p.countryOrder))
 	for i, name := range p.countryOrder {
 		switch name {
 		case config.ProviderDBIP:
-			chain[i] = p.dbip.snapshot()
+			capture.dbip = p.dbip.snapshot()
+			chain[i] = capture.dbip
 		case config.ProviderRegistry:
-			chain[i] = p.registry.snapshot()
+			capture.registry = p.registry.snapshot()
+			chain[i] = capture.registry
 		default:
 			// countryChainOrder emits nothing but the three local providers,
 			// and the two above are taken: the remainder is the geofeed.
 			chain[i] = lookup
 		}
 	}
-	return chain
+	return chain, capture
 }
 
 // countryChainOrder is the provider order countryChain walks: EVERY GEO
@@ -1050,8 +1113,10 @@ func retryDelay(failures int, interval time.Duration) time.Duration {
 	return delay
 }
 
-// scheduleRetryLocked arms the next reload attempt after a failed or refused
-// swap and returns the delay it picked. Callers must hold p.mu.
+// scheduleRetryLocked arms the next reload attempt and returns the delay it
+// picked: the failure/refusal arms and the accepted-but-partial arm all use
+// it, so a reload whose sources failed never passes as fresh. Callers must
+// hold p.mu.
 func (p *Processor) scheduleRetryLocked() time.Duration {
 	delay := retryDelay(p.reloadFailures, p.refreshInterval)
 	p.reloadFailures++
@@ -1087,6 +1152,14 @@ func (p *Processor) doReload(ctx context.Context) {
 
 	p.countryLookup = next
 	p.loadedAt = time.Now()
+	if failed > 0 {
+		// Accepted but incomplete: failed sources keep the retry armed rather
+		// than passing as fresh for a whole refresh interval.
+		p.logger.Warn().Int("sources_failed", failed).Int("entries", len(entries)).
+			Dur("retry_in", p.scheduleRetryLocked()).
+			Msg("geofeed reloaded in background but partial; retrying shortly")
+		return
+	}
 	p.retryAt = time.Time{}
 	p.reloadFailures = 0
 	p.logger.Info().Int("entries", len(entries)).Msg("geofeed reloaded in background")
@@ -1258,8 +1331,8 @@ func (db *geoDB) maybeRefresh(ctx context.Context, logger zerolog.Logger) {
 }
 
 // staleLocked reports whether the database needs a reload. Callers must hold
-// db.mu (read or write). A pending retryAt (failed or refused load) gates the
-// next attempt; otherwise a zero loadedAt (never loaded) is always stale.
+// db.mu (read or write). A pending retryAt gates the next attempt; otherwise
+// a zero loadedAt (never loaded) is always stale.
 func (db *geoDB) staleLocked(now time.Time) bool {
 	if db.interval <= 0 {
 		return false
@@ -1273,9 +1346,11 @@ func (db *geoDB) staleLocked(now time.Time) bool {
 	return now.Sub(db.loadedAt) >= db.interval
 }
 
-// scheduleRetryLocked arms the next reload attempt after a failed or refused
-// swap and returns the delay it picked. Callers must hold db.mu (newGeoDB runs
-// before the database is reachable, so it needs no lock).
+// scheduleRetryLocked arms the next reload attempt and returns the delay it
+// picked: the failure/refusal arms and the accepted-but-partial arm all use
+// it, so a reload whose sources failed never passes as fresh. Callers must
+// hold db.mu (newGeoDB runs before the database is reachable, so it needs no
+// lock).
 func (db *geoDB) scheduleRetryLocked() time.Duration {
 	delay := retryDelay(db.reloadFailures, db.interval)
 	db.reloadFailures++
@@ -1310,6 +1385,14 @@ func (db *geoDB) doReload(ctx context.Context, logger zerolog.Logger) {
 
 	db.lookup = next
 	db.loadedAt = time.Now()
+	if failed > 0 {
+		// Accepted but incomplete: failed sources keep the retry armed rather
+		// than passing as fresh for a whole refresh interval.
+		logger.Warn().Str("db", db.name).Int("sources_failed", failed).Int("ranges", len(ranges)).
+			Dur("retry_in", db.scheduleRetryLocked()).
+			Msg("geo database reloaded in background but partial; retrying shortly")
+		return
+	}
 	db.retryAt = time.Time{}
 	db.reloadFailures = 0
 	logger.Info().Str("db", db.name).Int("ranges", len(ranges)).Msg("geo database reloaded in background")
@@ -1442,8 +1525,10 @@ func (s *cidrStore) staleLocked(now time.Time) bool {
 	return now.Sub(s.loadedAt) >= s.interval
 }
 
-// scheduleRetryLocked arms the next attempt and returns the delay it picked.
-// Callers must hold s.mu (newCIDRStore runs before the store is reachable).
+// scheduleRetryLocked arms the next attempt and returns the delay it picked:
+// the failure/refusal arms and the accepted-but-partial arm all use it, so a
+// reload whose sources failed never passes as fresh. Callers must hold s.mu
+// (newCIDRStore runs before the store is reachable).
 func (s *cidrStore) scheduleRetryLocked() time.Duration {
 	delay := retryDelay(s.reloadFailures, s.interval)
 	s.reloadFailures++
@@ -1474,6 +1559,14 @@ func (s *cidrStore) doReload(ctx context.Context, logger zerolog.Logger) {
 
 	s.set = next
 	s.loadedAt = time.Now()
+	if failed > 0 {
+		// Accepted but incomplete: failed sources keep the retry armed rather
+		// than passing as fresh for a whole refresh interval.
+		logger.Warn().Int("sources_failed", failed).Int("ranges", next.Len()).
+			Dur("retry_in", s.scheduleRetryLocked()).
+			Msg("cidr allow-list reloaded in background but partial; retrying shortly")
+		return
+	}
 	s.retryAt = time.Time{}
 	s.reloadFailures = 0
 	logger.Info().Int("ranges", next.Len()).Msg("cidr allow-list reloaded in background")

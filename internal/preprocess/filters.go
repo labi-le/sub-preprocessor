@@ -142,6 +142,15 @@ func (f *CIDRFilter) Process(_ context.Context, ips []netip.Addr, pctx *Pipeline
 // per request.
 var errNoCIDRSet = errors.New("cidr filter configured without a loaded allow-list")
 
+// errNoASNResolver is the same insurance for the ASN arms: NewASNFilter
+// stores its *asn.Resolver in an interface field, so a typed nil would pass
+// the `f.resolver == nil` guard in Process and panic on the first IPv4
+// lookup. Unreachable from buildFilters' single caller — NewProcessor builds a
+// resolver whenever any spec needs ASN data (providerNeeds) — it exists so a
+// SECOND caller getting the wiring wrong fails NewProcessor instead of the
+// request path.
+var errNoASNResolver = errors.New("asn filter configured without a resolver")
+
 // buildFilters constructs the IP-stage filter chain from the parsed spec list,
 // in config order. A country filter uses the geofeed provider by default or the
 // ASN resolver when provider is "asn"; an asn filter applies its compiled
@@ -153,11 +162,17 @@ func buildFilters(specs []config.IPFilterSpec, asnR *asn.Resolver, cidrSet func(
 		switch spec.Type {
 		case config.FilterCountry:
 			if spec.Provider == config.ProviderASN {
+				if asnR == nil {
+					return nil, errNoASNResolver
+				}
 				filters = append(filters, NewASNFilter(asnR, nil))
 			} else {
 				filters = append(filters, NewGeofeedFilter())
 			}
 		case config.FilterASN:
+			if asnR == nil {
+				return nil, errNoASNResolver
+			}
 			patterns, err := compilePatterns(spec.DenyPatterns)
 			if err != nil {
 				return nil, err
