@@ -186,3 +186,32 @@ func TestLoadFoldsLegacyMixedCaseRows(t *testing.T) {
 		t.Errorf("two spellings of one legacy host must fold to one entry, got %d", got)
 	}
 }
+
+// TestOpenSwitchesFileToWALMode pins that Open's connection configuration
+// actually took effect: journal_mode=WAL is persistent in the database file,
+// so a second, independent connection — another process sharing the config
+// mount, say — must observe it rather than the rollback-journal default.
+func TestOpenSwitchesFileToWALMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "gb.db")
+	s, err := geoblock.Open(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var mode string
+	if scanErr := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if mode != "wal" {
+		t.Fatalf("geoblock db must run in WAL mode, got %q", mode)
+	}
+}

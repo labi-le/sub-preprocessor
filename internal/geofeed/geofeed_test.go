@@ -40,18 +40,40 @@ func TestParseAndLookupCountry(t *testing.T) {
 	}
 }
 
-// The two CSV parsers share the case-fold core but deliberately disagree on
-// the unknown-country marker: a geofeed row keeps its prefix under ZZ, while
-// dbip drops the whole range.
-func TestZZCountryDivergence(t *testing.T) {
+// The CSV parsers once disagreed on the unknown-country marker: a geofeed row
+// kept its prefix under ZZ while dbip dropped the range.
+// That kept row indexed a range whose country every chain consumer treated as
+// a first-hit answer — ZZ shadowed dbip/registry and rendered [GEO:ZZ] instead
+// of falling through as unknown. The parsers are now aligned (round 2): every
+// reserved non-country marker (ZZ, EU) is a miss. This test is
+// TestZZCountryDivergence reconciled to the shared contract.
+func TestReservedMarkersDroppedByCSVParsers(t *testing.T) {
 	t.Parallel()
 
-	entries, err := geofeed.Parse([]byte("198.51.100.0/24,ZZ\n"))
+	// A geofeed whose only country is ZZ parses to nothing: Parse errors on
+	// zero entries, which is the miss the chain must fall through.
+	if _, err := geofeed.Parse([]byte("198.51.100.0/24,ZZ\n")); err == nil {
+		t.Fatal("a ZZ-only body must parse to nothing: ZZ is a miss, not a country")
+	}
+
+	// Beside a real row, ZZ and EU rows must not index.
+	entries, err := geofeed.Parse([]byte(strings.Join([]string{
+		"198.51.100.0/24,ZZ",
+		"198.51.100.0/24,EU", // ripencc region marker: a region, not a country
+		"203.0.113.0/24,DE",
+	}, "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Country != (geofeed.CountryCode{'Z', 'Z'}) {
-		t.Fatalf("geofeed must keep ZZ rows, got %+v", entries)
+	if len(entries) != 1 || entries[0].Country != (geofeed.CountryCode{'D', 'E'}) {
+		t.Fatalf("ZZ/EU rows must fall through to real rows, got %+v", entries)
+	}
+
+	// The dropped row's prefix must miss: no range answers for it, so a chain
+	// would consult the next database instead of stopping at a false code.
+	lookup := geofeed.NewLookup(entries)
+	if got := geofeed.LookupCountry(lookup, netip.MustParseAddr("198.51.100.5")); got != (geofeed.CountryCode{}) {
+		t.Fatalf("a dropped ZZ row must not answer its prefix, got %q", got)
 	}
 
 	if ranges := geofeed.ParseDBIP([]byte("0.0.0.0,0.255.255.255,ZZ\n")); len(ranges) != 0 {

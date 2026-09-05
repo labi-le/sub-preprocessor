@@ -83,6 +83,14 @@ func (r *Resolver) PutResolvedMap(m map[string][]netip.Addr) {
 }
 
 func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, error) {
+	// Probe the cache before the IP parse: bare IPs are never stored (they
+	// return below), so a hit is by construction a domain host, and ParseAddr
+	// heap-allocates its ~48 B parse error on every domain (fetch.parseIPHost
+	// measures the same cost) — a warm hit must not pay it.
+	if ips, ok := r.cachedIPs(host); ok {
+		return ips, nil
+	}
+
 	// Bare IPs — skip DNS lookup.
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Is4() {
@@ -93,16 +101,18 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]netip.Addr, erro
 		return nil, errors.New("not an IPv4 address")
 	}
 
-	if ips, ok := r.cachedIPs(host); ok {
-		return ips, nil
-	}
-
 	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	ips, err := r.lookup.LookupNetIP(resolveCtx, "ip4", host)
 	if err != nil {
-		r.storeCache(host, nil, r.negativeTTL)
+		// A caller cancellation or deadline says nothing about DNS reachability,
+		// so it must not poison the negative cache. resolveCtx is done in that
+		// case too, so test the parent: the resolver's own r.timeout expiry is
+		// a genuine DNS failure and stays cacheable.
+		if ctx.Err() == nil {
+			r.storeCache(host, nil, r.negativeTTL)
+		}
 		return nil, fmt.Errorf("dns lookup: %w", err)
 	}
 

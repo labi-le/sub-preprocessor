@@ -2,7 +2,11 @@ package fetch
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"net"
+	"net/netip"
 	"strconv"
 	"testing"
 )
@@ -274,5 +278,103 @@ func BenchmarkReadBody(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// The resolved-address dial loop must not give up on the first public answer:
+// a v4 egress can sit behind a dead v6 entry, so a dial error on one public
+// address has to fall through to the remaining public addresses.
+func TestDialPublicAddrsDialsPastUnreachable(t *testing.T) {
+	t.Parallel()
+
+	dead := netip.MustParseAddr("192.0.2.1")
+	live := netip.MustParseAddr("198.51.100.7")
+
+	client, _ := net.Pipe()
+	defer client.Close()
+	var dialed []string
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		if addr == net.JoinHostPort(dead.String(), "443") {
+			return nil, errors.New("connection refused")
+		}
+		return client, nil
+	}
+	conn, err := dialPublicAddrs(context.Background(), dial, "tcp", "443", []netip.Addr{dead, live})
+	if err != nil {
+		t.Fatalf("dialPublicAddrs: %v", err)
+	}
+	defer conn.Close()
+	want := []string{
+		net.JoinHostPort(dead.String(), "443"),
+		net.JoinHostPort(live.String(), "443"),
+	}
+	if len(dialed) != 2 || dialed[0] != want[0] || dialed[1] != want[1] {
+		t.Fatalf("dialed %v, want %v", dialed, want)
+	}
+}
+
+func TestDialPublicAddrsSkipsNonPublic(t *testing.T) {
+	t.Parallel()
+
+	live := netip.MustParseAddr("198.51.100.7")
+	private := netip.MustParseAddr("10.0.0.1")
+
+	var dialed []string
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return nil, errors.New("boom")
+	}
+	_, err := dialPublicAddrs(context.Background(), dial, "tcp", "443", []netip.Addr{private, live})
+	if err == nil {
+		t.Fatal("all public dials failed, want an error")
+	}
+	if len(dialed) != 1 || dialed[0] != net.JoinHostPort(live.String(), "443") {
+		t.Fatalf("dialed %v, want only the public address %s", dialed, net.JoinHostPort(live.String(), "443"))
+	}
+}
+
+func TestDialPublicAddrsNoPublicReportsError(t *testing.T) {
+	t.Parallel()
+
+	private := netip.MustParseAddr("10.0.0.1")
+
+	called := false
+	dial := func(_ context.Context, _, _ string) (net.Conn, error) {
+		called = true
+		return nil, errors.New("must not be dialed")
+	}
+	conn, err := dialPublicAddrs(context.Background(), dial, "tcp", "443", []netip.Addr{private})
+	if err == nil || err.Error() != errNonPublicTarget {
+		t.Fatalf("err = %v, want %q", err, errNonPublicTarget)
+	}
+	if conn != nil {
+		t.Fatalf("conn = %v, want nil", conn)
+	}
+	if called {
+		t.Fatal("a non-public-only answer must not be dialed")
+	}
+}
+
+func TestDialPublicAddrsLastDialErrorWins(t *testing.T) {
+	t.Parallel()
+
+	dead := netip.MustParseAddr("192.0.2.1")
+	live := netip.MustParseAddr("198.51.100.7")
+
+	first := errors.New("first dead")
+	second := errors.New("second dead")
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		if addr == net.JoinHostPort(dead.String(), "443") {
+			return nil, first
+		}
+		return nil, second
+	}
+	conn, err := dialPublicAddrs(context.Background(), dial, "tcp", "443", []netip.Addr{dead, live})
+	if !errors.Is(err, second) {
+		t.Fatalf("err = %v, want the last dial error %v", err, second)
+	}
+	if conn != nil {
+		t.Fatalf("conn = %v, want nil", conn)
 	}
 }

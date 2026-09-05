@@ -141,7 +141,7 @@ func TestResolve_UsesConfiguredCacheTTL(t *testing.T) {
 // several ASes. Field 0 is an AS LIST, and parsing it whole used to fail the
 // record and throw away the country in field 2 -- so the annotate chain missed
 // and the ASN filter fell open on every multi-origin prefix. Records below are
-// verbatim Cymru answers for 146.103.121.1, 35.212.182.82 and 87.250.251.10.
+// verbatim Cymru origin answers for multi-origin prefixes.
 func TestParseOriginRecord_MultiOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -193,5 +193,36 @@ func TestParseOriginRecord_MultiOrigin(t *testing.T) {
 	// and no reason to invent a Resolve success shape for it.
 	if _, _, err := parseOriginRecord("nonsense | 10.0.0.0/8 | US | arin | 2020-01-01"); err == nil {
 		t.Error("an unparseable AS field must still error")
+	}
+}
+
+// TestParseOriginRecords_EmptyAnswerIsNoRecord pins the guard that keeps an
+// empty origin answer from reading as a parsed record: the caller builds
+// AS<n>.asn.cymru.com from the result, and continuing with asn 0 would query a
+// name Cymru does not serve. An answer with no parseable record must error.
+func TestParseOriginRecords_EmptyAnswerIsNoRecord(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := parseOriginRecords(nil); !errors.Is(err, errEmptyOriginAnswer) {
+		t.Fatalf("nil answer err = %v, want errEmptyOriginAnswer", err)
+	}
+	if _, _, err := parseOriginRecords([]string{}); !errors.Is(err, errEmptyOriginAnswer) {
+		t.Fatalf("empty answer err = %v, want errEmptyOriginAnswer", err)
+	}
+	if _, _, err := parseOriginRecords([]string{"not a record"}); err == nil {
+		t.Fatal("an answer with no parseable record must error")
+	}
+
+	// The first parseable record wins, as it did when the loop lived in
+	// lookup: a leading malformed record must not lose the good one after it.
+	asn, country, err := parseOriginRecords([]string{
+		"garbage | x | ZZ | arin | 2020-01-01",
+		"64500 | 192.0.2.0/24 | US | arin | 2020-01-01",
+	})
+	if err != nil {
+		t.Fatalf("a later parseable record must win: %v", err)
+	}
+	if asn != 64500 || country != (geofeed.CountryCode{'U', 'S'}) {
+		t.Fatalf("got asn %d country %q, want 64500 US", asn, country)
 	}
 }

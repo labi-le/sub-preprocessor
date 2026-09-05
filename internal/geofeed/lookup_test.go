@@ -166,3 +166,39 @@ func TestNewLookup_V6MostSpecific(t *testing.T) {
 		t.Fatalf("miss = %q, want zero", got)
 	}
 }
+
+// TestLookupCountry_MappedIPv4 pins the 4-in-6 normalisation on both sides of
+// the index (the same rule cidrset.Contains applies): a ::ffff:a.b.c.d probe
+// must search the v4 table, and a range parsed from the mapped spelling must be
+// indexed as v4 so the plain form can hit it. Before Unmap the mapped probe
+// fell into the v6 table and missed the whole v4 index, rendering the country
+// as the zero code.
+func TestLookupCountry_MappedIPv4(t *testing.T) {
+	t.Parallel()
+
+	entries := []geofeed.Entry{
+		{Prefix: netip.MustParsePrefix("20.0.0.0/8"), Country: geofeed.CountryCode{'D', 'E'}},
+		{Prefix: netip.MustParsePrefix("2001:db8::/32"), Country: geofeed.CountryCode{'N', 'L'}},
+	}
+	lookup := geofeed.NewLookup(entries)
+
+	if got := lookup.LookupCountry(netip.MustParseAddr("::ffff:20.1.2.3")); got != (geofeed.CountryCode{'D', 'E'}) {
+		t.Fatalf("mapped v4 probe = %q, want DE (must search the v4 index)", got)
+	}
+	if got := lookup.LookupCountry(netip.MustParseAddr("20.1.2.3")); got != (geofeed.CountryCode{'D', 'E'}) {
+		t.Fatalf("plain v4 probe = %q, want DE", got)
+	}
+	if got := lookup.LookupCountry(netip.MustParseAddr("2001:db8::1")); got != (geofeed.CountryCode{'N', 'L'}) {
+		t.Fatalf("v6 probe = %q, want NL", got)
+	}
+
+	rangeLookup := geofeed.NewRangeLookup([]geofeed.Range{
+		mustRange("::ffff:30.0.0.0", "::ffff:30.0.0.255", "US"),
+	})
+	if got := rangeLookup.LookupCountry(netip.MustParseAddr("30.0.0.9")); got != (geofeed.CountryCode{'U', 'S'}) {
+		t.Fatalf("plain probe into a mapped-spelled range = %q, want US", got)
+	}
+	if got := rangeLookup.LookupCountry(netip.MustParseAddr("::ffff:30.0.0.9")); got != (geofeed.CountryCode{'U', 'S'}) {
+		t.Fatalf("mapped probe into a mapped-spelled range = %q, want US", got)
+	}
+}

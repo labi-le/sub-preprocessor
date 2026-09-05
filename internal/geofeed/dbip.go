@@ -34,7 +34,10 @@ func LoadDBIP(ctx context.Context, url string, logger zerolog.Logger) ([]Range, 
 	monthURL := ExpandMonthURL(url, now)
 	body, err := fetchBytes(ctx, fetch.SubscriptionURL(monthURL), maxGeofeedSize, fetch.FileTypeGzip)
 	if err != nil {
-		prevURL := ExpandMonthURL(url, now.AddDate(0, -1, 0))
+		// AddDate overflows a month's last days into the current one (Mar 31
+		// minus a month is Mar 3), so derive the previous month from the first.
+		first := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+		prevURL := ExpandMonthURL(url, first.AddDate(0, -1, 0))
 		var statusErr *fetch.StatusError
 		if prevURL == monthURL || !errors.As(err, &statusErr) || statusErr.Code != http.StatusNotFound {
 			return nil, fmt.Errorf("fetch dbip: %w", err)
@@ -55,7 +58,7 @@ func LoadDBIP(ctx context.Context, url string, logger zerolog.Logger) ([]Range, 
 
 // ParseDBIP parses a DB-IP country lite CSV body: start_ip,end_ip,CC per line,
 // v4 and v6 mixed. Per-line tolerant: malformed, mixed-family, unordered, and
-// unknown-country (ZZ) lines are skipped.
+// reserved non-country-marker (ZZ, EU) lines are skipped.
 func ParseDBIP(body []byte) []Range {
 	nlCount := bytes.Count(body, []byte{'\n'})
 	ranges := make([]Range, 0, nlCount)
@@ -99,10 +102,16 @@ func parseDBIPLine(line []byte) (Range, bool) {
 	return Range{Start: start, End: end, Country: country}, true
 }
 
-// foldCountryCode accepts exactly two ASCII letters and folds them to upper
-// case. It does NOT reject the unknown-country marker ZZ: geofeed rows keep it,
-// dbip's parseCountry wraps this core to drop them.
-func foldCountryCode(b []byte) (CountryCode, bool) {
+// parseCountry is the one country-code validator every CSV parser shares
+// (geofeed, dbip, registry): exactly two ASCII letters, folded to upper case,
+// minus the reserved non-country markers the sources emit in place of a code.
+// ZZ marks an IP the source cannot attribute to any country; EU is ripencc's
+// region marker for allocations RIPE cannot attribute to one country (the only
+// non-ISO code in the five delegated-extended files: 10 rows in
+// delegated-ripencc-extended-latest, measured 2026-09-05). Either must read as
+// a miss, or the lookup chain would publish a non-country ahead of the real
+// databases.
+func parseCountry(b []byte) (CountryCode, bool) {
 	if len(b) != 2 { //nolint:mnd // ISO 3166-1 alpha-2 length
 		return CountryCode{}, false
 	}
@@ -111,17 +120,9 @@ func foldCountryCode(b []byte) (CountryCode, bool) {
 	if c1 < 'A' || c1 > 'Z' || c2 < 'A' || c2 > 'Z' {
 		return CountryCode{}, false
 	}
-	return CountryCode{c1, c2}, true
-}
-
-// parseCountry accepts exactly two ASCII letters, folds them to upper case,
-// and rejects the unknown-country marker ZZ.
-func parseCountry(b []byte) (CountryCode, bool) {
-	cc, ok := foldCountryCode(b)
-	if !ok {
-		return CountryCode{}, false
-	}
-	if cc[0] == 'Z' && cc[1] == 'Z' {
+	cc := CountryCode{c1, c2}
+	switch cc {
+	case CountryCode{'Z', 'Z'}, CountryCode{'E', 'U'}:
 		return CountryCode{}, false
 	}
 	return cc, true

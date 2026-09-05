@@ -97,22 +97,27 @@ func newIndexedLookup(ranges []Range) *indexedLookup {
 	lookup := &indexedLookup{}
 
 	for _, r := range ranges {
+		// Unmap first: a 4-in-6 spelling is an IPv4 range and must index as
+		// one, or the plain form can never hit it. LookupCountry unmaps probes
+		// the same way, so the two sides agree (as cidrset does).
+		start := r.Start.Unmap()
+		end := r.End.Unmap()
 		// One family per entry, inclusive, ordered — parsers guarantee this;
 		// garbage from other callers is dropped rather than corrupting the index.
-		if !r.Start.IsValid() || r.Start.Is4() != r.End.Is4() || r.End.Less(r.Start) {
+		if !start.IsValid() || start.Is4() != end.Is4() || end.Less(start) {
 			continue
 		}
-		if r.Start.Is4() {
+		if start.Is4() {
 			lookup.v4 = append(lookup.v4, ipRange{
-				start:   addrToUint32(r.Start),
-				end:     addrToUint32(r.End),
+				start:   addrToUint32(start),
+				end:     addrToUint32(end),
 				country: r.Country,
 			})
 			continue
 		}
 		lookup.v6 = append(lookup.v6, ip6Range{
-			start:   addrToUint128(r.Start),
-			end:     addrToUint128(r.End),
+			start:   addrToUint128(start),
+			end:     addrToUint128(end),
 			country: r.Country,
 		})
 	}
@@ -180,13 +185,12 @@ func hostMask128(prefixBits int) uint128 {
 }
 
 // ipv4PrefixRange computes the start/end IP addresses for an IPv4 CIDR prefix.
+// A /0 needs no special case: a full-width shift of the mask is 0 in Go, which
+// already yields the whole space (the rule cidrset's hostMask relies on).
 func ipv4PrefixRange(prefix netip.Prefix, country CountryCode) ipRange {
 	addr := prefix.Addr()
 	ip := addrToUint32(addr)
 	bits := prefix.Bits()
-	if bits == 0 {
-		return ipRange{start: 0, end: ^uint32(0), country: country}
-	}
 	mask := ^uint32(0) << (32 - bits) //nolint:mnd // IPv4 = 32 bits
 	start := ip & mask
 	end := start | ^mask
@@ -213,6 +217,7 @@ func (l *indexedLookup) Len() int {
 }
 
 func (l *indexedLookup) LookupCountry(ip netip.Addr) CountryCode {
+	ip = ip.Unmap()
 	if ip.Is4() {
 		return l.lookupV4(addrToUint32(ip))
 	}

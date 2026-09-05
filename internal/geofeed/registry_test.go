@@ -21,6 +21,7 @@ func TestParseDelegated(t *testing.T) {
 		"apnic|jp|ipv6|2001:200::|35|19990813|allocated",       // lowercase folds
 		"ripencc|FR|asn|3215|1|19950101|allocated",             // asn record skipped
 		"ripencc|ZZ|ipv4|10.0.0.0|256|20100101|allocated",      // unknown country skipped
+		"ripencc|EU|ipv4|198.51.100.0|4096|19900523|assigned",  // region marker skipped
 		"arin||ipv4|192.0.2.0|256||available",                  // available skipped
 		"arin|US|ipv4|198.51.100.0|256|20000101|reserved",      // reserved skipped
 		"arin|US|ipv4|255.255.255.0|512|20000101|allocated",    // count overflows v4 space

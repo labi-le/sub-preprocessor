@@ -27,23 +27,26 @@ type Store struct {
 	ttl time.Duration
 
 	mu      sync.RWMutex
-	blocked map[string]int64 // host -> unix expiry
+	blocked map[string]int64 // host -> unix-nano expiry
 }
 
 // Open opens (creating if needed) the SQLite blocklist at path, loads the
 // non-expired entries into memory and prunes expired ones.
 func Open(path string, ttl time.Duration) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout is per-connection state, so a one-off PRAGMA on the first
+	// pooled connection is silently lost when database/sql retires it and
+	// opens a replacement — a write contending with another writer on the
+	// shared db file would then fail instantly instead of waiting 5s. Riding
+	// in the DSN makes the driver apply both pragmas on every connection it
+	// opens. journal_mode=WAL is file-persistent; restating it per connection
+	// is a no-op once set.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open geoblock db: %w", err)
 	}
 	// Reads hit the in-memory cache, so a single connection avoids lock
 	// contention between the occasional Block/Prune writes.
 	db.SetMaxOpenConns(1)
-	if _, pragmaErr := db.ExecContext(context.Background(), `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); pragmaErr != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("geoblock pragmas: %w", pragmaErr)
-	}
 	if _, schemaErr := db.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS geoblock (host TEXT PRIMARY KEY, blocked_until INTEGER NOT NULL)`); schemaErr != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("geoblock schema: %w", schemaErr)
@@ -102,6 +105,11 @@ func (s *Store) Blocked(host string) bool {
 }
 
 // Block records host as blocked until now+ttl (upsert; refreshes the expiry).
+// The key is the bare lowercased host and nothing else, so one entry evicts
+// every node sharing that hostname -- other ports, other sources, possibly a
+// different endpoint behind a CDN name -- for the whole TTL. The stable
+// worker's apiFilter is the only writer and spells out that blast radius at
+// the call site.
 func (s *Store) Block(host string) error {
 	if host == "" {
 		return nil
@@ -138,7 +146,8 @@ func (s *Store) Prune() error {
 	return nil
 }
 
-// Count returns the number of currently cached (non-expired at load) entries.
+// Count returns the number of cached entries, expired-but-unpruned ones
+// included; only Prune (or the load at Open) drops them.
 func (s *Store) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

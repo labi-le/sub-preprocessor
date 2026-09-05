@@ -541,13 +541,7 @@ func newHTTPClient(guardIPs bool) *http.Client {
 			if errIP != nil {
 				return nil, fmt.Errorf("lookup net ip: %w", errIP)
 			}
-			for _, ip := range ips {
-				if !isPublicIP(ip) {
-					continue
-				}
-				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			}
-			return nil, errors.New(errNonPublicTarget)
+			return dialPublicAddrs(ctx, dialer.DialContext, network, port, ips)
 		},
 	}
 
@@ -565,6 +559,31 @@ func newHTTPClient(guardIPs bool) *http.Client {
 			return validate(req.URL)
 		},
 	}
+}
+
+// dialPublicAddrs dials addr for each public address in ips, in order, and
+// returns the first connection that succeeds. One unreachable answer must not
+// end the attempt: a resolved host can list a dead address ahead of a live one
+// (a v6 address with no v6 egress in front of the v4 answer), and returning on
+// the first dial error would burn the request. The last dial error is kept and
+// returned only when every public address failed; errNonPublicTarget is
+// returned only when the answer held no public address at all.
+func dialPublicAddrs(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error), network, port string, ips []netip.Addr) (net.Conn, error) {
+	var lastErr error
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			continue
+		}
+		conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		return nil, errors.New(errNonPublicTarget)
+	}
+	return nil, lastErr
 }
 
 // validateHTTPSURLParsed is checkHTTPSURL for the parsed form, so a redirect's

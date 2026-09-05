@@ -55,6 +55,13 @@ func LoadRegistry(ctx context.Context, urls []string, logger zerolog.Logger) (ra
 		}
 		logger.Info().Str("url", url).Str("serial", delegatedSerial(body)).
 			Int("ranges", len(part)).Msg("registry source loaded")
+		if ranges == nil {
+			// Adopt the first parsed source's backing array, as LoadAll does:
+			// appending into nil would duplicate that largest source with a
+			// full-size []Range allocation and memcpy on every build.
+			ranges = part
+			continue
+		}
 		ranges = append(ranges, part...)
 	}
 
@@ -99,8 +106,9 @@ func delegatedSerial(body []byte) string {
 // ParseDelegated parses an RIR delegated-extended body:
 // registry|cc|type|start|value|date|status[|extensions]. Only ipv4/ipv6
 // records with status allocated/assigned and a real country survive; version
-// header, summary rows, asn records, available/reserved, and ZZ/*/empty
-// countries are skipped. Per-line tolerant like the other parsers.
+// header, summary rows, asn records, available/reserved rows, non-country
+// markers (ZZ, EU), '*', and empty countries are skipped.
+// Per-line tolerant like the other parsers.
 func ParseDelegated(body []byte) []Range {
 	nlCount := bytes.Count(body, []byte{'\n'})
 	ranges := make([]Range, 0, nlCount)

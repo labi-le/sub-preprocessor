@@ -38,6 +38,7 @@ func TestParseDBIP(t *testing.T) {
 		"1.0.1.0,1.0.3.255,cn", // lowercase folds to CN
 		"2600:6000::,2600:6fff:ffff:ffff:ffff:ffff:ffff:ffff,US",
 		"0.0.0.0,0.255.255.255,ZZ", // unknown country skipped
+		"1.2.3.0,1.2.3.255,EU",     // region marker (not a country) skipped
 		"1.2.3.4,2001:db8::1,US",   // mixed family skipped
 		"5.6.7.8,5.6.7.0,US",       // end < start skipped
 		"9.9.9.9,9.9.9.10",         // missing country skipped

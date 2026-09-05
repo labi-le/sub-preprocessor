@@ -61,6 +61,32 @@ func TestLoadDBIP_MonthFallback(t *testing.T) {
 	}
 }
 
+// TestLoadDBIP_MonthFallbackAtMonthEnd pins the fallback on the days where
+// AddDate overflows: 2026-07-31 minus a month normalises to 2026-07-01, so the
+// previous month must be derived from the first of the month or the retry
+// points at the already-404ing current month and can never fire.
+func TestLoadDBIP_MonthFallbackAtMonthEnd(t *testing.T) {
+	stubClock(t, time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC))
+	calls := stubFetch(t, func(url fetch.SubscriptionURL, _ fetch.FileType) ([]byte, error) {
+		if string(url) == "https://x/db-2026-06.csv.gz" {
+			return []byte("1.0.0.0,1.0.0.255,AU\n"), nil
+		}
+		return nil, &fetch.StatusError{Code: http.StatusNotFound}
+	})
+
+	ranges, err := LoadDBIP(context.Background(), "https://x/db-{yyyy-mm}.csv.gz", zerolog.Nop())
+	if err != nil {
+		t.Fatalf("LoadDBIP: %v", err)
+	}
+	if len(ranges) != 1 {
+		t.Fatalf("got %d ranges, want 1", len(ranges))
+	}
+	want := []string{"https://x/db-2026-07.csv.gz", "https://x/db-2026-06.csv.gz"}
+	if len(*calls) != 2 || (*calls)[0] != want[0] || (*calls)[1] != want[1] {
+		t.Fatalf("fetch calls = %v, want %v", *calls, want)
+	}
+}
+
 // TestLoadDBIP_BothMonths404 verifies the double-404 path returns the error so
 // the caller can degrade to an empty lookup.
 func TestLoadDBIP_BothMonths404(t *testing.T) {

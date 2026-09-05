@@ -2,6 +2,7 @@ package asn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -48,7 +49,12 @@ type Resolver struct {
 	timeout  time.Duration
 	cacheTTL time.Duration
 	cache    map[netip.Addr]cachedResult
-	mu       sync.Mutex
+	mu       sync.RWMutex
+	// lookupResolver is the one net.Resolver every Cymru query goes through,
+	// shared like internal/resolver shares its instance (and set once here so
+	// a cache miss does not allocate a fresh one per IP). Tests replace it
+	// with a resolver dialing a local fake DNS server.
+	lookupResolver *net.Resolver
 	// lookupFn overrides the Cymru DNS lookup in tests; nil means r.lookup.
 	lookupFn func(ctx context.Context, ip netip.Addr) (Result, error)
 }
@@ -58,9 +64,10 @@ func New(timeout, cacheTTL time.Duration) *Resolver {
 		cacheTTL = defaultCacheTTL
 	}
 	return &Resolver{
-		timeout:  timeout,
-		cacheTTL: cacheTTL,
-		cache:    make(map[netip.Addr]cachedResult),
+		timeout:        timeout,
+		cacheTTL:       cacheTTL,
+		cache:          make(map[netip.Addr]cachedResult),
+		lookupResolver: &net.Resolver{PreferGo: true},
 	}
 }
 
@@ -69,12 +76,15 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 		return Result{}, fmt.Errorf("ASN lookup is not supported for IPv6: %s", ip)
 	}
 
-	r.mu.Lock()
+	// A warm entry is read-only, and every per-node ASN filter call pays this
+	// lock once per IP, so the hit path takes the read lock; only storeCache
+	// (and its eviction) takes the write one.
+	r.mu.RLock()
 	if cached, ok := r.cache[ip]; ok && time.Now().Before(cached.expiresAt) {
-		r.mu.Unlock()
+		r.mu.RUnlock()
 		return cached.result, cached.err
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
 	lookup := r.lookupFn
 	if lookup == nil {
@@ -140,30 +150,19 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	netR := &net.Resolver{
-		PreferGo: true,
-	}
-
 	rev := reverseIP(ip)
 
-	originTXT, err := netR.LookupTXT(resolveCtx, rev+"."+cymruOriginDomain)
+	originTXT, err := r.lookupResolver.LookupTXT(resolveCtx, rev+"."+cymruOriginDomain)
 	if err != nil {
 		return Result{}, fmt.Errorf("cymru origin lookup: %w", err)
 	}
 
-	var asn uint32
-	var country geofeed.CountryCode
-	for _, txt := range originTXT {
-		asn, country, err = parseOriginRecord(txt)
-		if err == nil {
-			break
-		}
-	}
+	asn, country, err := parseOriginRecords(originTXT)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse origin record: %w", err)
 	}
 
-	asTXT, err := netR.LookupTXT(resolveCtx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
+	asTXT, err := r.lookupResolver.LookupTXT(resolveCtx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
 	if err != nil {
 		return Result{}, fmt.Errorf("cymru as lookup: %w", err)
 	}
@@ -177,6 +176,30 @@ func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
 	}
 
 	return Result{Country: country, Name: name}, nil
+}
+
+// errEmptyOriginAnswer marks a Cymru origin answer with no records at all,
+// which parses nothing and therefore names no AS.
+var errEmptyOriginAnswer = errors.New("empty origin TXT answer")
+
+// parseOriginRecords picks the first parseable record from a Cymru origin TXT
+// answer. An answer with no parseable record — an empty one included — must
+// error rather than hand back asn 0: the caller builds AS<n>.asn.cymru.com
+// from it, and AS0 is a name Cymru does not serve.
+func parseOriginRecords(originTXT []string) (uint32, geofeed.CountryCode, error) {
+	var err error
+	for _, txt := range originTXT {
+		var asn uint32
+		var country geofeed.CountryCode
+		asn, country, err = parseOriginRecord(txt)
+		if err == nil {
+			return asn, country, nil
+		}
+	}
+	if err == nil {
+		err = errEmptyOriginAnswer
+	}
+	return 0, geofeed.CountryCode{}, err
 }
 
 // parseOriginRecord parses one Cymru origin TXT record, e.g.
@@ -239,7 +262,7 @@ func parseASRecord(txt string) string {
 
 // CacheLen returns the number of cached ASN entries (for observability).
 func (r *Resolver) CacheLen() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.cache)
 }

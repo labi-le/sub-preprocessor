@@ -211,6 +211,62 @@ func TestResolve_ConcurrentSameHostSharesOneQuery(t *testing.T) {
 	}
 }
 
+// TestResolve_CallerCancellationNotNegativeCached pins the negative-store
+// discriminator on the PARENT context: a lookup failing because the caller's
+// context is done says nothing about DNS, so it must not be remembered as a
+// negative answer — the next resolve with a live context has to hit the wire
+// again. Before the guard, one timed-out request marked the host unresolvable
+// for the whole negative TTL.
+func TestResolve_CallerCancellationNotNegativeCached(t *testing.T) {
+	addr, _, cleanup := countingDNS(t, answeringResponder)
+	defer cleanup()
+
+	r := resolver.New(5*time.Second, addr, 0, time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.Resolve(ctx, "example.com"); err == nil {
+		t.Fatal("resolve with a cancelled context must error")
+	}
+
+	want := netip.MustParseAddr("93.184.216.34")
+	ips, err := r.Resolve(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("resolve after the cancelled failure: %v", err)
+	}
+	if len(ips) != 1 || ips[0] != want {
+		t.Fatalf("resolve after the cancelled failure: got %v, want [%v]", ips, want)
+	}
+}
+
+// TestResolve_OwnTimeoutStillNegativeCached is the other half of the same
+// discriminator: the resolver's own r.timeout expiry is a genuine DNS failure
+// (the parent context is still live), so it stays cacheable and the next
+// resolve is served from the negative cache without another wire query.
+func TestResolve_OwnTimeoutStillNegativeCached(t *testing.T) {
+	release := make(chan struct{})
+	addr, queries, cleanup := heldCountingDNS(t, release)
+	defer cleanup()
+
+	r := resolver.New(30*time.Millisecond, addr, 0, time.Minute)
+
+	if _, err := r.Resolve(context.Background(), "example.com"); err == nil {
+		t.Fatal("a held answer must make the resolve time out")
+	}
+	after := queries.Load()
+
+	ips, err := r.Resolve(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("cached negative resolve: %v", err)
+	}
+	if len(ips) != 0 {
+		t.Fatalf("cached negative resolve: got %v, want empty", ips)
+	}
+	if got := queries.Load(); got != after {
+		t.Fatalf("dns queries = %d, want %d (own-timeout failure must be negative-cached)", got, after)
+	}
+}
+
 // heldCountingDNS is countingDNS with every answer withheld until release
 // closes, so all callers are still in flight when the count is taken. Answers
 // go out off the read loop: a query arriving while an earlier one is
