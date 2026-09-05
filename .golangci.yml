@@ -306,6 +306,11 @@ linters:
       # Default: 30 (but we recommend 10-20)
       min-complexity: 20
 
+    goconst:
+      # Test tables spell mihomo's scheme literals out deliberately; those
+      # occurrences must not force a constant into production code.
+      ignore-tests: true
+
     gomoddirectives:
       # List of allowed `replace` directives.
       # google.golang.org/protobuf must be replaced with metacubex's fork for
