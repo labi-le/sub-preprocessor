@@ -121,11 +121,11 @@ func (m *Metrics) writeMetrics(dst io.Writer) {
 	writeProbeStages(w, r.ProbeStages)
 	writePrecheck(w, r.Precheck)
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
-	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.", float64(r.GeoUnknown))
+	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.", float64(r.GeoUnknown))
 	writeTrace(w, r.Trace)
 	writeGemini(w, r.Gemini)
 	if len(r.KeptCountries) > 0 {
-		help(w, "stable_kept_country_nodes", "gauge", "Published nodes per resolved country (last cycle).")
+		help(w, "stable_kept_country_nodes", "gauge", "Published nodes per country, booked by their first rendered [GEO:xx] tag (last cycle).")
 		for _, c := range sortedKeys(r.KeptCountries) {
 			sampleEsc(w, "stable_kept_country_nodes", "country", c, float64(r.KeptCountries[c]))
 		}
@@ -148,7 +148,31 @@ func (m *Metrics) writeMetrics(dst io.Writer) {
 	}
 }
 
+// writeFilters renders the through-node filter families. The drop series
+// cannot carry the batch breaker: a tripped gate keeps every survivor and
+// books the same present zeros as a ran-clean one, so the trusted gauge
+// renders the state instead, on the pre-check's pattern — 1 when the verdict
+// was believed and its drops enacted, 0 when the breaker rejected it, and no
+// sample when the filter reached no verdict at all (skipped, like the keyless
+// gemini gate; a cancelled check never publishes). Rendering nothing for that
+// last case is deliberate, exactly as for stable_precheck_trusted: the absent
+// per-filter series means "no verdict this cycle", never "disbelieved".
 func writeFilters(w *exposition, filters []stable.FilterReport) {
+	help(w, "stable_filter_trusted", "gauge",
+		"1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.")
+	for _, f := range filters {
+		if f.State == stable.FilterAbsent {
+			// A filter that reached no verdict (the keyless gemini skip) must
+			// not read as either trusted value: its in/kept alone would claim
+			// a clean pass, so the series says "no verdict" by absence.
+			continue
+		}
+		var trusted float64
+		if f.State == stable.FilterRan {
+			trusted = 1
+		}
+		sampleEsc(w, "stable_filter_trusted", labelFilter, f.Name, trusted)
+	}
 	help(w, "stable_filter_in_nodes", "gauge", "Survivors entering each through-node filter.")
 	for _, f := range filters {
 		sampleEsc(w, "stable_filter_in_nodes", labelFilter, f.Name, float64(f.In))
@@ -256,10 +280,22 @@ func writePrecheck(w *exposition, p stable.PrecheckReport) {
 		float64(p.Unresolved))
 }
 
-// writeTrace renders the cloudflare annotation stage. It is not a filter and has
-// no FilterReport: the trace drops nothing, so answered+unanswered is simply
-// the published list split by whether the node told us where it exits.
+// writeTrace renders the cloudflare annotation stage only when it ran. The
+// trace is not a filter and has no FilterReport: it drops nothing, so where
+// these series render, answered+unanswered is simply the published list split
+// by whether the node told us where it exits. A cycle that never reached the
+// stage (the prober cannot trace, the cycle asked for none, or
+// filterAndMeasureEgress returned before it when ParseProxies failed -- a
+// skip only the no-retention prober fallback can take, production's prober
+// handing its probe-built adapters over instead) must not
+// render answered=0/unanswered=0 -- byte-identical to a trace that ran and
+// nobody answered, the failure this state exists to tell apart, on the
+// pre-check's and gemini gate's precedent. TraceAbsent is the zero value, so a
+// report assembled without the stage says so without anyone setting a field.
 func writeTrace(w *exposition, t stable.TraceReport) {
+	if t.State != stable.TraceRan {
+		return
+	}
 	gauge(w, "stable_trace_answered_nodes", "Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.", float64(t.Answered))
 	gauge(w, "stable_trace_unanswered_nodes", "Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.", float64(t.Unanswered))
 	gauge(w, "stable_trace_moved_nodes", "Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.", float64(t.Moved))
@@ -277,7 +313,8 @@ func writeTrace(w *exposition, t stable.TraceReport) {
 // (no scrape, no cycle published yet, no gemini filter in the chain, or one
 // configured that never reached its check: buildNodeFilters dropped it for
 // want of Gemini support on the prober, or filterAndMeasureEgress bailed
-// before the chain when ParseProxies failed) -- and mistaking a dead gate for
+// before the chain when ParseProxies failed on the no-retention prober
+// fallback) -- and mistaking a dead gate for
 // a healthy one is exactly the failure this metric exists to make visible.
 func writeGemini(w *exposition, g stable.GeminiReport) {
 	if g.State == stable.GeminiGateAbsent {

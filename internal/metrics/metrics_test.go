@@ -35,10 +35,10 @@ func TestMetricsObserveRender(t *testing.T) {
 			{Name: "mifa", Total: 133, Valid: 20, Tested: 14, Filtered: 9, DNSDrop: 5, GeoDrop: 71, CIDRDrop: 33, GeoBlockDrop: 4},
 		},
 		Filters: []stable.FilterReport{
-			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}},
-			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}},
+			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}, State: stable.FilterRan},
+			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}, State: stable.FilterRan},
 		},
-		Trace:         stable.TraceReport{Answered: 157, Unanswered: 8, Moved: 47},
+		Trace:         stable.TraceReport{State: stable.TraceRan, Answered: 157, Unanswered: 8, Moved: 47},
 		Gemini:        stable.GeminiReport{State: stable.GeminiGateRan, Checks: 306, Unverified: 22},
 		Precheck:      stable.PrecheckReport{State: stable.PrecheckRan, Dialled: 1907, Refused: 1119, Unresolved: 99},
 		KeptSpeeds:    []int{3, 7, 30, 120},
@@ -58,6 +58,8 @@ func TestMetricsObserveRender(t *testing.T) {
 		`stable_filter_kept_nodes{filter="bandwidth"} 165`,
 		`stable_filter_dropped_nodes{filter="bandwidth",reason="slow"} 49`,
 		`stable_filter_dropped_nodes{filter="claude",reason="blocked"} 7`,
+		`stable_filter_trusted{filter="bandwidth"} 1`,
+		`stable_filter_trusted{filter="claude"} 1`,
 		"# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.",
 		"# TYPE stable_trace_answered_nodes gauge",
 		"stable_trace_answered_nodes 157",
@@ -182,9 +184,10 @@ func TestMetricsSourceOwnerLabels(t *testing.T) {
 // than nothing: absence says only "no gemini gate ran", which has four causes
 // -- nothing scraped yet, no cycle published yet, no gemini filter in the
 // chain, or one configured that never reached its check (buildNodeFilters
-// dropped it with a WARN for want of Gemini support on the prober, or
-// ParseProxies failed and the whole through-node stage was skipped, publishing
-// every survivor UNFILTERED) -- and only the first two are benign.
+// dropped it with a WARN for want of Gemini support on the prober, or the
+// no-retention prober fallback's ParseProxies failed and the whole
+// through-node stage was skipped, publishing every survivor UNFILTERED) --
+// and only the first two are benign.
 func TestMetricsGeminiGateStatesRenderApart(t *testing.T) {
 	t.Parallel()
 
@@ -341,6 +344,194 @@ func precheckLines(out string) string {
 	var b strings.Builder
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(line, "stable_precheck_") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// TestMetricsFilterStatesRenderApart is the batch breaker's half of the
+// pre-check lesson: a gate whose whole-batch verdict tripped breakerTrips
+// keeps every survivor and books the same present zeros as a gate that ran and
+// verified everyone clean, so from the drop series alone "ran and dropped
+// everything" and "ran and dropped nothing" are one reading. FilterReport.State
+// carries the truth and renders as the trusted gauge on the pre-check's
+// pattern: 1 = the verdict was believed, 0 = disbelieved, and no sample = the
+// filter reached no verdict (the keyless gemini skip), where
+// filter_in/filter_kept alone would read like a clean pass.
+func TestMetricsFilterStatesRenderApart(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[stable.FilterState]string{}
+	for _, tc := range []struct {
+		name  string
+		state stable.FilterState
+		want  []string
+	}{
+		{
+			name:  "ran and verified everyone clean",
+			state: stable.FilterRan,
+			want:  []string{`stable_filter_trusted{filter="gemini"} 1`},
+		},
+		{
+			name:  "tripped, verdict disbelieved",
+			state: stable.FilterTripped,
+			want:  []string{`stable_filter_trusted{filter="gemini"} 0`},
+		},
+		{
+			name:  "no verdict (keyless skip)",
+			state: stable.FilterAbsent,
+		},
+	} {
+		dropped := map[string]int{}
+		if tc.state != stable.FilterAbsent {
+			// Both reached-verdict shapes book the two zero keys, exactly as in
+			// production: this is the byte-identity the finding rested on.
+			dropped = map[string]int{"blocked": 0, "unreachable": 0}
+		}
+		m := metrics.New()
+		m.Observe(stable.CycleReport{
+			Filters: []stable.FilterReport{
+				{Name: "gemini", In: 700, Kept: 700, Dropped: dropped, State: tc.state},
+			},
+		})
+		out := render(t, m)
+		for _, w := range tc.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: missing %q in:\n%s", tc.name, w, out)
+			}
+		}
+		// Sample lines, not a substring search: the trusted HELP text names the
+		// series, and an absent state may still be mentioned there.
+		if len(tc.want) == 0 && familyLines(out, "stable_filter_trusted") != "" {
+			t.Errorf("%s: a filter with no verdict must render no trusted sample:\n%s", tc.name, out)
+		}
+		rendered[tc.state] = familyLines(out, "stable_filter_trusted")
+	}
+
+	for a, ra := range rendered {
+		for b, rb := range rendered {
+			if a != b && ra == rb {
+				t.Errorf("filter states %d and %d render the trusted family identically as %q", a, b, ra)
+			}
+		}
+	}
+}
+
+// TestMetricsFilterTrippedSharesTheDropSeriesWithClean is the assertion the
+// trusted family exists for: the drop reading a tripped batch produces is
+// byte-identical to a verified clean pass, and the trusted gauge is the ONLY
+// line that separates the two in the whole exposition.
+func TestMetricsFilterTrippedSharesTheDropSeriesWithClean(t *testing.T) {
+	t.Parallel()
+
+	renderState := func(state stable.FilterState) string {
+		m := metrics.New()
+		m.Observe(stable.CycleReport{
+			Filters: []stable.FilterReport{{
+				Name: "gemini", In: 700, Kept: 700,
+				Dropped: map[string]int{"blocked": 0, "unreachable": 0},
+				State:   state,
+			}},
+		})
+		return render(t, m)
+	}
+	clean := renderState(stable.FilterRan)
+	tripped := renderState(stable.FilterTripped)
+
+	for _, family := range []string{
+		"stable_filter_in_nodes", "stable_filter_kept_nodes", "stable_filter_dropped_nodes",
+	} {
+		if got, want := familyLines(clean, family), familyLines(tripped, family); got != want {
+			t.Errorf("%s must not distinguish a tripped batch from a clean pass:\nclean:\n%s\ntripped:\n%s", family, got, want)
+		}
+	}
+	if got, want := familyLines(clean, "stable_filter_trusted"), `stable_filter_trusted{filter="gemini"} 1`+"\n"; got != want {
+		t.Errorf("clean pass trusted = %q, want %q", got, want)
+	}
+	if got, want := familyLines(tripped, "stable_filter_trusted"), `stable_filter_trusted{filter="gemini"} 0`+"\n"; got != want {
+		t.Errorf("tripped batch trusted = %q, want %q", got, want)
+	}
+	if got := withoutSampleLines(clean, "stable_filter_trusted{"); got != withoutSampleLines(tripped, "stable_filter_trusted{") {
+		t.Errorf("a tripped batch and a clean pass differ beyond the trusted gauge:\nclean:\n%s\ntripped:\n%s", clean, tripped)
+	}
+}
+
+// familyLines extracts one family's sample lines (HELP/TYPE headers excluded)
+// so two renderings can be compared for equality on that family alone.
+func familyLines(out, family string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, family+"{") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// withoutSampleLines returns out minus every sample line starting with prefix,
+// so two renderings expected to differ ONLY on those samples compare equal.
+func withoutSampleLines(out, prefix string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// TestMetricsTraceAbsentRendersNoFamily pins the trace's absent state: a cycle
+// whose trace never ran (the prober cannot trace, the cycle asked for none, or
+// the no-retention prober fallback's ParseProxies failed before the stage)
+// publishes survivors with no egress question asked. Rendering
+// answered=0/unanswered=0 for it is byte-identical to a trace that ran and
+// nobody answered, so the family must be silent -- exactly how writePrecheck
+// and writeGemini treat their absent states.
+func TestMetricsTraceAbsentRendersNoFamily(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{Kept: 1509, Trace: stable.TraceReport{}})
+	out := render(t, m)
+	// The published list is non-empty, so these zeros would read as "every
+	// node answered nothing" rather than "no trace ran".
+	if !strings.Contains(out, "stable_kept_nodes 1509") {
+		t.Fatalf("fixture must publish nodes:\n%s", out)
+	}
+	if got := traceLines(out); got != "" {
+		t.Errorf("an absent trace rendered a family:\n%s", got)
+	}
+	if strings.Contains(out, "# HELP stable_trace_answered_nodes") {
+		t.Errorf("an absent trace rendered HELP/TYPE headers:\n%s", out)
+	}
+
+	// The state the absent one must not be confused with: the trace ran and
+	// nobody answered, which renders the zeros the absent case suppresses.
+	ran := metrics.New()
+	ran.Observe(stable.CycleReport{Kept: 1509, Trace: stable.TraceReport{State: stable.TraceRan}})
+	ranOut := render(t, ran)
+	for _, want := range []string{
+		"stable_trace_answered_nodes 0",
+		"stable_trace_unanswered_nodes 0",
+		"stable_trace_moved_nodes 0",
+	} {
+		if !strings.Contains(ranOut, want) {
+			t.Errorf("a trace that ran and nobody answered must render %q:\n%s", want, ranOut)
+		}
+	}
+}
+
+// traceLines extracts the trace samples so two renderings can be compared for
+// equality; the HELP/TYPE headers are constant.
+func traceLines(out string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "stable_trace_") {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}

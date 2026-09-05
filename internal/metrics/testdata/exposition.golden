@@ -49,7 +49,7 @@ stable_precheck_unresolved_endpoints 61
 # HELP stable_kept_nodes Nodes published to /stable.txt.
 # TYPE stable_kept_nodes gauge
 stable_kept_nodes 1509
-# HELP stable_geo_unknown_nodes Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.
+# HELP stable_geo_unknown_nodes Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.
 # TYPE stable_geo_unknown_nodes gauge
 stable_geo_unknown_nodes 12
 # HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.
@@ -70,7 +70,7 @@ stable_gemini_gate_checks 654
 # HELP stable_gemini_gate_unverified_checks Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.
 # TYPE stable_gemini_gate_unverified_checks gauge
 stable_gemini_gate_unverified_checks 12
-# HELP stable_kept_country_nodes Published nodes per resolved country (last cycle).
+# HELP stable_kept_country_nodes Published nodes per country, booked by their first rendered [GEO:xx] tag (last cycle).
 # TYPE stable_kept_country_nodes gauge
 stable_kept_country_nodes{country="??"} 3
 stable_kept_country_nodes{country="FI"} 40
@@ -92,6 +92,11 @@ stable_cycle_phase_duration_seconds{phase="publish"} 1.5
 # HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
 # TYPE stable_last_success_timestamp_seconds gauge
 stable_last_success_timestamp_seconds 1.755474123e+09
+# HELP stable_filter_trusted 1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.
+# TYPE stable_filter_trusted gauge
+stable_filter_trusted{filter="geoblock"} 1
+stable_filter_trusted{filter="bandwidth"} 1
+stable_filter_trusted{filter="gemini"} 1
 # HELP stable_filter_in_nodes Survivors entering each through-node filter.
 # TYPE stable_filter_in_nodes gauge
 stable_filter_in_nodes{filter="geoblock"} 900
@@ -107,6 +112,8 @@ stable_filter_kept_nodes{filter="gemini"} 700
 stable_filter_dropped_nodes{filter="geoblock",reason="blocked"} 50
 stable_filter_dropped_nodes{filter="bandwidth",reason="slow"} 150
 stable_filter_dropped_nodes{filter="bandwidth",reason="unreachable"} 0
+stable_filter_dropped_nodes{filter="gemini",reason="blocked"} 0
+stable_filter_dropped_nodes{filter="gemini",reason="unreachable"} 0
 # HELP stable_source_nodes_total Nodes each source yielded before filtering last cycle. source is the verbatim config key; owner and feed are the entry's own fields, never re-derived from the name -- owner=crawler when the crawler minted the entry and curated when it was hand-added, feed the channel it was minted from, or the name itself where no channel was recorded.
 # TYPE stable_source_nodes_total gauge
 stable_source_nodes_total{feed="genliberty",owner="crawler",source="genliberty-3631"} 412
@@ -292,18 +299,9 @@ stable_precheck_unresolved_endpoints 0
 # HELP stable_kept_nodes Nodes published to /stable.txt.
 # TYPE stable_kept_nodes gauge
 stable_kept_nodes 0
-# HELP stable_geo_unknown_nodes Published nodes whose GEO tag is [GEO:??]: no annotation provider resolved a country.
+# HELP stable_geo_unknown_nodes Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.
 # TYPE stable_geo_unknown_nodes gauge
 stable_geo_unknown_nodes 0
-# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.
-# TYPE stable_trace_answered_nodes gauge
-stable_trace_answered_nodes 0
-# HELP stable_trace_unanswered_nodes Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.
-# TYPE stable_trace_unanswered_nodes gauge
-stable_trace_unanswered_nodes 0
-# HELP stable_trace_moved_nodes Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.
-# TYPE stable_trace_moved_nodes gauge
-stable_trace_moved_nodes 0
 # HELP stable_gemini_gate_enabled 1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.
 # TYPE stable_gemini_gate_enabled gauge
 stable_gemini_gate_enabled 0
@@ -327,6 +325,8 @@ stable_cycle_phase_duration_seconds{phase="publish"} 0
 # HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
 # TYPE stable_last_success_timestamp_seconds gauge
 stable_last_success_timestamp_seconds 1.755474123e+09
+# HELP stable_filter_trusted 1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.
+# TYPE stable_filter_trusted gauge
 # HELP stable_filter_in_nodes Survivors entering each through-node filter.
 # TYPE stable_filter_in_nodes gauge
 # HELP stable_filter_kept_nodes Survivors kept by each through-node filter.

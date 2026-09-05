@@ -112,13 +112,15 @@ func goldenCases() []goldenCase {
 			},
 		},
 		Filters: []stable.FilterReport{
-			{Name: "geoblock", In: 900, Kept: 850, Dropped: map[string]int{"blocked": 50}},
-			{Name: "bandwidth", In: 850, Kept: 700, Dropped: map[string]int{"slow": 150, "unreachable": 0}},
-			{Name: "gemini", In: 700, Kept: 700, Dropped: map[string]int{}},
+			{Name: "geoblock", In: 900, Kept: 850, Dropped: map[string]int{"blocked": 50}, State: stable.FilterRan},
+			{Name: "bandwidth", In: 850, Kept: 700, Dropped: map[string]int{"slow": 150, "unreachable": 0}, State: stable.FilterRan},
+			// A ran gate books both drop keys, zeros included: only a skipped
+			// gate (no verdict) keeps the map empty.
+			{Name: "gemini", In: 700, Kept: 700, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan},
 		},
 		KeptSpeeds:      goldenSpeeds(),
 		KeptLatenciesMs: []int{0, 50, 150, 300, 600, 900, 1200, 2000, 3500, 5700, 11000, 20000},
-		Trace:           stable.TraceReport{Answered: 1400, Unanswered: 109, Moved: 87},
+		Trace:           stable.TraceReport{State: stable.TraceRan, Answered: 1400, Unanswered: 109, Moved: 87},
 		Gemini:          stable.GeminiReport{State: stable.GeminiGateRan, Checks: 654, Unverified: 12},
 	}
 	degraded := &stable.CycleReport{

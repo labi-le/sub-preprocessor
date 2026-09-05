@@ -371,7 +371,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Through-node filter drops by reason",
-      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody; no line means it produced no verdict \u2014 unconfigured, no usable key, or cancelled.",
+      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody \u2014 but not necessarily a clean pass: a gate whose whole survivor batch was condemned had the verdict disbelieved by the plausibility breaker, kept every survivor, and booked the same present zeros, warning instead. Each gate's \"verdict trusted\" line (stable_filter_trusted, right axis) tells the two apart: 1 = the verdict was believed and its drops were enacted last cycle, 0 = the breaker rejected it and nothing was dropped, no line = the gate reached no verdict \u2014 unconfigured, no usable key, or cancelled.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -393,7 +393,44 @@
             }
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "verdict trusted$"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.stacking.mode",
+                "value": "none"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -416,6 +453,15 @@
           },
           "expr": "stable_filter_dropped_nodes{job=\"$job\"}",
           "legendFormat": "{{filter}}/{{reason}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_trusted{job=\"$job\"}",
+          "legendFormat": "{{filter}} verdict trusted"
         }
       ]
     },
@@ -1809,6 +1855,304 @@
           "legendFormat": "verdict trusted"
         }
       ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Gemini gate enabled",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 92
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NO GEMINI GATE",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_enabled{job=\"$job\"}",
+          "instant": true
+        }
+      ],
+      "description": "The gemini gate's tri-state, one tile: 1 means the gate ran last cycle and classified responses; 0 means a gemini filter is in this job's chain but had no usable API key, so it checked nothing and every survivor passed through unverified; No data means no gemini gate ran at all - no cycle published yet, no gemini filter in this job's chain, or a configured one that never reached its check (the through-node stage skipped it). A gate that is OFF must not read like a gate that is FINE, and the other two tiles stay at 0 while this reads 0."
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Gemini gate checks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 92
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NO GEMINI GATE",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_checks{job=\"$job\"}",
+          "instant": true
+        }
+      ],
+      "description": "Gemini API responses the gate classified last cycle: the denominator for the unverified-checks tile beside it. One per proxy that ANSWERED, so it is neither the node count nor the gemini filter's in count - a multi-port node contributes one per answering port, and a proxy that never answered is in neither term. 0 beside an enabled 1 means the gate ran and every check was verified."
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Gemini gate unverified checks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 92
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NO GEMINI GATE",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_gemini_gate_unverified_checks{job=\"$job\"}",
+          "instant": true
+        }
+      ],
+      "description": "Responses that told the gate nothing about the egress location last cycle: the API rejected the request before evaluating it (401/403/404/429, or a 400 API_KEY_INVALID - a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified; this is not a drop, not a block and not a request error. A large share of the checks tile here means the gate is running blind."
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Kept-node speed min (last cycle)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Mbits",
+          "noValue": "NO SPEED SAMPLE",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_kept_speed_min_mbps{job=\"$job\"}",
+          "instant": true
+        }
+      ],
+      "description": "Slowest kept node's measured download speed last cycle: the floor of the speed histogram panel, and the answer to whether the bandwidth gate is cutting inside the live population. Exported only when a cycle measured at least one kept-node speed, so No data means nothing was measured that cycle, exactly like the max line on the speed panel."
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Kept-node latency min (last cycle)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "NO KEPT NODES",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_kept_latency_min_ms{job=\"$job\"}",
+          "instant": true
+        }
+      ],
+      "description": "Fastest kept node's mean probe delay last cycle: the head of the latency histogram panel, shown on its own tile because the histogram panel plots the max and the quantiles. Every kept survivor carries a latency, so No data here means no cycle has published nodes yet, not a missing measurement."
     }
   ]
 }
