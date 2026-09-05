@@ -42,6 +42,21 @@ implementing it; say so with evidence when it is wrong. When the refutation is I
 disputed, neither side closes the finding unilaterally: it goes to whoever owns the numbered
 list — the agent that set the scope — who rules and records the ruling in that list.
 
+**Refutation is a routine resolution, not a rare concession — and the strike is
+recorded in the numbered list, not left to vanish.** The full round this repo
+just ran closed with seventeen of its sixty-three findings struck by a recorded
+ruling rather than implemented, and the struck set is not weak residue: it holds
+refutations of the round's own performance claims ("Refutation: the arena is
+correctly bounded — no action"), review questions answered rather than fixed
+("Answer, not a defect"), a finding folded into a sharper one, and defects that
+turned out to be the design ("a minimum-source publish gate is a new policy
+knob, not a defect", "stage order is a settled design decision"). A round that
+closes with strikes has not under-delivered: each strike is a regression that
+did not ship, which is exactly why striking with evidence — not silence — is
+what closes a finding, and why the agreement must show the ruling. "Every
+numbered point implemented" and "every numbered point resolved" are different
+claims, and only the list tells them apart.
+
 **A green suite is not evidence, and MUST NEVER be reported as a review result.** A review
 earns its cost only by trying to break the change; mutation is the cheapest way and is
 expected — revert the fix, confirm the new test fails, restore. The restore is not done
@@ -62,6 +77,21 @@ found tests here that could not fail at all: the mieru outcome fold shipped with
 that looked like coverage while neutering both production fold conditions left the package
 green, and replacing `betterTraceOutcome`'s body with `return a.name < b.name` also left it
 green (`364a50d`) — every ranked case sorted identically under either key.
+
+**A half-applied edit is caught by building before yielding, not by review.** The two full
+rounds this repo just ran showed the failure mode recurring: a test file clobbered past its
+edit point, a function signature changed while one caller kept the old shape, literal XML
+pasted into a Go source file. None of these surfaces in review, and
+structurally cannot: the passes are read-only and never execute the tree, and each half of a
+half-applied change reads coherently on its own — the clobbered file reads as a file, the
+left-behind caller reads as code that once matched the old signature, the pasted markup
+reads as a string that never closes. `go build ./...` and the touched package's tests find
+all three in one run, which is why an implementer compiles before yielding instead of
+leaving the discovery to a later round: a review finding costs a one-line fix, while a
+tree that does not build costs whoever inherits it a full repair cycle spent reconstructing
+what the edit meant to do. Mutation is the reviewer's side of the same coin — it exists to
+break green suites; the compile gate exists so a tree that was never green cannot be
+reported as done in the first place.
 
 **Why review at all when CI is green.** The `geotrace` filter once shipped completely inert,
 and stayed that way from `11e5ca3` to `e554307`. `go test ./...`, `-race` and

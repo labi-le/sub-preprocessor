@@ -12,8 +12,8 @@
 - `internal/resolver` — DNS resolution with an in-memory TTL cache
 - `internal/asn` — ASN lookup (Team Cymru) for the ASN name/country filter
 - `internal/filter` — country allow/deny bitset
-- `internal/subscription` — subscription fetch/normalize/parse (scheme-generic, plus dedicated decoders for `vmess://`, legacy `ss://`, `ssr://` and `mierus://` in `vmess.go`/`ss.go`/`ssr.go`/`mieru.go`, and Xray-JSON→share-link conversion in `xray.go`)
-- `internal/rewrite` — node name/fragment rewrite (`[GEO:XX]`, vmess `ps` rewrite)
+- `internal/subscription` — subscription fetch/normalize/parse (scheme-generic, plus dedicated decoders for `vmess://`, legacy `ss://`, `ssr://` and `mierus://` in `vmess.go`/`ss.go`/`ssr.go`/`mieru.go`, Xray-JSON→share-link conversion in `xray.go`, and the vmess/ssr display-name rewriters `RewriteVmessName`/`RewriteSSRName` with their `…Tagged` forms in `vmess.go`/`ssr.go`)
+- `internal/rewrite` — node name/fragment rewrite (`[GEO:XX]` folding); the vmess/ssr payload arms are composed inside `internal/subscription`'s tagged rewriters, which `NodeName` calls with the tag prefix and clean name as separate parts
 - `internal/preprocess` — the core per-node filter pipeline
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
 - `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), the post-filter `cdn-cgi/trace` egress measurement, one-shot name annotation at publication, checker loop, holder, and the JSON snapshot (`snapshot.go`) that carries the published list across a restart

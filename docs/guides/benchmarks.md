@@ -37,7 +37,14 @@
   differ between trees at `-benchtime 100x` while the SAME tree
   reproduces the same spread across consecutive runs - `Resolution_Concurrent` even flips
   64/65 allocs/op - so that is the instrument, and the honest comparison diffs the TOUCHED
-  packages rather than the whole list. Do NOT replace that with a quoted range: the two
+  packages rather than the whole list. Read that enumeration as of the tag-removal
+  wave it describes: the repair rounds have since edited `ParseProxies`'s
+  role and `internal/resolver`'s `Resolve`, so `ParseProxies`, `Resolution` and
+  `Resolution_Concurrent` can no longer be cited as untouched-package controls —
+  the resolver's hit path no longer pays the per-call `ParseAddr` parse-error
+  allocation (the cache is probed before the parse), and the settled-tree run
+  confirms it: `BenchmarkResolution_CachedHit` reads 0 B/op / 0 allocs/op
+  (bench-20260905T085512Z.txt). Do NOT replace that with a quoted range: the two
   `CacheStore/parallel` cases have a STABLE FLOOR (13 B/op) and a ceiling that is a draw of
   the instrument, because `B/op` is a total divided by 100 iterations spread over 16 P's, so
   a handful of fixed per-P costs lands the quotient anywhere. Three `-benchtime 100x
@@ -73,6 +80,19 @@
     `BenchmarkNormalizeParse_XrayJSON160Outbounds` 6750 -> 3067. `queryList`, an array-backed
     `url.Values`, replaced the map form on the ssr and xray paths, and a new display name is
     spliced over the old `ps` rather than marshalled from a decoded document.
+    **The repair rounds moved the paths behind these three; the settled-tree re-read
+    (bench-20260905T085512Z.txt) holds their allocation counts and re-prices the changed
+    work.** `BenchmarkParse_SSR` still reads 100 allocs/op (8000 B/op), `BenchmarkRewriteVmessName`
+    3 allocs/op (448 B/op) and `BenchmarkNormalizeParse_XrayJSON160Outbounds` 3067 allocs/op
+    (343137 B/op) — the vmess number gate hoisted above `json.Unmarshal` (a bare `"port":443`
+    used to pay one heap `&UnmarshalTypeError` per node for a decode that could never succeed)
+    and the display-name join moved into the tagged payload rewriters, which compose the tag
+    prefix and clean name in their own scratch instead of joining them into one heap string per
+    annotated node (`RewriteVmessNameTagged`/`RewriteSSRNameTagged`). The new arms prove the
+    two removals: `BenchmarkParse_Vmess/quoted` and `/numeric` are byte-identical at 5602 B/op /
+    50 allocs/op (the numeric-token allocation is gone), and
+    `BenchmarkNodeNamePayloadArms/vmess` reads 3 allocs/op with `/ssr` at 5 — the composition
+    allocation is gone and the payload arms sit on their rewriter floors.
   - `internal/crawl` — `BenchmarkHarvestPages/guarded` 387 -> 21 for this rewrite, then
     21 -> 16 across the naming cutover that segmented the walk; `/inline` 43 -> 11 and
     691746 -> 60024 B/op. Hand-scanned URL and inline-node extraction plus `unescapeInto`,
@@ -94,10 +114,24 @@
   **The `1600 B/op` in the FIXTURE bullet above is a PRE-WAVE reading.**
   `BenchmarkProcessBodyPipeline` runs through the annotate path, and this wave touched it:
   `rewrite.NodeName` writes the tag prefix, its space and the name straight into the caller's
-  buffer (`rewrite.go:58-63`), leaving a contiguous name to be built only by the vmess/ssr
-  payload arms (`displayName`). Re-read on the settled tree it allocates NOTHING — 0 B/op,
+  buffer (`rewrite.go:55-66`), leaving a contiguous name to be built only by the vmess/ssr
+  payload arms (then `displayName`). Re-read on the settled tree it allocates NOTHING — 0 B/op,
   0 allocs/op over its 100 nodes — so the `4640 -> 1600` arithmetic describes a tree at
-  `5d06fb6` and says nothing about this one.
+  `5d06fb6` and says nothing about this one. Two caveats date that reading, and the
+  settled-tree run (bench-20260905T085512Z.txt) resolves both. The fixture is
+  100% vless, and the fixture bound is real: vmess/ss-legacy/ssr lines allocate their
+  base64 parse buffers per node inside `Parse`, before the IP stage can drop anything, so an
+  all-vless fixture cannot see those buffers at all — the repair rounds added
+  `BenchmarkProcessBodySlice_MixedSchemes` (92% vless / 4% vmess / 2% ss-legacy / 2% ssr) to
+  put them inside the guarded envelope, and its first committed reading is 2849844 B/op /
+  1393 allocs/op — the arm is LargestSource's size and block with the scheme minority
+  swapped in, which is what the same-shaped all-vless `BenchmarkProcessBodySlice_LargestSource`
+  reads 2878595 B/op / 303 allocs/op against. And the tree the 0-alloc reading was re-read on
+  predates the rounds' rewrite change
+  (the `displayName` join deleted, the payload arms composing in the rewriters' scratch):
+  re-read on the settled tree, `BenchmarkProcessBodyPipeline` still allocates NOTHING —
+  0 B/op, 0 allocs/op — so the rounds' own refutation held, and the flagship claim survives
+  all three rounds.
   **Two ns/op LOSSES came out of this wave on source it does not touch, and they are
   recorded here rather than against either path.** `BenchmarkParse_SSLegacy` reads 3623 and
   3636 ns/op on two links of HEAD against 3776 and 3876 on two links of the settled tree
@@ -134,6 +168,16 @@
   apparatus rather than an arm of the shipped harvest, and the bullet below is where all of it
   belongs. No arm in the package sits above HEAD, on either half of agreement item 14.
   `BenchmarkWriteSources` is untouched by that narrowing and stays a 2026-08-18 reading.
+  **The repair rounds then edited the code behind these arms again — `pageCursor`
+  hand-scans the `data-post` attribute where `cursorRe`'s `FindAllStringSubmatch` ran per
+  match, inline-node extraction became one exact-buffer pass, and `extractRefs` clones each
+  slug out of its page. The settled-tree re-read (bench-20260905T085512Z.txt, on a Ryzen 5
+  5600X where the figures above were taken on a 9800X3D, so allocation columns are the
+  comparable half) holds EVERY allocation figure recorded in this bullet except one:
+  `guarded` 1848 B / 16 allocs, `segmented` 1848 / 16, `noise` 3432 / 37, `/blind` 25560 / 244
+  and all six `BenchmarkHarvestPagesByDistinct` points re-read exactly, while `/inline`
+  moved — 59704 B / 10 allocs against the recorded 60024 / 11 — which is the rounds'
+  exact-buffer inline extraction showing up as one fewer allocation.**
   - **`BenchmarkWriteSources` 86016 -> 73728 B/op, 3 allocs/op either side — and the formula is
     a THIRD of it, not the whole.** Holding the fixture at its new shape and reverting only
     `sourceLabelBytes` to `2*len(s.Name) + labelSyntaxBytes` reads 77824 B/op, so 4096 B is
@@ -302,12 +346,30 @@
   Every figure below was re-read for this entry on the settled tree — the reorder plus the
   `probeNodes` short-circuit that skips `probeAddr` for a mapping the pre-check will never dial —
   against a snapshot of the pre-reorder worktree, two `/tmp` exports of each.
-  - `BenchmarkParseProxies` is the UNCHANGED work — the checker's survivor parse, which is the
-    whole payload — and it holds over the same 300 nodes: 5880736 -> 5880414 B/op, allocations
+  **The repair rounds then re-edited this exact code — `Probe` keeps the adapter
+  objects its parse built (`m.probed`) and hands them to the egress stage by label
+  (`TakeProbedAdapters`, `proxiesByLabel` in checker.go), removing the cycle's second parse
+  of the survivors; `probeNodes`/`probeSet` stopped deriving a label per position — labels
+  now exist only for positions the pre-check condemned — and `foldProbeResults` reads them
+  accordingly. The rows below describe the tree they name; the settled-tree re-read
+  (bench-20260905T085512Z.txt) is quoted in each row that has one.**
+  - `BenchmarkParseProxies` is the UNCHANGED work — at that time the checker's survivor
+    parse, which is the whole payload — and it holds over the same 300 nodes: 5880736 ->
+    5880414 B/op, allocations
     unmoved. Read the counts as unmoved rather than as -1: each side flickers by one, the
     pre-reorder tree reading 54794/54795 and the settled tree 54793/54794. The -322 B is the
     index-aligned `[]bool` of TCP verdicts that no longer exists — `make([]bool, 300)` lands in
     the 320-byte size class.
+    **Since the repair rounds the function is the egress's FALLBACK only**: a prober
+    without the retention capability still re-parses the survivors (`parseEgressProxies`,
+    `checker.go:583-593`) — with the shipped `MihomoProber` the egress consumes the adapters
+    its `Probe` kept, so the cycle parses the survivors exactly once and the row's per-cycle
+    role is gone. The settled-tree re-read prices exactly that fallback: 5879764 B/op and
+    54791 allocs/op over the same 300 nodes (bench-20260905T085512Z.txt), two allocations
+    below the 54793/54794 flicker recorded above — the drift a function whose body did not
+    change is expected to read. **The row no longer prices a per-cycle cost at all**: it is
+    the standalone parse and the no-retention fallback, which is why the removal of the
+    duplicated second parse shows in no committed delta.
   - `BenchmarkProbeParseCondemned` is the new work, the same 300-node payload with
     `benchCondemnedPercent` of the positions condemned: **29656 allocs/op and 3134816 B/op
     against the 54794 / 5880736 the eager front-end spent, -45.9% and -46.7%.** Scaled to the
@@ -320,8 +382,17 @@
     prices exactly those three, and a step added to `Probe` anywhere else would not appear in it.
     Nothing asserts that the sequence still matches `Probe`'s body — the same twin axis as `/blind`
     above, UNCLOSED here, and the scaled `~739000 allocations and ~81 MB` inherits it.
+    **The repair rounds left the twin axis wider instead of closing it**: `probeNodes` no
+    longer derives a label for ANY position, the condemned positions' labels moved into
+    `probeSet` (outside this harness), and a successful `Probe` no longer closes its adapters.
+    The settled-tree re-read shows the mismatch measures nothing on this arm: the allocation
+    count re-reads at 29654 against the recorded 29656 and B/op at 3134376 against 3134816
+    (bench-20260905T085512Z.txt) — the label move and the retention are allocation-invisible
+    to this fixture, and the row's scaled savings stand as recorded.
     `BenchmarkSelectSurvivors` (73728 B/op, 1 alloc) and `BenchmarkMerge` (764 allocs/op, B/op
-    flickering over the same 7-byte spread on both sides) are unmoved.
+    flickering over the same 7-byte spread on both sides) are unmoved — and stay readings of
+    the current tree: `select.go` is still byte-identical and `merge.go`'s repair-round diff is
+    a comment.
   - **That share is a NODE share, and the constant is now seeded from one.** The condemned share
     is a benchmark constant (`benchCondemnedPercent`, 55.8), not a dial: a benchmark cannot own
     the network. Re-derive it from `stable_probe_outcome_nodes{stage="condemned"}` over
@@ -351,6 +422,12 @@
     +1.70% to +2.72%, so the median of medians clears both the relink control and this file's 2%
     floor, which is what makes silence the wrong record here; the weight is ~+3.7 µs once per
     cycle, which is why it is recorded and not chased.
+    **The repair rounds re-edited `foldProbeResults` itself** — its label read now
+    distinguishes the condemned positions (which carry the label `probeSet` derived) from the
+    live ones (which answer through their adapter) — and the settled-tree re-read holds the
+    row's allocation half exactly: 893616 B/op and 35 allocs/op (bench-20260905T085512Z.txt).
+    The fold edits were allocation-neutral; the row's ns/op story is untouched (the settled
+    run is another machine, so no new ns figure is quoted against it).
   - **The ceiling is upstream and this does not touch it.** mihomo's reflective struct decoder is
     90.4% of the objects and 81.4% of the bytes `adapter.ParseProxy` allocates: 48.2% of the
     objects are it re-splitting a compile-time-constant `proxy:"..."` tag
@@ -368,6 +445,39 @@
     only diff is a comment — so any ns gap on them is a relink comparison by construction and none
     is attributed to this change: per-link ns figures minted to support a null result are
     apparatus this file does not keep.
+- **Bench coverage gaps the perf review left open, and what the repair rounds did about
+  them.** Three absences were priced by no committed benchmark, so three changes shipped
+  without a before/after figure here:
+  - **No benchmark priced the duplicated adapter parse.** A cycle used to build an adapter
+    per survivor inside `Probe` and then parse the survivors' byte-identical raw a SECOND
+    time in the egress stage; the repair rounds removed the duplication (retention +
+    `TakeProbedAdapters`), but no arm ever priced the second parse, so the removal is
+    invisible in every committed figure — `BenchmarkParseProxies` prices the parse alone,
+    not the duplication.
+  - **The pipeline benchmarks drove an all-vless fixture.** The flagship preprocess arms
+    (`BenchmarkProcessBodyPipeline`, the `BenchmarkProcessBodySlice_*` family and the
+    `BenchmarkCollectSurvivors_*` family) write their bodies through `benchWriteVless`, so
+    the vmess/ss-legacy/ssr per-node parse buffers sat outside every guarded envelope; the
+    rounds closed that with `BenchmarkProcessBodySlice_MixedSchemes` (92% vless / 4% vmess /
+    2% ss-legacy / 2% ssr) and with `BenchmarkFilterRequest` / `BenchmarkFilterNodesRequest`
+    for the `Filter`/`FilterNodes` entry's fixed per-request allocations (the processBody-only
+    arms construct `pctx` by hand and bypass all of them). The settled-tree run
+    (bench-20260905T085512Z.txt) carries all three arms' first committed readings:
+    `BenchmarkProcessBodySlice_MixedSchemes` 2849844 B/op / 1393 allocs/op,
+    `BenchmarkFilterRequest` 1136 B/op / 8 allocs/op and
+    `BenchmarkFilterNodesRequest` 8629 B/op / 9 allocs/op.
+  - **Nothing drives the `/stable.txt` handler or a full `/metrics` scrape.** The
+    X-Stable-Stats header re-formatting the rounds memoized per snapshot, and the hand-rolled
+    Prometheus renderer's per-scrape state, have no benchmark at the HTTP layer —
+    `BenchmarkWriteSources` prices the exposition writer alone, not a scrape — so per-request
+    handler allocations stay unmeasured. (The scrape-state finding was struck with the shape
+    priced in prose only.)
+    The same review also noted, as a struck trade with the gap recorded for this pass, that
+    `ParseDBIP`/`ParseDelegated` reserve a full line-count slice (56 B per line) although
+    only a fraction of lines survive: the reservation is the accepted alloc-for-scan shape,
+    and no committed benchmark prices either loader. The adopt-first-slice change the rounds
+    made to `LoadAll`/`LoadRegistry` (the first parsed source's slice is adopted rather than
+    re-allocated) is likewise unread against any committed figure.
 - Earlier waves, mechanisms only (no figure for them is reachable from a checkout): geofeed
   parsing allocations, fragment-rewrite allocations, inner filter hot-path allocations, and
   skipping non-URI lines during subscription parse.

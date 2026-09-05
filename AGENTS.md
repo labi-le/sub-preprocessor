@@ -5,15 +5,25 @@
 Always run project commands via `nix-shell` — the toolchain (Go version, linter, etc.)
 is defined in `shell.nix`. Running tools directly may use different versions or fail.
 
-Prefer Makefile targets for common flows:
+Run the verify/build flows through `nix-shell`, using the Makefile targets
+(plus the compile gate):
 
 ```bash
-nix-shell --run "make"
+nix-shell --run "go build ./..."  # the compile gate: a tree that does not build is not yieldable
 nix-shell --run "make test"
-nix-shell --run "make fmt"
 nix-shell --run "make race"
+nix-shell --run "make fmt"
+nix-shell --run "make lint"
 nix-shell --run "make bench"
 ```
+
+Do NOT run bare `make`. The Makefile's `.DEFAULT_GOAL` is `run`, so `make`
+means `go run .`: it builds and then STARTS the live service against `./config`
+and stays in the foreground — a production binary, not a verify flow. An agent
+following that instruction has started it (it happened in this session). When a
+running instance is actually needed, start the compose stack (`docker compose
+up -d --build`, or `make dc-up`); operators run the service that way, and the
+endpoints land on the published ports.
 
 ## Workflow — mandatory, not advisory
 

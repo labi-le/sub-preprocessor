@@ -40,11 +40,18 @@ and name in a base64 payload, the legacy `ss` form hides server and port there
 (its name stays in the `#fragment`), `ssr` hides all three — its display name
 being a base64 `remarks` query value — and `mierus` carries its port list in
 the query. Each decoder mirrors mihomo's own accept rule, so a
-node kept here is a node the prober can convert. Portless `http`, `https`,
-`socks`, `socks5` and `socks5h` lines are the one outright rejection: such a
-proxy is `host:port` by definition and mihomo refuses it, so a bare
-`https://t.me/somechannel` in a source body counts as `unsupported=` (see
-`X-Preprocessor-Stats` below). The portful form is still a node — which is why
+node kept here is a node the prober can convert. Portless lines are refused,
+and the refusal is not the http/socks one alone: portless
+`http`/`https`/`socks`/`socks5`/`socks5h` is refused because such a proxy is
+`host:port` by definition — so a bare `https://t.me/somechannel` in a source
+body counts as `unsupported=` (see `X-Preprocessor-Stats` below) — and so is
+a legacy `ss` payload whose base64 names no port, and any other scheme's
+portless form (`vless`, `trojan`, `tuic`, an unknown scheme), which is refused
+rather than published under a fabricated port the node does not have.
+`hysteria2`/`hy2` is the one scheme whose portless form survives: mihomo itself
+defaults it to port `443` (`convert/converter.go:85-89`), and the parser
+mirrors that. The portful form
+of the ordinary proxy schemes is still a node — which is why
 the crawler's classifier keeps its
 own fixed proxy-scheme list, to reject pages full of ordinary `https://` links.
 
@@ -75,7 +82,16 @@ source can place is in no excluded country, so an exclusion-only request keeps
 it; an allow-list request drops it, because it is not in the list either. An
 unknown group name or a country that is not a 2-letter code fails the request
 with `400` naming the offending token. So does a request whose exclusions cover
-every allowed country.
+every allowed country, a request every one of whose country tokens is blank
+(`exclude_countries=,,` is the no-parameter request in disguise and 400s the
+same way), a request that repeats one of the five query keys (`subscription_url`
+/ `countries` / `groups` / `exclude_countries` / `exclude_groups` — fiber would
+silently answer with the first value, so a second `exclude_countries=` would be
+dropped instead of honoured), and a country-gated request against a config
+whose filter list has no country-capable entry (`filters[].type: country` of
+either provider, or `type: asn` — a `cidr` entry alone cannot enforce a country
+policy): the server answers `400` naming the missing filter rather than `200`
+with a list the parameters never constrained.
 
 The response is `text/plain` Mihomo-compatible text; node names are annotated
 according to the `annotate` config (shipped config: `[GEO:XX] <name>`).
@@ -83,11 +99,16 @@ Stats come back in the `X-Preprocessor-Stats` header. This path does **no**
 liveness probing — only IP-stage filtering (see below).
 
 One request is bounded on purpose. fasthttp cannot cancel a handler when the
-client disconnects, so the pipeline runs under an explicit 60 s deadline
-(`504` when it expires), and a body of more than 50 000 parseable nodes is
-refused with `413` before a single DNS lookup — resolution is serial, so an
-unbounded node list would otherwise occupy a goroutine for hours after the
-caller left. A panic in the request path is recovered as a `500` (logged with
+client disconnects, so the pipeline — the upstream fetch included, which runs
+on the request's own deadline rather than the worker's 3 s fail-fast
+`fetch.timeout` — runs under an explicit 60 s deadline (`504` when it
+expires). Oversize is refused with `413` at two ceilings of the same wall: a
+body of more than 50 000 parseable nodes is refused before a single DNS lookup
+— resolution is serial, so an unbounded node list would otherwise occupy a
+goroutine for hours after the caller left — and a body over the shared 10 MiB
+fetch cap is refused with the same `413` (for a realistic node shape, ~245
+B/node, the byte cap binds first, at roughly 43k nodes). A panic in the
+request path is recovered as a `500` (logged with
 its stack) instead of taking the process down with the in-memory stable list.
 The access log records the subscription URL as `host#<digest>`, never verbatim:
 these links are capability URLs, and the token would otherwise land in
@@ -137,10 +158,15 @@ with the previous run's list from the first request instead of `503` for a
 whole cycle — measured at 58 minutes on a 68266-node pool. The restored list
 keeps its original `updated=`, so its age is visible rather than reset by the
 restart, and there is no expiry: the in-memory rule already serves the last
-good list through failing cycles. A missing, unreadable or malformed file is a
-warning and nothing more. The write is atomic (temp file in the same
-directory, then rename), and a write that fails warns without touching the
-published list.
+good list through failing cycles. That whole stale-serving rule assumes the
+worker is meant to run: an empty `subscriptions.sources` at startup is the
+documented off switch (no worker ever starts), and the snapshot is **not**
+restored then — serving the previous run's list with nothing behind it would
+answer `200` forever with a list no cycle could ever refresh, so with
+subscriptions disabled `/stable.txt` answers `503` from the first request. A
+missing, unreadable or malformed file is a warning and nothing more. The write
+is atomic (temp file in the same directory, then rename), and a write that
+fails warns without touching the published list.
 
 ## The filter pipeline
 
@@ -158,10 +184,15 @@ after DNS resolution, before any probing:
   allow-list can drop it. `exclude_groups` / `exclude_countries` are
   **worker-only**: they build the `/stable.txt` deny-set and never reach the
   `/` chain, where the allowed and denied sets come from the query params
-  alone — and only when a `country` entry is present at all. Nothing is built
-  for a filter type the list does not name, so a config without one leaves
-  `GET /` still requiring a `countries` / `groups` / `exclude_*` parameter
-  (the server answers `400` without one) that no filter then reads.
+  alone — and only when the filter list carries a country-capable entry — a
+  `type: country` of either provider, or `type: asn`, which also consults the
+  allowed and denied sets — at all. Nothing is built for a filter type the
+  list does not name, and the server refuses to fake one: a country-gated
+  `GET /` against a config without a country-capable entry answers `400`
+  naming the missing filter (a cidr-only list can no more enforce a country
+  policy than it can
+  read the request), while the parameter-less request still answers `400` for
+  carrying no policy at all.
 - `asn` — drop nodes whose AS name matches `deny_patterns` (regexps), and
   nodes whose Cymru-resolved country is not allowed.
 - `cidr` — an IPv4 **allow-list** downloaded from `urls`: a node survives only
@@ -235,21 +266,33 @@ Before any of that, nodes whose host is in the **geoblock store** (see below)
 are dropped outright — on both endpoints, before DNS even runs.
 
 **Through-node filters** — run only in the stable worker, after the latency
-probe, routing real requests *through* each surviving node. All but the last
-are gates that drop:
+probe, routing real requests *through* each surviving node. Every entry is a
+gate that drops what it condemns. A verdict that condemns the whole survivor
+batch at once — or all but a handful, via the same 95%-share plausibility
+breaker the pre-check and the dead-cache write use — is disbelieved before any
+drop or geoblock write:
+every node dials the same endpoint or test URL, so a wholesale refusal is the
+endpoint's or our egress's story, not the nodes' — the batch is kept (and, for
+the bandwidth gate, left untagged) and re-checked next cycle. That breaker is
+what keeps a vendor 5xx outage or a dead test endpoint from emptying the
+published list. The gates:
 
 - `gemini` — GET the Gemini API through the node and inspect the response
   body for the location-block marker (a check a HEAD-only URL test cannot
   do). Blocked hosts are recorded in the geoblock store and dropped.
   Requires an API key (`geoblock.gemini.key_file` in agenix `KEY=VALUE`
-  format, `key_var`, or inline `api_key`); without a key the filter is
-  skipped — and it cannot be made keyless: the API resolves caller identity
+  format, `key_var`, or inline `api_key`); arming the filter without key
+  material fails the load, and a declared `key_file` that is missing or lacks
+  `key_var` fails Apply — the boot refuses and a reload keeps the previous
+  settings — rather than booting the gate silently off. It cannot be made
+  keyless: the API resolves caller identity
   and key validity before the location precondition, so the verdict this gate
   reads is invisible to anything but a working credential. For the same reason
   a response that never reached the location check — most often a `429` from
   the 200/min per-project-per-region read quota (measured 2026-09-03: 500
-  GETs at concurrency 8 returned 202), less often a rotated or restricted key
-  or a wrong `model` (404) — is not read as "not blocked": those nodes are
+  GETs at concurrency 8 returned 202), less often a rotated or restricted key,
+  a wrong `model` (404), or a `5xx` server fault — is not read as "not
+  blocked": those nodes are
   counted, warned about, and kept unverified.
   `geoblock.gemini.rate_limit` (default 150/min, 0 = default) paces request
   starts so one cycle's reads stay under that quota and every survivor gets a
@@ -271,8 +314,12 @@ are gates that drop:
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
-  below `min_mbps` (default 5; explicit `0` = no floor, annotate only) are
-  dropped; a kept node's Mbps is recorded, and the `[SPD:<n>M]` tag it earns is
+  below `min_mbps` (default 5) are dropped; an explicit `0` removes the speed
+  *threshold* — a slow-but-reachable node is then kept — but it is not
+  "annotate only": a node whose download failed outright (dial error, refused
+  or reset transfer) is still dropped, with only the whole-batch failure
+  spared by the breaker above. A kept node's Mbps is recorded, and the
+  `[SPD:<n>M]` tag it earns is
   rendered later, with every other tag, at publication.
   Results are never cached — measured fresh each cycle.
 
@@ -401,8 +448,8 @@ attribution).
 | Store | Kind | Purpose |
 |---|---|---|
 | geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
-| dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds; skipped before probing |
-| stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
+| dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds, keyed together with the address the IP stage resolved for them at verdict time — a hostname re-pointed to a new address is re-probed, not skipped on the old verdict; skipped before probing |
+| stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup — only while subscriptions are enabled; with an empty `subscriptions.sources` it is deliberately not restored (see §2) — so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
 | geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
@@ -464,7 +511,12 @@ compose sidecar) that discovers new sources automatically:
   and **hot-reloads** on change. A source's `hwid` is carried through that
   rewrite although the crawler never sets one: it re-authors the whole file
   every cycle, so a field it did not know would be silently stripped off a
-  hand-added entry.
+  hand-added entry. A `private.yaml` that holds no managed sources while the
+  crawler's state file still remembers a managed corpus — a missing overlay,
+  a `> private.yaml`, a failed external write — refuses the whole cycle with
+  an error instead of letting this cycle's discoveries replace the harvested
+  corpus and its liveness streaks; restoring the file, or deleting the
+  crawler state to rebuild the corpus from scratch, is the way out.
 
 The inline harvest reads the newest page alone because a pasted node is a
 frozen `server:port` whose worth is the age of the message carrying it: at
@@ -518,6 +570,12 @@ record before the TTL runs out. The record otherwise lasts until the TTL
 expires — after which the URL is classified afresh if rediscovered — and
 transient failures or nodeless 2xx bodies never create one. The memory is
 capped at 5000 records, evicting the stamps closest to expiry first.
+`CRAWL_FETCH_TIMEOUT` (default 3 s) bounds each classify and liveness fetch
+at the worker's own per-source fetch budget (`fetch.timeout` in `config.yaml`,
+also shipped at 3 s): the crawler reads no config of its own, so the mirror is
+what keeps a source the worker could never fetch inside its budget from being
+judged live — it converges through the retirement window instead. An operator
+who tunes `fetch.timeout` must set `CRAWL_FETCH_TIMEOUT` to match.
 The same curated files above do double duty: any URL they
 list verbatim under `subscriptions.sources` is withheld from crawler management
 for exactly as long as it stays listed, so retiring a mirror is an edit to the
@@ -584,7 +642,8 @@ Key sections:
   keys and no `endpoint`, for the reasons given with that provider above.
 - `resolver.timeout` / `cache_ttl` / `cache_negative_ttl`, and `resolver.address`
   — the upstream DNS server as `host:port` (a portless value is rejected at
-  load: it dials nothing, so every node would be dropped as a DNS failure).
+  load, and so is a port outside 1–65535: either dials nothing, so every
+  node would be dropped as a DNS failure; empty keeps the system resolver).
 - `filters` — the ordered filter list described above. The `cidr` entry's
   `urls` / `file_type` / `refresh_interval` hot-reload like everything else in
   the list: editing one of them re-downloads the allow-list (and refuses the
@@ -600,13 +659,17 @@ Key sections:
   gemini also takes `rate_limit`) for the through-node filters. Every tenant
   here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
-- `deadcache.ttl`, `fetch.timeout` (per-subscription fetch deadline).
+- `deadcache.ttl`, `fetch.timeout` — the worker's fail-fast per-source fetch
+  deadline (on `GET /` the upstream fetch runs on the request's own 60 s
+  budget instead; see the endpoint section).
 - `groups` — named country sets referenced by requests and `exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
   `body`, the crawler's own `managed` and `feed`, and `hwid`, which rides as
-  the `x-hwid` request header on that source's fetch and nowhere else — a panel
-  with the HWID device limit on otherwise answers 200 with a single placeholder
-  node instead of the real list, so the source publishes nothing and books no
+  the `x-hwid` request header on that source's fetch — and on the crawler's
+  liveness recheck of a managed entry, which must judge the source the way the
+  worker fetches it — but nowhere else: a panel with the HWID device limit on
+  otherwise answers 200 with a single placeholder node instead of the real
+  list, so the source publishes nothing and books no
   error anywhere — its own `stable_source_published_nodes` sits at 0 with
   `stable_source_nodes_total` at 1, and that is the whole signal;
   `docs/guides/config.md` has the shape the panel validates and why the value
@@ -657,7 +720,8 @@ A gate that verified nothing is reported separately from a gate that dropped
 nothing. The gemini check needs a working credential to see a location verdict
 at all, so `stable_gemini_gate_checks` / `stable_gemini_gate_unverified_checks`
 publish how many API responses it classified and how many of those arrived
-before the location check (401/403/404/429, or a 400 `API_KEY_INVALID`).
+before the location check (401/403/404/429/5xx, a 400 `API_KEY_INVALID`, or a
+400 whose wording no longer carries the block marker).
 Those nodes are **kept and published unverified**, so the pair is deliberately
 outside the per-filter drop counters. A large unverified share is normally the
 read quota, not the credential: the gate fires one read per survivor against
@@ -665,8 +729,13 @@ Google's 200/min per-project-per-region `model_requests` ceiling (measured
 2026-09-03), and a key problem reads as `400 API_KEY_INVALID`, not `429` —
 check the 429 share first, then suspect the key.
 `stable_gemini_gate_enabled` separates
-the third state: 0 means the gate is configured but has no usable key, so it
-checked nothing at all. All three are absent when the gate did not run, which
+the third state: 0 renders a gate that ran no checks for want of a usable key.
+The fail-loud rule above keeps the shipped wiring out of that state — an armed
+filter without key material refuses the load, a declared key file that cannot
+be resolved refuses boot (or keeps the previous settings on a reload) — so a
+running, configured gate has always resolved its key and renders 1; the 0
+rendering is the report state a regression that reintroduced the silent skip
+would land in. All three are absent when the gate did not run, which
 is not the same as "not configured".
 
 The metrics listener is bound synchronously at startup, so a port conflict is a
@@ -722,9 +791,10 @@ docker compose up -d --build   # or: make dc-up
   `./config` volume so its `private.yaml` writes hot-reload the service. It
   feeds `./config`.
 - Shutdown is graceful and bounded: the server drains for 15 s (long enough for
-  the 5 s DNS/ASN lookup an in-flight request may be blocked in) and the stable
-  worker is joined for another 5 s, hence `stop_grace_period: 30s`. Expiring
-  that budget is logged as a warning, not a failed exit.
+  the 5 s DNS/ASN lookup an in-flight request may be blocked in), then the
+  config watcher and the stable worker are each joined under a 5 s bound —
+  hence `stop_grace_period: 30s`, which the 15 s + 2×5 s worst case fits
+  under. Expiring that budget is logged as a warning, not a failed exit.
 
 ## Package map
 

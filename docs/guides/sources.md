@@ -98,7 +98,13 @@ limit, and it applies to any deployment, whitelist-gated or not.
   is small, fast and well-formed — and gate 1 has nothing to read; only the MARGINAL count
   exposes it, as a source whose entire contribution is one placeholder `stable.Merge` refuses
   a probe slot. The fix is the source's own `hwid:` field, sent as the `x-hwid` request
-  header on that source's fetch and on nothing else (`docs/guides/config.md` has the key, the
+  header on that source's fetch — and now also on the crawler's own liveness
+  recheck of a managed entry carrying one, which must judge the source the way
+  the worker fetches it: a header-less liveness fetch reads the same placeholder
+  as a nodeless-2xx and would age a panel the worker keeps publishing through
+  the retirement window into prune (`recheckManaged`
+  threads the entry's `HWID` into the per-URL classify fetch,
+  `crawl.go:558-573`) — and on no other source's. (`docs/guides/config.md` has the key, the
   `^[a-zA-Z0-9=-]{10,64}$` shape the panel has validated since v3.0.0, and the vendor docs
   that promise a 404 this panel does not send — it sends 200, which is why the symptom is
   `nodeless-2xx` and not a bad status). Three consequences for curation. The value is
@@ -109,7 +115,11 @@ limit, and it applies to any deployment, whitelist-gated or not.
   the loader rejects an `hwid` on an inline `body:` entry, where nothing is fetched for a
   header to ride on. Hand-adding it to `config/private.yaml` is safe — `crawl.source` mirrors
   the field, so the crawler's full-file rewrite carries it through instead of stripping it
-  and reverting the source to the placeholder.
+  and reverting the source to the placeholder. The carry is not only the
+  sheltered copy's: a managed entry that the mint renames keeps its value too —
+  `mintSource` hands `prev.HWID` to the entry it builds in its place
+  (`crawl.go:753`) — so an operator-set hwid survives on both sides of the
+  rewrite.
 
 ## What the Telegram crawler may harvest
 
@@ -141,8 +151,24 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   bounded opposite: it reads only each topic's NEWEST embed window (~96–200 replies; live probe,
   2026-08-23 — no static pagination exists, so newest-window-only is a property, not a choice),
   expands only along proven-productive edges (a discovered topic is itself expanded only if its
-  own page yielded a live subscription — the gate above, not a new one), spends at most one GET
-  per topic per cycle inside the existing caps (the shared `MaxChannels` pool of 200 counting
+  own page yielded a live subscription — the gate above, not a new one), and the
+  remembered-productive memory feeds the depth-0 seed set on the same full-ref
+  identity: `buildSeeds` keys each seed by the whole `<slug>/<topic>` ref, so a
+  forum remembered productive in several topics queues one seed PER TOPIC — each
+  a separate read of that chat — where keying by slug alone kept whichever topic
+  the map ranged over first and silently dropped the rest from the cycle
+  (`buildSeeds`, `discover.go:208-266`). A bare `<slug>` entry naming a chat some other entry
+  already names with a topic is absorbed into that slug's topic entries rather than
+  adding a probe of its own. Each topic-carrying read costs TWO GETs, not one:
+  the message-less t.me/s listing walk comes first even for a ref carrying a
+  topic, because `<chan>/<msgid>` and `<chat>/<topic>` are the same URL shape and
+  only the `/s/` answer separates them — a channel's listing answers with message
+  wraps and the topic read is never needed, while a group's empty listing is
+  dropped and the topic read follows, one wasted probe per topic-carrying visit.
+  Nothing memoizes the message-less verdict per slug, so a forum remembered
+  productive in N topics pays N wasted probes per cycle on top of its N topic
+  reads (`scrapeChat` and its comment, `discover.go:511-551`) — all
+  inside the existing caps (the shared `MaxChannels` pool of 200 counting
   topic visits with cross-channel ones, `discoveredPages`, `CRAWL_DEPTH`; `comments_limit` stays
   200; zero new knobs), and admits same-group hops only through a narrow carve-out from the
   slug-equals-self exclusion: the scanned node must have been read through its topic embed this
@@ -171,7 +197,8 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   The first cycle on the new rule wrote `inline:500` again — the seed set's newest pages
   alone carry more than the cap, so 500 is a truncation of comparable candidates, not a
   yield. What the number cannot tell you is which 500: seeds are walked in Go map order
-  (`scan`'s `for slug, s := range seeds`, `discover.go:130`), so the truncation point is
+  (`scan`'s `for _, s := range seeds`, `discover.go:131`, one row per full ref —
+  each topic of a multi-topic forum its own seed), so the truncation point is
   arbitrary within one cycle's fresh pool.
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
@@ -179,7 +206,7 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
 ## What a managed source entry means
 
 A crawler-written source is named `<channel-slug>-<postid>` by `sourceName`
-(`internal/crawl/crawl.go:778`): the slug is the Telegram channel folded into the config name
+(`internal/crawl/crawl.go:966`): the slug is the Telegram channel folded into the config name
 alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and `postid` is the
 decimal id of the Telegram message the URL was harvested from. `seyedng-3631` reads "the
 subscription the crawler found in @seyedng, post 3631".
@@ -187,20 +214,20 @@ subscription the crawler found in @seyedng, post 3631".
 The name is now a LABEL and nothing more. Everything a reader or the exporter needs to know
 about an entry sits beside it as data: `managed: true` says the crawler owns it and
 `feed: <slug>` says which channel it came from (`SubscriptionSource.Managed` and `.Feed`,
-`internal/config/config.go:584,589`). The crawler writes `managed: true` on every entry it mints.
+`internal/config/config.go:639,644`). The crawler writes `managed: true` on every entry it mints.
 `feed:` it writes as the channel slug whenever the name is NEW and the origin named a channel; an
 entry whose name it keeps verbatim keeps the `feed:` it already had, and a mint that saw no usable
-slug records none (`mintSource`, `internal/crawl/crawl.go:573-581`). And `feed:` is not the
+slug records none (`mintSource`, `internal/crawl/crawl.go:746-753`). And `feed:` is not the
 crawler's alone: unlike `managed` it grants nothing and only groups, so a curated entry may set it
-too (`config.go:585-589`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
+too (`config.go:644`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
 and prune, so an operator who forgets the field is safe by default. `managed: true` in a
 git-tracked file is REFUSED twice,
-and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1068`) refuses it in
-`config/sources.yaml` before appending it (`:1084-1088`), so that overlay stays policed wherever
-it is merged, and `validateSources` (`:1467`) refuses it again over the merged list
-(`:1471`), which is what covers `config.yaml`'s own entries. Both raise one wording,
-`errManagedInCuratedFile` (`:1064`). Only the pass after the `private.yaml` merge allows the
-mark (`:1024`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
+and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1166`) refuses it in
+`config/sources.yaml` before appending it (`:1184`), so that overlay stays policed wherever
+it is merged, and `validateSources` (`:1661`) refuses it again over the merged list
+(`:1666`), which is what covers `config.yaml`'s own entries. Both raise one wording,
+`errManagedInCuratedFile` (`:1162`). Only the pass after the `private.yaml` merge allows the
+mark (`:1119`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
 carries a URL of one post that did not take the bare stem, N counting from 2 because that stem
 was offered to the post's FIRST URL first. `<slug>-N` carries a known slug whose origin post is
 not, N counting from 1 instead, that family having no bare stem to be offered at all. In both, N is
@@ -208,15 +235,15 @@ the lowest ordinal free in the cycle's taken-name set. And `<sha10>` — the fir
 sha256 of the SUBSCRIPTION URL — carries a URL whose slug is unusable, and NOTHING else now that
 an unbounded ordinal always finds a free name.
 The inline harvest is the fixed name `inline` (`inlineSourceName`,
-`internal/crawl/crawl.go:939`) — the one entry the crawler writes whose name it derived from
+`internal/crawl/crawl.go:1155`) — the one entry the crawler writes whose name it derived from
 nothing, and therefore the one an operator can collide with by accident. It holds the aggregate of
 inline node URIs harvested across messages and channels, with `managed: true`, a `body:` and no
-`url:` (`buildInlineSource`, `crawl.go:946`). **Nothing reserves that name.** No validator refuses
-it to anyone — `inline` is a legal curated name and one that loads (`config_test.go:904`) — and
+`url:` (`buildInlineSource`, `crawl.go:1162`). **Nothing reserves that name.** No validator refuses
+it to anyone — `inline` is a legal curated name and one that loads (`config_test.go:1098`) — and
 nothing announces the crawler's namespace either. So the crawler YIELDS the name instead of
 owning it. Hand-add an entry called `inline` to `config/private.yaml` — with a `body:` or a
 `url:`, either way — and the merge shelters
-it like any other unmarked entry (`crawl.go:507-512`), and rather than append a duplicate beside
+it like any other unmarked entry (`crawl.go:659-670`), and rather than append a duplicate beside
 it the crawler skips its own inline entry for that cycle, logging WARN `a hand-added entry holds the
 inline aggregate's name; skipping the inline harvest rather than writing a duplicate` and leaving
 `inline:0` on the `private.yaml updated` line whenever that cycle writes. Nothing else in the
@@ -226,16 +253,16 @@ your entry to take its name back, because a hand-added entry is never renamed; o
 entry by hand returns the name. The same name in a GIT-TRACKED file costs more and earns no
 warning, because the yield cannot reach it: the crawler reads `private.yaml`, `channels.yaml`, its
 own state file, and the names AND URLs on every `CRAWL_CURATED` path (`loadPrivate`,
-`channels.go:31`, `state.go:390`, `curatedNames`, `curatedURLs`) — reads that feed the MINT's
+`channels.go:31`, `state.go:419`, `curatedNames`, `curatedURLs`) — reads that feed the MINT's
 taken-name set and the URL deny funnel, and nothing else. `inline`
 is not minted: it is a fixed constant, and the skip that protects it tests the `private.yaml`
 entries the cycle is about to write and nothing else (the `slices.ContainsFunc` gate in `RunOnce`,
-`crawl.go:341`). So an `inline` sitting in `config/sources.yaml`, or in `config.yaml` itself, is
+`crawl.go:456`). So an `inline` sitting in `config/sources.yaml`, or in `config.yaml` itself, is
 still invisible to it — both reads happen, but the mint never consults its taken-name set for a
-fixed constant and the deny funnel never sees a `body:` entry with no `url:` (`crawl.go:973`), so
+fixed constant and the deny funnel never sees a `body:` entry with no `url:` (`crawl.go:1393`), so
 `inline` escapes both. It cannot see the collision, appends `inline` to `private.yaml` as usual,
 and the MERGED list then carries the name twice — which
-`validateSources("")` refuses (`config.go:1024,1476-1477`) and `config.Load` turns into
+`validateSources("")` refuses (`config.go:1119,1672`) and `config.Load` turns into
 `private config: subscriptions.sources: duplicate name "inline"`, so the service does not start
 until one of the two entries goes. Reserving the literal name in config validation was weighed and
 refused: it would fail files that load today, and it would put authority back into a string, which
@@ -243,11 +270,18 @@ is the very thing `managed:` replaced.
 
 That last hazard is the general one, and `inline` is only its most reachable case. Inside
 `private.yaml` the MINTED forms are already safe: `mergeManaged` seeds `used` from every name the
-file holds, hand-added ones included (`crawl.go:491-512`), and `sourceName` consults it before
-returning a candidate (`crawl.go:787,794`), so an operator holding `seyedng-3631` makes the crawler
-mint `seyedng-3631-2` instead of colliding — it yields there too. `used` does not stop at
+file holds, hand-added ones included (`crawl.go:610-670`), and `sourceName` consults it before
+returning a candidate (`crawl.go:961-990`), so an operator holding `seyedng-3631` makes the crawler
+mint `seyedng-3631-2` instead of colliding — it yields there too. The yield covers the URL as
+well: a URL a sheltered entry already carries is withheld from the mint, so a live rediscovery
+of it never becomes a second, managed entry over the same URL: the mirror the mint would build
+carries no `hwid` of its own, so over an operator entry that carries one it is a header-less
+fetch — the placeholder, on a device-limited panel — and over a hwid-less entry it is
+byte-identical work, a list the write validator refuses under the identity rule it mirrors from
+config (same url AND hwid, `config.go:1697-1703`), freezing the file until the pair is untangled
+(`mergeManaged`, `crawl.go:659-682`). `used` does not stop at
 `private.yaml`: the crawler reads every `CRAWL_CURATED` path and seeds THEIR names FIRST
-(`curatedNames`, `crawl.go:1095`, from `Options.CuratedPaths` — a comma-separated list defaulting
+(`curatedNames`, `crawl.go:1349`, from `Options.CuratedPaths` — a comma-separated list defaulting
 to `/config/sources.yaml,/config/config.yaml`). BOTH files are seeded, not just the overlay:
 `validateSources` rules on the whole MERGED list and
 `config.yaml` carries `subscriptions.sources` of its own, so seeding one of the two would fail
@@ -278,12 +312,12 @@ set `managed: true` and backfilled `feed:` from the name it was stripping. The p
 not trigger it, and could not, because the prefix is not a mark even here: `channelSlug` folds
 `_` to `-`, so the channel `tg_vpn` slugs to `tg-vpn` and every name minted from it — `tg-vpn-123`
 — legitimately begins `tg-` while being nobody's migration. So `needsAdoption`
-(`crawl.go:1250`) requires the rest of the name to wear a shape the pre-cutover mint actually
-produced as well: `inline`, a `-` plus 6-hex tail `legacyFeed` can read a slug off (`crawl.go:1263`),
-or a bare 10 hex (`unattributedNameRe`, `crawl.go:62`). An unmarked `tg-vpn-123` wears none of the
+(`crawl.go:1509`) requires the rest of the name to wear a shape the pre-cutover mint actually
+produced as well: `inline`, a `-` plus 6-hex tail `legacyFeed` can read a slug off (`crawl.go:1522`),
+or a bare 10 hex (`unattributedNameRe`, `crawl.go:68`). An unmarked `tg-vpn-123` wears none of the
 three, so it stays SHELTERED like any other unmarked entry — the merge writes it back verbatim
-(`crawl.go:510`) — rather than being seized into the prune. The mark settles the crawler's own
-side: a marked entry is never read again (`crawl.go:1251`), so a real `tg-vpn-123456` is safe by
+(`crawl.go:659-670`) — rather than being seized into the prune. The mark settles the crawler's own
+side: a marked entry is never read again (`crawl.go:1510`), so a real `tg-vpn-123456` is safe by
 its field. An UNMARKED name wearing one of those shapes is adopted, and nothing can tell it from a
 pre-cutover mint: a 6-digit post id is also 6 hex digits, so a hand-added `tg-vpn-123456` is
 exactly what an attributed mint looked like and is claimed as slug `vpn` plus hash, where
@@ -321,10 +355,10 @@ is not changing, which is why the ambiguity is written down here instead of desi
   counters (`stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}`) carries
   `source`, `feed` and `owner`. `source` is the `name:` VERBATIM — `seyedng-3631`, slug and
   post id. `feed` is the `feed:` field, or the name when the field is absent — `sourceFeed` tests
-  `Feed != ""` and nothing else (`internal/metrics/metrics.go:376-380`), so ownership does not
+  `Feed != ""` and nothing else (`internal/metrics/metrics.go:410-418`), so ownership does not
   enter it. The origin-less `<sha10>` form and any entry that set no `feed:` therefore name
-  themselves, while a curated entry that DID set one keeps it (`config.go:585-589`, asserted by
-  `config_test.go:1161-1171` and rendered as `owner="curated"` beside a divergent feed at
+  themselves, while a curated entry that DID set one keeps it (`config.go:644`, asserted by
+  `config_test.go:1331-1340` and rendered as `owner="curated"` beside a divergent feed at
   `internal/metrics/testdata/exposition.golden:119`). Every URL of one channel shares
   one `feed` (`seyedng`) whatever tail its own name carries. `owner` is `crawler` when the
   entry carries `managed: true` and `curated` when it does not, which makes `owner="crawler"`
@@ -363,8 +397,8 @@ is not changing, which is why the ambiguity is written down here instead of desi
   in that slot would hand every private or paid panel link to everyone who fetches the
   list. The second reason is merely mechanical and would not save it on its own: the
   config source-name alphabet is `^[a-z0-9-]+$` (`sourceNameRe`,
-  `internal/config/config.go:115`, mirrored for the crawler's own write-back by its own
-  `sourceNameRe` at `internal/crawl/crawl.go:1278`), and `:` `/` `.` `?` all fall outside it.
+  `internal/config/config.go:124`, mirrored for the crawler's own write-back by its own
+  `sourceNameRe` at `internal/crawl/crawl.go:1537`), and `:` `/` `.` `?` all fall outside it.
 - **The collision form exists because neither a channel nor a post is a source.** One
   channel routinely publishes several distinct subscription URLs, so the slug alone is not
   unique — and a post is a container too, so the post id does not settle it: one message
@@ -453,14 +487,14 @@ is not changing, which is why the ambiguity is written down here instead of desi
   minimum of three digits, not to a width, so the index can be longer). Then grep both
   overlays rather than reasoning about which file owns the name: `private.yaml` holds the
   managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
-  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1476-1477`).
+  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1672`).
 - **`<10 hex>` is the other managed shape and carries no channel at all.** It is not
   merely historical: `unattributedNameRe` matches it and the fallback mint still EMITS it — but only
   ever for a URL the crawler has never named, since an entry that already carries a name gets it
-  back first (`crawl.go:779-780`). For such a URL the fallback fires for exactly ONE reason:
-  the slug was unusable, leaving no stem to build on (`crawl.go:783`). The ordinal is unbounded
+  back first (`crawl.go:967-968`). For such a URL the fallback fires for exactly ONE reason:
+  the slug was unusable, leaving no stem to build on (`crawl.go:987-990`). The ordinal is unbounded
   and every value it rejects is one distinct name already in `used`, so a usable slug always
-  reaches a free candidate inside `len(used)+1` tries and cannot fall through (`crawl.go:793-797`).
+  reaches a free candidate inside `len(used)+1` tries and cannot fall through (`crawl.go:981-985`).
   `sourceName` upgrades a hash-only name to the attributed form the first time the URL turns
   up in a channel, and that is the only rewrite it ever performs: an already-attributed
   name is kept VERBATIM forever, because a rename churns `private.yaml` and relabels every
@@ -507,16 +541,62 @@ under it were deleted.
   summary and deliberately given no log line of its own. An entry still in the
   managed corpus IS still rechecked — `recheckManaged` passes no skip set — and
   that is the one route by which a URL that came back clears its record
-  (`clearDead`) before the TTL runs out. Every renewed definitive verdict
+  (`clearDead`) before the TTL runs out. The recheck fetches judge each source
+  the way the worker fetches it: a managed entry's `hwid` rides on its own
+  liveness probe (`recheckManaged` threads `s.HWID` per pending URL into the
+  classify fetch, `crawl.go:558-573`), and every liveness probe is bounded by
+  the worker's own per-source fetch budget — `Options.FetchTimeout` (wired in
+  `main` from `CRAWL_FETCH_TIMEOUT`, defaulting to the same 3s as
+  `subscriptions.fetch.timeout`; `probeBudget`, `crawl.go:1038-1043`;
+  `main.go:35-41,89`) — not the fixed 15s the probe used to get, so a source
+  the worker cannot fetch inside its budget is not admitted as live.
+  A DEFINITIVE verdict on a managed entry PRUNES it at once — no retirement
+  window, no second opinion — and the same verdict's Dead stamp then withholds
+  the URL from rediscovery for the stamp's whole TTL, because the discovery
+  pass skips remembered-dead URLs: the prune is not a one-cycle reprieve, and a
+  channel reposting the link before expiry gets it skipped, not refetched
+  (`retainManaged`, `crawl.go:766-782`). That lockout is the DeadTTL's designed
+  re-probe period, not a grace. Every renewed definitive verdict
   re-stamps it, `pruneDead` drops stamps past `CRAWL_DEAD_TTL`
   (`Options.DeadTTL`, whose ZERO VALUE disables the memory outright; the 720h
   default is `main`'s, from the env var), and after expiry the URL is classified
-  afresh on its next rediscovery — revival needs no edit. A cycle that saw no
-  live answer anywhere records nothing at all: without one, nothing proved the
-  egress works. Transient statuses (403/408/425/429/5xx, transport errors)
-  and nodeless-2xx placeholder bodies never create a record: a WAF answering for
-  a live payload and a panel whose death reads nodeless-2xx stay in the ordinary
-  classify/recheck flow.
+  afresh on its next rediscovery — revival needs no edit, only the wait. A cycle
+  that saw no live answer anywhere records nothing at all: without one, nothing
+  proved the egress works. Transient statuses (403/408/425/429/5xx, transport
+  errors) and nodeless-2xx placeholder bodies never create a record: a WAF
+  answering for a live payload and a panel whose death reads nodeless-2xx stay
+  in the ordinary classify/recheck flow.
+- **An overlay emptied or vanished refuses the CYCLE, not the corpus.** At cycle
+  start `loadCycle` refuses to run when `private.yaml` holds no managed URL
+  source (`managedCount(pf) == 0` — a file holding only hand-added or inline
+  entries is as empty a corpus as a missing one) while the state file remembers
+  a managed corpus (`st.Managed` non-empty) — whether the file is MISSING or
+  present-but-empty, a truncation (`> private.yaml`, a failed external write):
+  rewriting either from that cycle's discoveries would silently replace the
+  whole harvested corpus and wipe the liveness streaks the state still holds,
+  since `ageManaged` deletes every record whose URL the cycle-start file no
+  longer carries. Only an empty corpus beside an empty memory — a genuine first
+  cycle — proceeds. The refusal logs at error and says what the remedies are:
+  restore the file, or delete the crawler state to rebuild the corpus from
+  scratch (`loadCycle`, `crawl.go:345-374`). The same content test re-runs at
+  the pre-merge re-read of the overlay: a cycle takes minutes to hours, the
+  file can change between the two loads, and an overlay emptied mid-cycle —
+  truncated by an editor save or failed external write landing in that window,
+  or deleted outright — must not be rebuilt from that cycle's discoveries
+  either, and refuses with the same error and the same remedies (`RunOnce`,
+  `crawl.go:441-446`). A vanished file reads as empty, so one content test
+  covers both shapes.
+- **A triggered cycle runs on the schedule's terms, and never consumes the
+  day's scheduled run.** `POST /crawl` runs under the schedule loop's own
+  per-cycle budget when one is running — the trigger cannot start what the
+  ticker would have aborted, and falls back to the daily cap only when the
+  crawler is trigger-only (`triggerBudget`, `crawl.go:303-313`;
+  `internal/crawl/http.go:80-84`). And when the daily tick fires while a
+  triggered cycle still holds the cycle lock, `RunDaily` WAITS the trigger out
+  and then runs the day's cycle, instead of skipping to the next 24h — a dropped
+  tick is fine for the hourly `Run` schedule, whose next interval comes soon,
+  but a straddling trigger used to consume a daily run that nothing would
+  restore (`runDailyGuarded`, `crawl.go:236-273`).
 - **A live-but-unwanted source has NO hold mechanism.** Owner decision,
   2026-08-25: sources rejected at curation — the aggregators measured to add
   nothing (`github.com/zieng2/wl`, all 15 files of `igareck/vpn-configs-for-russia`)
