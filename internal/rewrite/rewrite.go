@@ -29,15 +29,24 @@ func NodeName(b *bytes.Buffer, node subscription.Node, tags string) {
 
 	// vmess and ssr carry their display name inside the base64 payload rather
 	// than in a URI fragment, so the tag prefix is folded into the payload and
-	// re-encoded. The two parts go in separately: joining them here would be
-	// one heap string per node, so the rewriters compose inside their scratch.
-	// For ssr a fragment would be actively harmful: mihomo base64-decodes
-	// everything after "ssr://", the "#name" included, so an appended fragment
-	// turns the node into "format invalid". An undecodable payload is published
-	// verbatim — unannotated beats mangled.
+	// re-encoded — except the Xray VMessAEAD form of vmess, which names its
+	// node in a fragment like any vless line and gets the fragment rewrite
+	// instead (RewriteVmessAEADNameTagged). The two parts go in separately:
+	// joining them here would be one heap string per node, so the rewriters
+	// compose inside their scratch. For ssr a fragment would be actively
+	// harmful: mihomo base64-decodes everything after "ssr://", the "#name"
+	// included, so an appended fragment turns the node into "format invalid".
+	// An undecodable payload is published verbatim — unannotated beats
+	// mangled.
 	switch node.Scheme { //nolint:exhaustive // ss and mierus name their node in the URI fragment, i.e. the generic path below
 	case subscription.SchemeVmess:
 		if out, ok := subscription.RewriteVmessNameTagged(node.Raw, tags, cleanName); ok {
+			b.WriteString(out)
+			return
+		}
+		// Not base64: either the AEAD form, whose fragment the counterpart
+		// rewrites, or a line parseVmess refused, which stays verbatim.
+		if out, ok := subscription.RewriteVmessAEADNameTagged(node.Raw, tags, cleanName); ok {
 			b.WriteString(out)
 			return
 		}

@@ -109,7 +109,11 @@ const schemeSep = "://"
 // node — two for ssr, whose display name is base64 inside the payload — and
 // their Server/Port/Name are views into THAT buffer rather than into Raw — so
 // what a retained node string keeps alive is scheme-dependent, and a caller
-// holding one past the body it came from has to copy rather than slice.
+// holding one past the body it came from has to copy rather than slice. The
+// Xray VMessAEAD form of vmess is the exception on that list: its fields live
+// in the URI authority and fragment like the generic schemes, so it allocates
+// nothing (parseVmess picks it by the '@' cue before any base64 attempt) and
+// its strings are views into the caller's line.
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {

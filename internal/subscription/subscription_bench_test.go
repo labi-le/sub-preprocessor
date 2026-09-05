@@ -122,6 +122,32 @@ func vmessPayload(name string) string {
 // the number gate ran; the arms must stay close, or the gate has slipped back
 // below the decoder.
 func BenchmarkParse_Vmess(b *testing.B) {
+	run := func(b *testing.B, line string) {
+		var sb strings.Builder
+		for range benchNodes {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+		input := []byte(sb.String())
+		nodes := 0
+		if rejected := subscription.Parse(input, func(_ subscription.Node) bool {
+			nodes++
+			return true
+		}); nodes != benchNodes || rejected != 0 {
+			b.Fatalf("fixture: %d nodes, %d rejected; want %d, 0", nodes, rejected, benchNodes)
+		}
+
+		b.ReportAllocs()
+		for b.Loop() {
+			count := 0
+			subscription.Parse(input, func(_ subscription.Node) bool {
+				count++
+				return true
+			})
+			sinkInt = count
+		}
+	}
+
 	for _, tc := range []struct{ name, port string }{
 		{"quoted", `"443"`},
 		{"numeric", `443`},
@@ -129,31 +155,17 @@ func BenchmarkParse_Vmess(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			payload := `{"v":"2","add":"1.2.3.4","port":` + tc.port +
 				`,"ps":"Name","id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"ws"}`
-			var sb strings.Builder
-			for range benchNodes {
-				sb.WriteString(vmessLine(payload))
-				sb.WriteString("\n")
-			}
-			input := []byte(sb.String())
-			nodes := 0
-			if rejected := subscription.Parse(input, func(_ subscription.Node) bool {
-				nodes++
-				return true
-			}); nodes != benchNodes || rejected != 0 {
-				b.Fatalf("fixture: %d nodes, %d rejected; want %d, 0", nodes, rejected, benchNodes)
-			}
-
-			b.ReportAllocs()
-			for b.Loop() {
-				count := 0
-				subscription.Parse(input, func(_ subscription.Node) bool {
-					count++
-					return true
-				})
-				sinkInt = count
-			}
+			run(b, vmessLine(payload))
 		})
 	}
+
+	// The AEAD arm prices the second body mihomo's vmess case accepts — the
+	// URI form the base64 attempt fails on (convert/converter.go:236-239) —
+	// and pins that parseVmess picks it by the '@' cue before that doomed
+	// decode, so the arm must sit at zero allocations like the generic path.
+	b.Run("aead", func(b *testing.B) {
+		run(b, "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:443?encryption=auto&security=tls&type=tcp#Name")
+	})
 }
 
 func BenchmarkRewriteVmessName(b *testing.B) {

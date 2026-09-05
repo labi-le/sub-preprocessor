@@ -12,15 +12,30 @@ import (
 
 // SchemeVmess identifies vmess:// nodes. Unlike vless/trojan the server, port
 // and display name live inside a base64-encoded JSON payload rather than a URI
-// authority, so vmess needs a dedicated parser and relabeler. Legacy ss and ssr
-// hide the same fields the same way and have their own decoders (ss.go/ssr.go);
-// vmess is only the oldest of the three.
+// authority, so vmess needs a dedicated parser and relabeler — the Xray
+// VMessAEAD form (uuid@host:port) carries them in the authority and fragment
+// like vless, and the dedicated parser decides between the two bodies.
+// Legacy ss and ssr hide the same fields the same way and have their own
+// decoders (ss.go/ssr.go); vmess is only the oldest of the three.
 const SchemeVmess Scheme = "vmess"
 
 // parseVmess decodes a vmess:// share link whose payload after the scheme is
-// base64 JSON of the form {"add":host,"port":port,"ps":name,...}.
+// either base64 JSON of the form {"add":host,"port":port,"ps":name,...} or an
+// Xray VMessAEAD URI authority uuid@host:port (parseVmessAEAD).
 func parseVmess(line string, schemeEnd int) (Node, bool) {
 	payload := line[schemeEnd+len(schemeSep):]
+
+	// mihomo tells the two vmess share-link bodies apart by attempting to
+	// base64-decode the body: a body that decodes is the V2RayN JSON form,
+	// anything else is tried as an Xray VMessAEAD link
+	// (convert/converter.go:236-239). '@' is in no base64 alphabet, so its
+	// presence before any '#' picks the AEAD arm without paying that doomed
+	// decode per AEAD line — DecodeString allocates its destination before
+	// failing. BenchmarkParse_Vmess/aead prices the arm.
+	if strings.IndexByte(vmessBody(payload), '@') >= 0 {
+		return parseVmessAEAD(line, schemeEnd)
+	}
+
 	doc, ok := decodeVmessPayload(payload)
 	if !ok {
 		return Node{}, false
@@ -36,7 +51,14 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 	}
 	port := jsonValueString(fields.port)
 	if port == "" {
-		port = "443"
+		// A mapping with an empty or absent "port" cannot dial: mihomo's
+		// structure decode fails outright on the empty string ("cannot parse
+		// 'port' as int", common/structure/structure.go:143-148) and leaves a
+		// missing or null port at zero, so the old fabricated 443 published a
+		// probe slot under a port the node does not have — a stage="unknown"
+		// probe and a dead-cache entry where an honest Unsupported booking
+		// belongs.
+		return Node{}, false
 	}
 	// Every other scheme takes its name from the URI fragment; vmess normally
 	// carries it in the payload's "ps", but a link that omits "ps" and labels
@@ -53,13 +75,107 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 		name = server
 	}
 
-	return Node{Raw: line, Scheme: SchemeVmess, Name: name, Server: server, Port: port, FragmentIdx: -1}, true
+	// Re-encode a url-safe alphabet body in the STD alphabet. mihomo's
+	// converter decodes vmess bodies with the STD alphabets only — RawStd
+	// then Std (convert/base64.go:24-33) — so a producer's url-safe body,
+	// which decodeBase64Tolerant accepts, is dropped by the client's mihomo:
+	// the decode fails there and the body is misparsed as an AEAD authority.
+	// Parse is the single seam every published line passes through — merge's
+	// relabel already re-encodes for /stable.txt, but the on-demand /
+	// endpoints emit Raw — so healing the body here heals both.
+	raw := line
+	if strings.ContainsAny(vmessBody(payload), "-_") {
+		frag := ""
+		if h := strings.IndexByte(payload, '#'); h >= 0 {
+			frag = payload[h:]
+		}
+		prefix := line[:schemeEnd+len(schemeSep)]
+		buf := make([]byte, 0, len(prefix)+base64.StdEncoding.EncodedLen(len(doc))+len(frag))
+		buf = append(buf, prefix...)
+		buf = base64.StdEncoding.AppendEncode(buf, doc)
+		buf = append(buf, frag...)
+		raw = ioutil.UnsafeString(buf)
+	}
+
+	return Node{Raw: raw, Scheme: SchemeVmess, Name: name, Server: server, Port: port, FragmentIdx: -1}, true
+}
+
+// vmessBody returns the share-link body with any fragment removed, the strip
+// decodeVmessPayload applies before base64-decoding. parseVmess tests this
+// region for the AEAD and url-safe alphabet cues, and splitVmessAEAD parses
+// the authority out of it.
+func vmessBody(payload string) string {
+	if body, _, found := strings.Cut(payload, "#"); found {
+		return body
+	}
+	return payload
+}
+
+// parseVmessAEAD parses the Xray VMessAEAD share link — a vmess:// body of the
+// form <user>@<host>:<port>?<params>#<name>, with the display name in the
+// fragment rather than a JSON "ps". mihomo reaches this form when the body
+// does not base64-decode and falls back to handleVShareLink
+// (convert/converter.go:236-249); the gates here are that function's:
+// hostname AND port must both be present (convert/v.go:17-22) and url.Parse
+// must have accepted the port text, i.e. digits — any other port makes
+// url.Parse fail and the line is skipped (converter.go:239-241). The user
+// part is deliberately not validated: mihomo maps whatever userinfo survives
+// url.Parse through UUIDMap, which turns a string uuid.FromString rejects
+// into a deterministic UUIDv5 (transport/vmess/vmess.go:87,
+// common/utils/uuid.go:46-51), so a non-UUID "uuid" still dials.
+func parseVmessAEAD(line string, schemeEnd int) (Node, bool) {
+	payload := line[schemeEnd+len(schemeSep):]
+	server, port, ok := splitVmessAEAD(payload)
+	if !ok {
+		return Node{}, false
+	}
+
+	name := ""
+	hashIdx := -1
+	if h := strings.IndexByte(payload, '#'); h >= 0 {
+		hashIdx = schemeEnd + len(schemeSep) + h
+		name = strings.TrimSpace(payload[h+1:])
+	}
+	if name == "" {
+		name = server
+	}
+
+	return Node{Raw: line, Scheme: SchemeVmess, Name: name, Server: server, Port: port, FragmentIdx: hashIdx}, true
+}
+
+// splitVmessAEAD splits the authority of an Xray VMessAEAD share link into
+// server and port under the same gates parseVmessAEAD applies, so the
+// relabelers refuse exactly the lines the parse refuses. An authority without
+// an '@', a host or a digit port is not a link mihomo converts.
+func splitVmessAEAD(payload string) (server, port string, ok bool) {
+	authority := vmessBody(payload)
+	if i := strings.IndexByte(authority, '?'); i >= 0 {
+		authority = authority[:i]
+	}
+	if i := strings.IndexByte(authority, '/'); i >= 0 {
+		authority = authority[:i]
+	}
+	if strings.IndexByte(authority, '@') < 0 {
+		return "", "", false
+	}
+	server, port = splitHostPort(authority)
+	if server == "" || port == "" {
+		return "", "", false
+	}
+	for i := range len(port) {
+		if port[i] < '0' || port[i] > '9' {
+			return "", "", false
+		}
+	}
+	return server, port, true
 }
 
 // RewriteVmessName returns a vmess:// line identical to raw except its "ps"
 // (display name) field is set to newName, re-encoding the base64 payload.
 // Downstream consumers that key nodes by name (the mihomo prober) then see the
-// intended label. It returns false when raw is not a decodable vmess payload.
+// intended label. It returns false when raw is not a decodable base64 vmess
+// payload; the Xray VMessAEAD form, which names its node in the URI fragment,
+// is RewriteVmessAEADName's.
 //
 // The new name is spliced over the old value rather than marshalled from a
 // map[string]json.RawMessage: that round trip was 89% of this function's
@@ -130,6 +246,62 @@ func rewriteVmessName(raw, tags, cleanName string) (string, bool) {
 	buf := make([]byte, 0, len(scheme)+base64.StdEncoding.EncodedLen(len(plain)))
 	buf = append(buf, scheme...)
 	buf = base64.StdEncoding.AppendEncode(buf, plain)
+	return ioutil.UnsafeString(buf), true
+}
+
+// RewriteVmessAEADName returns a vmess:// line identical to raw except its
+// display name is set to newName, for the Xray VMessAEAD form whose name
+// lives in the URI fragment rather than a base64 "ps": the old fragment is
+// replaced, one is appended when raw carries none. It is RewriteVmessName's
+// counterpart for the body that function refuses — an AEAD authority is not
+// base64 (convert/converter.go:236-239) — and like it, it refuses nothing
+// parseVmess accepted: splitVmessAEAD is the parse's own gate, so a base64
+// JSON body or an undecodable non-URI line returns false and stays with the
+// payload rewriter or the verbatim fallback.
+func RewriteVmessAEADName(raw, newName string) (string, bool) {
+	return rewriteVmessAEADName(raw, "", newName)
+}
+
+// RewriteVmessAEADNameTagged is RewriteVmessAEADName for a display name held
+// as two parts — the annotation prefix and the cleaned node name — which
+// rewrite.NodeName calls instead of joining them first. The rewritten
+// fragment is byte-identical to RewriteVmessAEADName(raw, tags+" "+cleanName),
+// and to cleanName alone when tags is empty: only the join is skipped, so the
+// parts are written straight into the output buffer.
+func RewriteVmessAEADNameTagged(raw, tags, cleanName string) (string, bool) {
+	return rewriteVmessAEADName(raw, tags, cleanName)
+}
+
+// rewriteVmessAEADName splices a display name into the fragment of an Xray
+// VMessAEAD share link. No decode is needed, so the line is rebuilt by
+// appending the untouched prefix and the name parts into one buffer.
+func rewriteVmessAEADName(raw, tags, cleanName string) (string, bool) {
+	prefix, payload, found := strings.Cut(raw, schemeSep)
+	if !found {
+		return "", false
+	}
+	if _, _, ok := splitVmessAEAD(payload); !ok {
+		return "", false
+	}
+
+	fragLen := 0
+	if h := strings.IndexByte(payload, '#'); h >= 0 {
+		fragLen = len(payload) - h
+	}
+	need := len(raw) - fragLen + 1 + len(cleanName)
+	if tags != "" {
+		need += len(tags) + 1
+	}
+	buf := make([]byte, 0, need)
+	buf = append(buf, prefix...)
+	buf = append(buf, schemeSep...)
+	buf = append(buf, payload[:len(payload)-fragLen]...)
+	buf = append(buf, '#')
+	if tags != "" {
+		buf = append(buf, tags...)
+		buf = append(buf, ' ')
+	}
+	buf = append(buf, cleanName...)
 	return ioutil.UnsafeString(buf), true
 }
 

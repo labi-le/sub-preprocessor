@@ -3,6 +3,7 @@ package subscription_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/subscription"
@@ -150,29 +151,27 @@ func TestParseVmessRejectsNonStringAdd(t *testing.T) {
 	}
 }
 
-// TestParseVmessNonStringPortDefaults: a "port" that is not a JSON string or
-// number must not become literal port text ("true", "null"). mihomo reads
-// values["port"] and structure-decodes it into an int, so "true" would publish
-// a node that converts to nothing; the empty string the reader now returns
-// takes the same 443 default an absent port does.
-func TestParseVmessNonStringPortDefaults(t *testing.T) {
+// TestParseVmessEmptyPortRefused pins the end of the fabricated 443: a JSON
+// body whose "port" reads as nothing — absent, "", null, or a token that is
+// neither string nor number — is refused and booked Unsupported rather than
+// published. mihomo's structure decode fails on the empty string ("cannot
+// parse 'port' as int", common/structure/structure.go:143-148) and leaves an
+// absent or null port at zero, so the fabricated 443 sent a probe to a port
+// the node does not have, then a stage="unknown" probe and a dead-cache entry
+// where an honest Unsupported booking belongs.
+func TestParseVmessEmptyPortRefused(t *testing.T) {
 	t.Parallel()
 
 	for _, payload := range []string{
+		`{"add":"srv.example","ps":"n"}`,
+		`{"add":"srv.example","port":"","ps":"n"}`,
 		`{"add":"srv.example","port":true,"ps":"n"}`,
 		`{"add":"srv.example","port":null,"ps":"n"}`,
 		`{"add":"srv.example","port":{"p":443},"ps":"n"}`,
 	} {
-		got, count := parseOne(t, vmessLine(payload))
-		if count != 1 {
-			t.Errorf("payload %s parsed %d nodes, want 1", payload, count)
-			continue
-		}
-		if got.Port != "443" {
-			t.Errorf("payload %s: port = %q, want the 443 default", payload, got.Port)
-		}
-		if got.Server != "srv.example" {
-			t.Errorf("payload %s: server = %q, want srv.example", payload, got.Server)
+		_, count := parseOne(t, vmessLine(payload))
+		if count != 0 {
+			t.Errorf("payload %s parsed %d nodes, want 0", payload, count)
 		}
 	}
 }
@@ -236,5 +235,216 @@ func TestRewriteVmessNameRejectsGarbage(t *testing.T) {
 
 	if _, ok := subscription.RewriteVmessName("vmess://not!base64!!!", "x"); ok {
 		t.Fatal("expected failure on undecodable payload")
+	}
+}
+
+// TestParseVmessAEADAllocatesNothing prices the '@' cue that skips the doomed
+// base64 attempt on the AEAD arm: an AEAD line must cost what the generic
+// path costs (BenchmarkParse_SingleNode, 0 allocs/op), not the decode buffer
+// a decode-first dispatch would allocate before failing per node.
+func TestParseVmessAEADAllocatesNothing(t *testing.T) {
+	line := []byte("vmess://b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:443?encryption=auto&security=tls#Name\n")
+	if allocs := testing.AllocsPerRun(100, func() {
+		subscription.Parse(line, func(_ subscription.Node) bool {
+			return true
+		})
+	}); allocs != 0 {
+		t.Fatalf("AEAD parse allocated %.0f times per run, want 0", allocs)
+	}
+}
+
+// aeadLine is the Xray VMessAEAD share-link form — a vmess:// body that is
+// not base64 but the authority <user>@<host>:<port>?<params>#<name>.
+func aeadLine(rest string) string {
+	return "vmess://" + rest
+}
+
+// TestParseVmessAEADExtractsServerPortName pins the accepted AEAD shape: the
+// server and port come from the authority, the name from the fragment, and
+// the query survives verbatim in Raw for the client's own mihomo to dial.
+func TestParseVmessAEADExtractsServerPortName(t *testing.T) {
+	t.Parallel()
+
+	line := aeadLine("b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:8443?encryption=auto&security=tls&type=tcp#Tokyo AEAD")
+	got, count := parseOne(t, line)
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Scheme != subscription.SchemeVmess {
+		t.Errorf("scheme: got %q, want vmess", got.Scheme)
+	}
+	if got.Server != "1.2.3.4" {
+		t.Errorf("server: got %q, want 1.2.3.4", got.Server)
+	}
+	if got.Port != "8443" {
+		t.Errorf("port: got %q, want 8443", got.Port)
+	}
+	if got.Name != "Tokyo AEAD" {
+		t.Errorf("name: got %q, want Tokyo AEAD", got.Name)
+	}
+	if got.FragmentIdx < 0 || got.Raw[:got.FragmentIdx] != line[:strings.IndexByte(line, '#')] {
+		t.Errorf("FragmentIdx = %d, want the '#' position", got.FragmentIdx)
+	}
+	if got.Raw != line {
+		t.Errorf("raw: got %q, want the original line", got.Raw)
+	}
+}
+
+// TestParseVmessAEADRefusedShapes pins the gates the AEAD fallback is refused
+// under: handleVShareLink requires both a hostname and a port
+// (convert/v.go:17-21), url.Parse must accept the port text (any non-digit
+// port makes it fail and the line is skipped, converter.go:239-241), and the
+// two slices identify the form by an '@' in the authority — so a portless,
+// hostless, non-digit-port or '@'-less body is refused and booked
+// Unsupported, never published.
+func TestParseVmessAEADRefusedShapes(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{
+		aeadLine("uuid@1.2.3.4?type=tcp#No Port"),
+		aeadLine("uuid@1.2.3.4#No Port"),
+		aeadLine("uuid@:443#No Host"),
+		aeadLine("uuid@1.2.3.4:abc#Bad Port"),
+		aeadLine("1.2.3.4:443?type=tcp#No At"),
+	} {
+		_, count := parseOne(t, line)
+		if count != 0 {
+			t.Errorf("%q parsed %d nodes, want 0", line, count)
+		}
+	}
+}
+
+// TestParseVmessAEADAcceptsNonUUIDUser pins the user-part verdict: mihomo's
+// vmess adapter maps whatever userinfo the link carries through UUIDMap,
+// which turns a string uuid.FromString rejects into a deterministic UUIDv5
+// rather than refusing it (transport/vmess/vmess.go:87,
+// common/utils/uuid.go:46-51), so a body whose "uuid" is not one still dials
+// and must parse.
+func TestParseVmessAEADAcceptsNonUUIDUser(t *testing.T) {
+	t.Parallel()
+
+	got, count := parseOne(t, aeadLine("not-a-uuid@1.2.3.4:443?encryption=none#N"))
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Server != "1.2.3.4" || got.Port != "443" {
+		t.Errorf("server:port = %s:%s, want 1.2.3.4:443", got.Server, got.Port)
+	}
+	if got.Name != "N" {
+		t.Errorf("name: got %q, want N", got.Name)
+	}
+}
+
+// TestParseVmessURLSafeBodyReencoded: decodeBase64Tolerant reads a url-safe
+// alphabet body, but the client's mihomo decodes vmess bodies with the STD
+// alphabets only (RawStd then Std, convert/base64.go:24-33), so a published
+// url-safe line would fail that decode and be misparsed as an AEAD authority.
+// parseVmess re-encodes such a body in the STD alphabet at parse, so Raw must
+// decode under StdEncoding to the same document, keep the fragment, and
+// re-parse to the same node.
+func TestParseVmessURLSafeBodyReencoded(t *testing.T) {
+	t.Parallel()
+
+	doc := `{"v":"2","add":"1.2.3.4","port":"443","ps":"Nam~e","id":"b831381d","net":"ws"}`
+	urlSafe := base64.RawURLEncoding.EncodeToString([]byte(doc))
+	if !strings.ContainsAny(urlSafe, "-_") {
+		t.Fatalf("fixture body %q does not exercise the url-safe alphabet", urlSafe)
+	}
+
+	line := "vmess://" + urlSafe + "#Frag"
+	got, count := parseOne(t, line)
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Raw == line {
+		t.Fatal("url-safe body was published verbatim")
+	}
+	const prefix = "vmess://"
+	const frag = "#Frag"
+	if !strings.HasSuffix(got.Raw, frag) {
+		t.Fatalf("fragment lost: %q", got.Raw)
+	}
+	plain, err := base64.StdEncoding.DecodeString(got.Raw[len(prefix) : len(got.Raw)-len(frag)])
+	if err != nil {
+		t.Fatalf("published body is not STD base64: %v", err)
+	}
+	if string(plain) != doc {
+		t.Errorf("published body decodes to %q, want %q", plain, doc)
+	}
+
+	// Re-parsing the published line must yield the same node — this is the
+	// property that makes parse the right seam for both endpoints.
+	again, count := parseOne(t, got.Raw)
+	if count != 1 {
+		t.Fatalf("re-parse got %d nodes, want 1", count)
+	}
+	if again.Server != got.Server || again.Port != got.Port || again.Name != got.Name {
+		t.Errorf("re-parse node %+v differs from %+v", again, got)
+	}
+}
+
+// TestRewriteVmessAEADNameReplacesFragment pins the relabel the AEAD form
+// needs: the display name lives in the fragment, so the new label replaces it
+// and the relabeled line parses back to the same node under the new name —
+// the property stable.Merge's relabel depends on.
+func TestRewriteVmessAEADNameReplacesFragment(t *testing.T) {
+	t.Parallel()
+
+	line := aeadLine("b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:8443?type=tcp#Old Name")
+	out, ok := subscription.RewriteVmessAEADName(line, "avia-003")
+	if !ok {
+		t.Fatal("rewrite failed")
+	}
+	want := aeadLine("b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:8443?type=tcp#avia-003")
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+
+	got, count := parseOne(t, out)
+	if count != 1 {
+		t.Fatalf("re-parse got %d nodes, want 1", count)
+	}
+	if got.Name != "avia-003" {
+		t.Errorf("name: got %q, want avia-003", got.Name)
+	}
+	if got.Server != "1.2.3.4" || got.Port != "8443" {
+		t.Errorf("server:port = %s:%s, want 1.2.3.4:8443", got.Server, got.Port)
+	}
+}
+
+// TestRewriteVmessAEADNameAppendsMissingFragment: a fragmentless AEAD line
+// names its node after its server, so the relabel appends the fragment mihomo
+// reads the name from.
+func TestRewriteVmessAEADNameAppendsMissingFragment(t *testing.T) {
+	t.Parallel()
+
+	line := aeadLine("b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:443?type=tcp")
+	out, ok := subscription.RewriteVmessAEADName(line, "avia-003")
+	if !ok {
+		t.Fatal("rewrite failed")
+	}
+	if want := line + "#avia-003"; out != want {
+		t.Errorf("got %q, want %q", out, want)
+	}
+}
+
+// TestRewriteVmessAEADNameRefusesOtherShapes: the AEAD rewriter owns the
+// non-base64 body only, the JSON body is RewriteVmessName's, and the two
+// refuse exactly what parseVmess refuses between them — a relabel flow that
+// tries both drops nothing the parser accepted.
+func TestRewriteVmessAEADNameRefusesOtherShapes(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		vmessLine(`{"v":"2","ps":"Old","add":"1.2.3.4","port":"443","id":"uuid"}`),
+		"vmess://!!!not-base64!!!",
+		aeadLine("uuid@1.2.3.4"),
+	} {
+		if _, ok := subscription.RewriteVmessAEADName(raw, "x"); ok {
+			t.Errorf("RewriteVmessAEADName accepted %q", raw)
+		}
+	}
+	if _, ok := subscription.RewriteVmessName(aeadLine("uuid@1.2.3.4:443#n"), "x"); ok {
+		t.Error("RewriteVmessName accepted an AEAD body")
 	}
 }

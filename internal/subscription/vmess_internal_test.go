@@ -380,3 +380,43 @@ func displayNameJoin(tags, cleanName string) string {
 	}
 	return tags + " " + cleanName
 }
+
+// TestRewriteVmessAEADNameTaggedMatchesConcat pins the AEAD rewriter's parts
+// composition to the join it replaced, mirroring
+// TestRewriteVmessNameTaggedMatchesConcat for the fragment form: the fragment
+// takes the name verbatim (no JSON encoding), so every corpus name must come
+// out byte-identical to the joined form and agree on acceptance.
+func TestRewriteVmessAEADNameTaggedMatchesConcat(t *testing.T) {
+	t.Parallel()
+
+	line := "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:443?type=tcp#Old Name"
+
+	pairs := make([][2]string, 0, len(nameCorpus)*2+4)
+	for _, name := range nameCorpus {
+		pairs = append(pairs, [2]string{"", name}, [2]string{"[GEO:FI][IP:192.0.2.1]", name})
+	}
+	pairs = append(
+		pairs,
+		[2]string{"", ""},
+		[2]string{"[GEO:DE]", ""},
+		[2]string{"tags with \"quote\" and \\slash and <html>&", "node"},
+		[2]string{"[GEO:xx]", "name past the scratch " + strings.Repeat("y", nameScratch*2)},
+		[2]string{"[GEO:xx] " + strings.Repeat("t", nameScratch), "node"},
+	)
+
+	for _, p := range pairs {
+		tags, cleanName := p[0], p[1]
+		want, wantOK := RewriteVmessAEADName(line, displayNameJoin(tags, cleanName))
+		got, gotOK := RewriteVmessAEADNameTagged(line, tags, cleanName)
+		if gotOK != wantOK {
+			t.Errorf("tags %q cleanName %q: ok = %v, concat form ok = %v", tags, cleanName, gotOK, wantOK)
+			continue
+		}
+		if !gotOK {
+			continue
+		}
+		if got != want {
+			t.Errorf("tags %q cleanName %q:\n got %q\nwant %q", tags, cleanName, got, want)
+		}
+	}
+}

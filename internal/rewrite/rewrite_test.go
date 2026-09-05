@@ -69,6 +69,36 @@ func TestNodeNameVmessRewritesPsWithGeoIP(t *testing.T) {
 	}
 }
 
+// TestNodeNameVmessAEADRewritesFragment: an AEAD vmess node names itself in
+// the URI fragment, so the tag prefix goes there — the base64 arm refuses the
+// non-base64 body and the AEAD counterpart rewrites the fragment, keeping the
+// annotation on a line the client's mihomo can still dial.
+func TestNodeNameVmessAEADRewritesFragment(t *testing.T) {
+	t.Parallel()
+
+	node := parseNode(t, "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@host.example:443?type=tcp#[GEO:RU][SPD:20M] Old Name")
+	var buf bytes.Buffer
+	rewrite.NodeName(&buf, node, "[GEO:US][IP:1.2.3.4]")
+
+	want := "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@host.example:443?type=tcp#[GEO:US][IP:1.2.3.4] Old Name"
+	if buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+
+	// An empty prefix strips the upstream tags; a fragmentless AEAD node gets
+	// a fragment appended, exactly like the fragment schemes.
+	var clean bytes.Buffer
+	rewrite.NodeName(&clean, node, "")
+	if got := clean.String(); got != "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@host.example:443?type=tcp#Old Name" {
+		t.Errorf("empty tags: got %q, want the stripped name in the fragment", got)
+	}
+	var bare bytes.Buffer
+	rewrite.NodeName(&bare, parseNode(t, "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@192.0.2.1:443?type=tcp"), "[GEO:FI]")
+	if got := bare.String(); got != "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@192.0.2.1:443?type=tcp#[GEO:FI] 192.0.2.1" {
+		t.Errorf("fragmentless: got %q, want the appended fragment", got)
+	}
+}
+
 // ssrLine builds an ssr:// link whose display name is the base64 "remarks"
 // query param inside the base64 payload.
 func ssrLine(remarks string) string {
@@ -261,6 +291,8 @@ func nodeNameCases(t *testing.T) []nodeCase {
 		{"mierus", parseNode(t, "mierus://u@192.0.2.1?port=2999&protocol=TCP#Old Name")},
 		{"vmess", parseNode(t, vmessLine)},
 		{"vmess with a name json would escape", parseNode(t, vmessEscaped)},
+		{"vmess aead", parseNode(t, "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@host.example:443?type=tcp#Old Name")},
+		{"vmess aead without a fragment", parseNode(t, "vmess://b831381d-6324-4d53-ad4f-8cda48b30811@192.0.2.1:443?type=tcp")},
 		{"ssr", parseNode(t, ssrLine("Old Node"))},
 		{"ssr with an escaping name", parseNode(t, ssrLine(`quote " back \ slash`))},
 		{"ssr behind a stale fragment", parseNode(t, ssrLine("Old Node")+"#stale label")},
@@ -295,6 +327,9 @@ func preSplitNodeName(node subscription.Node, tags string) string {
 	switch node.Scheme { //nolint:exhaustive // mirrors NodeName: every other scheme takes the fragment path below
 	case subscription.SchemeVmess:
 		if out, ok := subscription.RewriteVmessName(node.Raw, name); ok {
+			return out
+		}
+		if out, ok := subscription.RewriteVmessAEADName(node.Raw, name); ok {
 			return out
 		}
 
