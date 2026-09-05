@@ -168,8 +168,20 @@ func (e *StatusError) Gone() bool { return e != nil && goneCodes[e.Code] }
 // client's dialer owns the IP/SSRF policy (guarded for the CLI, unrestricted for
 // the crawler). A non-2xx status is returned as *StatusError, whose Gone method
 // says whether that status is definitive; any other error means the verdict is
-// undetermined.
+// undetermined. No hwid is sent: this is the entry for fetches that have no
+// source config to read one from, the classify CLI included.
 func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL) (Result, error) {
+	return URLWithHWID(ctx, client, rawURL, "")
+}
+
+// URLWithHWID is URL with the source's hwid carried as the x-hwid request
+// header, exactly as the worker's subscription fetch carries it
+// (fetch.BytesWithTypeHWID). A Remnawave panel with the HWID device limit on
+// answers a header-less fetch 200 with a single placeholder node, so judging
+// such a source without its hwid reads live as nodeless and its owner would be
+// retired while the worker keeps publishing real nodes from it. An empty hwid
+// sends no header.
+func URLWithHWID(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL, hwid string) (Result, error) {
 	if err := fetch.ValidateHTTPSURL(rawURL); err != nil {
 		return Result{}, fmt.Errorf("validate url: %w", err)
 	}
@@ -181,6 +193,11 @@ func URL(ctx context.Context, client *http.Client, rawURL fetch.SubscriptionURL)
 	// included: the verdict must describe what the worker would see, and some
 	// panels vary the response format by User-Agent prefix.
 	req.Header.Set("User-Agent", fetch.UserAgent())
+	if hwid != "" {
+		// Header.Set canonicalises any casing, and HTTP/2 lowercases the name
+		// on the wire regardless, so the canonical spelling is the whole of it.
+		req.Header.Set("X-Hwid", hwid)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, fmt.Errorf("do request: %w", err)

@@ -72,7 +72,7 @@ const fixturePage = `<a href="` + fixNoise + `">x</a>` +
 // request URL), fixRaw formats the URL straight into the message, and
 // fixRedirect carries a SECOND URL the candidate's own substitution cannot
 // touch — the shape a refused redirect produces.
-func fixtureClassify(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+func fixtureClassify(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 	switch string(u) {
 	case fixLive:
 		return classify.Result{Nodes: 3}, nil
@@ -150,11 +150,11 @@ func fixtureCrawler(t *testing.T, logger zerolog.Logger, page string, seen *[]st
 			MaxDepth:    0,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/" + fixChannel: page}},
-		classifyFn: func(ctx context.Context, hc *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(ctx context.Context, hc *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			mu.Lock()
 			*seen = append(*seen, string(u))
 			mu.Unlock()
-			return fixtureClassify(ctx, hc, u)
+			return fixtureClassify(ctx, hc, u, "")
 		},
 		logger: logger,
 	}, priv
@@ -714,9 +714,9 @@ func TestRejectSummaryExcludesACandidateAcceptedElsewhere(t *testing.T) {
 		"https://t.me/s/chanb": `<pre>` + flappy + `</pre>`,
 	}}
 	var calls atomic.Int32
-	c.classifyFn = func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+	c.classifyFn = func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 		if string(u) != flappy {
-			return fixtureClassify(context.Background(), nil, u)
+			return fixtureClassify(context.Background(), nil, u, "")
 		}
 		if calls.Add(1) == 1 {
 			return classify.Result{}, &classify.StatusError{Code: http.StatusServiceUnavailable, Status: "503"}

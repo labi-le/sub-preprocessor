@@ -33,7 +33,7 @@ func carveCrawler(t *testing.T, opts Options, f pageFetcher, logBuf *bytes.Buffe
 	c := &Crawler{
 		opts:   opts,
 		client: f,
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(logBuf),
@@ -257,7 +257,6 @@ func TestCarveOutGating(t *testing.T) {
 			carveParentURL:  parentPage,
 			carveSiblingURL: wrapMsg(subSibling),
 		}}, &logBuf)
-
 		if got := hits[carveSiblingURL]; got != 1 {
 			t.Errorf("differing-topic sibling fetched %d time(s), want the 1 carve-out visit", got)
 		}
@@ -291,6 +290,34 @@ func TestCarveOutGating(t *testing.T) {
 		}
 		if got := hits[srca2ListURL]; got != 1 {
 			t.Errorf("/s/ probed %d time(s), want 1 — a leaked carve-out child re-probes the same message-less-for-channels listing", got)
+		}
+	})
+
+	t.Run("bare slug seed is absorbed by its remembered topics", func(t *testing.T) {
+		t.Parallel()
+
+		// carveCrawler seeds the state empty, so it cannot pre-load the
+		// productive memory this case needs. The fixture is instead driven
+		// through the real Crawler with a pre-seeded state: the configured
+		// bare slug must be absorbed into its remembered topic (see the
+		// buildSeeds doc), leaving the listing fetched once as the topic
+		// probe and never scanned as a chat of its own.
+		hits := map[string]int{}
+		st := state{Productive: map[string]channelState{"forumchat/39": {}}}
+		c := &Crawler{
+			opts: Options{Channels: []string{"forumchat"}, Pages: 3, MaxDepth: 0},
+			client: pageFetcher{hits: hits, pages: map[string]string{
+				carveListURL:   carveJoinCard,
+				carveParentURL: wrapMsg(subParent),
+			}},
+			classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
+				return classify.Result{Nodes: 1}, nil
+			},
+			logger: zerolog.Nop(),
+		}
+		c.scan(context.Background(), &st, nil)
+		if got := hits[carveListURL]; got != 1 {
+			t.Errorf("t.me/s/forumchat fetched %d time(s), want the 1 topic probe; the bare slug seed must be absorbed, not scanned", got)
 		}
 	})
 
@@ -464,7 +491,7 @@ func TestThematicGateDoesNotExpandBarrenChild(t *testing.T) {
 			childListURL: wrapMsg("https://sub.example/child-never-live") +
 				`<a href="https://t.me/deeperg">child's own repost</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) == subSeed {
 				return classify.Result{Nodes: 1}, nil
 			}

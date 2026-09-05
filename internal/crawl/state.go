@@ -58,6 +58,12 @@ type state struct {
 	// weeks of productive-channel memory that nothing can reconstruct, and a
 	// transient EACCES must not turn into permanent amnesia.
 	loadFailed bool
+	// dirty marks that an in-memory mutation has not been written out.
+	// persistState skips the whole marshal+fsync+rename when it is false, so a
+	// cycle that changed nothing pays nothing for a file that can exceed 0.5 MB
+	// at the Dead cap. Every mutating method sets it; saveState itself does not
+	// consult it, keeping the direct call (tests seeding a file) unconditional.
+	dirty bool
 }
 
 // record marks a channel productive as of now, preserving its first-seen time.
@@ -71,6 +77,7 @@ func (s *state) record(ch string, now time.Time) {
 	}
 	e.LastSubAt = now
 	s.Productive[ch] = e
+	s.dirty = true
 }
 
 // maxProductive caps the remembered-channel memory. Every productive channel
@@ -83,12 +90,16 @@ const maxProductive = 200
 // prune drops channels whose last productive moment is before cutoff, then caps
 // the memory at maxProductive, keeping the most recently productive.
 func (s *state) prune(cutoff time.Time) {
+	before := len(s.Productive)
 	for ch, e := range s.Productive {
 		if e.LastSubAt.Before(cutoff) {
 			delete(s.Productive, ch)
 		}
 	}
 	if len(s.Productive) <= maxProductive {
+		if len(s.Productive) != before {
+			s.dirty = true
+		}
 		return
 	}
 	slugs := make([]string, 0, len(s.Productive))
@@ -107,6 +118,7 @@ func (s *state) prune(cutoff time.Time) {
 	for _, ch := range slugs[maxProductive:] {
 		delete(s.Productive, ch)
 	}
+	s.dirty = true
 }
 
 // maxDead caps the remembered-dead memory. Dead is the one persisted map whose
@@ -148,7 +160,10 @@ func (s *state) recordDead(urls []string, ttl time.Duration, now time.Time) (cha
 		s.Dead[u] = until
 		changed = true
 	}
-	return s.capDead() || changed
+	if changed = s.capDead() || changed; changed {
+		s.dirty = true
+	}
+	return changed
 }
 
 // capDead evicts the soonest-expiring records once the memory is over maxDead,
@@ -191,6 +206,9 @@ func (s *state) pruneDead(now time.Time) (changed bool) {
 			changed = true
 		}
 	}
+	if changed {
+		s.dirty = true
+	}
 	return changed
 }
 
@@ -203,6 +221,9 @@ func (s *state) clearDead(live map[string]origin) (changed bool) {
 			delete(s.Dead, u)
 			changed = true
 		}
+	}
+	if changed {
+		s.dirty = true
 	}
 	return changed
 }
@@ -248,6 +269,7 @@ func (s *state) ageManaged(managed map[string]bool, live map[string]origin, now 
 	for u := range s.Managed {
 		if !managed[u] {
 			delete(s.Managed, u)
+			s.dirty = true
 		}
 	}
 	if s.Managed == nil && len(managed) > 0 {
@@ -255,6 +277,9 @@ func (s *state) ageManaged(managed map[string]bool, live map[string]origin, now 
 	}
 	for u := range managed {
 		if _, isLive := live[u]; isLive {
+			if m, ok := s.Managed[u]; !ok || !m.LastLiveAt.Equal(now) {
+				s.dirty = true
+			}
 			s.Managed[u] = managedState{LastLiveAt: now}
 			continue
 		}
@@ -264,6 +289,7 @@ func (s *state) ageManaged(managed map[string]bool, live map[string]origin, now 
 		}
 		m.NotLiveCycles++
 		s.Managed[u] = m
+		s.dirty = true
 		if m.NotLiveCycles >= staleRetireCycles && !now.Before(m.NotLiveSince.Add(staleRetireAfter)) {
 			if stale == nil {
 				stale = make(map[string]bool)
@@ -317,6 +343,7 @@ func (s *state) confirmBulkPrune(now time.Time, condemned []string) (allow, chan
 		!sameProposal(s.BulkPruneURLs, condemned) {
 		s.BulkPruneAt = now
 		s.BulkPruneURLs = slices.Clone(condemned)
+		s.dirty = true
 		return false, true
 	}
 	if now.Before(s.BulkPruneAt.Add(bulkPruneConfirmAfter)) {
@@ -329,6 +356,7 @@ func (s *state) confirmBulkPrune(now time.Time, condemned []string) (allow, chan
 		return false, false
 	}
 	s.BulkPruneAt, s.BulkPruneURLs = time.Time{}, nil
+	s.dirty = true
 	return true, true
 }
 
@@ -364,6 +392,7 @@ func (s *state) clearBulkPrune() (changed bool) {
 		return false
 	}
 	s.BulkPruneAt, s.BulkPruneURLs = time.Time{}, nil
+	s.dirty = true
 	return true
 }
 

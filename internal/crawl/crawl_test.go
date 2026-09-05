@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 	t.Parallel()
 
 	c := &Crawler{
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			switch string(u) {
 			case "https://live.example/sub":
 				return classify.Result{Nodes: 1}, nil
@@ -103,7 +104,7 @@ func TestClassifyAllDistinguishesUnknownFromDead(t *testing.T) {
 		logger: zerolog.Nop(),
 	}
 	live, unknown, dead := c.classifyAll(context.Background(),
-		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, nil, "", nil)
+		[]string{"https://live.example/sub", "https://err.example/sub", "https://dead.example/sub", "https://gone.example/sub"}, nil, nil, "", nil, nil)
 	// deadOut carries no order: workers append under the mutex as they finish,
 	// and its only consumer writes a map.
 	if !slices.Contains(dead, "https://dead.example/sub") ||
@@ -142,7 +143,7 @@ func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
 		urlGone    = "https://gone.example/sub"    // 404
 	)
 	c := &Crawler{
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			switch string(u) {
 			case urlExpired:
 				return classify.Result{Nodes: 12, Expired: true}, nil
@@ -154,7 +155,7 @@ func TestClassifyAllKeepsNodeless200Undetermined(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown, dead := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, nil, "", nil)
+	live, unknown, dead := c.classifyAll(context.Background(), []string{urlPortal, urlEmpty, urlExpired, urlGone}, nil, nil, "", nil, nil)
 	if len(dead) != 2 {
 		t.Errorf("dead = %v, want exactly the expired and gone URLs", dead)
 	}
@@ -180,7 +181,7 @@ func TestClassifyAllBoundsConcurrency(t *testing.T) {
 
 	var cur, peak atomic.Int32
 	c := &Crawler{
-		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL, string) (classify.Result, error) {
 			n := cur.Add(1)
 			defer cur.Add(-1)
 			for {
@@ -198,7 +199,7 @@ func TestClassifyAllBoundsConcurrency(t *testing.T) {
 	for i := range cap(urls) {
 		urls = append(urls, fmt.Sprintf("https://h%d.example/sub", i))
 	}
-	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil)
+	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil, nil)
 	if len(live) != len(urls) || len(unknown) != 0 {
 		t.Fatalf("live=%d unknown=%d, want %d/0", len(live), len(unknown), len(urls))
 	}
@@ -220,7 +221,7 @@ func TestRecheckRetainsUnknownPrunesDead(t *testing.T) {
 	)
 	c := &Crawler{
 		opts: Options{Prune: true},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			switch string(u) {
 			case urlLive:
 				return classify.Result{Nodes: 1}, nil
@@ -302,13 +303,13 @@ func TestClassifyAllTreatsTransientStatusAsUnknown(t *testing.T) {
 	}
 
 	c := &Crawler{
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			status := code[string(u)]
 			return classify.Result{}, &classify.StatusError{Code: status, Status: http.StatusText(status)}
 		},
 		logger: zerolog.Nop(),
 	}
-	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil)
+	live, unknown, _ := c.classifyAll(context.Background(), urls, nil, nil, "", nil, nil)
 
 	if len(live) != 0 {
 		t.Fatalf("live = %v, want none: no URL answered 2xx", live)
@@ -347,7 +348,7 @@ func TestRecheckKeepsTransientStatusPrunesGone(t *testing.T) {
 	}
 	c := &Crawler{
 		opts: Options{Prune: true},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if code, bad := status[string(u)]; bad {
 				return classify.Result{}, &classify.StatusError{Code: code, Status: http.StatusText(code)}
 			}
@@ -643,12 +644,149 @@ func TestMergeReservesExistingManagedNames(t *testing.T) {
 	}
 }
 
+// TestMergeReservesShelteredURLs: an unmarked entry's URL is reserved the way
+// its name is. Without the reservation a live rediscovery of that URL would
+// mint a second, managed entry over it — a mirror that carries no hwid of its
+// own, which over the operator's entry either duplicates the fetch
+// byte-for-byte (the pair validatePrivate refuses to write when the sheltered
+// entry is hwid-less, freezing private.yaml until the operator intervenes) or
+// reads only the placeholder a device-limited panel serves to a header-less
+// request. The merge skips the mint instead, so the URL stays owned by the
+// operator's entry alone, exactly as the curated deny list withholds URLs the
+// operator already curates.
+func TestMergeReservesShelteredURLs(t *testing.T) {
+	t.Parallel()
+
+	const (
+		handName = "hand-added"
+		handURL  = "https://hand.example/sub"
+		urlNew   = "https://new.example/sub"
+	)
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{{Name: handName, URL: handURL}}
+
+	o := origin{Slug: "chan", Post: 3631}
+	live := map[string]origin{handURL: o, urlNew: o}
+	next, managed, _, _ := c.mergeManaged(pf, live, recheckResult{}, true, nil)
+	byURL := map[string]source{}
+	for _, s := range next {
+		if _, dup := byURL[s.URL]; dup {
+			t.Fatalf("two entries fetch one URL %s: %+v", s.URL, next)
+		}
+		byURL[s.URL] = s
+	}
+	if hand, ok := byURL[handURL]; !ok {
+		t.Fatalf("the sheltered entry was dropped: %+v", next)
+	} else if hand.Name != handName || hand.Managed {
+		t.Errorf("sheltered entry = %+v, want %q verbatim and unmanaged", hand, handName)
+	}
+	if _, ok := byURL[urlNew]; !ok {
+		t.Fatalf("the discovery was not minted: %+v", next)
+	}
+	if len(managed) != 1 {
+		t.Errorf("managed = %+v, want only the discovery minted", managed)
+	}
+	pf.Subscriptions.Sources = next
+	if err := validatePrivate(pf); err != nil {
+		t.Fatalf("the merge composed a list no cycle can write: %v", err)
+	}
+}
+
+// TestMergeSheltersOneURLUnderTwoHwids: a hand-authored pair fetching one URL
+// under two hwids is the device-limited-panel shape config.Load admits, so
+// the cycle must be able to rewrite the file that holds it. Both unmarked
+// entries are sheltered verbatim with their hwids and a discovery on a new
+// URL is minted beside them; the composed list passes validatePrivate, which
+// the url-only key the write gate used to carry refused — freezing every
+// write with a false "would be unloadable".
+func TestMergeSheltersOneURLUnderTwoHwids(t *testing.T) {
+	t.Parallel()
+
+	const (
+		url    = "https://shared.example/sub"
+		hwidA  = "abcdef0123456789"
+		hwidB  = "abcdef012345678a"
+		urlNew = "https://new.example/sub"
+	)
+	c := &Crawler{opts: Options{Prune: true}, logger: zerolog.Nop()}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{
+		{Name: "panel-a", URL: url, HWID: hwidA},
+		{Name: "panel-b", URL: url, HWID: hwidB},
+	}
+
+	o := origin{Slug: "chan", Post: 3631}
+	live := map[string]origin{url: o, urlNew: o}
+	next, managed, _, _ := c.mergeManaged(pf, live, recheckResult{}, true, nil)
+	if len(managed) != 1 || managed[0].URL != urlNew {
+		t.Fatalf("managed = %+v, want only the discovery over %s minted", managed, urlNew)
+	}
+	byName := map[string]source{}
+	for _, s := range next {
+		byName[s.Name] = s
+	}
+	a, b := byName["panel-a"], byName["panel-b"]
+	if a.HWID != hwidA || b.HWID != hwidB || a.Managed || b.Managed {
+		t.Fatalf("the hwid pair was not sheltered verbatim: %+v", next)
+	}
+	pf.Subscriptions.Sources = next
+	if err := validatePrivate(pf); err != nil {
+		t.Fatalf("the merge composed a list no cycle can write: %v", err)
+	}
+}
+
+// cursorReRef is the regexp pageCursor's hand scan replaced; TestPageCursor
+// holds the scan equal to it over the committed page shapes and the edges the
+// two could disagree on (PerfCrawl#4 demanded proof of equivalence, not trust).
+var cursorReRef = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
+
+// pageCursorRe is pageCursor's reference implementation: the smallest message
+// id per cursorReRef, compared exactly as pageCursor compares its captures.
+func pageCursorRe(page string) string {
+	best := ""
+	for _, m := range cursorReRef.FindAllStringSubmatch(page, -1) {
+		if id := m[1]; best == "" || less(id, best) {
+			best = id
+		}
+	}
+	return best
+}
+
 func TestPageCursor(t *testing.T) {
 	t.Parallel()
 
-	page := `data-post="chan/3650" ... data-post="chan/3631" ... data-post="chan/3648"`
-	if got := pageCursor(page); got != "3631" {
-		t.Fatalf("pageCursor = %q, want 3631", got)
+	// Committed t.me listing shapes from this package's fixtures, then the
+	// adversarial edges where a hand scan could drift from the regexp: a value
+	// hiding another attribute inside itself, an escaped boundary (the raw-page
+	// read), leading zeros and over-wide runs the regexp accepts, a value that
+	// opens with its slash, and unterminated values.
+	pages := []string{
+		`data-post="chan/3650" ... data-post="chan/3631" ... data-post="chan/3648"`,
+		`<div class="tgme_widget_message_wrap" data-post="chan/3631">a</div>` +
+			`<div class="tgme_widget_message_wrap" data-post="chan/3630">b</div>`,
+		`<div data-post="chan/100"></div><pre>body</pre>`,
+		`<a href="https://sub.example/c">c</a><div>me &amp; you</div>` +
+			`<div data-post="chan/100"><a href="https://sub.example/a">a</a></div>` +
+			`<div data-post=&quot;chan/200&quot;><a href="https://sub.example/d">d</a></div>`,
+		`a<div data-post="chan/12">b`,
+		`<div data-post="chat/7/12">b`,
+		`data-post="chan/007" data-post="chan/8"`,
+		`data-post="chan/123456789012345678901234567890"`,
+		`data-post="chan/x" data-post="chan/9">b`,
+		`data-post="/12"`,
+		`data-post="chan/"`,
+		`data-post="chan/12`,
+		`data-post="unterminated data-post="chan/9" tail`,
+		`data-post="x/5 data-post=unterminated/3"`,
+		`data-post="ab/5 data-post="chan/9"`,
+		"no posts here",
+		"",
+	}
+	for _, page := range pages {
+		if got, want := pageCursor(page), pageCursorRe(page); got != want {
+			t.Errorf("pageCursor(%q) = %q, cursorReRef gives %q", page, got, want)
+		}
 	}
 	if got := pageCursor("no posts here"); got != "" {
 		t.Fatalf("pageCursor(empty) = %q, want empty", got)
@@ -707,7 +845,7 @@ func TestPrivateRoundTripPreservesUnmanaged(t *testing.T) {
 	if err := writePrivate(path, pf); err != nil {
 		t.Fatalf("writePrivate: %v", err)
 	}
-	got, err := loadPrivate(path)
+	got, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -736,13 +874,13 @@ func TestPrivateCycleKeepsHandAddedHWID(t *testing.T) {
 		hwid       = "abcdef0123456789"
 		seed       = "subscriptions:\n  sources:\n" +
 			"    - name: hand-added\n      url: " + urlHand + "\n      hwid: " + hwid + "\n" +
-			"    - name: chan-3631\n      url: " + urlManaged + "\n      feed: chan\n      managed: true\n"
+			"    - name: chan-3631\n      url: " + urlManaged + "\n      feed: chan\n      managed: true\n      hwid: " + hwid + "\n"
 	)
 	path := filepath.Join(t.TempDir(), "private.yaml")
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatalf("write private.yaml: %v", err)
 	}
-	pf, err := loadPrivate(path)
+	pf, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -777,8 +915,8 @@ func TestPrivateCycleKeepsHandAddedHWID(t *testing.T) {
 	if hand := byName["hand-added"]; hand.HWID != hwid || hand.URL != urlHand || hand.Managed {
 		t.Errorf("hand-added entry = %+v, want it unchanged with hwid %q", hand, hwid)
 	}
-	if managed := byName["chan-3631"]; managed.HWID != "" {
-		t.Errorf("the crawler minted an hwid it has no source of: %+v", managed)
+	if managed := byName["chan-3631"]; managed.HWID != hwid {
+		t.Errorf("the crawler stripped the hwid a managed entry already carried: %+v", managed)
 	}
 }
 
@@ -808,7 +946,7 @@ func TestRunOnceAdoptsLegacyNames(t *testing.T) {
 	c := &Crawler{
 		opts:   Options{PrivatePath: priv, Prune: true},
 		client: pageFetcher{},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.Nop(),
@@ -872,7 +1010,7 @@ func TestLoadPrivateAdoptionAvoidsACollision(t *testing.T) {
 		t.Fatalf("write private.yaml: %v", err)
 	}
 
-	pf, err := loadPrivate(path)
+	pf, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -918,7 +1056,7 @@ func TestLoadPrivateAdoptionIsOneShot(t *testing.T) {
 		{Name: "tg-vpn-123", URL: urlMinted, Feed: "tg-vpn", Managed: true},
 	}
 
-	first, err := loadPrivate(path)
+	first, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -932,7 +1070,7 @@ func TestLoadPrivateAdoptionIsOneShot(t *testing.T) {
 		t.Fatalf("writePrivate: %v", writeErr)
 	}
 
-	second, err := loadPrivate(path)
+	second, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("second loadPrivate: %v", err)
 	}
@@ -947,12 +1085,76 @@ func TestLoadPrivateAdoptionIsOneShot(t *testing.T) {
 func TestLoadPrivateMissingFile(t *testing.T) {
 	t.Parallel()
 
-	got, err := loadPrivate(filepath.Join(t.TempDir(), "nope.yaml"))
+	got, exists, err := loadPrivate(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
 		t.Fatalf("missing file should not error, got %v", err)
 	}
+	if exists {
+		t.Error("a missing file must report that it does not exist")
+	}
 	if len(got.Subscriptions.Sources) != 0 {
 		t.Fatalf("missing file should yield no sources, got %+v", got.Subscriptions.Sources)
+	}
+}
+
+// TestRunOnceRefusesToRebuildAMissingCorpus pins finding 2's guard: private.yaml
+// absent while the state file remembers a managed corpus is a lost file (or an
+// unmounted bind), not an empty corpus, and the cycle must refuse the write —
+// one cycle's discoveries alone would silently replace hundreds of harvested
+// sources and wipe their liveness streaks. The fixture also proves the genuine
+// first cycle still works: absent file, state remembering nothing, the write
+// goes through.
+func TestRunOnceRefusesToRebuildAMissingCorpus(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	if err := saveState(statePath, state{Managed: map[string]managedState{
+		"https://lost.example/sub": {NotLiveCycles: 2},
+	}}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:    []string{"chan"},
+			PrivatePath: priv,
+			StatePath:   statePath,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": wrapMsg("https://sub.example/new")}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	c.RunOnce(context.Background())
+	if _, err := os.Stat(priv); !os.IsNotExist(err) {
+		t.Fatalf("refused cycle must leave the absent private.yaml alone, stat: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "private.yaml holds no managed sources while state remembers a managed corpus") {
+		t.Errorf("the refusal was not logged at error level:\n%s", logBuf.String())
+	}
+	// The liveness streaks of the missing corpus must survive the refused
+	// cycle: they are the memory that keeps the guard armed and the evidence
+	// that restores the retirement verdicts once the file is back.
+	if st := loadState(statePath, zerolog.Nop()); len(st.Managed) != 1 {
+		t.Errorf("state lost the corpus's liveness records: %+v", st.Managed)
+	}
+
+	// A genuine first cycle — state remembering nothing — still builds the file.
+	os.Remove(statePath)
+	var fresh bytes.Buffer
+	c.logger = zerolog.New(&fresh)
+	c.RunOnce(context.Background())
+	got, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("first cycle must write the corpus it discovered: %v", err)
+	}
+	if !strings.Contains(string(got), "sub.example") {
+		t.Errorf("first cycle wrote %s, want its discovery in it", got)
 	}
 }
 
@@ -1207,7 +1409,7 @@ func TestRunOnceHarvestsInlineNodes(t *testing.T) {
 			InlineMax:     2,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, nil
 		},
 		logger: zerolog.Nop(),
@@ -1281,7 +1483,7 @@ func TestRunOnceHarvestsInlineFromNewestPageAndLinksFromEveryPage(t *testing.T) 
 			"https://t.me/s/chan":            page1,
 			"https://t.me/s/chan?before=100": page2,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) == subURL {
 				return classify.Result{Nodes: 1}, nil
 			}
@@ -1367,14 +1569,14 @@ func TestRunOnceAttributesBothLinksOfOnePost(t *testing.T) {
 	c := &Crawler{
 		opts:   Options{Channels: []string{"chan"}, PrivatePath: priv, Pages: 1},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.Nop(),
 	}
 	c.RunOnce(context.Background())
 
-	pf, err := loadPrivate(priv)
+	pf, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -1431,7 +1633,7 @@ func TestRunOnceInlineDisabled(t *testing.T) {
 			InlineEnabled: false,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, nil
 		},
 		logger: zerolog.Nop(),
@@ -1480,7 +1682,7 @@ func TestRunOnceYieldsInlineNameToHandAddedEntry(t *testing.T) {
 			InlineMax:     5,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(&logBuf),
@@ -1541,7 +1743,7 @@ func writeEmptyPrivate(t *testing.T, dir string) string {
 // the one file no later cycle can write.
 func sourcesByName(t *testing.T, priv string) map[string]source {
 	t.Helper()
-	pf, err := loadPrivate(priv)
+	pf, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -1613,7 +1815,7 @@ func TestRunOnceSheltersHandAddedBodySource(t *testing.T) {
 			InlineMax:     5,
 		},
 		client: pageFetcher{pages: pages},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(&logBuf),
@@ -1681,7 +1883,7 @@ func TestRunOnceNoInlineNodes(t *testing.T) {
 			InlineMax:     2,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, nil
 		},
 		logger: zerolog.Nop(),
@@ -1719,7 +1921,7 @@ func TestRunOnceRefusesBulkPrune(t *testing.T) {
 		client: pageFetcher{},
 		// urls[0] still answers, so this is not a learned-nothing cycle: the
 		// bulk-prune floor alone has to stop the write.
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) == urls[0] {
 				return classify.Result{Nodes: 1}, nil
 			}
@@ -1730,7 +1932,7 @@ func TestRunOnceRefusesBulkPrune(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -1769,7 +1971,7 @@ func TestRunOnceKeepsNodeless200PrunesGone(t *testing.T) {
 		client: pageFetcher{},
 		// urlLive revives, so the cycle is not a learned-nothing one and prune
 		// stays enabled; three sources are far under the bulk-prune floor.
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			switch string(u) {
 			case urlLive:
 				return classify.Result{Nodes: 3}, nil
@@ -1784,7 +1986,7 @@ func TestRunOnceKeepsNodeless200PrunesGone(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -1841,7 +2043,7 @@ func TestRunOnceStaleRefusalCannotAuthorizeADifferentPrune(t *testing.T) {
 	c := &Crawler{
 		opts:   Options{PrivatePath: priv, StatePath: statePath, Prune: true},
 		client: pageFetcher{},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if gone[string(u)] {
 				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
 			}
@@ -1852,7 +2054,7 @@ func TestRunOnceStaleRefusalCannotAuthorizeADifferentPrune(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -1900,7 +2102,7 @@ func TestRunOnceNoChangeWithdrawsBulkPruneRecord(t *testing.T) {
 	c := &Crawler{
 		opts:   Options{PrivatePath: priv, StatePath: statePath, Prune: true},
 		client: pageFetcher{},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(&logBuf),
@@ -1992,7 +2194,7 @@ func TestRunOnceDarkCycleWritesNothing(t *testing.T) {
 	c := &Crawler{
 		opts:   Options{PrivatePath: priv, Prune: true},
 		client: pageFetcher{},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
 		},
 		logger: zerolog.New(&logBuf),
@@ -2000,7 +2202,7 @@ func TestRunOnceDarkCycleWritesNothing(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -2045,7 +2247,7 @@ func newRetireFixture(t *testing.T, urls []string, nodeless map[string]bool, see
 	f.c = &Crawler{
 		opts:   Options{PrivatePath: f.priv, StatePath: f.statePath, StateTTL: 30 * oneDay, Prune: true},
 		client: pageFetcher{},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if nodeless[string(u)] {
 				return classify.Result{}, nil
 			}
@@ -2059,7 +2261,7 @@ func newRetireFixture(t *testing.T, urls []string, nodeless map[string]bool, see
 func (f retireFixture) kept(t *testing.T) map[string]bool {
 	t.Helper()
 
-	pf, err := loadPrivate(f.priv)
+	pf, _, err := loadPrivate(f.priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -2474,23 +2676,45 @@ func TestStatePruneCapsProductive(t *testing.T) {
 	}
 }
 
-// TestBuildSeedsMergesEntriesNamingOneChat: a chat is one crawl target, so the
-// three seed sources cannot contribute competing entries for it. Which of them
-// won used to decide whether the chat was read through its topic or through the
-// t.me/s/ listing a group answers with no message — off the productive memory's
-// map order, so a forum seed died on an unpredictable subset of cycles.
-func TestBuildSeedsMergesEntriesNamingOneChat(t *testing.T) {
+// TestBuildSeedsSeedsEveryRememberedTopic: the seed set is keyed by the full
+// ref, not the slug, so a group remembered productive in several topics is one
+// depth-0 target PER topic — collapsing them by slug kept whichever topic the
+// productive map ranged over first and silently dropped the rest from the
+// cycle. A bare <slug> entry is absorbed into its slug's topic entries, its
+// configured flag riding onto them, so the chat is still read through each
+// topic rather than also probed through its message-less listing.
+func TestBuildSeedsSeedsEveryRememberedTopic(t *testing.T) {
 	t.Parallel()
 
 	c := &Crawler{opts: Options{Channels: []string{"forumchat", "elsewhere"}}, logger: zerolog.Nop()}
-	st := state{Productive: map[string]channelState{"forumchat/1310": {}, "remembered": {}}}
+	st := state{Productive: map[string]channelState{
+		"forumchat/1310": {},
+		"forumchat/55":   {},
+		"remembered":     {},
+	}}
 
 	seeds := c.buildSeeds(&st)
-	if len(seeds) != 3 {
-		t.Fatalf("seeds = %+v, want 3 chats", seeds)
+	if len(seeds) != 4 {
+		t.Fatalf("seeds = %+v, want 4 targets: both remembered topics, elsewhere, remembered", seeds)
 	}
-	if got := seeds["forumchat"]; got.topic != "1310" || !got.configured {
-		t.Errorf("forumchat = %+v, want the remembered topic kept and the configured budget", got)
+	if _, ok := seeds["forumchat"]; ok {
+		t.Error("the bare forumchat entry survived beside its topics; the group would be probed through its message-less listing for nothing")
+	}
+	for topic, configured := range map[string]bool{"forumchat/1310": true, "forumchat/55": true} {
+		spec, ok := seeds[topic]
+		if !ok {
+			t.Errorf("seeds missing the remembered topic %q: %+v", topic, keys(seeds))
+			continue
+		}
+		if spec.ref.String() != topic {
+			t.Errorf("seeds[%q].ref = %+v, want the topic ref", topic, spec.ref)
+		}
+		if spec.configured != configured {
+			t.Errorf("seeds[%q].configured = %v, want %v (the absorbed bare entry's configured budget)", topic, spec.configured, configured)
+		}
+	}
+	if got := seeds["elsewhere"]; got.ref.slug != "elsewhere" || !got.configured {
+		t.Errorf("elsewhere = %+v, want the configured bare seed kept (no topic absorbs it)", got)
 	}
 	if got := seeds["remembered"]; got.configured {
 		t.Errorf("remembered = %+v, want the shallower discovered budget", got)
@@ -2532,6 +2756,60 @@ func TestWritePrivateRefusesUnloadableSource(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a refused write must not create the file; stat err = %v", err)
+	}
+}
+
+// TestWritePrivateFetchIdentityMatchesConfigLoad: the write gate keys the
+// duplicate rule the way config.Load does — on the fetch, url AND hwid — so
+// it admits exactly the files the service will load. Round 3 re-keyed the
+// loader because x-hwid changes the request and a device-limited panel serves
+// each value a different payload, so a private.yaml holding one URL under two
+// hwids loads and must also write, or the crawler would freeze every cycle on
+// a "would be unloadable" error that is false. The byte-identical pair — same
+// url under the same hwid, the empty value included — stays refused.
+func TestWritePrivateFetchIdentityMatchesConfigLoad(t *testing.T) {
+	t.Parallel()
+
+	const (
+		url  = "https://shared.example/sub"
+		hwid = "abcdef0123456789"
+	)
+	write := func(sources ...source) error {
+		var pf privateFile
+		pf.Subscriptions.Sources = sources
+		return writePrivate(filepath.Join(t.TempDir(), "private.yaml"), pf)
+	}
+	if err := write(
+		source{Name: "one", URL: url, HWID: hwid},
+		source{Name: "two", URL: url, HWID: "abcdef012345678a"},
+	); err != nil {
+		t.Fatalf("same url under two hwids must write: %v", err)
+	}
+	// Empty vs set is a distinct fetch too (no header vs header).
+	if err := write(
+		source{Name: "one", URL: url},
+		source{Name: "two", URL: url, HWID: hwid},
+	); err != nil {
+		t.Fatalf("same url under empty vs set hwid must write: %v", err)
+	}
+	for name, sources := range map[string][]source{
+		"same hwid": {
+			{Name: "one", URL: url, HWID: hwid},
+			{Name: "two", URL: url, HWID: hwid},
+		},
+		"no hwid": {
+			{Name: "one", URL: url},
+			{Name: "two", URL: url},
+		},
+	} {
+		err := write(sources...)
+		if err == nil {
+			t.Errorf("%s: the byte-identical fetch pair must be refused", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "already fetched as") {
+			t.Errorf("%s: error %q must name the duplicate fetch", name, err)
+		}
 	}
 }
 
@@ -2702,7 +2980,7 @@ func TestRunOnceWithholdingIsNotADeletion(t *testing.T) {
 			Prune:        true,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page.String()}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.Nop(),
@@ -2710,7 +2988,7 @@ func TestRunOnceWithholdingIsNotADeletion(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -2747,7 +3025,7 @@ func TestClassifyAllRecordsSkipsAndVerdictsSafely(t *testing.T) {
 	}
 	c := &Crawler{
 		opts: Options{DeadTTL: testDeadTTL},
-		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(context.Context, *http.Client, fetch.SubscriptionURL, string) (classify.Result, error) {
 			time.Sleep(time.Millisecond)
 			return classify.Result{}, &classify.StatusError{Code: http.StatusServiceUnavailable, Status: "503 Service Unavailable"}
 		},
@@ -2755,7 +3033,7 @@ func TestClassifyAllRecordsSkipsAndVerdictsSafely(t *testing.T) {
 	}
 	rej := newRejects(zerolog.Nop())
 
-	_, unknown, deadOut := c.classifyAll(context.Background(), urls, dead, rej, "chan", nil)
+	_, unknown, deadOut := c.classifyAll(context.Background(), urls, dead, rej, "chan", nil, nil)
 
 	if len(unknown) != n {
 		t.Errorf("unknown = %d, want %d: a 503 proves nothing about the subscription", len(unknown), n)
@@ -2803,7 +3081,7 @@ func TestRunOnceWithholdsCuratedURLs(t *testing.T) {
 			Pages:        1,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.Nop(),
@@ -2811,7 +3089,7 @@ func TestRunOnceWithholdsCuratedURLs(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -2855,7 +3133,7 @@ func TestRunOnceRemembersDeadAndSkipsRefetch(t *testing.T) {
 			Pages:       1,
 		},
 		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": page}},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) == goneURL {
 				goneFetches.Add(1)
 				return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
@@ -2914,7 +3192,7 @@ func TestRunOnceDarkCycleRecordsNoDead(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/s/chan": `<a href="` + pageURL + `">a</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
 		},
 		logger: zerolog.Nop(),
@@ -2951,7 +3229,7 @@ func TestRunOnceEmptyCorpusRecordsNoDead(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/s/chan": `<a href="https://a.example/sub">a</a> <a href="https://b.example/sub">b</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{}, &classify.StatusError{Code: http.StatusNotFound, Status: "404 Not Found"}
 		},
 		logger: zerolog.Nop(),
@@ -3016,7 +3294,7 @@ func TestRunOnceReclassifiesAfterDeadRecordExpiry(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/s/chan": `<a href="` + revivedURL + `">a</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.Nop(),
@@ -3024,7 +3302,7 @@ func TestRunOnceReclassifiesAfterDeadRecordExpiry(t *testing.T) {
 
 	c.RunOnce(context.Background())
 
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -3067,7 +3345,7 @@ func TestRunOnceDeadTTLZeroWithholdsNothing(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/s/chan": `<a href="` + heldURL + `">a</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			fetches.Add(1)
 			return classify.Result{Nodes: 1}, nil
 		},
@@ -3079,7 +3357,7 @@ func TestRunOnceDeadTTLZeroWithholdsNothing(t *testing.T) {
 	if n := fetches.Load(); n != 1 {
 		t.Errorf("classify calls = %d, want 1: a held record must not withhold once the memory is off", n)
 	}
-	got, err := loadPrivate(priv)
+	got, _, err := loadPrivate(priv)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -3125,7 +3403,7 @@ func TestRunOnceKeepsChannelMemoryOnMidRecheckAbort(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/s/chan": `<a href="` + freshURL + `">a</a>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) == managedURL {
 				// The recheck: the budget expiring here is the real case.
 				cancel()
@@ -3392,13 +3670,16 @@ func TestScrapeChannelListingFetchFailureDoesNotReadTheTopic(t *testing.T) {
 	}
 }
 
-// TestScanCrawlsAChatOnceWhateverItsSeedShape pins the crawl identity: the slug.
-// A chat seeded with a forum topic and reposted bare by another channel is one
-// target, so t.me/s/<chat> is fetched exactly once — the probe that tells a
-// group from a channel. The second, bare visit is the damaging one: it keeps the
-// group's message-less listing as a page, and a page with no cursor and budget
-// left is a cursor loss, so a chat already read through its topic would report
-// a 100% loss into cursorStats. A visit never made is a vote never cast.
+// TestScanCrawlsAChatOnceWhateverItsSeedShape pins the cross-channel crawl
+// identity: the slug. A chat seeded with a forum topic and reposted bare by
+// another channel is one target, so t.me/s/<chat> is fetched exactly once —
+// the probe that tells a group from a channel. The second, bare visit is the
+// damaging one: it keeps the group's message-less listing as a page, and a
+// page with no cursor and budget left is a cursor loss, so a chat already read
+// through its topic would report a 100% loss into cursorStats. A visit never
+// made is a vote never cast. (Same-slug topic SEEDS are the deliberate
+// exception: one depth-0 seed per remembered topic, pinned by
+// TestScanSeedsEveryRememberedForumTopic.)
 func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
 	t.Parallel()
 
@@ -3420,7 +3701,7 @@ func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
 				listURL:  `<html><body>a group listing carries no message and no cursor</body></html>`,
 			},
 		},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(&logBuf),
@@ -3437,6 +3718,57 @@ func TestScanCrawlsAChatOnceWhateverItsSeedShape(t *testing.T) {
 	}
 	if live[subURL].Slug != "forumchat" {
 		t.Errorf("live = %v, want %s attributed to the bare chat", live, subURL)
+	}
+}
+
+// TestScanSeedsEveryRememberedForumTopic drives finding 1's fix end to end: a
+// group remembered productive in several topics must be re-seeded on EVERY one
+// of them. The slug-keyed buildSeeds used to collapse the topics into one seed
+// chosen by the productive map's range order, so N-1 topics were silently
+// dropped from the cycle (and aged out of the state as if they had gone
+// stale); now each topic's embed is fetched exactly once per cycle, whatever
+// the map order, and the bare configured slug is absorbed — the group's
+// message-less listing is fetched once per topic probe and never scanned on
+// its own.
+func TestScanSeedsEveryRememberedForumTopic(t *testing.T) {
+	t.Parallel()
+
+	const listURL = "https://t.me/s/forumchat"
+	topics := []string{"7", "9", "11"}
+	pages := map[string]string{listURL: carveJoinCard}
+	for _, topic := range topics {
+		pages["https://t.me/forumchat/"+topic+topicQuery] = wrapMsg("https://sub.example/topic-" + topic)
+	}
+	for run := range 2 { // the admission must not depend on seed-map range order
+		hits := map[string]int{}
+		st := state{Productive: map[string]channelState{}}
+		for _, topic := range topics {
+			st.record("forumchat/"+topic, time.Now())
+		}
+		c := &Crawler{
+			opts:   Options{Channels: []string{"forumchat"}, Pages: 3, MaxDepth: 0},
+			client: pageFetcher{hits: hits, pages: pages},
+			classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
+				return classify.Result{Nodes: 1}, nil
+			},
+			logger: zerolog.Nop(),
+		}
+		live, _, _ := c.scan(context.Background(), &st, nil)
+		for _, topic := range topics {
+			embed := "https://t.me/forumchat/" + topic + topicQuery
+			if got := hits[embed]; got != 1 {
+				t.Errorf("run %d: topic %s embed fetched %d time(s), want exactly 1 — every remembered topic must be seeded", run, topic, got)
+			}
+			if _, ok := st.Productive["forumchat/"+topic]; !ok {
+				t.Errorf("run %d: productive memory lost the %s topic it was re-seeded from", run, topic)
+			}
+		}
+		if got := hits[listURL]; got != len(topics) {
+			t.Errorf("run %d: listing fetched %d time(s), want %d — one probe per topic seed and no standalone bare-slug scan", run, got, len(topics))
+		}
+		if len(live) != len(topics) {
+			t.Errorf("run %d: live = %+v, want one subscription per topic", run, live)
+		}
 	}
 }
 
@@ -3469,7 +3801,7 @@ func TestRunOnceHarvestsForumTopic(t *testing.T) {
 		client: pageFetcher{pages: map[string]string{
 			"https://t.me/forumchat/1310" + topicQuery: page,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			if string(u) != subURL {
 				t.Errorf("fetched %q; only the listing's external link is a candidate", u)
 			}
@@ -3648,7 +3980,7 @@ func TestMigrationOverACorpusFixture(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	first, err := loadPrivate(path)
+	first, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -3676,7 +4008,7 @@ func TestMigrationOverACorpusFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the written file: %v", err)
 	}
-	second, err := loadPrivate(path)
+	second, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("second loadPrivate: %v", err)
 	}
@@ -3764,7 +4096,7 @@ func TestMigrationCrashBeforeTheWrite(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	first, err := loadPrivate(path)
+	first, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -3778,7 +4110,7 @@ func TestMigrationCrashBeforeTheWrite(t *testing.T) {
 	if err = os.WriteFile(path+".tmp", []byte("subscriptions:\n  sources:\n    - name: trunc"), 0o600); err != nil {
 		t.Fatalf("plant a crashed write's temp file: %v", err)
 	}
-	replay, err := loadPrivate(path)
+	replay, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("replay loadPrivate: %v", err)
 	}
@@ -3809,9 +4141,14 @@ func TestMigrationCrashBeforeTheWrite(t *testing.T) {
 
 // TestLoadPrivateAdoptionSeparatesTwoEntriesOnOneURL: two legacy entries can name
 // one URL after a hand edit, and if both strip onto names the file already holds
-// they both fall to the same per-URL hash. That duplicate would make
+// they both fall to the same per-URL hash. That duplicate NAME would make
 // validatePrivate refuse the write on this and every later cycle, so the second
-// falls further, onto the hash of the name being migrated.
+// falls further, onto the hash of the name being migrated. The URL itself is
+// still duplicated, and the file is now unwritable for that too: neither adopted
+// entry carries a hwid, so the two perform the same header-less fetch, and
+// config.Load refuses two sources sharing a url AND hwid — a write that
+// published this shape would brick the next boot. The migration must refuse
+// and leave the operator's duplicate for the hand that made it.
 func TestLoadPrivateAdoptionSeparatesTwoEntriesOnOneURL(t *testing.T) {
 	t.Parallel()
 
@@ -3828,12 +4165,12 @@ func TestLoadPrivateAdoptionSeparatesTwoEntriesOnOneURL(t *testing.T) {
 		t.Fatalf("write private.yaml: %v", err)
 	}
 
-	pf, err := loadPrivate(path)
+	pf, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
-	if err = validatePrivate(pf); err != nil {
-		t.Fatalf("the adopted file is unwritable: %v", err)
+	if err = validatePrivate(pf); err == nil || !strings.Contains(err.Error(), "already fetched as") {
+		t.Fatalf("validatePrivate = %v, want the identical-fetch refusal (same url, neither entry carries a hwid) config.Load now applies", err)
 	}
 	first, second := pf.Subscriptions.Sources[2], pf.Subscriptions.Sources[3]
 	if first.Name != managedName(shared) || !first.Managed || first.Feed != "dup" {
@@ -3863,7 +4200,7 @@ func TestLoadPrivateSheltersPostCutoverNames(t *testing.T) {
 		t.Fatalf("write private.yaml: %v", err)
 	}
 
-	pf, err := loadPrivate(path)
+	pf, _, err := loadPrivate(path)
 	if err != nil {
 		t.Fatalf("loadPrivate: %v", err)
 	}
@@ -3922,6 +4259,26 @@ func TestMergeAvoidsCuratedName(t *testing.T) {
 	// The mint walked past the taken stem rather than giving up on the slug.
 	if !strings.HasPrefix(managed[0].Name, curated+"-") {
 		t.Errorf("name = %q, want a %q descendant", managed[0].Name, curated)
+	}
+
+	// The same collision on an EXISTING entry is a different hole: sourceName
+	// returns the incumbent name verbatim, so the mint never walks and the
+	// duplicate must be caught when the entry is retained. The logger must
+	// report it at error level, naming the entry, or a reload that freezes the
+	// live config stays invisible.
+	const urlExisting = "https://existing.example/sub"
+	var buf bytes.Buffer
+	filePath := writeCurated(t, "subscriptions:\n  sources:\n    - name: "+curated+"\n")
+	live := map[string]origin{urlExisting: {Slug: "chan", Post: 3631}}
+	c := &Crawler{opts: Options{Prune: true, CuratedPaths: []string{filePath}, PrivatePath: filePath}, logger: zerolog.New(&buf)}
+	pf := privateFile{}
+	pf.Subscriptions.Sources = []source{{Name: curated, URL: urlExisting, Managed: true}}
+	_, managed2, _, _ := c.mergeManaged(pf, live, recheckResult{}, true, nil)
+	if len(managed2) != 1 || managed2[0].Name != curated {
+		t.Fatalf("retained = %+v, want the existing entry kept under its name", managed2)
+	}
+	if !strings.Contains(buf.String(), `"level":"error"`) || !strings.Contains(buf.String(), curated) {
+		t.Errorf("the collision was not logged at error level naming the entry:\n%s", buf.String())
 	}
 }
 
@@ -4065,7 +4422,7 @@ func TestRunOnceLogsCuratedCount(t *testing.T) {
 			"https://t.me/s/chan": `<div class="tgme_widget_message_wrap" data-post="chan/3631">` +
 				`<a href="https://new.example/sub">sub</a></div>`,
 		}},
-		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL) (classify.Result, error) {
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
 			return classify.Result{Nodes: 1}, nil
 		},
 		logger: zerolog.New(&buf),
@@ -4082,5 +4439,310 @@ func TestRunOnceLogsCuratedCount(t *testing.T) {
 	}
 	if terminal["curated"] != float64(3) {
 		t.Errorf("terminal line = %v, want curated=3 (kept-2 counted once)", terminal)
+	}
+}
+
+// TestRunOnceRefusesToRebuildAnEmptyCorpus pins the content half of the
+// absent-corpus refusal (LogicSources#4): a private.yaml that EXISTS but holds
+// no managed URL sources — a truncation, `> private.yaml`, a failed external
+// write — is the same empty corpus a missing file is, and rewriting it from one
+// cycle's discoveries would wipe the harvested corpus and its liveness streaks
+// exactly as the missing-file guard refuses to. Hand-added entries do not make
+// a corpus: they are nobody's to prune, and st.Managed remembers only managed
+// URLs, so a file holding only hand-added entries refuses the same way.
+func TestRunOnceRefusesToRebuildAnEmptyCorpus(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"empty file", "subscriptions:\n  sources: []\n"},
+		{"hand-added only", "subscriptions:\n  sources:\n    - name: mine\n      url: https://hand.example/sub\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertEmptyCorpusRefused(t, tc.body)
+		})
+	}
+}
+
+// assertEmptyCorpusRefused runs one cycle against a private.yaml holding no
+// managed sources while the state remembers a managed corpus, and pins the
+// refusal: the file stays untouched, the error is logged, the liveness memory
+// survives — and a genuine first cycle over the same file still builds the
+// corpus from its discoveries.
+func assertEmptyCorpusRefused(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(priv, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveState(statePath, state{Managed: map[string]managedState{
+		"https://lost.example/sub": {NotLiveCycles: 2},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:    []string{"chan"},
+			PrivatePath: priv,
+			StatePath:   statePath,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": wrapMsg("https://sub.example/new")}},
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	c.RunOnce(context.Background())
+
+	got, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("refused cycle must leave the file alone: %v", err)
+	}
+	if strings.Contains(string(got), "sub.example") {
+		t.Errorf("the refused cycle rewrote the empty corpus from its discoveries:\n%s", got)
+	}
+	if strings.Contains(body, "hand.example") && !strings.Contains(string(got), "hand.example") {
+		t.Errorf("the refused cycle dropped the hand-added entry:\n%s", got)
+	}
+	if !strings.Contains(logBuf.String(), "private.yaml holds no managed sources while state remembers a managed corpus") {
+		t.Errorf("the refusal was not logged at error level:\n%s", logBuf.String())
+	}
+	// The liveness streaks of the lost corpus must survive the refused cycle:
+	// they keep the guard armed until the file is restored or the state
+	// deliberately deleted.
+	if st := loadState(statePath, zerolog.Nop()); len(st.Managed) != 1 {
+		t.Errorf("state lost the corpus's liveness records: %+v", st.Managed)
+	}
+
+	// A genuine first cycle — the same file, state remembering nothing — still
+	// builds the corpus.
+	os.Remove(statePath)
+	c.logger = zerolog.Nop()
+	c.RunOnce(context.Background())
+	got, err = os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("first cycle must write the corpus it discovered: %v", err)
+	}
+	if !strings.Contains(string(got), "sub.example") {
+		t.Errorf("first cycle wrote %s, want its discovery in it", got)
+	}
+}
+
+// TestRunOnceRefusesToRebuildACorpusTruncatedMidCycle pins the reload half of
+// the empty-corpus refusal: loadCycle guards the file as read at cycle start,
+// but the merge re-reads it after a cycle that takes minutes to hours, and an
+// overlay emptied between the two reads — an editor save or failed external
+// write landing in that window — must refuse exactly as one emptied before the
+// cycle would. The cycle-start snapshot was full, so an existence test at the
+// reload sees nothing wrong; only re-running the content test there catches
+// the wipe before the merge rebuilds the corpus from this cycle's discoveries.
+func TestRunOnceRefusesToRebuildACorpusTruncatedMidCycle(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "private.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	const (
+		corpusURL = "https://corpus.example/sub"
+		discovery = "https://sub.example/new"
+	)
+	if err := os.WriteFile(priv, []byte("subscriptions:\n  sources:\n"+
+		"    - name: corpus-1\n      url: "+corpusURL+"\n      feed: corpus\n      managed: true\n"), 0o644); err != nil {
+		t.Fatalf("write private.yaml: %v", err)
+	}
+	if err := saveState(statePath, state{Managed: map[string]managedState{
+		corpusURL: {NotLiveCycles: 2},
+	}}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	c := &Crawler{
+		opts: Options{
+			Channels:    []string{"chan"},
+			PrivatePath: priv,
+			StatePath:   statePath,
+			Pages:       1,
+		},
+		client: pageFetcher{pages: map[string]string{"https://t.me/s/chan": wrapMsg(discovery)}},
+		// The truncation lands on the cycle's first classify call: loadCycle's
+		// read has already seen the full corpus, and the merge's re-read is
+		// still to come — the window an external write needs.
+		classifyFn: func(_ context.Context, _ *http.Client, _ fetch.SubscriptionURL, _ string) (classify.Result, error) {
+			if err := os.WriteFile(priv, []byte("subscriptions:\n  sources: []\n"), 0o644); err != nil {
+				return classify.Result{}, err
+			}
+			return classify.Result{Nodes: 1}, nil
+		},
+		logger: zerolog.New(&logBuf),
+	}
+	c.RunOnce(context.Background())
+
+	if !strings.Contains(logBuf.String(), "private.yaml holds no managed sources while state remembers a managed corpus") {
+		t.Errorf("the refusal was not logged at error level:\n%s", logBuf.String())
+	}
+	got, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("refused cycle must leave the file alone: %v", err)
+	}
+	if strings.Contains(string(got), discovery) {
+		t.Errorf("the refused cycle rebuilt the truncated corpus from its discoveries:\n%s", got)
+	}
+	// The liveness streaks of the truncated corpus must survive the refused
+	// cycle: they keep the guard armed until the file is restored or the
+	// state deliberately deleted.
+	if st := loadState(statePath, zerolog.Nop()); len(st.Managed) != 1 {
+		t.Errorf("state lost the corpus's liveness records: %+v", st.Managed)
+	}
+
+	// A genuine first cycle — the same truncated file, state remembering
+	// nothing — still builds the corpus from its discoveries.
+	os.Remove(statePath)
+	c.logger = zerolog.Nop()
+	c.RunOnce(context.Background())
+	got, err = os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("first cycle must write the corpus it discovered: %v", err)
+	}
+	if !strings.Contains(string(got), discovery) {
+		t.Errorf("first cycle wrote %s, want its discovery in it", got)
+	}
+}
+
+// TestRecheckCarriesManagedHWID pins the hwid thread (LogicSources#2): the
+// liveness fetch of a managed entry must carry the entry's hwid exactly like
+// the worker's, or a device-limited panel's header-less answer reads nodeless
+// and the entry retires while the worker keeps publishing real nodes from it.
+// The recheck is the only liveness path with a per-source config to read one
+// from; discovery candidates have no hwid and must send none.
+func TestRecheckCarriesManagedHWID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		urlHWID = "https://hwid.example/sub"
+		urlBare = "https://bare.example/sub"
+		hwid    = "abcdef0123456789"
+	)
+	var mu sync.Mutex
+	seen := map[string]string{}
+	c := &Crawler{
+		opts: Options{Prune: true},
+		classifyFn: func(_ context.Context, _ *http.Client, u fetch.SubscriptionURL, h string) (classify.Result, error) {
+			mu.Lock()
+			seen[string(u)] = h
+			mu.Unlock()
+			// The panel serves its real payload only to the hwid-carrying
+			// fetch; a header-less one gets the placeholder.
+			if h == "" {
+				return classify.Result{}, nil
+			}
+			return classify.Result{Nodes: 2}, nil
+		},
+		logger: zerolog.Nop(),
+	}
+	var pf privateFile
+	pf.Subscriptions.Sources = []source{
+		{Name: managedName(urlHWID), URL: urlHWID, Managed: true, HWID: hwid},
+		{Name: managedName(urlBare), URL: urlBare, Managed: true},
+	}
+
+	live := map[string]origin{}
+	rr := c.recheckManaged(context.Background(), pf, live)
+	if rr.checked != 2 {
+		t.Fatalf("rechecked %d URLs, want 2", rr.checked)
+	}
+	mu.Lock()
+	gotHWID, gotBare, bareSeen := seen[urlHWID], seen[urlBare], true
+	if _, ok := seen[urlBare]; !ok {
+		bareSeen = false
+	}
+	mu.Unlock()
+	if !bareSeen {
+		t.Fatalf("recheck classified %v, want both managed URLs", seen)
+	}
+	if gotHWID != hwid {
+		t.Errorf("hwid entry fetched with hwid %q, want %q", gotHWID, hwid)
+	}
+	if gotBare != "" {
+		t.Errorf("bare entry fetched with hwid %q, want none sent", gotBare)
+	}
+	if rr.revived != 1 {
+		t.Errorf("revived = %d, want 1: only the hwid-carrying fetch saw real nodes", rr.revived)
+	}
+	if !rr.unknown[urlBare] {
+		t.Error("the bare entry's placeholder must read undetermined, not live and not dead")
+	}
+	_, managed, _, _ := c.mergeManaged(pf, live, rr, true, nil)
+	kept := map[string]bool{}
+	for _, s := range managed {
+		kept[s.URL] = true
+	}
+	if !kept[urlHWID] || !kept[urlBare] {
+		t.Errorf("both entries must survive the merge (live and undetermined), got %v", kept)
+	}
+}
+
+// TestPersistStateSkipsUnchanged pins the dirty gate behind PerfCrawl#2: a
+// cycle whose state did not change must not marshal and atomically rewrite the
+// whole state file (it can exceed 0.5 MB at the Dead cap). saveState stays
+// unconditional for direct callers — tests seed files with it — so the gate
+// lives in Crawler.persistState, the cycle path.
+func TestPersistStateSkipsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	c := &Crawler{opts: Options{StatePath: path}, logger: zerolog.Nop()}
+	var st state
+	c.persistState(&st)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("a clean state must not create the file, stat err: %v", err)
+	}
+	st.record("chan", time.Now())
+	c.persistState(&st)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("a dirty state must be written: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	c.persistState(&st)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Error("a state unchanged since the last write was rewritten")
+	}
+	// The mutators re-arm the gate: the next change must land on disk.
+	st.record("chan2", time.Now())
+	c.persistState(&st)
+	if got := loadState(path, zerolog.Nop()); len(got.Productive) != 2 {
+		t.Errorf("second change was not persisted: %v", got.Productive)
+	}
+}
+
+// TestProbeBudgetDefaultsToTheWorkersFetchTimeout pins LogicSources#1's bound:
+// the liveness probe must not outlive the worker's per-source fetch, so an
+// embedder that never threads Options.FetchTimeout still gets the 3s default
+// mirroring config's subscriptions.fetch.timeout — never an unbounded probe,
+// and never the old 15s that admitted sources the worker could not fetch.
+func TestProbeBudgetDefaultsToTheWorkersFetchTimeout(t *testing.T) {
+	t.Parallel()
+
+	if got := (&Crawler{}).probeBudget(); got != defaultProbeTimeout {
+		t.Errorf("unthreaded probe budget = %v, want the mirrored default %v", got, defaultProbeTimeout)
+	}
+	if got := (&Crawler{opts: Options{FetchTimeout: -time.Second}}).probeBudget(); got != defaultProbeTimeout {
+		t.Errorf("negative probe budget = %v, want the mirrored default %v", got, defaultProbeTimeout)
+	}
+	if got := (&Crawler{opts: Options{FetchTimeout: 5 * time.Second}}).probeBudget(); got != 5*time.Second {
+		t.Errorf("threaded probe budget = %v, want 5s", got)
 	}
 }

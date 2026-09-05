@@ -1,7 +1,6 @@
 package crawl
 
 import (
-	"cmp"
 	"context"
 	"regexp"
 	"strings"
@@ -118,17 +117,19 @@ func (c *Crawler) scan(ctx context.Context, st *state, dead map[string]time.Time
 	if maxDiscovered <= 0 {
 		maxDiscovered = defaultMaxDiscovered
 	}
-	// Two admission identities, applied by admitNode alone: a cross-channel
-	// discovery keys on the slug — a chat seeded with a topic and reposted
-	// without one is one target, and scraping it twice would feed cursorStats
-	// a loss the group's message-less t.me/s/ listing cannot help producing —
-	// while same-group carve-out children key on the full ref, their slug
-	// being by construction already visited.
+	// The admission identities, applied by admitNode alone: depth-0 seeds key
+	// on the full ref — a group remembered productive in several topics queues
+	// one seed per topic, each a separate read of that chat — and so do
+	// same-group carve-out children, whose slug is by construction already
+	// visited. A cross-channel discovery keys on the slug: a chat seeded with
+	// a topic and reposted without one is one target, and scraping it twice
+	// would feed cursorStats a loss the group's message-less t.me/s/ listing
+	// cannot help producing.
 	visited := make(map[string]bool, len(seeds))
 	topicsSeen := make(map[string]bool, len(seeds))
 	queue := make([]scanNode, 0, len(seeds))
-	for slug, s := range seeds {
-		queue = append(queue, scanNode{ref: chanRef{slug: slug, topic: s.topic}, configured: s.configured})
+	for _, s := range seeds {
+		queue = append(queue, scanNode{ref: s.ref, configured: s.configured})
 	}
 
 	for len(queue) > 0 {
@@ -150,12 +151,28 @@ func (c *Crawler) scan(ctx context.Context, st *state, dead map[string]time.Time
 	return live, inline, deadOut
 }
 
-// admitNode applies the two admission identities and the shared discovery
-// budget, marking both maps on acceptance: a back-reference must die whichever
-// map its re-discoverer checks against, so the marks ride processing itself.
+// admitNode applies the admission identities and the shared discovery budget,
+// marking both maps on acceptance: a back-reference must die whichever map its
+// re-discoverer checks against, so the marks ride processing itself. Depth-0
+// seeds and carved carve-out children key on the full ref: a group remembered
+// productive in several topics is one depth-0 seed per topic, each a separate
+// read of that chat even though the slug is shared. Cross-channel discoveries
+// key on the slug — a chat seeded with a topic and reposted without one is one
+// target, and scraping it twice would feed cursorStats a loss the group's
+// message-less t.me/s/ listing cannot help producing.
 func admitNode(n scanNode, visited, topicsSeen map[string]bool, discovered *int, maxDiscovered int) bool {
-	if n.carved {
-		if topicsSeen[n.ref.String()] {
+	// The admission identities differ (see scan): depth-0 seeds and carved
+	// carve-out children probe topicsSeen by the FULL ref, cross-channel
+	// discoveries probe visited by the bare slug. topicsSeen is always marked
+	// with the full ref, so a cross-channel topic admitted by slug still blocks
+	// a later carved child of the same slug. The one String() build per node is
+	// shared by the probe and the mark; a bare ref IS the slug and joins
+	// nothing.
+	full := n.carved || n.depth == 0
+	key := ""
+	if full {
+		key = n.ref.String()
+		if topicsSeen[key] {
 			return false
 		}
 	} else if visited[n.ref.slug] {
@@ -171,26 +188,34 @@ func admitNode(n scanNode, visited, topicsSeen map[string]bool, discovered *int,
 		}
 	}
 	visited[n.ref.slug] = true
-	topicsSeen[n.ref.String()] = true
+	if !full {
+		key = n.ref.String()
+	}
+	topicsSeen[key] = true
 	return true
 }
 
-// seedSpec is a depth-0 crawl target: the forum topic to read the chat through if a
-// seed entry named one, and whether the operator configured it (which buys the
-// full page budget; a remembered productive channel pays the shallower
-// discovered budget, because those accumulate across cycles and paying full
-// Pages for each is what makes a cycle cost more than the last).
+// seedSpec is one depth-0 crawl target: the ref it names (which is also the map
+// key buildSeeds stores it under) and whether the operator configured it.
+// Configured seeds get the full page budget; a remembered productive channel
+// pays the shallower discovered budget, because those accumulate across cycles
+// and paying full Pages for each is what makes a cycle cost more than the last.
 type seedSpec struct {
-	topic      string
+	ref        chanRef
 	configured bool
 }
 
-// buildSeeds collects the depth-0 seeds by slug. Several entries can name one
-// chat — CRAWL_CHANNELS, the channels file and the productive memory are merged
-// — and a chat is one crawl target, so the fields merge rather than the entries
-// competing: configured wins, and the first topic named wins over none, because
-// a group's t.me/s/ listing carries no message at all while a topic that turns
-// out to be a permalink falls back to that listing.
+// buildSeeds collects the depth-0 crawl targets, keyed by the full ref
+// (<slug> or <slug>/<topic>) rather than the slug alone: the productive memory
+// can hold several topics of one forum, and every remembered topic is a seed —
+// collapsing them by slug kept whichever topic the map ranged over first and
+// silently dropped the rest from the cycle. Entries naming the SAME ref —
+// CRAWL_CHANNELS, the channels file and the productive memory can each
+// contribute one — merge into that ref's single slot, configured OR'd across
+// the sources. A bare <slug> entry is then absorbed into its slug's topic
+// entries: reading a group through its message-less t.me/s/ listing yields
+// nothing, so when any entry names a topic the bare shape would only spend a
+// wasted probe and report its empty listing as a cursor loss.
 func (c *Crawler) buildSeeds(st *state) map[string]seedSpec {
 	file := loadChannels(c.opts.ChannelsPath, c.logger).Channels
 	seeds := make(map[string]seedSpec, len(c.opts.Channels)+len(file)+len(st.Productive))
@@ -199,9 +224,10 @@ func (c *Crawler) buildSeeds(st *state) map[string]seedSpec {
 		if ref.slug == "" {
 			return
 		}
-		prev := seeds[ref.slug]
-		seeds[ref.slug] = seedSpec{
-			topic:      cmp.Or(prev.topic, ref.topic),
+		key := ref.String()
+		prev := seeds[key]
+		seeds[key] = seedSpec{
+			ref:        ref,
 			configured: prev.configured || configured,
 		}
 	}
@@ -214,11 +240,33 @@ func (c *Crawler) buildSeeds(st *state) map[string]seedSpec {
 	for _, s := range st.seeds() {
 		addSeed(s, false)
 	}
+	topics := make(map[string]bool, len(seeds))
+	bareConfigured := make(map[string]bool, len(seeds))
+	for _, spec := range seeds {
+		if spec.ref.topic != "" {
+			topics[spec.ref.slug] = true
+		} else if spec.configured {
+			bareConfigured[spec.ref.slug] = true
+		}
+	}
+	for key, spec := range seeds {
+		switch {
+		case spec.ref.topic == "" && topics[spec.ref.slug]:
+			// The slug's topic entries read the chat; the bare entry would only
+			// probe the empty group listing (see the function comment).
+			delete(seeds, key)
+		case bareConfigured[spec.ref.slug] && !spec.configured:
+			// The absorbed bare entry's configured flag buys the topics the
+			// full page budget the operator meant for the chat.
+			spec.configured = true
+			seeds[key] = spec
+		}
+	}
 	return seeds
 }
 
 // cursorStats aggregates page-cursor outcomes over a cycle. Pagination hangs
-// off one undocumented t.me markup attribute (cursorRe); if it is renamed,
+// off one undocumented t.me markup attribute, data-post; if it is renamed,
 // pageCursor returns "" everywhere, every channel silently degrades to a
 // single page, and nothing in the per-channel log distinguishes that from a
 // channel that genuinely has one page. Only the fleet-wide ratio does.
@@ -300,9 +348,13 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead m
 		return nil, nil
 	}
 
+	// One full-ref build per scanned channel, feeding both the record key on
+	// the viaTopic path and the log line: a bare ref IS the slug and costs
+	// nothing, so only topic-bearing channels pay the join.
+	refName := n.ref.String()
 	cand := c.harvestPages(pages, inline, rej, n.ref.slug)
 	var found map[string]bool
-	found, _, deadOut = c.classifyAll(ctx, keys(cand), dead, rej, n.ref.slug, cand)
+	found, _, deadOut = c.classifyAll(ctx, keys(cand), dead, rej, n.ref.slug, cand, nil)
 	for u := range found {
 		// First discoverer wins: BFS visits seeds before discovered channels, so
 		// attribution prefers the operator-configured origin. The slug stays
@@ -317,16 +369,19 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead m
 		}
 	}
 	if len(found) > 0 {
-		key := n.ref.slug
+		// The record key is the ref's own seed form: full ref when the chat
+		// was read through its topic embed, bare slug otherwise (see buildSeeds
+		// on why a bare shape is absorbed into a slug's topic entries).
 		if viaTopic {
-			key = n.ref.String()
+			st.record(refName, time.Now())
+		} else {
+			st.record(n.ref.slug, time.Now())
 		}
-		st.record(key, time.Now())
 	}
 	if viaTopic && len(found) > 0 {
 		metrics.Crawl.TopicLive.Add(1)
 	}
-	c.logger.Info().Str("channel", n.ref.String()).Int("depth", n.depth).
+	c.logger.Info().Str("channel", refName).Int("depth", n.depth).
 		Int("pages", len(pages)).Int("subs", len(found)).Msg("scanned channel")
 
 	// Thematic gate: expand into referenced chats only from seeds or from
@@ -468,11 +523,12 @@ func harvestPage(text string, o origin, cand map[string]uint64, urls []string, r
 // discovered group with no digits just finds its empty listing and stops. A
 // topic-carrying ref whose listing was reached and carried no message is the
 // group case: that empty listing and its cursor outcome are dropped and the
-// topic is read instead, which costs a genuine forum seed one wasted fetch per
-// cycle and a channel seed nothing. A listing that never came back is not that
-// case and does not fall back: a transport or status error says nothing about
-// the ref's shape, and a host that just rate-limited us must not be asked twice
-// in one scrape.
+// topic is read instead — one wasted probe per topic-carrying visit, and since
+// nothing memoizes the message-less verdict per slug, a forum remembered
+// productive in N topics pays it N times a cycle. A listing that never came
+// back is not that case and does not fall back: a transport or status error
+// says nothing about the ref's shape, and a host that just rate-limited us
+// must not be asked twice in one scrape.
 //
 // out is newest-first on every return path, and harvestPages takes its inline
 // nodes from out[0] alone: reordering here silently ages that harvest.
@@ -606,7 +662,11 @@ func extractRefs(pages []string) []chanRef {
 	var out []chanRef
 	for _, page := range pages {
 		for _, m := range channelRe.FindAllStringSubmatch(page, -1) {
-			slug := strings.ToLower(m[1])
+			// m[1] sub-slices page and strings.ToLower returns it unchanged on
+			// the all-lowercase fast path (the common t.me shape); the ref
+			// outlives the page as a visited key and as every live URL's Slug,
+			// where an alias would pin up to maxPageBytes per discovered chat.
+			slug := strings.Clone(strings.ToLower(m[1]))
 			if strings.HasPrefix(m[3], "?start") {
 				continue // bot deep link, not a chat
 			}
@@ -618,10 +678,11 @@ func extractRefs(pages []string) []chanRef {
 				topic = queryTopic(m[3])
 			}
 			ref := chanRef{slug: slug, topic: topic}
-			if seen[ref.String()] {
+			key := ref.String()
+			if seen[key] {
 				continue
 			}
-			seen[ref.String()] = true
+			seen[key] = true
 			out = append(out, ref)
 		}
 	}

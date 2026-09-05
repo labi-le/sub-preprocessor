@@ -77,7 +77,10 @@ func serveMux(ctx context.Context, c *Crawler) http.Handler {
 		}
 		go func() {
 			defer c.running.Unlock()
-			c.runBounded(ctx, cycleBudget(oneDay))
+			// The trigger runs under the schedule's own per-cycle bound when a
+			// schedule loop is running, so it cannot starve the ticker the
+			// budget exists to protect (see triggerBudget).
+			c.runBounded(ctx, c.triggerBudget())
 		}()
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("crawl started\n"))

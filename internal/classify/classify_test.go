@@ -3,11 +3,13 @@ package classify_test
 import (
 	"encoding/base64"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/classify"
+	"domains.lst/sub-preprocessor/internal/fetch"
 )
 
 func TestBodyCountsNodes(t *testing.T) {
@@ -388,5 +390,43 @@ func TestBodyAllocatesNothingPerNode(t *testing.T) {
 		if got > benchNodes/10 {
 			t.Errorf("%s: %.0f allocs for %d nodes, want per-node zero", name, got, benchNodes)
 		}
+	}
+}
+
+// TestURLWithHWIDSendsTheHeader pins the x-hwid half of the worker-mirroring
+// contract: the crawler's liveness fetch of a managed entry must present the
+// entry's hwid exactly like the worker's subscription fetch, or a Remnawave
+// panel with the device limit on answers the header-less request with a single
+// placeholder node. URL, the no-config entry (the classify CLI), must send no
+// header.
+func TestURLWithHWIDSendsTheHeader(t *testing.T) {
+	t.Parallel()
+
+	const hwid = "abcdef0123456789"
+	seen := make(chan string, 1)
+	// A TLS server: classify validates the URL as https before fetching, so a
+	// plain http listener could never be reached.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("X-Hwid")
+		w.Write([]byte("vless://u@1.1.1.1:443#n\n"))
+	}))
+	defer srv.Close()
+
+	got, err := classify.URLWithHWID(t.Context(), srv.Client(), fetch.SubscriptionURL(srv.URL), hwid)
+	if err != nil {
+		t.Fatalf("URLWithHWID: %v", err)
+	}
+	if !got.Live() {
+		t.Fatalf("URLWithHWID = %+v, want live", got)
+	}
+	if h := <-seen; h != hwid {
+		t.Errorf("x-hwid = %q, want %q", h, hwid)
+	}
+
+	if _, err = classify.URL(t.Context(), srv.Client(), fetch.SubscriptionURL(srv.URL)); err != nil {
+		t.Fatalf("URL: %v", err)
+	}
+	if h := <-seen; h != "" {
+		t.Errorf("URL sent x-hwid %q, want no header", h)
 	}
 }

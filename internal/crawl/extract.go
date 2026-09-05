@@ -67,8 +67,8 @@ const dataPost = `data-post="`
 // harvest is skipped. A zero id ends the walk.
 //
 // A value that is not "<chat>/<digits>" is no boundary and stays inside seg —
-// the shape cursorRe demands of the same attribute, except that postID also
-// refuses leading-zero and over-wide digit runs where cursorRe accepts them.
+// the shape pageCursor demands of the same attribute, except that postID also
+// refuses leading-zero and over-wide digit runs where pageCursor accepts them.
 func nextMessage(text string) (seg string, id uint64, tail string) {
 	for pos := 0; ; {
 		i := strings.Index(text[pos:], dataPost)
@@ -88,12 +88,12 @@ func nextMessage(text string) (seg string, id uint64, tail string) {
 }
 
 // postID returns the message id of a data-post value, or 0 for a value that
-// carries none. Taking the LAST segment mirrors cursorRe's greedy
-// `[^"]+/(\d+)`, so a forum's three-segment form yields its message id rather
-// than its topic.
+// carries none. Taking the LAST segment mirrors pageCursor's greedy
+// `[^"]+/(\d+)` read of the same attribute, so a forum's three-segment form
+// yields its message id rather than its topic.
 //
-// Deliberately narrower than the digit run cursorRe accepts: a leading zero and
-// a run too wide for uint64 are refused as no boundary, exactly as a
+// Deliberately narrower than the digit run pageCursor accepts: a leading zero
+// and a run too wide for uint64 are refused as no boundary, exactly as a
 // non-numeric tail is. What stays injective is the digit run onto its uint64,
 // not the value onto the name: the last-segment rule above gives "chan/12" and
 // "chat/7/12" the same id, which mergeManaged's used set absorbs. The refusals
@@ -145,24 +145,55 @@ func extractInlineNodes(page string) []string {
 // unescape scratch, and it removes the pin the accepted candidate key already
 // clones away: a node URI joins the cycle-wide accumulator, where a sub-slice
 // would hold its whole page (up to maxPageBytes) until buildInlineSource runs.
+//
+// extractInlineNodes' walk is run twice: the first pass sizes one buffer to the
+// nodes' exact byte total, the second fills it and hands out views. A view
+// handed out mid-fill would be invalidated by an append that moves the buffer,
+// so the size is what lets the fill hand views as it goes; the []string
+// round-trip this replaces allocated once per :// on the page — scheme-seps of
+// ordinary http(s) links included — and paid that make even on a page with no
+// inline node at all, where this returns dst before allocating anything.
+// TestExtractorsMatchTheirRegexps holds the copy equal to extractInlineNodes
+// over the corpus, so the two walks cannot drift apart.
 func appendInlineNodes(dst []string, text string) []string {
-	nodes := extractInlineNodes(text)
 	total := 0
-	for _, n := range nodes {
-		total += len(n)
+	for pos := 0; ; {
+		i := strings.Index(text[pos:], schemeSep)
+		if i < 0 {
+			break
+		}
+		sep := pos + i
+		body := sep + len(schemeSep)
+		end := inlineEnd(text, body)
+		if start := wordStart(text, sep); end > body && isInlineScheme(text[start:sep]) {
+			total += len(strings.TrimRight(text[start:end], trimSet))
+			pos = end
+			continue
+		}
+		pos = body
 	}
 	if total == 0 {
 		return dst
 	}
-	// cap is the exact total, so no append moves buf and invalidates a view
-	// already handed out, and nothing writes to buf once its view is taken.
 	buf := make([]byte, 0, total)
-	for _, n := range nodes {
-		off := len(buf)
-		buf = append(buf, n...)
-		dst = append(dst, ioutil.UnsafeString(buf[off:]))
+	for pos := 0; ; {
+		i := strings.Index(text[pos:], schemeSep)
+		if i < 0 {
+			return dst
+		}
+		sep := pos + i
+		body := sep + len(schemeSep)
+		end := inlineEnd(text, body)
+		if start := wordStart(text, sep); end > body && isInlineScheme(text[start:sep]) {
+			node := strings.TrimRight(text[start:end], trimSet)
+			off := len(buf)
+			buf = append(buf, node...)
+			dst = append(dst, ioutil.UnsafeString(buf[off:]))
+			pos = end
+			continue
+		}
+		pos = body
 	}
-	return dst
 }
 
 // unescapeInto returns page with its HTML entities decoded, copying into buf

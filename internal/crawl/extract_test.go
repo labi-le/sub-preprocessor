@@ -92,6 +92,12 @@ func TestExtractorsMatchTheirRegexps(t *testing.T) {
 		if got, want := extractInlineNodes(page), extractInlineNodesRe(page); !equalStrings(got, want) {
 			t.Fatalf("extractInlineNodes(%q) = %q, inlineReRef gives %q", page, got, want)
 		}
+		// appendInlineNodes runs its own copy of the extractInlineNodes walk
+		// (PerfCrawl#1: one exact buffer instead of a []string round-trip), so
+		// the corpus binds the two walks to the same node set.
+		if got, want := appendInlineNodes(nil, page), extractInlineNodes(page); !equalStrings(got, want) {
+			t.Fatalf("appendInlineNodes(%q) = %q, extractInlineNodes gives %q", page, got, want)
+		}
 	}
 }
 
@@ -139,8 +145,14 @@ func TestAppendInlineNodesCopiesOutOfTheScratch(t *testing.T) {
 	if len(got) != 1 || got[0] != node {
 		t.Fatalf("appendInlineNodes = %q, want [%q]", got, node)
 	}
-	if _, reused := unescapeInto(buf, strings.Repeat("&amp;z", len(page))); len(reused) == 0 {
-		t.Fatal("fixture did not reuse the buffer")
+	// The second page must decode INTO the buffer the first page grew: if it
+	// allocated a fresh buffer, the scratch an aliased node would read is
+	// never written to and the check below could not fail. The page is kept
+	// smaller than the first buffer's cap and the reuse is asserted by the
+	// capacity staying put, exactly as TestUnescapeIntoReusesOneBuffer does.
+	second := strings.Repeat("&amp;z", 4)
+	if _, next := unescapeInto(buf, second); cap(next) != cap(buf) {
+		t.Fatalf("second page grew the buffer %d -> %d; the fixture never reused it", cap(buf), cap(next))
 	}
 	if got[0] != node {
 		t.Fatalf("node became %q after the buffer was reused, want %q", got[0], node)
@@ -148,7 +160,7 @@ func TestAppendInlineNodesCopiesOutOfTheScratch(t *testing.T) {
 }
 
 // TestNextMessageWalksDataPostBoundaries pins what counts as a boundary: the id
-// shape is cursorRe's, and an attribute carrying none leaves its text with the
+// shape is pageCursor's, and an attribute carrying none leaves its text with the
 // message before it rather than opening one.
 //
 // The last two are the narrowing a numeric id buys. postID refuses a leading
