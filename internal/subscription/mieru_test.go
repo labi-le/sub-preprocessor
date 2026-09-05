@@ -82,6 +82,14 @@ func TestParseMieruRejects(t *testing.T) {
 		// valueless-port link that converts to zero proxies, hence "format
 		// invalid".
 		{"empty port value", "mierus://u@1.2.3.4?port=&protocol=TCP"},
+		// A multi-digit port opening with '0' is refused by the shared
+		// portNumber gate because mihomo's structure decoder parses ports with
+		// base-0 strconv (structure.go:143): "0443" would read as octal 291 and
+		// "08" would not decode at all. The mieru converter's own Atoi is base
+		// 10, so this is a deliberate over-reach of the shared gate, never a
+		// loosening.
+		{"leading-zero port", "mierus://u@1.2.3.4?port=0443&protocol=TCP"},
+		{"leading-zero port in a range", "mierus://u@1.2.3.4?port=0443-0444&protocol=TCP"},
 		{"every port value empty", "mierus://u@1.2.3.4?port=&port=&protocol=TCP&protocol=UDP"},
 		{"every port value non-numeric", "mierus://u@1.2.3.4?port=abc&port=def&protocol=TCP&protocol=UDP"},
 		// A '-' sends the value past the converter untouched as "port-range",

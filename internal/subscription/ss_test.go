@@ -38,7 +38,6 @@ func TestParseSSLegacyDecodesAuthority(t *testing.T) {
 		// URLEncoding would refuse the character outright.
 		{"payload using the std-only '+'", base64.RawStdEncoding, "aes-256-gcm:pa~@1.2.3.4:8388", "#Legacy", "1.2.3.4", "8388", "Legacy"},
 		{"no fragment names the node after the decoded host", base64.RawStdEncoding, "aes-256-gcm:pass@example.net:8388", "", "example.net", "8388", "example.net"},
-		{"decoded without a port keeps the 443 default", base64.RawStdEncoding, "aes-256-gcm:pass@example.net", "#N", "example.net", "443", "N"},
 		{"password containing @ splits at the last one", base64.RawStdEncoding, "aes-256-gcm:p@ss@1.2.3.4:8388", "#N", "1.2.3.4", "8388", "N"},
 		{"ipv6 host", base64.RawStdEncoding, "aes-256-gcm:pass@[2001:db8::1]:8388", "#N", "2001:db8::1", "8388", "N"},
 	}
@@ -77,6 +76,11 @@ func TestParseSSLegacyDecodesAuthority(t *testing.T) {
 // with RawStdEncoding alone, so accepting a padded or url-safe payload would
 // only publish a node no client we serve can convert — one guaranteed probe
 // failure plus 2h of dead-cache pollution under its server:port.
+//
+// The portless case is the same story one field further on: a payload decoding
+// to "method:pass@host" has no port, and the generic path used to fabricate
+// one (443) for a node no client converts. mihomo re-parses the same payload
+// and its structure decoder refuses the empty port (convert/converter.go:397-436).
 func TestParseSSLegacyRejects(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +93,7 @@ func TestParseSSLegacyRejects(t *testing.T) {
 		{"url-safe alphabet", ssLegacyLine(t, base64.RawURLEncoding, "aes-256-gcm:pa~@1.2.3.4:8388", "#N")},
 		{"decoded payload carries no @", ssLegacyLine(t, base64.RawStdEncoding, "aes-256-gcm:pass", "#N")},
 		{"decoded payload carries no host", ssLegacyLine(t, base64.RawStdEncoding, "aes-256-gcm:pass@:8388", "#N")},
+		{"decoded payload carries no port", ssLegacyLine(t, base64.RawStdEncoding, "aes-256-gcm:pass@example.net", "#N")},
 	}
 
 	for _, tc := range cases {
@@ -96,6 +101,29 @@ func TestParseSSLegacyRejects(t *testing.T) {
 			t.Parallel()
 			rejectOne(t, tc.line)
 		})
+	}
+}
+
+// TestParseSSUppercaseSchemeDecodes pins scheme normalization: mihomo lowercases
+// the scheme before dispatching (convert/converter.go:35), so an "SS://" line
+// must reach the legacy decoder, not the generic authority path that would
+// publish the base64 blob as a hostname.
+func TestParseSSUppercaseSchemeDecodes(t *testing.T) {
+	t.Parallel()
+
+	line := "SS://" + base64.RawStdEncoding.EncodeToString([]byte("aes-256-gcm:pass@1.2.3.4:8388")) + "#Up"
+	node := mustParseOne(t, line)
+	if node.Scheme != subscription.SchemeSS {
+		t.Errorf("scheme: got %q, want %q", node.Scheme, subscription.SchemeSS)
+	}
+	if node.Server != "1.2.3.4" {
+		t.Errorf("server: got %q, want 1.2.3.4", node.Server)
+	}
+	if node.Port != "8388" {
+		t.Errorf("port: got %q, want 8388", node.Port)
+	}
+	if node.Name != "Up" {
+		t.Errorf("name: got %q, want Up", node.Name)
 	}
 }
 
@@ -123,7 +151,7 @@ func TestParseSSSIP002UsesAuthority(t *testing.T) {
 // TestParseSSSIP002WithoutPortRejected: a SIP002-shaped link with no port is
 // the one ss form the '@' told us nothing about. mihomo branches on the port
 // (convert/converter.go:396-407), so for this link it takes the LEGACY branch
-// and RawStd-decodes the bare host — "1.2.3.5" is not base64, the decode
+// and RawStd-decodes the bare host — a dotted quad is not base64, the decode
 // fails, and the line is dropped (measured: 0 mappings + "format invalid";
 // the same link with ":8388" yields 1). Keeping it meant defaulting the port
 // to 443 and publishing, probing and dead-caching a node under a port it does

@@ -39,6 +39,15 @@ const (
 	SchemeMieru Scheme = "mierus"
 )
 
+// schemeHysteria2 and schemeHy2 are the two protocol names panels emit for
+// Hysteria 2 ("hysteria2"/"hy2" name the version themselves, xray.go). Untyped
+// so they serve as cases in both the Scheme switch here and the
+// protocol-string switch in xray.go.
+const (
+	schemeHysteria2 = "hysteria2"
+	schemeHy2       = "hy2"
+)
+
 type Node struct {
 	Raw         string
 	Scheme      Scheme
@@ -94,13 +103,13 @@ const schemeSep = "://"
 // parseNode extracts node fields from a URI string using a lightweight parser.
 // It replaces url.Parse to avoid per-node heap allocations.
 //
-// The generic path allocates nothing: Node.Raw is the caller's line and
-// Server, Port and Name are substrings of it. The three dedicated decoders
-// (vmess, ss legacy, ssr) each allocate a base64 buffer per node — two for ssr,
-// whose display name is base64 inside the payload — and their
-// Server/Port/Name are views into THAT buffer rather than into Raw — so what a
-// retained node string keeps alive is scheme-dependent, and a caller holding
-// one past the body it came from has to copy rather than slice.
+// The generic path allocates nothing for a lowercase-scheme line: Node.Raw is
+// the caller's line and Server, Port and Name are substrings of it. The three
+// dedicated decoders (vmess, ss legacy, ssr) each allocate a base64 buffer per
+// node — two for ssr, whose display name is base64 inside the payload — and
+// their Server/Port/Name are views into THAT buffer rather than into Raw — so
+// what a retained node string keeps alive is scheme-dependent, and a caller
+// holding one past the body it came from has to copy rather than slice.
 //
 // Supported format: scheme://[userinfo@]host[:port][?query][#fragment]
 func parseNode(line string) (Node, bool) {
@@ -109,7 +118,12 @@ func parseNode(line string) (Node, bool) {
 		return Node{}, false
 	}
 
-	scheme := Scheme(line[:idx])
+	// mihomo lowercases the scheme before dispatching (convert/converter.go:35);
+	// a byte-exact compare would let "SS://"/"VMESS://"/"HTTPS://" bypass the
+	// dedicated decoders and the portless http/socks reject. ToLower returns
+	// the already-lowercase string untouched, so the common case allocates
+	// nothing; Node.Scheme stays lowercased for rewrite's and merge's switches.
+	scheme := Scheme(strings.ToLower(line[:idx]))
 	if scheme == SchemeVmess {
 		return parseVmess(line, idx)
 	}
@@ -153,7 +167,27 @@ func parseNode(line string) (Node, bool) {
 		return Node{}, false
 	}
 	if port == "" {
-		port = "443"
+		// mihomo supplies the 443 default for exactly one scheme, hysteria2
+		// (converter.go:85-89); every other line this branch refuses dies in
+		// mihomo too — vless and the Xray VMessAEAD form fail closed on
+		// url.Port() == "" (convert/v.go:20-22), the empty trojan/tuic/hysteria
+		// port fails the structure decoder's ParseInt, an unknown scheme has no
+		// converter case — so defaulting them would publish a probe slot and a
+		// dead-cache entry under a port the node does not have. An unbracketed
+		// IPv6 authority is refused here for a DIFFERENT reason, not mihomo
+		// parity: net/url does not refuse those lines — parseHost splits a
+		// non-bracketed multi-colon host at its LAST colon outside http(s), so
+		// mihomo reads them as a mangled server plus the trailing digits for a
+		// port (or as a genuine v6 node) — and neither is an IPv4 endpoint
+		// this pipeline can probe.
+		switch scheme {
+		case schemeHysteria2, schemeHy2:
+			port = "443"
+		case SchemeSS, SchemeSSR, SchemeMieru, SchemeVmess:
+			return Node{}, false
+		default:
+			return Node{}, false
+		}
 	}
 
 	// Extract fragment (node name): everything after the FIRST '#' at or
@@ -180,9 +214,9 @@ func parseNode(line string) (Node, bool) {
 //
 // The '@' cannot stand in for the port even though every SIP002 link carries
 // one. "ss://<b64userinfo>@host" is SIP002-shaped but portless, and mihomo
-// drops it — it RawStd-decodes the bare host, which is not base64 — whereas the
-// generic path defaults the port to 443 and publishes a node under a port it
-// does not have, then probes it and parks it in the 2h dead cache. The reverse
+// drops it — it RawStd-decodes the bare host, which is not base64 — and so does
+// this parser: decodeSSLegacy cannot decode the authority either, so the line
+// is refused rather than published under a fabricated 443. The reverse
 // misread cannot happen: a legacy authority is base64, an alphabet holding no
 // ':', so it can never look portful.
 func ssFields(authority, server, port string) (string, string, bool) {
@@ -263,6 +297,14 @@ func portNumber(s string) (int, bool) {
 		maxWidth = 5 // digits in maxPort; bounding the length is what lets n accumulate unchecked
 	)
 	if s == "" || len(s) > maxWidth {
+		return 0, false
+	}
+	// A leading zero in a multi-digit value is refused: mihomo's structure
+	// decoder converts the port with strconv.ParseInt(..., 0, ...) — base 0 —
+	// which reads "0443" as octal 291 (common/structure/structure.go:143) and
+	// rejects "08" outright, so such a port names something the node never
+	// answers on. Single-digit "0" dies on the range check below.
+	if len(s) > 1 && s[0] == '0' {
 		return 0, false
 	}
 	n := 0

@@ -116,21 +116,43 @@ func vmessPayload(name string) string {
 		`","id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"ws"}`
 }
 
+// BenchmarkParse_Vmess prices the vmess decode under both port spellings the
+// wild ships: "port":"443" quoted and "port":443 bare. The bare form used to
+// pay a doomed json.Unmarshal — one heap &UnmarshalTypeError per node — before
+// the number gate ran; the arms must stay close, or the gate has slipped back
+// below the decoder.
 func BenchmarkParse_Vmess(b *testing.B) {
-	var sb strings.Builder
-	for range 50 {
-		sb.WriteString(vmessLine(vmessPayload("Name")))
-		sb.WriteString("\n")
-	}
-	input := []byte(sb.String())
-	b.ReportAllocs()
-	for b.Loop() {
-		count := 0
-		subscription.Parse(input, func(_ subscription.Node) bool {
-			count++
-			return true
+	for _, tc := range []struct{ name, port string }{
+		{"quoted", `"443"`},
+		{"numeric", `443`},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			payload := `{"v":"2","add":"1.2.3.4","port":` + tc.port +
+				`,"ps":"Name","id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"ws"}`
+			var sb strings.Builder
+			for range benchNodes {
+				sb.WriteString(vmessLine(payload))
+				sb.WriteString("\n")
+			}
+			input := []byte(sb.String())
+			nodes := 0
+			if rejected := subscription.Parse(input, func(_ subscription.Node) bool {
+				nodes++
+				return true
+			}); nodes != benchNodes || rejected != 0 {
+				b.Fatalf("fixture: %d nodes, %d rejected; want %d, 0", nodes, rejected, benchNodes)
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				count := 0
+				subscription.Parse(input, func(_ subscription.Node) bool {
+					count++
+					return true
+				})
+				sinkInt = count
+			}
 		})
-		sinkInt = count
 	}
 }
 
@@ -342,7 +364,8 @@ func benchXrayJSON(outbounds int) []byte {
 		}
 		sb.WriteString(strings.Replace(
 			strings.TrimSuffix(strings.TrimPrefix(realityTCP, "["), "]"),
-			"node-a", "node-"+strconv.Itoa(i), 1))
+			"node-a", "node-"+strconv.Itoa(i), 1,
+		))
 	}
 	sb.WriteByte(']')
 	return []byte(sb.String())

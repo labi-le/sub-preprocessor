@@ -167,6 +167,40 @@ func appendQueryEscape(dst []byte, s string) []byte {
 	return dst
 }
 
+// userinfoSafe reports whether c stays unescaped in the userinfo position. The
+// set is net/url's encodeUserPassword table plus ':', which that mode escapes
+// (%3A) but this package's hysteria2 emission must keep literal — see
+// appendHysteria2ShareLink for the mihomo round trip that depends on it.
+func userinfoSafe(c byte) bool {
+	if unreserved(c) {
+		return true
+	}
+	switch c {
+	case ':', '$', '&', '+', ',', ';', '=':
+		return true
+	}
+
+	return false
+}
+
+// appendUserinfoEscape is net/url's userinfo escaping (encodeUserPassword) in
+// append form, except that ':' stays literal — the one byte a userinfo String()
+// round trip cannot survive escaped. url.User(...).String() would emit %3A for
+// the separator itself, so matching net/url byte-for-byte is impossible by
+// construction; every other byte follows it exactly.
+func appendUserinfoEscape(dst []byte, s string) []byte {
+	for i := range len(s) {
+		c := s[i]
+		if userinfoSafe(c) {
+			dst = append(dst, c)
+			continue
+		}
+		dst = append(dst, '%', upperhex[c>>4], upperhex[c&0xf])
+	}
+
+	return dst
+}
+
 // appendPathEscape is url.PathEscape in append form.
 func appendPathEscape(dst []byte, s string) []byte {
 	for i := range len(s) {

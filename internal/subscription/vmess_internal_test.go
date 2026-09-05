@@ -1,10 +1,14 @@
 package subscription
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+
+	"domains.lst/sub-preprocessor/internal/ioutil"
 )
 
 // nameCorpus is what a display name can carry that json.Marshal treats
@@ -249,4 +253,130 @@ func decodeVmessDocument(t *testing.T, line string) map[string]any {
 	}
 
 	return m
+}
+
+// jsonValueStringPreHoist is jsonValueString as it stood before the bare-number
+// gate was moved above json.Unmarshal: the decoder ran first and answered every
+// number token with a heap &UnmarshalTypeError before the gate returned the raw
+// text. json.Valid has vetted every token the walker produces, so hoisting the
+// gate may not move a byte of output — this oracle pins that.
+func jsonValueStringPreHoist(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if n := len(raw); n >= 2 && raw[0] == '"' && raw[n-1] == '"' {
+		if inner := raw[1 : n-1]; bytes.IndexByte(inner, '\\') < 0 {
+			return ioutil.UnsafeString(inner)
+		}
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	if c := raw[0]; c == '-' || (c >= '0' && c <= '9') {
+		return strings.TrimSpace(ioutil.UnsafeString(raw))
+	}
+	return ""
+}
+
+// TestJSONValueStringHoistKeepsAcceptSet pins the PerfParse#1 reorder: every
+// token the walker or the map decode can hand jsonValueString — the 256 single
+// bytes, every two-byte token over the JSON alphabet, and the named shapes —
+// must read exactly as it did when the Unmarshal ran first. A token whose
+// output differs is a token whose parse or rewrite answer moved.
+func TestJSONValueStringHoistKeepsAcceptSet(t *testing.T) {
+	tokens := make([][]byte, 0, 256+24*24+32)
+	for b := range 256 {
+		tokens = append(tokens, []byte{byte(b)})
+	}
+	alphabet := `{}[],:"\-0123456789.eE+truefalsn \t`
+	for _, a := range []byte(alphabet) {
+		for _, b := range []byte(alphabet) {
+			tokens = append(tokens, []byte{a, b})
+		}
+	}
+	tokens = append(
+		tokens,
+		[]byte(`""`), []byte(`"443"`), []byte(`"node name"`), []byte(`"a\"b"`),
+		[]byte(`"back \\ slash"`), []byte(`"new\nline"`), []byte(`"\u0041"`),
+		[]byte(`"\u2028"`), []byte("null"), []byte(`true`), []byte(`false`),
+		[]byte(`0`), []byte(`443`), []byte(`-1`), []byte(`-17`), []byte(`3.5`),
+		[]byte(`1e3`), []byte(`1.2e+10`), []byte(`-0.5`), []byte(`{}`),
+		[]byte(`{"a":1}`), []byte(`{"a":{"b":[1,2]}}`), []byte(`[]`),
+		[]byte(`[1,"x"]`), []byte(`{"add":"x","port":443}`), []byte(`  `),
+		[]byte("\n\t"), []byte(`  443  `), []byte(`"`), []byte(`-`),
+	)
+
+	for _, raw := range tokens {
+		if have, want := jsonValueString(raw), jsonValueStringPreHoist(raw); have != want {
+			t.Errorf("jsonValueString(%q) = %q, pre-hoist oracle = %q", raw, have, want)
+		}
+	}
+}
+
+// TestJSONValueStringNumericAllocatesNothing prices the point of the hoist: a
+// bare-number port used to pay one heap &UnmarshalTypeError per node before the
+// raw-text return ran. The numeric token must now cost what the quoted fast
+// path costs — nothing — or the gate has slipped back below the decoder.
+func TestJSONValueStringNumericAllocatesNothing(t *testing.T) {
+	num := []byte(`443`)
+	quoted := []byte(`"443"`)
+
+	for _, raw := range [][]byte{num, quoted} {
+		if allocs := testing.AllocsPerRun(100, func() {
+			_ = jsonValueString(raw)
+		}); allocs != 0 {
+			t.Errorf("jsonValueString(%q) allocated %.0f times per call, want 0", raw, allocs)
+		}
+	}
+}
+
+// TestRewriteVmessNameTaggedMatchesConcat pins the parts composition to the
+// join it replaced: for every (tags, cleanName) pair the two exported forms can
+// be handed — the escaping bytes, the runes Marshal escapes, invalid UTF-8 and
+// names past the scratch — RewriteVmessNameTagged must emit the identical line
+// RewriteVmessName(raw, tags+" "+cleanName) does, and agree on acceptance.
+func TestRewriteVmessNameTaggedMatchesConcat(t *testing.T) {
+	t.Parallel()
+
+	doc := `{"v":"2","ps":"Old","add":"1.2.3.4","port":443,"id":"uuid","net":"ws"}`
+	line := "vmess://" + base64.StdEncoding.EncodeToString([]byte(doc))
+
+	pairs := make([][2]string, 0, len(nameCorpus)*2+4)
+	for _, name := range nameCorpus {
+		pairs = append(pairs, [2]string{"", name}, [2]string{"[GEO:FI][IP:192.0.2.1]", name})
+	}
+	pairs = append(
+		pairs,
+		[2]string{"", ""},
+		[2]string{"[GEO:DE]", ""},
+		[2]string{"tags with \"quote\" and \\slash and <html>&", "node"},
+		[2]string{"[GEO:xx]", "name past the scratch " + strings.Repeat("y", nameScratch*2)},
+		[2]string{"[GEO:xx] " + strings.Repeat("t", nameScratch), "node"},
+	)
+
+	for _, p := range pairs {
+		tags, cleanName := p[0], p[1]
+		want, wantOK := RewriteVmessName(line, displayNameJoin(tags, cleanName))
+		got, gotOK := RewriteVmessNameTagged(line, tags, cleanName)
+		if gotOK != wantOK {
+			t.Errorf("tags %q cleanName %q: ok = %v, concat form ok = %v", tags, cleanName, gotOK, wantOK)
+			continue
+		}
+		if !gotOK {
+			continue
+		}
+		if got != want {
+			t.Errorf("tags %q cleanName %q:\n got %q\nwant %q", tags, cleanName, got, want)
+		}
+	}
+}
+
+// displayNameJoin is the join displayName in rewrite used to hand the rewriters,
+// kept here as the byte-identity oracle for the parts composition.
+func displayNameJoin(tags, cleanName string) string {
+	if tags == "" {
+		return cleanName
+	}
+	return tags + " " + cleanName
 }

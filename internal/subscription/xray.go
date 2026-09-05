@@ -3,7 +3,6 @@ package subscription
 import (
 	"encoding/json"
 	"net/netip"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -181,7 +180,7 @@ func appendOutboundShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]by
 	switch strings.ToLower(ob.Protocol) {
 	case "vless":
 		return appendVlessShareLink(dst, ob, remarks)
-	case "hysteria", "hysteria2", "hy2":
+	case "hysteria", schemeHysteria2, schemeHy2:
 		return appendHysteria2ShareLink(dst, ob, remarks)
 	}
 
@@ -213,8 +212,14 @@ func appendHysteria2ShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]b
 		q = q.set("insecure", "1")
 	}
 
+	// mihomo reads the whole userinfo back through url.Parse + User.String() and
+	// makes it the hysteria2 password (convert/converter.go:97-99); net/url's
+	// own userinfo escaping would turn a "user:pass" auth into the literal
+	// "user%3Apass" credential, because parse sees no raw ':' and String()
+	// re-escapes it. Emitting the ':' raw makes parse split the pair and
+	// String() rejoin it with a literal ':' — the auth arrives intact.
 	dst = append(dst, "hysteria2://"...)
-	dst = append(dst, url.User(st.Hysteria.Auth).String()...)
+	dst = appendUserinfoEscape(dst, st.Hysteria.Auth)
 	dst = append(dst, '@')
 	dst = appendHostForAuthority(dst, ob.Settings.Address)
 	dst = append(dst, ':')
@@ -236,7 +241,7 @@ func appendHysteria2ShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]b
 // hysteriaSettings depending on which panel wrote the config.
 func isHysteria2(ob *xrayOutbound) bool {
 	switch strings.ToLower(ob.Protocol) {
-	case "hysteria2", "hy2":
+	case schemeHysteria2, schemeHy2:
 		return true
 	case "hysteria":
 		return ob.StreamSettings.Hysteria.Version == 2 || ob.Settings.Version == 2
@@ -247,26 +252,25 @@ func isHysteria2(ob *xrayOutbound) bool {
 
 // decodeXrayConfigs accepts both shapes seen in the wild: a single config
 // object, and the array of configs a panel serves when it publishes several
-// servers at once.
+// servers at once. Its only caller, maybeXrayJSON, has already guaranteed
+// body[0] is '[' or '{' (xray.go:46-47), so the object vs array distinction is
+// the whole decision and there is no fall-through case to reach.
 func decodeXrayConfigs(body []byte) ([]xrayConfig, bool) {
-	switch body[0] {
-	case '[':
+	if body[0] == '[' {
 		var many []xrayConfig
 		if err := json.Unmarshal(body, &many); err != nil {
 			return nil, false
 		}
 
 		return many, true
-	case '{':
-		var one xrayConfig
-		if err := json.Unmarshal(body, &one); err != nil {
-			return nil, false
-		}
-
-		return []xrayConfig{one}, true
 	}
 
-	return nil, false
+	var one xrayConfig
+	if err := json.Unmarshal(body, &one); err != nil {
+		return nil, false
+	}
+
+	return []xrayConfig{one}, true
 }
 
 // appendVlessShareLink builds the share link mihomo's convert.ConvertsV2Ray

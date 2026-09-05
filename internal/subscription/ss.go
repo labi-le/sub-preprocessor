@@ -22,9 +22,12 @@ import (
 // server:port in the 2h dead cache. The tolerant decoder stays right for
 // vmess, whose mihomo counterpart is tolerant too.
 //
-// It reports false when the payload does not decode or carries no "@": the
-// generic path would then hand the base64 blob to the resolver as a hostname,
-// which books an NXDOMAIN drop and loses the node on both endpoints.
+// It reports false when the payload does not decode, carries no "@", or names
+// no port: the generic path would then hand the base64 blob to the resolver as
+// a hostname — an NXDOMAIN drop on both endpoints — or, for a portless
+// "method:pass@host", publish the node under a fabricated 443 (mihomo re-parses
+// the same payload and its structure decoder refuses the empty port,
+// convert/converter.go:397-436).
 func decodeSSLegacy(authority string) (server, port string, ok bool) {
 	decoded, err := base64.RawStdEncoding.DecodeString(authority)
 	if err != nil {
@@ -36,7 +39,7 @@ func decodeSSLegacy(authority string) (server, port string, ok bool) {
 	}
 	// splitHostPort cuts at the LAST '@', so a password containing one is safe.
 	server, port = splitHostPort(plain)
-	if server == "" {
+	if server == "" || port == "" {
 		return "", "", false
 	}
 	return server, port, true

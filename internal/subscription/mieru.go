@@ -65,9 +65,13 @@ func mieruPort(tail string) (string, bool) {
 // 1..65535, and a plain port in the same window (adapter/outbound/mieru.go:301-324)
 // -- because adapter.ParseProxy is what the prober feeds the converted map to.
 //
-// The value is tested as written, before percent-decoding, and that is exact
-// rather than conservative: mihomo Atoi's the DECODED value, and both "+3000"
-// and "%203000" decode to " 3000", which Atoi refuses just as this does.
+// The value is tested as written, before percent-decoding — deliberately
+// CONSERVATIVE, never exact: mihomo compares the percent-DECODED value
+// (url.Query() unescapes it, converter.go:656), so "port=%33000" reaches it as
+// "3000" and converts while this gate refuses the raw "%33000" form. The
+// asymmetry is one-directional — we can only be stricter, never looser — and
+// the escaped form appears in no real payload, so the rawer test keeps the
+// grammar this predicate already owns.
 func mieruUsablePort(value string) bool {
 	if begin, end, isRange := strings.Cut(value, "-"); isRange {
 		b, bok := portNumber(begin)

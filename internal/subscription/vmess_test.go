@@ -129,6 +129,77 @@ func TestParseVmessMalformedSkipped(t *testing.T) {
 	}
 }
 
+// TestParseVmessRejectsNonStringAdd: a JSON null/bool/object/array "add" is not
+// a hostname, and mihomo's own decode (values["add"], convert/converter.go:274)
+// turns it into a mapping adapter.ParseProxy refuses. jsonValueString's raw
+// fallback exists for bare NUMBERS only, so any of these must reject the node
+// instead of publishing it with a literal "true"/"{...}" server.
+func TestParseVmessRejectsNonStringAdd(t *testing.T) {
+	t.Parallel()
+
+	for _, payload := range []string{
+		`{"add":true,"port":"443","ps":"n"}`,
+		`{"add":null,"port":"443","ps":"n"}`,
+		`{"add":{"host":"x"},"port":"443","ps":"n"}`,
+		`{"add":["x"],"port":"443","ps":"n"}`,
+	} {
+		_, count := parseOne(t, vmessLine(payload))
+		if count != 0 {
+			t.Errorf("payload %s parsed %d nodes, want 0", payload, count)
+		}
+	}
+}
+
+// TestParseVmessNonStringPortDefaults: a "port" that is not a JSON string or
+// number must not become literal port text ("true", "null"). mihomo reads
+// values["port"] and structure-decodes it into an int, so "true" would publish
+// a node that converts to nothing; the empty string the reader now returns
+// takes the same 443 default an absent port does.
+func TestParseVmessNonStringPortDefaults(t *testing.T) {
+	t.Parallel()
+
+	for _, payload := range []string{
+		`{"add":"srv.example","port":true,"ps":"n"}`,
+		`{"add":"srv.example","port":null,"ps":"n"}`,
+		`{"add":"srv.example","port":{"p":443},"ps":"n"}`,
+	} {
+		got, count := parseOne(t, vmessLine(payload))
+		if count != 1 {
+			t.Errorf("payload %s parsed %d nodes, want 1", payload, count)
+			continue
+		}
+		if got.Port != "443" {
+			t.Errorf("payload %s: port = %q, want the 443 default", payload, got.Port)
+		}
+		if got.Server != "srv.example" {
+			t.Errorf("payload %s: server = %q, want srv.example", payload, got.Server)
+		}
+	}
+}
+
+// TestParseVmessUppercaseSchemeDecodes pins scheme normalization: mihomo
+// lowercases the scheme before dispatching (convert/converter.go:35), so a
+// "VMESS://" line must reach the payload decoder instead of slipping onto the
+// generic authority path, which would publish the base64 payload as the server.
+func TestParseVmessUppercaseSchemeDecodes(t *testing.T) {
+	t.Parallel()
+
+	line := "VMESS://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"srv.example","port":"8443","ps":"Up"}`))
+	got, count := parseOne(t, line)
+	if count != 1 {
+		t.Fatalf("got %d nodes, want 1", count)
+	}
+	if got.Scheme != subscription.SchemeVmess {
+		t.Errorf("scheme: got %q, want vmess", got.Scheme)
+	}
+	if got.Server != "srv.example" {
+		t.Errorf("server: got %q, want srv.example", got.Server)
+	}
+	if got.Port != "8443" {
+		t.Errorf("port: got %q, want 8443", got.Port)
+	}
+}
+
 func TestRewriteVmessNameReplacesPs(t *testing.T) {
 	t.Parallel()
 

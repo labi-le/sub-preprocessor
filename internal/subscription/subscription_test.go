@@ -8,22 +8,54 @@ import (
 	"domains.lst/sub-preprocessor/internal/subscription"
 )
 
-func TestParseDefaultsPort(t *testing.T) {
+// TestParsePortlessProxySchemesRejected: mihomo's converter defaults a portless
+// link to 443 for exactly ONE scheme, hysteria2 (convert/converter.go:85-89).
+// Every other portless line dies in mihomo: handleVShareLink refuses vless on
+// url.Port() == "" (common/convert/v.go:20-22), the structure decoder refuses
+// the empty-string port trojan/tuic/hysteria put in "port", and an unknown
+// scheme has no converter case at all. Publishing them under a fabricated 443
+// would spend a probe slot and a dead-cache entry on a port the node does not
+// have.
+func TestParsePortlessProxySchemesRejected(t *testing.T) {
 	t.Parallel()
 
-	var nodes []subscription.Node
-	subscription.Parse([]byte("vless://uuid@example.com?security=tls#Example\ntrojan://uuid@example.net#Other\nplain-text-node\n"), func(n subscription.Node) bool {
-		nodes = append(nodes, n)
-		return true
-	})
-	if len(nodes) != 2 {
-		t.Fatalf("unexpected count: %d", len(nodes))
+	for _, line := range []string{
+		"vless://uuid@example.com?security=tls#Example",
+		"trojan://pw@example.net#Other",
+		"tuic://uuid:secret@example.org#T",
+		"hysteria://pw@example.org#H",
+		"anytls://pw@example.net#A",
+		"future-scheme://u@example.com#U",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			rejectOne(t, line)
+		})
 	}
-	if nodes[0].Port != "443" {
-		t.Fatalf("unexpected port: %q", nodes[0].Port)
-	}
-	if nodes[1].Scheme != "trojan" {
-		t.Fatalf("unexpected scheme: %q", nodes[1].Scheme)
+}
+
+// TestParsePortlessHysteria2Defaults443 mirrors the one default mihomo's own
+// converter applies (convert/converter.go:85-89), so a portless hysteria2 link
+// is served on 443 rather than dropped here. The uppercase row pins scheme
+// normalization: the default must fire for "HYSTERIA2://" too.
+func TestParsePortlessHysteria2Defaults443(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		line string
+		name string
+	}{
+		{"hysteria2://auth@example.com#H2", "H2"},
+		{"hy2://auth@example.net#Y", "Y"},
+		{"HYSTERIA2://auth@example.org#Upper", "Upper"},
+	} {
+		node := mustParseOne(t, tc.line)
+		if node.Port != "443" {
+			t.Errorf("%q: port = %q, want 443", tc.line, node.Port)
+		}
+		if node.Name != tc.name {
+			t.Errorf("%q: name = %q, want %q", tc.line, node.Name, tc.name)
+		}
 	}
 }
 
@@ -205,6 +237,40 @@ func TestParseAcceptsRealSchemes(t *testing.T) {
 	}
 }
 
+// TestParseUppercaseSchemesNormalized pins scheme normalization
+// (convert/converter.go:35): parseNode lowercases the scheme once and both the
+// dispatch and Node.Scheme use the lowercased value, so an uppercase line still
+// reaches its dedicated decoder (ssr, mierus), and rewrite's and merge's
+// switches on node.Scheme see a value they match.
+func TestParseUppercaseSchemesNormalized(t *testing.T) {
+	t.Parallel()
+
+	node := mustParseOne(t, "VLESS://uuid@example.com:443#N")
+	if node.Scheme != "vless" {
+		t.Errorf("vless scheme: got %q, want vless", node.Scheme)
+	}
+	if node.Server != "example.com" || node.Port != "443" {
+		t.Errorf("vless server:port: got %s:%s, want example.com:443", node.Server, node.Port)
+	}
+
+	ssr := "SSR://" + base64.RawURLEncoding.EncodeToString([]byte(ssrHead+"/?"+ssrQuery()))
+	node = mustParseOne(t, ssr)
+	if node.Scheme != subscription.SchemeSSR {
+		t.Errorf("ssr scheme: got %q, want ssr", node.Scheme)
+	}
+	if node.Server != "1.2.3.4" || node.Port != "8388" {
+		t.Errorf("ssr server:port: got %s:%s, want 1.2.3.4:8388", node.Server, node.Port)
+	}
+
+	node = mustParseOne(t, "MIERUS://user:pass@1.2.3.4?port=2999&protocol=TCP#M")
+	if node.Scheme != subscription.SchemeMieru {
+		t.Errorf("mierus scheme: got %q, want mierus", node.Scheme)
+	}
+	if node.Port != "2999" {
+		t.Errorf("mierus port: got %q, want 2999", node.Port)
+	}
+}
+
 // TestParseCountsRejectedLines pins PP-05: URI-shaped lines the parser refuses
 // are reported, so a source that quietly starts returning junk is visible in
 // stats instead of just yielding fewer nodes.
@@ -241,31 +307,41 @@ func TestParseIPv6BracketedStripsBrackets(t *testing.T) {
 		t.Errorf("port: got %q, want %q", node.Port, "8443")
 	}
 
-	node = mustParseOne(t, "vless://uuid@[2001:db8::1]#v6")
-	if node.Server != "2001:db8::1" {
-		t.Errorf("no-port server: got %q, want %q", node.Server, "2001:db8::1")
-	}
-	if node.Port != "443" {
-		t.Errorf("no-port port: got %q, want default %q", node.Port, "443")
-	}
+	// The bracketed form without a port reads the host cleanly and then dies on
+	// the portless reject — mihomo refuses it the same way (v.go:20-22) — so it
+	// must not be published under a fabricated 443.
+	rejectOne(t, "vless://uuid@[2001:db8::1]#v6")
 }
 
+// TestParseIPv6UnbracketedIsWholeHost: an unbracketed IPv6 literal is kept
+// whole — never split at its last colon — which means no port can be read, and
+// the portless veto refuses the line. The second row would PARSE if
+// splitHostPort sliced at the last colon ("…:1" host, "8443" port), so
+// rejection pins the no-split property. The refusal is NOT mihomo parity:
+// net/url's parseHost splits a non-bracketed multi-colon host at its LAST
+// colon outside http(s), so mihomo parses row 1 as server "2001:db8:" port "1"
+// and row 2 as a genuine v6 node — it refuses neither, and this IPv4-only
+// pipeline rejects them because neither is an endpoint it can probe.
 func TestParseIPv6UnbracketedIsWholeHost(t *testing.T) {
 	t.Parallel()
 
-	node := mustParseOne(t, "vless://uuid@2001:db8::1#v6")
-	if node.Server != "2001:db8::1" {
-		t.Errorf("server: got %q, want %q", node.Server, "2001:db8::1")
-	}
-	if node.Port != "443" {
-		t.Errorf("port: got %q, want default %q", node.Port, "443")
+	for _, line := range []string{
+		"vless://uuid@2001:db8::1#v6",
+		"vless://uuid@2001:db8::1:8443#v6",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			rejectOne(t, line)
+		})
 	}
 }
 
 // TestParseProxySchemesRequireExplicitPort: an HTTP/SOCKS proxy node is
 // host:port by definition and mihomo drops a portless one, so a bare web URL in
 // a source body — a channel link, a panel notice — must not be published as a
-// node.
+// node. The "HTTPS://" rows pin scheme normalization: mihomo lowercases the
+// scheme (convert/converter.go:35), so an uppercase bare web URL must hit the
+// same portless reject instead of the 443 default that used to publish it.
 func TestParseProxySchemesRequireExplicitPort(t *testing.T) {
 	t.Parallel()
 
@@ -277,6 +353,9 @@ func TestParseProxySchemesRequireExplicitPort(t *testing.T) {
 		"socks://1.2.3.4",
 		"socks5://1.2.3.4#Proxy",
 		"socks5h://proxy.example?udp=true",
+		"HTTPS://t.me/somechannel",
+		"HTTP://example.com",
+		"HTTPS://user:pass@example.com#Proxy",
 	} {
 		t.Run(line, func(t *testing.T) {
 			t.Parallel()

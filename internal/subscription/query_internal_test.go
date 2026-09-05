@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// escapeCorpus is what a display name and a base64 query value can carry: the
-// reserved bytes each escaping mode treats differently, a space, non-ASCII and
-// the tag shape the annotator writes.
+// escapeCorpus is what a display name, an auth string and a base64 query value
+// can carry: the reserved bytes each escaping mode treats differently, a
+// space, non-ASCII and the tag shape the annotator writes.
 var escapeCorpus = []string{
 	"", "plain", "Tokyo Node", "[GEO:FI][IP:192.0.2.1] mifa-001",
 	"a+b/c=d", "?query#frag", "a;b,c/d", "$&+,/:;=?@", "~-._",
@@ -18,15 +18,28 @@ var escapeCorpus = []string{
 	"obfs.example.com", "auth-token", "UO3EObgU3xUrhIGEE0gfCn5ZOz8YxNcwwW6ZaYzD3SA",
 }
 
+// roundTripAuths are hysteria2 auth strings the emitted link must survive
+// mihomo's read with (url.Parse + User.String() re-escapes anything outside
+// its userinfo-safe set, so only these come back intact).
+var roundTripAuths = []string{
+	"user:pass", "tok-1", "plain", "u:pa$$word", "s:3cr3t", ":leading-colon", "trailing:",
+}
+
 // TestEscapersMatchNetURL is the equivalence proof for the append escapers that
 // replaced url.QueryEscape and url.PathEscape on the share-link paths: a byte
 // either escaper spelled differently would publish a link mihomo reads as a
-// different node.
+// different node. appendUserinfoEscape is pinned against url.User(...).String()
+// everywhere except ':': net/url escapes that byte (encodeUserPassword), which
+// is exactly the one that must stay literal for mihomo's hysteria2 read, so a
+// colon-bearing auth is asserted through the parse round trip instead — but
+// only when every other byte survives net/url's re-escaping, which is what
+// userinfoSafe decides.
 func TestEscapersMatchNetURL(t *testing.T) {
 	t.Parallel()
 
-	cases := make([]string, 0, len(escapeCorpus)+256)
+	cases := make([]string, 0, len(escapeCorpus)+len(roundTripAuths)+256)
 	cases = append(cases, escapeCorpus...)
+	cases = append(cases, roundTripAuths...)
 	for b := range 256 {
 		cases = append(cases, string([]byte{byte(b)}))
 	}
@@ -38,7 +51,47 @@ func TestEscapersMatchNetURL(t *testing.T) {
 		if got, want := string(appendPathEscape(nil, s)), url.PathEscape(s); got != want {
 			t.Errorf("appendPathEscape(%q) = %q, url.PathEscape = %q", s, got, want)
 		}
+		got := string(appendUserinfoEscape(nil, s))
+		if !strings.Contains(s, ":") {
+			if want := url.User(s).String(); got != want {
+				t.Errorf("appendUserinfoEscape(%q) = %q, url.User(...).String() = %q", s, got, want)
+			}
+			continue
+		}
+		if !strings.Contains(got, ":") {
+			t.Errorf("appendUserinfoEscape(%q) = %q: the ':' must stay literal", s, got)
+		}
+		if !roundTripSafe(s) {
+			continue
+		}
+		u, err := url.Parse("hysteria2://" + got + "@host:443")
+		if err != nil || u.User.String() != s {
+			t.Errorf("appendUserinfoEscape(%q) = %q does not round-trip (err %v)", s, got, err)
+		}
 	}
+}
+
+// roundTripSafe reports whether mihomo's read of a colon-bearing auth — parse
+// the userinfo, String() it back — reproduces it. String() re-escapes any byte
+// outside userinfoSafe and any colon past the first (the split happens at the
+// first one, so later colons live in the password half and come back escaped).
+// An auth is therefore round-trip-safe exactly when every byte is safe AND the
+// colon count is at most one.
+func roundTripSafe(s string) bool {
+	colon := 0
+	for i := range len(s) {
+		if s[i] == ':' {
+			if colon++; colon > 1 {
+				return false
+			}
+			continue
+		}
+		if !userinfoSafe(s[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func TestAppendEscapersKeepPrefix(t *testing.T) {
@@ -50,6 +103,9 @@ func TestAppendEscapersKeepPrefix(t *testing.T) {
 	}
 	if got := string(appendPathEscape([]byte(prefix), "a b")); got != prefix+"a%20b" {
 		t.Errorf("appendPathEscape overwrote its destination: %q", got)
+	}
+	if got := string(appendUserinfoEscape([]byte(prefix), "a:b")); got != prefix+"a:b" {
+		t.Errorf("appendUserinfoEscape overwrote its destination: %q", got)
 	}
 }
 

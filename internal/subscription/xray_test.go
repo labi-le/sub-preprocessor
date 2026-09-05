@@ -246,3 +246,28 @@ func TestNormalizeRefusesHysteriaV1(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeConvertsHysteria2UserPassAuth: the documented hysteria2 auth
+// form is a "user:pass" pair, and mihomo reads the whole userinfo back through
+// url.Parse + User.String() into the proxy's password (convert/converter.go:97-99).
+// Escaping the ':' (url.User(...).String()) would hand mihomo the literal
+// "user%3Apass" credential, so the emitted userinfo must keep the ':' raw and
+// round-trip to the auth unchanged.
+func TestNormalizeConvertsHysteria2UserPassAuth(t *testing.T) {
+	t.Parallel()
+
+	const auth = "user:pass"
+	body := `{"outbounds":[{"protocol":"hysteria2","settings":{"address":"popa.example.ru","port":443},
+"streamSettings":{"hysteriaSettings":{"auth":"` + auth + `"},"tlsSettings":{"serverName":"popa.example.ru"}}}]}`
+	uri := normalizeOne(t, body)
+	if !strings.HasPrefix(uri, "hysteria2://"+auth+"@popa.example.ru:443?") {
+		t.Fatalf("auth must be emitted with its ':' literal: %q", uri)
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := u.User.String(); got != auth {
+		t.Errorf("userinfo round trip = %q, want %q (this is the password mihomo reads)", got, auth)
+	}
+}

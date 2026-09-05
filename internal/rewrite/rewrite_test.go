@@ -247,7 +247,11 @@ func nodeNameCases(t *testing.T) []nodeCase {
 
 	_, ssLine := ssLegacyLine()
 	vmessLine := "vmess://" + base64.StdEncoding.EncodeToString(
-		[]byte(`{"v":"2","ps":"Old","add":"192.0.2.1","port":"443","id":"uuid","net":"ws"}`))
+		[]byte(`{"v":"2","ps":"Old","add":"192.0.2.1","port":"443","id":"uuid","net":"ws"}`),
+	)
+	vmessEscaped := "vmess://" + base64.StdEncoding.EncodeToString(
+		[]byte(`{"v":"2","ps":"quote \" back \\ and <html>","add":"192.0.2.1","port":443,"id":"uuid","net":"ws"}`),
+	)
 
 	return []nodeCase{
 		{"vless", parseNode(t, "vless://uuid@host.example:443?type=tcp#Old Name")},
@@ -256,7 +260,9 @@ func nodeNameCases(t *testing.T) []nodeCase {
 		{"ss legacy", parseNode(t, ssLine)},
 		{"mierus", parseNode(t, "mierus://u@192.0.2.1?port=2999&protocol=TCP#Old Name")},
 		{"vmess", parseNode(t, vmessLine)},
+		{"vmess with a name json would escape", parseNode(t, vmessEscaped)},
 		{"ssr", parseNode(t, ssrLine("Old Node"))},
+		{"ssr with an escaping name", parseNode(t, ssrLine(`quote " back \ slash`))},
 		{"ssr behind a stale fragment", parseNode(t, ssrLine("Old Node")+"#stale label")},
 		{"undecodable vmess", subscription.Node{
 			Raw: "vmess://!!!not-base64!!!", Scheme: subscription.SchemeVmess,
@@ -338,6 +344,42 @@ func TestNodeNameFragmentPathAllocationFree(t *testing.T) {
 	})
 	if allocs != 0 {
 		t.Errorf("allocated %.0f times per run, want 0", allocs)
+	}
+}
+
+// TestNodeNamePayloadArmsAllocationFloor pins the PerfParse#2 point: the vmess
+// and ssr arms cost exactly the rewriter floors (3 and 5, measured 2026-08-18)
+// and nothing for the tag prefix. The displayName tags+" "+cleanName join used
+// to add one heap string per node on top; a concat reappearing at this call
+// site moves vmess to 4 and ssr to 6 and fails the pin.
+func TestNodeNamePayloadArmsAllocationFloor(t *testing.T) {
+	const tags = "[GEO:NL][IP:198.51.100.10]"
+	vmessLine := "vmess://" + base64.StdEncoding.EncodeToString(
+		[]byte(`{"v":"2","ps":"Old Name","add":"192.0.2.1","port":"443","id":"uuid","net":"ws"}`),
+	)
+	ssrPayload := "192.0.2.1:8388:origin:aes-256-cfb:plain:" + base64.RawURLEncoding.EncodeToString([]byte("secret")) +
+		"/?remarks=" + base64.RawURLEncoding.EncodeToString([]byte("Old Name"))
+
+	for _, tc := range []struct {
+		name, line string
+		want       int
+	}{
+		{"vmess", vmessLine, 3},
+		{"ssr", "ssr://" + base64.RawURLEncoding.EncodeToString([]byte(ssrPayload)), 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := parseNode(t, tc.line)
+			var buf bytes.Buffer
+			buf.Grow(512)
+
+			allocs := testing.AllocsPerRun(100, func() {
+				buf.Reset()
+				rewrite.NodeName(&buf, node, tags)
+			})
+			if allocs != float64(tc.want) {
+				t.Errorf("allocated %.0f times per run, want %d", allocs, tc.want)
+			}
+		})
 	}
 }
 

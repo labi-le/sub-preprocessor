@@ -132,6 +132,13 @@ func TestParseSSRRejects(t *testing.T) {
 		// range check of its own), but nothing can dial them.
 		{"non-numeric port", ssrLine("1.2.3.4:http:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"port with a trailing byte", ssrLine("1.2.3.4:8388x:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		// A multi-digit port opening with '0' is refused: mihomo's structure
+		// decoder parses the port with base-0 strconv (structure.go:143), so
+		// "0443" becomes octal 291 — a port the node never answers on — and
+		// "08" fails to decode at all, splitting the published key from the
+		// port mihomo dials.
+		{"leading-zero port", ssrLine("1.2.3.4:0443:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
+		{"port that only base 0 refuses", ssrLine("1.2.3.4:08:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"port zero", ssrLine("1.2.3.4:0:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"negative port", ssrLine("1.2.3.4:-1:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
 		{"port above 65535", ssrLine("1.2.3.4:70000:origin:aes-256-cfb:plain:c2VjcmV0/?" + ssrQuery())},
@@ -301,4 +308,42 @@ func decodeSSRResult(t *testing.T, out string) (head, query string) {
 		t.Fatalf("payload lost its /? separator: %q", decoded)
 	}
 	return head, query
+}
+
+// TestRewriteSSRNameTaggedMatchesConcat pins the parts composition of the ssr
+// arm to the join it replaced: RewriteSSRNameTagged(raw, tags, cleanName) must
+// emit the identical line RewriteSSRName(raw, tags+" "+cleanName) does — and,
+// because both share the decodeSSR gate, agree on acceptance — whatever the
+// parts carry.
+func TestRewriteSSRNameTaggedMatchesConcat(t *testing.T) {
+	t.Parallel()
+
+	line := ssrLine(ssrHead + "/?" + ssrQuery())
+	names := []string{
+		"Tokyo Node", "", "quote \" inside", "back \\ slash", "html <b>&</b>",
+		"100%", "Ünïtéd ÿÿÿ", "raw emoji 🇩🇪", "line\u2028sep", "\xff invalid",
+		"nul \x00 byte", strings.Repeat("y", 200),
+	}
+	tagses := []string{"", "[GEO:JP][IP:1.2.3.4]", "[GEO:FI] with \"quote\"", "[SPD:60M] [GEO:JP]"}
+
+	for _, tags := range tagses {
+		for _, cleanName := range names {
+			name := cleanName
+			if tags != "" {
+				name = tags + " " + cleanName
+			}
+			want, wantOK := subscription.RewriteSSRName(line, name)
+			got, gotOK := subscription.RewriteSSRNameTagged(line, tags, cleanName)
+			if gotOK != wantOK {
+				t.Errorf("tags %q cleanName %q: ok = %v, concat form ok = %v", tags, cleanName, gotOK, wantOK)
+				continue
+			}
+			if !gotOK {
+				continue
+			}
+			if got != want {
+				t.Errorf("tags %q cleanName %q:\n got %q\nwant %q", tags, cleanName, got, want)
+			}
+		}
+	}
 }

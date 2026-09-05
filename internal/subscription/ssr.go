@@ -76,6 +76,18 @@ func parseSSR(line, payload string) (Node, bool) {
 // a '=' pad (which query escaping turns into "%3D") makes the link
 // unconvertible.
 func RewriteSSRName(raw, newName string) (string, bool) {
+	return rewriteSSRName(raw, "", newName)
+}
+
+// RewriteSSRNameTagged is RewriteSSRName for a display name held as two parts
+// — the annotation prefix and the cleaned node name — see RewriteVmessNameTagged.
+// The remarks are byte-identical to RewriteSSRName(raw, tags+" "+cleanName),
+// and to cleanName alone when tags is empty.
+func RewriteSSRNameTagged(raw, tags, cleanName string) (string, bool) {
+	return rewriteSSRName(raw, tags, cleanName)
+}
+
+func rewriteSSRName(raw, tags, cleanName string) (string, bool) {
 	_, payload, found := strings.Cut(raw, schemeSep)
 	if !found {
 		return "", false
@@ -86,7 +98,19 @@ func RewriteSSRName(raw, newName string) (string, bool) {
 		return "", false
 	}
 
-	query = query.set("remarks", base64.RawURLEncoding.EncodeToString([]byte(newName)))
+	// base64 needs the name contiguous, and rewrite.NodeName used to hand over
+	// a pre-joined tags+" "+cleanName string that escaped to the heap per
+	// annotated node; composing the parts in the nameScratch stack buffer (the
+	// same bound the vmess splice's JSON name is built under) keeps the join
+	// off the heap — EncodeToString reads the buffer without retaining it.
+	var composedBuf [nameScratch]byte
+	composed := composedBuf[:0]
+	if tags != "" {
+		composed = append(composed, tags...)
+		composed = append(composed, ' ')
+	}
+	composed = append(composed, cleanName...)
+	query = query.set("remarks", base64.RawURLEncoding.EncodeToString(composed))
 
 	// rawLen is exact for a query whose values are all base64, which is every
 	// ssr query: nothing in that alphabet escapes, so plain never grows.

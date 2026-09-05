@@ -66,10 +66,24 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 // alloc_objects on 2026-08-18 (json.Unmarshal 68%, json.Marshal 21%) and
 // re-encoded the whole document to change one field. Splicing keeps every other
 // byte — unknown fields, their order, their spelling — as the producer wrote it.
-//
 // vmessFields gates the payload, so the accept set stays the map decode's:
 // TestVmessFieldsAgreeWithMapDecode pins the two together document by document.
 func RewriteVmessName(raw, newName string) (string, bool) {
+	return rewriteVmessName(raw, "", newName)
+}
+
+// RewriteVmessNameTagged is RewriteVmessName for a display name held as two
+// parts — the annotation prefix and the cleaned node name — which the payload
+// arms of rewrite.NodeName call instead of joining them first. The spliced
+// name is byte-identical to RewriteVmessName(raw, tags+" "+cleanName), and to
+// cleanName alone when tags is empty: only the join is skipped, so the tagged
+// form is composed inside the name scratch rather than as one heap string per
+// annotated node.
+func RewriteVmessNameTagged(raw, tags, cleanName string) (string, bool) {
+	return rewriteVmessName(raw, tags, cleanName)
+}
+
+func rewriteVmessName(raw, tags, cleanName string) (string, bool) {
 	_, payload, found := strings.Cut(raw, schemeSep)
 	if !found {
 		return "", false
@@ -86,7 +100,7 @@ func RewriteVmessName(raw, newName string) (string, bool) {
 	// Encoding the name first makes plain's capacity exact, and the scratch is
 	// wide enough for a tagged label so the common name never reaches the heap.
 	var scratch [nameScratch]byte
-	nameJSON, ok := appendJSONString(scratch[:0], newName)
+	nameJSON, ok := appendJSONName(scratch[:0], tags, cleanName)
 	if !ok {
 		return "", false
 	}
@@ -119,9 +133,10 @@ func RewriteVmessName(raw, newName string) (string, bool) {
 	return ioutil.UnsafeString(buf), true
 }
 
-// nameScratch bounds the stack buffer a JSON-encoded display name is built in.
-// A relabelled name is the upstream one behind a "[GEO:xx][SPD:nM] " prefix,
-// which the shipped tags keep well inside this.
+// nameScratch bounds the stack buffer a relabel display name is composed in:
+// JSON-encoded for the vmess splice, raw for the ssr remarks. A relabelled
+// name is the upstream one behind a "[GEO:xx][SPD:nM] " prefix, which the
+// shipped tags keep well inside this.
 const nameScratch = 128
 
 // appendJSONString appends s as a JSON string. The escape-free path is the
@@ -140,6 +155,27 @@ func appendJSONString(dst []byte, s string) ([]byte, bool) {
 		return dst, false
 	}
 	return append(dst, encoded...), true
+}
+
+// appendJSONName appends the JSON encoding of the display name a payload arm
+// publishes: cleanName alone, or tags+" "+cleanName when tags is non-empty.
+// rewrite.NodeName used to hand that join over as one string, which escaped to
+// the heap per annotated node; writing the two parts here keeps the tagged
+// form in the caller's scratch whenever both are jsonPlainString — every real
+// name. A part json.Marshal would escape falls back to marshalling the join,
+// byte-identical to the old path and costing the concat only there.
+func appendJSONName(dst []byte, tags, cleanName string) ([]byte, bool) {
+	if tags == "" {
+		return appendJSONString(dst, cleanName)
+	}
+	if jsonPlainString(tags) && jsonPlainString(cleanName) {
+		dst = append(dst, '"')
+		dst = append(dst, tags...)
+		dst = append(dst, ' ')
+		dst = append(dst, cleanName...)
+		return append(dst, '"'), true
+	}
+	return appendJSONString(dst, tags+" "+cleanName)
 }
 
 // jsonPlainString reports whether json.Marshal emits s as itself between
@@ -345,9 +381,15 @@ func decodeBase64Tolerant(s string) ([]byte, bool) {
 	return nil, false
 }
 
-// jsonValueString reads a raw JSON value as a string, accepting both JSON
-// strings and bare numbers (vmess "port" appears in the wild as both "443" and
-// 443). An absent field is a nil value and reads as "".
+// jsonValueString reads a raw JSON value as a string, accepting JSON strings
+// and bare numbers (vmess "port" appears in the wild as both "443" and 443).
+// An absent field is a nil value and reads as "". A bare number is returned
+// verbatim without reaching the decoder — a number can never unmarshal into a
+// string, so the numeric form would pay a heap &UnmarshalTypeError for
+// nothing. null, bool, object and array values are not text mihomo would ever
+// decode into a server or port, so they read as "" too (null already does:
+// json.Unmarshal accepts it as a no-op into a string, which is how an absent
+// field reads as "").
 func jsonValueString(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
@@ -361,9 +403,20 @@ func jsonValueString(raw []byte) string {
 			return ioutil.UnsafeString(inner)
 		}
 	}
+	// A bare number is vmess's other "port" spelling (443 alongside "443"),
+	// and it can never decode into a string: json.Unmarshal answers the
+	// number-into-string case with a heap &UnmarshalTypeError, so the raw-text
+	// return has to run BEFORE the Unmarshal — every real numeric node paid
+	// that doomed decode when it ran first. The document is json.Valid by the
+	// time this runs, so the first byte decides what the token is; null,
+	// "true", an object and an array still fall through to the Unmarshal
+	// below, which keeps them reading as "" rather than literal text.
+	if c := raw[0]; c == '-' || (c >= '0' && c <= '9') {
+		return strings.TrimSpace(ioutil.UnsafeString(raw))
+	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
-	return strings.TrimSpace(ioutil.UnsafeString(raw))
+	return ""
 }

@@ -35,6 +35,13 @@ const (
 // machine that would dial it. The measured panel advertised an expire= still in
 // the future, so the header gate cannot see that death — only the node can.
 //
+// The credential half reads ONLY the URI userinfo (nilCredential), so it can
+// fire only for schemes that carry the credential there — vless, trojan, tuic,
+// anytls, mierus, hysteria2, SIP002 ss, the proxy schemes. It cannot see vmess,
+// legacy ss or ssr, whose credential is sealed inside a base64 payload (vmess's
+// "id", ssr's head), and it does not try: reading those would be a new
+// detection rule, not this one.
+//
 // It lives here because classify (which refuses such a body a live verdict) and
 // stable.Merge (which refuses the node a probe slot) must not disagree: the
 // worker never calls classify, so a second copy of the rule would let a URL
@@ -47,7 +54,10 @@ func PlaceholderNode(raw, server string) bool {
 
 // nilCredential reports whether the URI userinfo is the RFC 9562 §5.9 Nil UUID,
 // which by definition names no account. All 32 zeros are required: a short
-// all-zero credential is a legal password, not evidence of a dead panel.
+// all-zero credential is a legal password, not evidence of a dead panel. It
+// reads the authority between the scheme and the first '/'/'?'/'#' and needs an
+// '@' there, so it can only ever fire for schemes carrying the credential in
+// the URI userinfo — never for vmess/ss/ssr, whose base64 payloads hold no '@'.
 func nilCredential(raw string) bool {
 	_, auth, ok := strings.Cut(raw, schemeSep)
 	if !ok {

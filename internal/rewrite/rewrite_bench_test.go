@@ -11,12 +11,16 @@ import (
 
 // BenchmarkNodeNamePayloadArms prices the two arms the fragment path's
 // separate-write trick does not reach: both fold the display name into a base64
-// payload, so both need it as one string. preprocess.BenchmarkRewriteNodeName
-// covers the fragment path itself.
+// payload, whose rewriters compose the tag prefix and the cleaned name from
+// parts. The arms used to pay displayName's tags+" "+cleanName join — one heap
+// string per node above the rewriter floors (3 vmess, 5 ssr); a concat
+// reappearing shows here first. preprocess.BenchmarkRewriteNodeName covers the
+// fragment path itself.
 func BenchmarkNodeNamePayloadArms(b *testing.B) {
 	const tags = "[GEO:NL][IP:198.51.100.10]"
 	vmessLine := "vmess://" + base64.StdEncoding.EncodeToString(
-		[]byte(`{"v":"2","ps":"Old Name","add":"192.0.2.1","port":"443","id":"uuid","net":"ws"}`))
+		[]byte(`{"v":"2","ps":"Old Name","add":"192.0.2.1","port":"443","id":"uuid","net":"ws"}`),
+	)
 	ssrPayload := "192.0.2.1:8388:origin:aes-256-cfb:plain:" + base64.RawURLEncoding.EncodeToString([]byte("secret")) +
 		"/?remarks=" + base64.RawURLEncoding.EncodeToString([]byte("Old Name"))
 
