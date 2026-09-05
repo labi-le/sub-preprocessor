@@ -26,14 +26,18 @@ const defaultConfigPath = "./config/config.yaml"
 // can be sitting in — a 5s DNS or ASN lookup, which cannot observe the
 // cancellation fasthttp delivers until it returns — or an ordinary SIGTERM
 // during a lookup reports a deadline error. 15s leaves margin for one queued
-// lookup plus the response write, and 15s + controllerStopTimeout stays under
-// docker-compose's stop_grace_period.
+// lookup plus the response write. It is the first term of the shutdown worst
+// case: the two bounded joins that follow it (config watcher, stable worker)
+// add controllerStopTimeout each, and shutdownTimeout + 2×controllerStopTimeout
+// stays under docker-compose's stop_grace_period.
 const shutdownTimeout = 15 * time.Second
 
-// controllerStopTimeout bounds the join on the stable worker. Every stage of a
-// cycle takes the cancelled context, so it normally unwinds in milliseconds;
-// the bound exists so a future non-cooperative stage cannot make the process
-// unkillable.
+// controllerStopTimeout bounds each of the two joins shutdown performs — the
+// config watcher (stopWatcher) and the stable worker (stopController). Both
+// unwind promptly once their context is cancelled, so the bound exists so a
+// future non-cooperative step — a reload's context-free work, a cycle stage
+// that ignores its context — degrades to a logged warning instead of a hung
+// shutdown.
 const controllerStopTimeout = 5 * time.Second
 
 const metricsReadHeaderTimeout = 5 * time.Second
@@ -79,6 +83,20 @@ func stopController(ctl *stable.Controller, logger zerolog.Logger) {
 	case <-done:
 	case <-time.After(controllerStopTimeout):
 		logger.Warn().Dur("budget", controllerStopTimeout).Msg("stable worker did not stop in time, abandoning it")
+	}
+}
+
+// stopWatcher cancels the config watcher and joins it under the same bound as
+// stopController. The watcher loop can only observe the cancellation between
+// reloads, so a reload wedged in a context-free step (config.Load, ctl.Apply)
+// would otherwise hang shutdown past the supervisor's grace period; the bound
+// degrades that case to a logged warning.
+func stopWatcher(cancelWatcher context.CancelFunc, watcherDone <-chan struct{}, logger zerolog.Logger) {
+	cancelWatcher()
+	select {
+	case <-watcherDone:
+	case <-time.After(controllerStopTimeout):
+		logger.Warn().Dur("budget", controllerStopTimeout).Msg("config watcher did not stop in time, abandoning it")
 	}
 }
 
@@ -142,6 +160,16 @@ func buildProcessor(ctx context.Context, cfg config.Config, logger zerolog.Logge
 	return svc, nil
 }
 
+// newServerHolder publishes the first snapshot. CountryFilter is set before
+// the holder exists because a published snapshot is immutable: the handler
+// reads the field per request, and a cidr-only filters list must refuse a
+// country-gated GET / rather than answer it unfiltered.
+func newServerHolder(cfg config.Config, svc *preprocess.Processor) *serverpkg.Holder {
+	snap := serverpkg.NewSnapshot(svc, svc, cfg.Groups)
+	snap.CountryFilter = cfg.CountryFilterConfigured()
+	return serverpkg.NewHolder(snap)
+}
+
 // buildWatcher wires the config reloader and its filesystem watcher.
 func buildWatcher(cfg config.Config, logger zerolog.Logger, holder *serverpkg.Holder, svc *preprocess.Processor, ctl *stable.Controller, pblock preprocess.Blocklist) (*reload.Watcher, error) {
 	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc, ctl, pblock)
@@ -155,10 +183,17 @@ func buildWatcher(cfg config.Config, logger zerolog.Logger, holder *serverpkg.Ho
 // restoreStableList seeds the worker's holder with the list the previous run
 // persisted, so /stable.txt answers from the first request instead of 503 for
 // a whole cycle after every restart (measured 58 minutes on a 68266-node
-// pool). A missing or unusable file leaves the holder empty; LoadSnapshot
-// warns and startup carries on.
+// pool). It restores only when subscriptions are enabled — the same predicate
+// Apply starts a worker under — because an empty source list at startup is the
+// deliberate disable, and serving the previous run's snapshot then would
+// answer 200 with a stale list and no worker to ever replace it. A missing or
+// unusable file leaves the holder empty; LoadSnapshot warns and startup
+// carries on.
 func restoreStableList(cfg config.Config, logger zerolog.Logger) *stable.Holder {
 	h := stable.NewHolder()
+	if !cfg.SubscriptionsEnabled() {
+		return h
+	}
 	if snap := stable.LoadSnapshot(cfg.Subscriptions.SnapshotPath, logger); snap != nil {
 		h.Store(snap)
 	}
@@ -197,7 +232,7 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	holder := serverpkg.NewHolder(serverpkg.NewSnapshot(svc, svc, cfg.Groups))
+	holder := newServerHolder(cfg, svc)
 	stableHolder := restoreStableList(cfg, logger)
 	m := metrics.New()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
@@ -225,8 +260,12 @@ func Run(ctx context.Context) error {
 
 	// Watcher runs under a derived context; the deferred cancel+join is
 	// registered AFTER the stopController/gbStore.Close defers so (LIFO) the
-	// watcher is joined FIRST on every return path — an in-flight
-	// Reload→ctl.Apply can never race controller/store teardown.
+	// watcher is joined FIRST on every return path. The loop can observe the
+	// cancellation only between reloads, so a reload in flight delays the
+	// join; normally it unwinds in milliseconds and controller/store teardown
+	// never races a live Reload→ctl.Apply. The join is bounded like
+	// stopController's, so a reload wedged past the budget is abandoned with a
+	// warning instead of hanging shutdown.
 	watcherCtx, cancelWatcher := context.WithCancel(ctx)
 	watcherDone := make(chan struct{})
 	go func() {
@@ -235,10 +274,7 @@ func Run(ctx context.Context) error {
 			logger.Error().Err(watchErr).Msg("config watcher error")
 		}
 	}()
-	defer func() {
-		cancelWatcher()
-		<-watcherDone
-	}()
+	defer func() { stopWatcher(cancelWatcher, watcherDone, logger) }()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -247,9 +283,7 @@ func Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownErr := gracefulShutdown(ctx, srv, logger)
-		<-watcherDone
-		return shutdownErr
+		return gracefulShutdown(ctx, srv, logger)
 	case listenErr := <-errCh:
 		return listenErr
 	}

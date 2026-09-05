@@ -74,9 +74,9 @@ func TestStartMetricsServesAfterBind(t *testing.T) {
 }
 
 // TestRestoreStableList pins the startup half of snapshot persistence: with a
-// readable file the holder is already published before the server starts, and
-// without one it stays empty so /stable.txt answers 503 exactly as it did
-// before the feature existed.
+// readable file and a source list to power a worker, the holder is already
+// published before the server starts, and without a usable file it stays empty
+// so /stable.txt answers 503 exactly as it did before the feature existed.
 func TestRestoreStableList(t *testing.T) {
 	t.Parallel()
 
@@ -117,9 +117,42 @@ func TestRestoreStableList(t *testing.T) {
 	}
 }
 
+// TestRestoreStableListSkipsSnapshotWhenDisabled pins the ordering behind the
+// deliberate disable: Apply starts no worker for an explicitly empty source
+// list, so the restore that precedes it must not seed the holder either. A
+// previous run's snapshot would then answer 200 on /stable.txt for the whole
+// process lifetime with no worker to ever replace it, silently bypassing the
+// 503-on-cold-start an empty holder answers.
+func TestRestoreStableListSkipsSnapshotWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	saved := &stable.Snapshot{
+		Payload:   []byte("vless://u@192.0.2.1:443#foo\n"),
+		UpdatedAt: time.Date(2026, 8, 7, 13, 53, 57, 0, time.UTC),
+	}
+	path := filepath.Join(t.TempDir(), "stable.json")
+	if err := stable.SaveSnapshot(path, saved); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	var cfg config.Config
+	cfg.Subscriptions.SnapshotPath = path
+	if cfg.SubscriptionsEnabled() {
+		t.Fatal("fixture must model an empty merged source list")
+	}
+
+	if h := restoreStableList(cfg, zerolog.Nop()); h.Load() != nil {
+		t.Fatal("a disabled worker must not serve the previous run's snapshot; /stable.txt must answer 503")
+	}
+}
+
+// configWithSnapshotPath builds a config whose worker will actually run (one
+// source) alongside the given snapshot path, so restoreStableList reaches the
+// snapshot file rather than stopping at the enable gate.
 func configWithSnapshotPath(path string) config.Config {
 	var cfg config.Config
 	cfg.Subscriptions.SnapshotPath = path
+	cfg.Subscriptions.Sources = []config.SubscriptionSource{{Name: "seed", URL: "https://example.com/stable"}}
 
 	return cfg
 }

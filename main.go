@@ -32,8 +32,15 @@ const (
 	defaultCrawlDeadTTL   = 720 * time.Hour
 	defaultCrawlInterval  = 30 * time.Minute
 	defaultCrawlInlineMax = 500
-	classifyTimeout       = 30 * time.Second
-	exitUsageError        = 2
+	// defaultCrawlFetchTimeout mirrors config's subscriptions.fetch.timeout
+	// default (the worker's per-source fetch budget). The crawl subcommand
+	// reads no config.yaml of its own, and Options.FetchTimeout makes each
+	// liveness probe live inside whatever budget the worker fetches under, so
+	// the mirror is the shipped value — CRAWL_FETCH_TIMEOUT must be set to
+	// match when an operator tunes subscriptions.fetch.timeout in config.yaml.
+	defaultCrawlFetchTimeout = 3 * time.Second
+	classifyTimeout          = 30 * time.Second
+	exitUsageError           = 2
 )
 
 func main() {
@@ -79,6 +86,7 @@ func runCrawl() {
 		StatePath:     getenv("CRAWL_STATE", "/config/.crawler-state.json"),
 		StateTTL:      durationDefault(getenv("CRAWL_STATE_TTL", ""), defaultCrawlStateTTL),
 		DeadTTL:       durationAllowZero(getenv("CRAWL_DEAD_TTL", ""), defaultCrawlDeadTTL),
+		FetchTimeout:  durationDefault(getenv("CRAWL_FETCH_TIMEOUT", ""), defaultCrawlFetchTimeout),
 		InlineEnabled: boolDefault(getenv("CRAWL_INLINE", ""), true),
 		InlineMax:     intDefault(getenv("CRAWL_INLINE_MAX", ""), defaultCrawlInlineMax),
 	}
@@ -95,10 +103,17 @@ func runCrawl() {
 	// CRAWL_HTTP=":8081" starts an on-demand HTTP trigger alongside the
 	// schedule loop; empty keeps the crawler HTTP-less (unchanged behavior).
 	if addr := getenv("CRAWL_HTTP", ""); addr != "" {
-		logger.Info().Str("addr", addr).Msg("crawl HTTP trigger listening")
+		logger.Info().Str("addr", addr).Msg("crawl HTTP trigger starting")
+		// Serve returns nil only on a clean ctx-cancelled shutdown, so an
+		// error while the context is still live is a listener failure — a
+		// bind failure (port already taken) returns almost immediately.
+		// CRAWL_HTTP was set explicitly, so running on without the trigger
+		// surface would report success to the supervisor while /crawl and
+		// /metrics stay dead: exit non-zero instead.
 		go func() {
-			if err := c.Serve(ctx, addr); err != nil {
+			if err := c.Serve(ctx, addr); err != nil && ctx.Err() == nil {
 				logger.Error().Err(err).Str("addr", addr).Msg("crawl HTTP server failed")
+				os.Exit(1)
 			}
 		}()
 	}
