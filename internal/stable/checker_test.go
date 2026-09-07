@@ -339,6 +339,7 @@ type fakeDeadCache struct {
 func (d *fakeDeadCache) Blocked(addr string, ip netip.Addr) bool {
 	return d.blocked[deadKey{addr: addr, ip: ip}]
 }
+
 func (d *fakeDeadCache) Block(addr string, ip netip.Addr) error {
 	addr = strings.Clone(addr)
 	d.recorded = append(d.recorded, deadKey{addr: addr, ip: ip})
@@ -553,12 +554,14 @@ func TestCheckerCancelAfterProbeSkipsWrites(t *testing.T) {
 	}
 }
 
-// A cycle in which every probed node returned zero successes (our egress down,
-// say) must not write the verdict into the dead cache: committing it would
-// freeze the published list for deadcache.ttl after the network recovers.
-// verdict into the dead cache: committing it would freeze the published list
-// for deadcache.ttl after the network recovers.
-func TestCheckerDeadCacheNotWrittenWhenWholeProbeSetFails(t *testing.T) {
+// A cycle in which every probed node returned zero successes IS written to the
+// dead cache: that is this corpus's normal state, not evidence about our
+// egress. Suppressing it (a node-share breaker did, for 39 production cycles)
+// leaves the in-memory cache empty after any restart and quadruples the probed
+// pool, since nothing can ever be skipped again. The egress verdict belongs to
+// the pre-check, which measures endpoints and withholds the write itself when
+// it discards its own verdict — pinned in prober_test.go.
+func TestCheckerDeadCacheWrittenWhenWholeProbeSetFails(t *testing.T) {
 	t.Parallel()
 
 	const n = 8
@@ -582,8 +585,8 @@ func TestCheckerDeadCacheNotWrittenWhenWholeProbeSetFails(t *testing.T) {
 	if err := c.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if len(dead.recorded) != 0 {
-		t.Errorf("a whole-pool failure must not be written to the dead cache, got %v", dead.recorded)
+	if len(dead.recorded) != n {
+		t.Errorf("every zero-success node must be cached, got %d of %d: %v", len(dead.recorded), n, dead.recorded)
 	}
 }
 

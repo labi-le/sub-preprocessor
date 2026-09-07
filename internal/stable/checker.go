@@ -241,7 +241,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	precheck := precheckReportOf(spec.Prober)
 	refusals := refusalReportOf(spec.Prober)
 
-	c.recordDead(probe, res, refusals)
+	c.recordDead(probe, res, refusals, precheck)
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	selectedAt := time.Now()
@@ -865,43 +865,33 @@ func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, o
 // label, and an un-attributable absence must not silently stop blocking (the
 // lesson of TestCheckerDeadCacheRecordsZeroSuccessAndAbsent).
 //
-// The write carries the same plausibility breaker as the pre-check
-// (breakerTrips), over the entries the probe actually JUDGED -- res-present
-// ones, or every entry for a prober without the account. Refused entries
-// cannot be blocked, so counting them in the denominator would hold a wholly
-// refused pool under the trip threshold exactly as unresolvable endpoints
-// would in filterReachable's; the breaker must stay about our egress, and a
-// refusal is not an egress verdict. The verdict fails open instead, exactly as
-// filterReachable's does.
-func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals RefusalReport) {
+// The write is gated on the PRE-CHECK's verdict, not on the share of nodes that
+// failed. A node-level share cannot discriminate here: this corpus is
+// structurally 96-99.7% zero-success even when the egress is provably healthy
+// (234-963 nodes of ~66k pass any round), so the pre-check's 95% line -- which
+// has headroom only against the ENDPOINT-level TCP-refusal share it was
+// measured on, ~58.9% healthy -- fires on normal operation and suppresses
+// every write. It did exactly that in production for 39 consecutive cycles:
+// the DeadSet is in-memory, so a restart emptied it and the misfire kept it
+// empty, quadrupling the probed pool from ~15k to ~66k.
+//
+// PrecheckTripped is the egress signal worth respecting: the pre-check judged
+// its OWN verdict implausible over the quantity it measures, which is the
+// "our uplink is down, not their servers" case this guard exists for. A
+// pre-check that ran, or a prober that runs none, leaves the write to the
+// per-node verdicts.
+func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals RefusalReport, precheck PrecheckReport) {
 	if c.dead == nil {
 		return
 	}
-	blocked, judged := 0, 0
-	for _, e := range probe {
-		r, ok := res[e.Label]
-		if !ok {
-			if refusals.State == RefusalRan {
-				// Attributed refusal: no liveness signal, never cached (see
-				// the doc above).
-				continue
-			}
-			blocked++
-			judged++
+	if precheck.State == PrecheckTripped {
+		c.logger.Warn().Int("precheck_refused", precheck.Refused).
+			Int("precheck_dialled", precheck.Dialled).
+			Msg("pre-check discarded its own verdict; keeping the dead cache unchanged")
 
-			continue
-		}
-		judged++
-		if r.Successes == 0 {
-			blocked++
-		}
-	}
-	if breakerTrips(blocked, judged) {
-		c.logger.Warn().Int("blocked", blocked).Int("judged", judged).
-			Int("threshold_pct", precheckBreakerPercent).
-			Msg("nearly every probed node failed; treating the verdict as unreliable and keeping the dead cache unchanged")
 		return
 	}
+	blocked := 0
 	for _, e := range probe {
 		r, ok := res[e.Label]
 		if !ok {
@@ -909,13 +899,17 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals
 				continue
 			}
 			_ = c.dead.Block(e.Addr, e.IP)
+			blocked++
 
 			continue
 		}
 		if r.Successes == 0 {
 			_ = c.dead.Block(e.Addr, e.IP)
+			blocked++
 		}
 	}
+	c.logger.Debug().Int("blocked", blocked).Int("probed", len(probe)).
+		Msg("dead cache updated")
 }
 
 // pruneCaches sheds expired entries from every TTL cache this cycle wrote to.

@@ -1054,7 +1054,7 @@ func TestRecordDeadExcludesAttributedRefusals(t *testing.T) {
 		"src-004": {Successes: 5, MeanMs: 100, Stage: StagePassed},
 	}
 	refusals := RefusalReport{State: RefusalRan, refused: map[string]struct{}{"src-002": {}}}
-	c.recordDead(probe, res, refusals)
+	c.recordDead(probe, res, refusals, PrecheckReport{State: PrecheckRan})
 
 	want := []string{"192.0.2.1:443"}
 	got := make([]string, len(dead.blocked))
@@ -1086,7 +1086,7 @@ func TestRecordDeadAbsenceKeepsBlockingWithoutTheAccount(t *testing.T) {
 		"src-001": {Stage: StageConnect},
 		"src-004": {Successes: 5, MeanMs: 100, Stage: StagePassed},
 	}
-	c.recordDead(probe, res, RefusalReport{}) // State Absent: no account
+	c.recordDead(probe, res, RefusalReport{}, PrecheckReport{State: PrecheckRan}) // State Absent: no account
 
 	want := []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443"}
 	got := make([]string, len(dead.blocked))
@@ -1098,13 +1098,12 @@ func TestRecordDeadAbsenceKeepsBlockingWithoutTheAccount(t *testing.T) {
 	}
 }
 
-// TestRecordDeadBreakerIgnoresRefusedEntries: the write's plausibility breaker
-// must judge only the entries a write could block, exactly as the pre-check's
-// breaker judges only the endpoints it dialled. A probed set that is wholly
-// converter-unmapped has no verdict to disbelieve -- nothing is written and
-// nothing trips -- while a set whose judged entries are all dead still trips
-// and keeps the cache unchanged.
-func TestRecordDeadBreakerIgnoresRefusedEntries(t *testing.T) {
+// TestRecordDeadWritesWhenAlmostEverythingIsDead pins the calibration this
+// write cost production 39 cycles to learn: the pool is STRUCTURALLY 96-99.7%
+// zero-success even on a healthy egress, so a node-share breaker suppresses
+// every write and the in-memory cache, once emptied by a restart, can never
+// refill. Only the pre-check's own discarded verdict withholds the write.
+func TestRecordDeadWritesWhenAlmostEverythingIsDead(t *testing.T) {
 	t.Parallel()
 
 	allRefused := make([]Entry, 8)
@@ -1113,13 +1112,13 @@ func TestRecordDeadBreakerIgnoresRefusedEntries(t *testing.T) {
 	}
 	dead := &recordingDead{}
 	c := NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
-	c.recordDead(allRefused, map[string]ProbeResult{}, RefusalReport{State: RefusalRan})
+	c.recordDead(allRefused, map[string]ProbeResult{}, RefusalReport{State: RefusalRan}, PrecheckReport{State: PrecheckRan})
 	if len(dead.blocked) != 0 {
 		t.Errorf("a wholly unconvertible set must write nothing, wrote %v", dead.blocked)
 	}
 
-	allDead := make([]Entry, 8)
-	res := make(map[string]ProbeResult, 8)
+	allDead := make([]Entry, 200)
+	res := make(map[string]ProbeResult, len(allDead))
 	for i := range allDead {
 		label := fmt.Sprintf("src-%03d", i)
 		allDead[i] = Entry{Label: label, Addr: fmt.Sprintf("192.0.2.%d:443", i+1)}
@@ -1127,9 +1126,16 @@ func TestRecordDeadBreakerIgnoresRefusedEntries(t *testing.T) {
 	}
 	dead = &recordingDead{}
 	c = NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
-	c.recordDead(allDead, res, RefusalReport{State: RefusalRan})
+	c.recordDead(allDead, res, RefusalReport{State: RefusalRan}, PrecheckReport{State: PrecheckRan})
+	if len(dead.blocked) != len(allDead) {
+		t.Errorf("an all-dead judged set must be cached, wrote %d of %d", len(dead.blocked), len(allDead))
+	}
+
+	dead = &recordingDead{}
+	c = NewChecker(CheckerSpec{}, nil, nil, dead, NewHolder(), "", zerolog.Nop(), nil)
+	c.recordDead(allDead, res, RefusalReport{State: RefusalRan}, PrecheckReport{State: PrecheckTripped, Dialled: 200, Refused: 199})
 	if len(dead.blocked) != 0 {
-		t.Errorf("an all-dead judged set must trip the breaker and write nothing, wrote %v", dead.blocked)
+		t.Errorf("a discarded pre-check verdict must withhold the write, wrote %v", dead.blocked)
 	}
 }
 

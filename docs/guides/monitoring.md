@@ -417,14 +417,17 @@ vendor the dashboard into the nixos repo.
   `scheme_contract_test.go` — and a mihomo bump that adds the scheme case or cipher would
   find the line skipped past the bump. Re-judged every cycle instead, the class stays
   attributable until the moment mihomo can dial it (`checker.go:852-861`). The write is
-  guarded by the same plausibility breaker as the pre-check and the gates
-  (`breakerTrips`, `prober.go:539-542`; the call at `checker.go:899`) — a cycle where
-  nearly every node the probe JUDGED failed leaves the cache unchanged: committing that
-  verdict would freeze the list for the whole TTL after the network recovered. Judged is
-  the result-present entries, or every entry for a no-account prober; the refusal classes
-  cannot be blocked, so counting them in the denominator would hold a wholly-refused pool
-  under the trip threshold exactly as unresolvable endpoints would in the pre-check's
-  (`checker.go:868-874`). The shipped config sets
+  withheld for exactly one reason: `PrecheckState == PrecheckTripped`, i.e. the pre-check
+  discarded its OWN verdict, which is the "our egress is down, not their servers" case
+  (`checker.go:887-893`). It is deliberately NOT guarded by a share of the nodes that
+  failed. That guard shipped on 2026-09-05 and misfired on all 39 cycles that followed:
+  this corpus is structurally 96-99.7% zero-success even on a provably healthy egress
+  (234-963 nodes of ~66k pass any round), while `precheckBreakerPercent`'s 95% line was
+  measured against the ENDPOINT-level TCP-refusal share (~58.9% healthy). Because the
+  DeadSet is in-memory, the deploy restart emptied it and the misfire kept it empty, so
+  `stable_dead_skipped_nodes` read 0 for two days and the probe phase carried the whole
+  ~66k pool instead of ~15k. The two quantities are not interchangeable, and this is what
+  that cost. The shipped config sets
   `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:174` and
   `:227`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
   it by a uniform [1, 1.5)
@@ -488,7 +491,8 @@ vendor the dashboard into the nixos repo.
   at least 100 judged endpoints, at least 95% of them refused (`precheckBreakerMin` at :528,
   `precheckBreakerPercent` at :524, the decided call at :701); the total-refusal arm fires on
   one refused endpoint as surely as on ten thousand (`breakerTrips`, :539-542, shared with
-  `recordDead`'s guard at `checker.go:899` and the through-node gates). Judged is dialled minus
+  the through-node gates; the dead-cache write does NOT use it — see the dead-cache bullet
+  above for why a node-level share cannot carry this line). Judged is dialled minus
   unresolved: an unresolvable name is judged by nobody, so no resolver outage can fire the
   breaker, and every verdict but `verdictRefused` falls through to `live` (the loop at
   :716-724).
@@ -557,12 +561,14 @@ vendor the dashboard into the nixos repo.
   which is valid) and two consequences still bind any dashboard edit: a panel added later
   MUST carry that selector, and a panel description MUST NOT name a config file as the
   authority for what ran — which filters exist depends on which deployment `$job` selects.
-- **The crawler's five counters are label-less lifetime int64s with no dashboard panel, and
+- **The topic phase's five counters are label-less lifetime int64s with no dashboard panel, and
   they are readable where nothing scrapes.** Rendered by `internal/metrics`' exposition helpers
   and served by the CRAWLER process — not the preprocessor listener described above — at
   `GET /metrics` on the optional `CRAWL_HTTP` trigger listener; a deployment without `CRAWL_HTTP`
-  reads the same five numbers off a per-cycle structured log line that every cycle which crawls emits. No Grafana
-  panel or Prometheus rule consumes them yet — documentation only, by decision. Semantics:
+  reads the same five numbers off the per-cycle structured log line that every cycle which crawls
+  emits (`reportTopics`). No Grafana panel or Prometheus rule consumes the topic family yet —
+  documentation only, by decision — unlike the GitHub discovery phase's nine below, whose panel
+  half shipped with the metrics in the same commit. Semantics:
   `stable_crawl_topic_pages_total` counts successful topic embed fetches (the denominator);
   `stable_crawl_topic_live_total` those yielding at least one live subscription (the numerator);
   `stable_crawl_topic_empty_total` embed pages that answered with a reachable body but zero
@@ -570,7 +576,7 @@ vendor the dashboard into the nixos repo.
   `stable_crawl_topic_discovered_total` same-group carve-out edges admitted into the crawl queue;
   `stable_crawl_group_empty_total` bare discovered groups whose `/s/` listing was reached and
   empty with no topic hint available — the counted dead end.
-- **One automated alarm and one operator check ship with the five counters; both are fleet-shaped,
+- **One automated alarm and one operator check ship with the topic counters; both are fleet-shaped,
   never per-topic.** (1) The empty ratio pinned near 1 while fetches keep rising ⇒ the embed markup
   changed and every topic read is coming back silently empty — fired as a warn from the same per-cycle
   log line once at least five topic pages were fetched in a cycle with zero live yields, the same
@@ -578,6 +584,34 @@ vendor the dashboard into the nixos repo.
   stuck near zero over days ⇒ the same-group carve-out is misfiring and intra-forum recursion is
   effectively dead — operator guidance rather than an automated alarm: nothing fires on it, so check
   that before concluding the forums themselves dried up.
+- **The GitHub discovery phase's nine counters share the topic family's label-less lifetime shape,
+  and they are the crawler counters with a panel half: a `Crawler` row (row panel 28) under the
+  existing tiles holds panels 29-32, every target an `increase(...,[1h])` over the lifetime counter,
+  because a raw cumulative read would only climb.** Rendered by the same `writeCrawl`
+  (`internal/metrics/crawl.go`) on the same `GET /metrics`, they answer only where that endpoint is
+  scraped under the selected `$job` — the shipped compose neither sets `CRAWL_HTTP` nor scrapes the
+  crawler listener (Prometheus scrapes only the preprocessor's `127.0.0.1:9091`), so until a
+  deployment adds both, these tiles read No data while the counters move regardless, exactly the
+  topic family's position. Semantics, down the pipeline: `stable_crawl_github_searches_total` counts
+  search API calls the phase spent, code and repo grids alike — the spend the per-cycle
+  `GITHUB_SEARCH_*` caps bound; `stable_crawl_github_repos_total` counts the repositories those
+  searches admitted and treed, `stable_crawl_github_skipped_total` the ones the
+  freshness/archived/fork gates refused before any tree call, so `repos/(repos+skipped)` is the
+  admission share of the searched population and a skipped-heavy pair means the queries surface
+  stale or archived repositories, not that discovery failed (panel 31);
+  `stable_crawl_github_probed_total` candidate file bodies fetched, `stable_crawl_github_live_files_total`
+  the subset that carried nodes and `stable_crawl_github_accepted_total` the subset that cleared the
+  marginality gate and reached the mint — `live_files/probed` is candidate-filter precision,
+  `accepted/live_files` is marginality, and the probed-to-accepted taper is what panel 29 draws
+  (accepted pinned at zero under a climbing live_files means the novelty floor sits above what the
+  files add); `stable_crawl_github_novel_endpoints_total` counts distinct endpoints the accepted
+  files added beyond the census — the phase's yield, `novel_endpoints/accepted` the mean novelty per
+  accepted file (panel 30). The last two are the health pair (panel 32):
+  `stable_crawl_github_rate_sleeps_total` counts rate-limit sleeps — the signal that the per-cycle
+  caps sit above the token's limits, so a rise means lowering
+  `GITHUB_SEARCH_CODE`/`GITHUB_SEARCH_REPO`, not that the phase is broken — and
+  `stable_crawl_github_errors_total` counts API/transport failures inside the phase, a rise meaning
+  the token or the network is failing and the phase yields nothing for its calls.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway
