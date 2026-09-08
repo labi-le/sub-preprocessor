@@ -82,6 +82,7 @@ load when its trigger fires. Each guide states its own trigger at the top.
 | [`docs/guides/monitoring.md`](./docs/guides/monitoring.md) | adding, renaming or rendering a metric, or editing `deploy/grafana/sub-preprocessor.json` |
 | [`docs/guides/benchmarks.md`](./docs/guides/benchmarks.md) | quoting a performance figure, or taking one |
 | [`docs/guides/sources.md`](./docs/guides/sources.md) | adding, removing or auditing a subscription source, or touching `internal/crawl` |
+| [`docs/guides/github.md`](./docs/guides/github.md) | adding, retuning or auditing the GitHub discovery phase, or asking why a repository was accepted |
 | [`docs/guides/security.md`](./docs/guides/security.md) | touching `internal/fetch`, a user-supplied URL, or the SSRF gates |
 | [`docs/guides/layout.md`](./docs/guides/layout.md) | orientation: which package owns a concern |
 | [`routes.md`](./routes.md) | orientation before a change, and after adding, removing or restructuring a package, or changing a package's public API (key types, constructors, interfaces) — the per-package reference: types, functions, tags, dependency graph |

@@ -203,13 +203,57 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   Raising the cap admits nodes from the same distribution — ~93% of which the earlier
   sources already carry — at one DNS resolve and one probe slot each.
 
+## What the GitHub discovery phase may harvest
+
+The `crawl` subcommand's second discovery phase reads GitHub instead of Telegram
+(`internal/ghfind`, wired in by `internal/crawl/github.go`). The algorithm, the
+measured signal table and every `GITHUB_*` knob live in
+`docs/guides/github.md`; this section holds only how the
+three gates above map onto a GitHub candidate and what is different about them here.
+
+- FRESH is the REPOSITORY, not the file: a candidate raw URL passes only when
+  its repository's `pushed_at` sits inside `GITHUB_FRESH`, an archived
+  repository is refused outright, and a fork needs a push within a quarter of
+  that window. There is no per-file date — the tree API returns sizes, not
+  commit dates, and dating each path would cost one API call per candidate.
+- FETCHABLE is `classify.Body` over the served bytes — the same verdict
+  function the worker fetch itself reaches, so a mint and a probe cannot
+  disagree about a body.
+- MARGINAL is endpoint novelty against the whole-corpus census: every
+  configured source URL fetched once and folded into a hash set, managed
+  entries included, by the same baseline rule that condemned the curated-only
+  pass above. With no census at all the phase refuses acceptance entirely —
+  it never mints blind, and this is the one gate here that a 200 cannot
+  wave through.
+
+MARGINAL is the load-bearing gate, and the 2026-09-07 measurement is why: one
+pass over the grid found **155 394 novel endpoints across 578 repositories** —
+75% of the 208 304 distinct endpoints the fetched candidate files carried were
+absent from the corpus. Acceptance, not discovery, is the scarce resource.
+That is also why the phase is capped (`GITHUB_MAX_SOURCES`) and why a file is
+minted only when it still adds `GITHUB_MIN_NOVEL` endpoints the census and the
+cycle's earlier picks do not carry: with no per-file date to read, the census
+is what catches a stale or redundant file, exactly as a source that only
+re-carries an accepted source's nodes is rejected however large it is.
+
+GitHub-minted sources are not a second kind of managed entry. They join the
+same `live` map, carry `managed: true`, and are aged, retired and pruned by
+the same machinery as every other managed source — "Retiring a source" below
+applies to them verbatim. Only the naming and attribution differ from the
+Telegram shape the next section dissects: a GitHub mint is named
+`gh-<owner>-<repo>` (plus an ordinal when the stem is taken) rather than
+`<channel-slug>-<postid>`, with `feed: gh:<owner>/<repo>` instead of a channel
+slug.
+
 ## What a managed source entry means
 
-A crawler-written source is named `<channel-slug>-<postid>` by `sourceName`
+A crawler-written source whose origin is Telegram is named `<channel-slug>-<postid>` by `sourceName`
 (`internal/crawl/crawl.go:966`): the slug is the Telegram channel folded into the config name
 alphabet by `channelSlug` (lowercase, `_` to `-`, capped at 24 bytes), and `postid` is the
 decimal id of the Telegram message the URL was harvested from. `seyedng-3631` reads "the
-subscription the crawler found in @seyedng, post 3631".
+subscription the crawler found in @seyedng, post 3631". A crawler-written source whose
+origin is the GitHub phase follows the `gh-<owner>-<repo>` shape instead (the section
+above; `docs/guides/github.md` names the mint conventions).
 
 The name is now a LABEL and nothing more. Everything a reader or the exporter needs to know
 about an entry sits beside it as data: `managed: true` says the crawler owns it and

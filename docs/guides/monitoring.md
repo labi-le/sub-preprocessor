@@ -551,16 +551,21 @@ vendor the dashboard into the nixos repo.
   logged unattributed survivors (`checker.go:651-654`) — the one way it can undercount. `filtered` 0
   beside a large `valid` says only that nothing reached the payload under that name: dedupe,
   dead-cache skip, probe failure and a gate read alike.
-- **One deployment, one scrape JOB — a second one gets its OWN job, never a second target
-  in the first.** `deploy/monitoring.nix:10-17` scrapes `sub-preprocessor` at
-  `127.0.0.1:9091` under that `job_name`, and nothing else today: the second instance's job
-  was removed with it on 2026-08-26. The mechanism outlives the count, because the
-  dashboard's Instance picker is `label_values(stable_cycles_total, job)` and every panel
-  expression is scoped `{job="$job"}` — two targets sharing a job are unselectable AND
-  silently summed into one funnel. So the picker stays (it enumerates one value today,
-  which is valid) and two consequences still bind any dashboard edit: a panel added later
-  MUST carry that selector, and a panel description MUST NOT name a config file as the
-  authority for what ran — which filters exist depends on which deployment `$job` selects.
+- **One deployment, one scrape JOB — a second DEPLOYMENT gets its OWN job, never a second target
+  in the first; the crawler sidecar is the one sanctioned second target.** `deploy/monitoring.nix`
+  scrapes `sub-preprocessor` at `127.0.0.1:9091` under that `job_name` and adds the crawler's own
+  listener as a second target, `127.0.0.1:9092` (`CRAWL_HTTP`, published by `docker-compose.yaml`);
+  the second instance's job was removed with it on 2026-08-26. The crawler target is safe BECAUSE
+  it shares the job: its surface renders a disjoint family (`stable_crawl_*` only — no
+  `stable_cycles_total` of its own), so nothing double-counts and it could never be selected under
+  a job of its own. The mechanism outlives the count, because the dashboard's Instance picker is
+  `label_values(stable_cycles_total, job)` and every panel expression is scoped `{job="$job"}`
+  — two targets sharing a job are unselectable AND silently summed into one funnel, which is
+  exactly why a second deployment may never share the first's job. So the picker stays (it
+  enumerates one value today, which is valid) and two consequences still bind any dashboard edit:
+  a panel added later MUST carry that selector, and a panel description MUST NOT name a config
+  file as the authority for what ran — which filters exist depends on which deployment `$job`
+  selects.
 - **The topic phase's five counters are label-less lifetime int64s with no dashboard panel, and
   they are readable where nothing scrapes.** Rendered by `internal/metrics`' exposition helpers
   and served by the CRAWLER process — not the preprocessor listener described above — at
@@ -589,10 +594,13 @@ vendor the dashboard into the nixos repo.
   existing tiles holds panels 29-32, every target an `increase(...,[1h])` over the lifetime counter,
   because a raw cumulative read would only climb.** Rendered by the same `writeCrawl`
   (`internal/metrics/crawl.go`) on the same `GET /metrics`, they answer only where that endpoint is
-  scraped under the selected `$job` — the shipped compose neither sets `CRAWL_HTTP` nor scrapes the
-  crawler listener (Prometheus scrapes only the preprocessor's `127.0.0.1:9091`), so until a
-  deployment adds both, these tiles read No data while the counters move regardless, exactly the
-  topic family's position. Semantics, down the pipeline: `stable_crawl_github_searches_total` counts
+  scraped under the selected `$job`. The shipped compose provides both halves: `tg-sub-crawler`
+  runs with `CRAWL_HTTP=:9092` and `docker-compose.yaml` publishes that listener loopback-only
+  (`127.0.0.1:9092:9092`); `deploy/monitoring.nix` scrapes it as a second target of the
+  `sub-preprocessor` job (disjoint family — see the scrape-job bullet above), so the Crawler
+  row reads data on that deployment. A deployment that omits either half — no `CRAWL_HTTP`,
+  or a scrape job without the crawler target — shows No data on these tiles while the counters
+  move regardless. Semantics, down the pipeline: `stable_crawl_github_searches_total` counts
   search API calls the phase spent, code and repo grids alike — the spend the per-cycle
   `GITHUB_SEARCH_*` caps bound; `stable_crawl_github_repos_total` counts the repositories those
   searches admitted and treed, `stable_crawl_github_skipped_total` the ones the
@@ -610,8 +618,12 @@ vendor the dashboard into the nixos repo.
   `stable_crawl_github_rate_sleeps_total` counts rate-limit sleeps — the signal that the per-cycle
   caps sit above the token's limits, so a rise means lowering
   `GITHUB_SEARCH_CODE`/`GITHUB_SEARCH_REPO`, not that the phase is broken — and
-  `stable_crawl_github_errors_total` counts API/transport failures inside the phase, a rise meaning
-  the token or the network is failing and the phase yields nothing for its calls.
+  `stable_crawl_github_errors_total` counts every failure inside the phase — search/metadata/tree
+  API errors, transport errors, and per-candidate probe failures alike: a
+  `raw.githubusercontent.com` 404 for a file that vanished between the tree listing and the fetch,
+  or a body over the subscription size cap (10 MiB), raises it with no token or network fault.
+  Read it as a rate: a low steady value is candidate churn, a step change is the token, the
+  network, or a GitHub outage.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway

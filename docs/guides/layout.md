@@ -22,7 +22,8 @@
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
 - `internal/geo` — the provider adapters (`geofeed`/`dbip`/`registry`/`asn`) the country filter and the annotator share, each named after the data source it queries
 - `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate
-- `internal/crawl` — the `crawl` subcommand: Telegram-preview crawler writing the `private.yaml` overlay; it owns the source-name convention and writes ownership and attribution as the `managed`/`feed` fields on each entry it mints, so no other package parses a name
+- `internal/ghfind` — the GitHub discovery phase behind the `crawl` subcommand: authenticated REST search and repository trees, rotating query grid, candidate filter, whole-corpus endpoint census, greedy per-repository cover; accepted files become raw URLs handed to `internal/crawl`'s mint (`docs/guides/github.md` is the spec)
+- `internal/crawl` — the `crawl` subcommand: Telegram and GitHub (`internal/ghfind`) discovery phases feeding one mint that writes the `private.yaml` overlay; it owns the source-name convention and writes ownership and attribution as the `managed`/`feed` fields on each entry it mints, so no other package parses a name
 - `internal/log` — zerolog setup, runtime level changes (`SetLevel`), the `Op` child-logger helper (`ctxlog.go`)
 - `internal/ioutil` — `Lines` (non-empty, non-comment line iteration) and `UnsafeString`, shared by `cidrset`, `crawl`, `geofeed`, `preprocess`, `subscription` and `stable`
 

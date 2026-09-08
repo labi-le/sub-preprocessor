@@ -477,10 +477,11 @@ currently failing, so a reload neither re-downloads a healthy database nor
 resets a failing one's backoff. The cidr allow-list rides that same
 machinery, with the three differences spelled out with the filter above.
 
-## Telegram crawler
+## Crawler
 
 The same binary has a `crawl` subcommand (run as the `tg-sub-crawler`
-compose sidecar) that discovers new sources automatically:
+compose sidecar) that discovers new sources automatically through two
+discovery phases that feed the same mint. The Telegram half:
 
 - scrapes public Telegram channel web previews (`t.me/s/<channel>`, paginated),
 - treats every https link as a candidate and keeps those that **classify** as
@@ -590,6 +591,16 @@ The same curated files above do double duty: any URL they
 list verbatim under `subscriptions.sources` is withheld from crawler management
 for exactly as long as it stays listed, so retiring a mirror is an edit to the
 curated list, not a deny-list entry.
+
+The other discovery phase reads GitHub instead of Telegram
+(`internal/ghfind` + `internal/crawl/github.go`): it walks a rotating grid of
+code and repository searches, filters candidate raw URLs by path, name,
+extension and size, fetches the survivors once, and hands the accepted ones to
+the same mint — sources named `gh-<owner>-<repo>`, aged and retired by the
+identical machinery. The phase needs a GitHub token (`GITHUB_TOKEN`, or
+`GITHUB_TOKEN_FILE` naming a file, as the compose service ships it); without
+one it is disabled. The algorithm, the measured signal table and the full
+`GITHUB_*` knob table live in `docs/guides/github.md`.
 
 There is also a one-shot `classify` subcommand:
 
