@@ -28,6 +28,14 @@ services:
       - sub-preprocessor # no build: section here, so that service is what produces the image
     volumes:
       - ./config:/config:rw
+    ports:
+      # Loopback only: this surface also carries POST /crawl, an unauthenticated
+      # trigger. It exists so the crawl counters (stable_crawl_*, both the topic
+      # family and the GitHub phase's nine) are scrapable at all — the service's
+      # own :9090 renders none of them, and without a scrape the Grafana crawler
+      # row reads No data. Scraped under the sub-preprocessor job as a second
+      # target (deploy/monitoring.nix).
+      - "127.0.0.1:9092:9092"
     environment:
       # Seed channels live in config/channels.yaml (hot-reloaded each cycle).
       # CRAWL_CHANNELS (comma/space list) still works as an extra override.
@@ -47,4 +55,17 @@ services:
       - CRAWL_MAX_CHANNELS=0   # 0 = built-in per-cycle cap on discovered channels (see defaultMaxDiscovered)
       - CRAWL_STATE=/config/.crawler-state.json
       - CRAWL_STATE_TTL=720h
+      # GitHub discovery phase (internal/ghfind + internal/crawl/github.go): a
+      # second discovery path in the SAME process and cycle, feeding the same
+      # mint. Algorithm, rate limits and the full knob table: docs/guides/github.md.
+      # Any GITHUB_* key not set here runs at the default that table states.
+      # The token file is operator-provided and gitignored (./config/.github-token);
+      # an absent file disables the phase rather than failing the cycle.
+      - GITHUB_TOKEN_FILE=/config/.github-token
+      # Explicit because the default is invisible when wrong, like CRAWL_STATE:
+      # the census must sit on the writable config mount so it survives restarts.
+      - GITHUB_CENSUS=/config/.crawler-census.bin
+      # Enables the control surface the port above publishes: GET /metrics,
+      # GET /healthz, POST /crawl.
+      - CRAWL_HTTP=:9092
     restart: unless-stopped

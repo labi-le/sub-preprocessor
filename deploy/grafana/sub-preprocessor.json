@@ -2153,6 +2153,252 @@
         }
       ],
       "description": "Fastest kept node's mean probe delay last cycle: the head of the latency histogram panel, shown on its own tile because the histogram panel plots the max and the quantiles. Every kept survivor carries a latency, so No data here means no cycle has published nodes yet, not a missing measurement."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 100
+      },
+      "id": 28,
+      "panels": [],
+      "title": "Crawler",
+      "type": "row"
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "GitHub candidate funnel",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_probed_total{job=\"$job\"}[1h])",
+          "legendFormat": "probed/h"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_live_files_total{job=\"$job\"}[1h])",
+          "legendFormat": "live/h"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_accepted_total{job=\"$job\"}[1h])",
+          "legendFormat": "accepted/h"
+        }
+      ],
+      "description": "Candidate files the GitHub discovery phase fetched per hour, in legend order: probed (bodies fetched), live (carried nodes), accepted (cleared the novelty floor and reached the mint). live/probed is candidate-filter precision and accepted/live the marginal gate's cut \u2014 a probed line climbing while live sits flat means the candidate scoring admits junk."
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "GitHub novel endpoints",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_novel_endpoints_total{job=\"$job\"}[1h])",
+          "legendFormat": "novel/h"
+        }
+      ],
+      "description": "Distinct endpoints the accepted files added beyond the census, per hour \u2014 the phase's yield. Read against accepted on the funnel panel: novel/accepted is the mean novelty per accepted file, and a yield pinned near zero while probed keeps climbing means the corpus already carries what GitHub publishes or the novelty floor sits above it."
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "GitHub searches, repos and skips",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 109
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_searches_total{job=\"$job\"}[1h])",
+          "legendFormat": "searches/h"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_repos_total{job=\"$job\"}[1h])",
+          "legendFormat": "repos/h"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_skipped_total{job=\"$job\"}[1h])",
+          "legendFormat": "skipped/h"
+        }
+      ],
+      "description": "Searches the GitHub phase spent per hour and what they admitted: repos (admitted and treed) and skipped (refused by the freshness/archived/fork gates before any tree call). repos/(repos+skipped) is the admission share of the searched population \u2014 a skipped-heavy pair means the queries surface stale or archived repositories, and searches climbing while repos stay flat means the cycle is spending its search budget on repositories the gates then refuse."
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "GitHub rate-limit sleeps & errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 109
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_rate_sleeps_total{job=\"$job\"}[1h])",
+          "legendFormat": "sleeps/h"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_errors_total{job=\"$job\"}[1h])",
+          "legendFormat": "errors/h"
+        }
+      ],
+      "description": "Rate-limit sleeps and every failure inside the GitHub phase, per hour. A sleeps line climbing means the per-cycle search caps sit above the token's limits - lower GITHUB_SEARCH_CODE/GITHUB_SEARCH_REPO. The errors line counts API, transport AND per-candidate probe failures, so read it as a rate: a low steady one is candidate churn (a file that vanished between the tree listing and the fetch), a step change is the token, the network or a GitHub outage."
     }
   ]
 }

@@ -36,9 +36,11 @@ Thumbs.db
 
 # Private config (untracked)
 config/private.yaml
+config/.github-token
 
 # Runtime state (untracked)
 config/.crawler-state.json
+config/.crawler-census.bin
 config/.geoblock.db*
 config/.stable-snapshot.json*
 
