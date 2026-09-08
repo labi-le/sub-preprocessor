@@ -96,6 +96,9 @@ type Options struct {
 	// thread it leave, falls back to defaultProbeTimeout — an unbounded probe
 	// is the worse failure.
 	FetchTimeout time.Duration
+	// GitHub configures the GitHub discovery phase, which feeds the same mint
+	// as the channel scan (see github.go). The zero value keeps it off.
+	GitHub GitHubOptions
 }
 
 type source struct {
@@ -398,8 +401,17 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	}
 	st.prune(time.Now().Add(-c.opts.StateTTL))
 	// Saved before the recheck, which is network-bound over the whole managed
-	// corpus: an abort in that window would otherwise discard this cycle's
-	// productive-channel discoveries and the expiries pruneDead just dropped.
+	// corpus, and before the GitHub phase, which is network-bound over the
+	// whole corpus census: an abort in either window would otherwise discard
+	// this cycle's productive-channel discoveries and the expiries pruneDead
+	// just dropped. The channel graph is the work that cannot be resumed — a
+	// search cursor persists, a half-walked repost graph does not — so it runs
+	// first and is made durable before anything else spends the budget.
+	c.persistState(&st)
+	c.scanGitHub(ctx, &st, pf, live, c.deadSet(&st))
+	// The GitHub phase bounds itself (see githubBudget), so an overrun there
+	// ends the phase rather than the cycle; this second save is dirty-gated
+	// and costs nothing when the phase changed nothing.
 	c.persistState(&st)
 	// Captured before recheckManaged folds revived URLs into live.
 	discovered := len(live)
@@ -747,7 +759,7 @@ func mintSource(u string, prev source, o origin, used map[string]bool) source {
 	name := sourceName(u, prev.Name, o, used)
 	feed := prev.Feed
 	if name != prev.Name {
-		feed = channelSlug(o.Slug)
+		feed = o.label()
 	}
 	used[name] = true
 	return source{Name: name, URL: u, Feed: feed, Managed: true, HWID: prev.HWID}
@@ -967,6 +979,12 @@ func sourceName(u, existingName string, o origin, used map[string]bool) string {
 	if existingName != "" && !unattributedNameRe.MatchString(existingName) {
 		return existingName
 	}
+	// An origin carrying its own stem names itself: the GitHub phase builds a
+	// stem the Telegram slug alphabet cannot express (owner and repository,
+	// wider cap), so the only thing left to decide here is the ordinal.
+	if o.Stem != "" {
+		return uniqueName(o.Stem, used)
+	}
 	var buf [maxSlug + 1 + maxPostDigits + 1 + maxOrdinalDigits]byte
 	if stem := appendChannelSlug(buf[:0], o.Slug); len(stem) > 0 {
 		ordinal := uint64(1)
@@ -990,6 +1008,22 @@ func sourceName(u, existingName string, o origin, used map[string]bool) string {
 	return managedName(u)
 }
 
+// uniqueName returns stem, or the first "stem-N" from 2 that the taken-name set
+// does not hold. The ordinal is appended into one buffer sized for the widest
+// ordinal, so a sibling name costs the returned string and nothing more.
+func uniqueName(stem string, used map[string]bool) string {
+	if !used[stem] {
+		return stem
+	}
+	buf := make([]byte, 0, len(stem)+1+maxOrdinalDigits)
+	buf = append(append(buf, stem...), '-')
+	for ordinal := uint64(firstSiblingOrdinal); ; ordinal++ {
+		if cand := strconv.AppendUint(buf, ordinal, decimalBase); !used[string(cand)] {
+			return string(cand)
+		}
+	}
+}
+
 const (
 	// maxSlug caps a normalized channel slug.
 	maxSlug = 24
@@ -999,7 +1033,10 @@ const (
 	// nothing bounds statically. No corpus reaches 20 digits; the spare stack
 	// bytes cost nothing.
 	maxOrdinalDigits = maxPostDigits
-	decimalBase      = 10
+	// firstSiblingOrdinal is where a discriminator starts: the unsuffixed stem
+	// is the first sibling, so the second one is "-2".
+	firstSiblingOrdinal = 2
+	decimalBase         = 10
 )
 
 // channelSlug normalizes a Telegram channel slug into the config source-name

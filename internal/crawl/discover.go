@@ -76,11 +76,28 @@ type scanNode struct {
 	carved     bool
 }
 
-// origin is where a harvested URL was first seen this cycle. Both fields are
-// zero on the recheck-revival path, which sees no channel at all.
+// origin is where a harvested URL was first seen this cycle. Both channel
+// fields are zero on the recheck-revival path, which sees no channel at all,
+// and on the GitHub path, which names itself through Stem and Feed instead.
 type origin struct {
 	Slug string // channel slug, "" when unknown
 	Post uint64 // Telegram message id, 0 when unknown
+	// Stem is a ready-made name stem for an origin the channel-slug alphabet
+	// cannot express. When set, sourceName takes it verbatim and decides only
+	// the sibling ordinal.
+	Stem string
+	// Feed is the attribution written to the minted entry, for origins whose
+	// identity is not a slug: "gh:<owner>/<repo>" carries a '/' and a ':' that
+	// channelSlug would strip, and the GitHub source cap counts this prefix.
+	Feed string
+}
+
+// label is the feed value a mint writes for this origin.
+func (o origin) label() string {
+	if o.Feed != "" {
+		return o.Feed
+	}
+	return channelSlug(o.Slug)
 }
 
 // scan performs a relevance-gated breadth-first crawl of the channel repost

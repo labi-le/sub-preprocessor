@@ -26,8 +26,11 @@ const (
 //	              is already running. The cycle runs in a background goroutine,
 //	              so the request never blocks on a full crawl.
 //	GET  /healthz liveness probe; always 200 "ok".
-//	GET  /metrics lifetime crawler counters in Prometheus text format; the
-//	              same numbers ride the per-cycle reportTopics log line.
+//	GET  /metrics lifetime crawler counters in Prometheus text format, both
+//	              families: the topic counters, whose numbers also ride the
+//	              per-cycle reportTopics log line, and the GitHub phase's, whose
+//	              per-cycle deltas ride the "github phase finished" line — bar
+//	              the errors booked before a pass reaches it (a refused census).
 //
 // Other methods on these paths return 405; unknown paths return 404. Only the
 // stdlib net/http is used.

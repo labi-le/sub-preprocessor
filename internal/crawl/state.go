@@ -53,6 +53,17 @@ type state struct {
 	// owns. Bounded twice: by the record's own expiry (pruneDead) and by
 	// maxDead (recordDead).
 	Dead map[string]time.Time `json:"dead,omitempty"`
+	// Repos is the GitHub phase's productive memory, keyed "owner/repo": a
+	// repository that contributed an accepted file is revisited every cycle
+	// outside the per-cycle repository budget, until it goes stale past the
+	// same TTL that expires a channel. Bounded by maxProductiveRepos.
+	Repos map[string]repoState `json:"repos,omitempty"`
+	// GitHub is where the rotating search grid stopped. It is the whole reason
+	// a cycle can spend eight code searches and still cover a grid that would
+	// take fifty: coverage comes from repetition across cycles, not from one
+	// exhaustive pass, and a search cursor is the only part of a discovery pass
+	// that is worth resuming.
+	GitHub ghCursor `json:"github,omitzero"`
 	// loadFailed marks state that stands in for a file loadState could not
 	// read or parse. saveState refuses to write it: the real file may hold
 	// weeks of productive-channel memory that nothing can reconstruct, and a
@@ -90,6 +101,7 @@ const maxProductive = 200
 // prune drops channels whose last productive moment is before cutoff, then caps
 // the memory at maxProductive, keeping the most recently productive.
 func (s *state) prune(cutoff time.Time) {
+	s.pruneGitHubRepos(cutoff)
 	before := len(s.Productive)
 	for ch, e := range s.Productive {
 		if e.LastSubAt.Before(cutoff) {
@@ -119,6 +131,92 @@ func (s *state) prune(cutoff time.Time) {
 		delete(s.Productive, ch)
 	}
 	s.dirty = true
+}
+
+// repoState is one GitHub repository's productive history. LastFileAt is when
+// it last contributed a file the marginal gate accepted, not when it was last
+// read: a repository whose every file the corpus already carries is not
+// productive, however live its contents are.
+type repoState struct {
+	FirstSeen  time.Time `json:"first_seen"`
+	LastFileAt time.Time `json:"last_file_at"`
+}
+
+// ghCursor is the rotating search grid's position: an index into the
+// code-search grid and one into the repo-search grid, each advanced modulo its
+// grid length by the pass that consumed them.
+type ghCursor struct {
+	Code int `json:"code,omitempty"`
+	Repo int `json:"repo,omitempty"`
+}
+
+// maxProductiveRepos caps the GitHub productive memory. Every remembered
+// repository is revisited outside the per-cycle budget and costs a tree call
+// plus up to FilesPerRepo body fetches, so an uncapped map would let one good
+// week decide every later cycle's cost — the same feedback loop maxProductive
+// brakes on the channel side.
+const maxProductiveRepos = 120
+
+// recordGitHubRepo marks a repository productive as of now, keeping its
+// first-seen time.
+func (s *state) recordGitHubRepo(repo string, now time.Time) {
+	if s.Repos == nil {
+		s.Repos = map[string]repoState{}
+	}
+	e := s.Repos[repo]
+	if e.FirstSeen.IsZero() {
+		e.FirstSeen = now
+	}
+	e.LastFileAt = now
+	s.Repos[repo] = e
+	s.dirty = true
+}
+
+// recordGitHubCursor stores where the search grid stopped. Written on every
+// pass, including one that accepted nothing: the point of the cursor is that
+// the next cycle does not repeat these queries.
+func (s *state) recordGitHubCursor(code, repo int) {
+	if s.GitHub.Code == code && s.GitHub.Repo == repo {
+		return
+	}
+	s.GitHub = ghCursor{Code: code, Repo: repo}
+	s.dirty = true
+}
+
+// githubRepos lists the remembered repositories, most recently productive
+// first so a truncated read keeps the best of them.
+func (s *state) githubRepos() []string {
+	repos := make([]string, 0, len(s.Repos))
+	for r := range s.Repos {
+		repos = append(repos, r)
+	}
+	sort.Slice(repos, func(i, j int) bool {
+		a, b := s.Repos[repos[i]].LastFileAt, s.Repos[repos[j]].LastFileAt
+		if !a.Equal(b) {
+			return a.After(b)
+		}
+		return repos[i] < repos[j]
+	})
+	return repos
+}
+
+// pruneGitHubRepos drops repositories that have not contributed since cutoff,
+// then caps the memory at maxProductiveRepos, keeping the most recent.
+func (s *state) pruneGitHubRepos(cutoff time.Time) {
+	before := len(s.Repos)
+	for r, e := range s.Repos {
+		if e.LastFileAt.Before(cutoff) {
+			delete(s.Repos, r)
+		}
+	}
+	if len(s.Repos) > maxProductiveRepos {
+		for _, r := range s.githubRepos()[maxProductiveRepos:] {
+			delete(s.Repos, r)
+		}
+	}
+	if len(s.Repos) != before {
+		s.dirty = true
+	}
 }
 
 // maxDead caps the remembered-dead memory. Dead is the one persisted map whose
