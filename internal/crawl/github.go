@@ -27,7 +27,17 @@ type GitHubOptions struct {
 	// measured candidate universe is far larger than the corpus can carry
 	// (155k novel endpoints over 578 repositories on 2026-09-07), so
 	// acceptance, not discovery, is the scarce resource.
-	MaxSources    int
+	MaxSources int
+	// OutcomesURL is the service's metrics endpoint, where the phase reads the
+	// per-source probe outcome it is judged by (stable_source_tested_nodes);
+	// empty keeps the withdrawal half of the phase off. Probation is how many
+	// consecutive survivor-free SERVICE cycles condemn a source — the fold's
+	// mirror of the six-cycle retirement rule; 0 keeps the withdrawal half off
+	// too. The pair is what lets MaxSources stay a bound on standing cost
+	// rather than on intake forever: a batch that never proves itself leaves
+	// on its own (docs/guides/github.md).
+	OutcomesURL   string
+	Probation     int
 	Concurrency   int
 	MaxRepos      int
 	FilesPerRepo  int
@@ -117,6 +127,152 @@ func (c *Crawler) scanGitHub(ctx context.Context, st *state, pf privateFile, liv
 	}
 	c.admitGitHub(st, live, res, room)
 }
+
+// withholdCondemned folds this cycle's service outcomes and withholds the
+// GitHub sources probation condemns from the write that follows: a condemned
+// source rides the same deny path as a curated one (mintRetained drops it and
+// mergeManaged reports the count) and is dead-stamped, so the next cycle's
+// discovery cannot re-mint it while the stamp holds. The fold and the stamp
+// are persisted here because an unsaved fold is replayed against the old file
+// next cycle, counting one service snapshot twice; the save is dirty-gated.
+func (c *Crawler) withholdCondemned(ctx context.Context, st *state, pf privateFile, denied map[string]struct{}) {
+	gh := c.opts.GitHub
+	if !gh.Enabled || gh.Probation <= 0 || gh.OutcomesURL == "" {
+		return
+	}
+	if withdrawn := c.githubWithdrawals(ctx, st, pf); len(withdrawn) > 0 {
+		urls := make([]string, 0, len(withdrawn))
+		for u := range withdrawn {
+			denied[u] = struct{}{}
+			urls = append(urls, u)
+		}
+		st.recordDead(urls, c.opts.DeadTTL, time.Now())
+	}
+	c.persistState(st)
+}
+
+// githubWithdrawals reads the service's per-source outcomes and returns the
+// URLs of GitHub-minted sources whose probation has run out, folding this
+// cycle's reading into the state as it goes. Probation is the withdrawal half
+// of the phase, and it is deliberately second-hand: nothing the crawler can
+// measure at mint time predicts whether the service's probe will keep a
+// source's nodes (docs/guides/github.md), so a minted source gets Probation
+// SERVICE cycles to prove itself on the probe that matters, and is condemned
+// only on readings of it — never on a crawler-side guess.
+//
+// The fold fails safe: an unreadable endpoint, a parse failure, an empty
+// reading or one whose cycle has not moved since the source's last fold
+// withdraws nothing and folds nothing, because a source must never be
+// condemned on missing evidence. Records for sources private.yaml no longer
+// holds are pruned on every successful reading, and a condemned source's
+// record is forgotten with it.
+func (c *Crawler) githubWithdrawals(ctx context.Context, st *state, pf privateFile) map[string]struct{} {
+	opts := c.opts.GitHub
+	if !opts.Enabled || opts.Probation <= 0 || opts.OutcomesURL == "" {
+		return nil
+	}
+	// The fold keys sources by NAME, which is the identity the service's
+	// outcome metric carries (its source= label); the file's feed is the only
+	// way to tell this phase's entries from the Telegram mint's.
+	byName := make(map[string]string)
+	for _, s := range pf.Subscriptions.Sources {
+		if s.Managed && s.URL != "" && strings.HasPrefix(s.Feed, ghFeedPrefix) {
+			byName[s.Name] = s.URL
+		}
+	}
+	if len(byName) == 0 {
+		return nil
+	}
+	reading, err := fetchOutcomes(ctx, c.httpClient, opts.OutcomesURL)
+	if err != nil {
+		c.logger.Warn().Err(err).Str("url", opts.OutcomesURL).
+			Msg("github probation: outcomes unreadable; withdrawing nothing")
+		return nil
+	}
+	if len(reading.Sources) == 0 {
+		c.logger.Warn().Str("url", opts.OutcomesURL).
+			Msg("github probation: outcomes carry no sources; withdrawing nothing")
+		return nil
+	}
+	now := time.Now()
+	names := make([]string, 0, len(byName))
+	known := make(map[string]struct{}, len(byName))
+	for name := range byName {
+		names = append(names, name)
+		known[name] = struct{}{}
+	}
+	// Sorted so the per-source lines below read in file order, not map order.
+	sort.Strings(names)
+	withdrawn := make(map[string]struct{})
+	type verdict struct {
+		name   string
+		barren int
+		valid  int
+	}
+	var due []verdict
+	for _, name := range names {
+		outcome, ok := reading.Sources[name]
+		if !ok {
+			// No observation for this source in this reading: the service did
+			// not probe it this cycle, which is missing evidence, not a barren
+			// cycle.
+			continue
+		}
+		if barren := st.foldOutcome(name, outcome.Survivors, reading.Published, now); barren >= opts.Probation {
+			due = append(due, verdict{name: name, barren: barren, valid: outcome.Valid})
+		}
+	}
+	// Longest-barren first, so a capped cycle withdraws the least defensible
+	// sources and the rest wait one cycle carrying a streak that only grows.
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].barren != due[j].barren {
+			return due[i].barren > due[j].barren
+		}
+		return due[i].name < due[j].name
+	})
+	if room := withdrawRoom(len(byName)); len(due) > room {
+		c.logger.Warn().Int("due", len(due)).Int("withdrawing", room).Int("population", len(byName)).
+			Msg("github probation: more sources came due than one cycle may withdraw; the rest wait for the next reading")
+		due = due[:room]
+	}
+	condemned := make([]string, 0, len(due))
+	for _, v := range due {
+		u := byName[v.name]
+		withdrawn[u] = struct{}{}
+		condemned = append(condemned, v.name)
+		c.logger.Info().Str("source", v.name).Str("url", u).
+			Int("valid_nodes", v.valid).Int("barren_cycles", v.barren).
+			Msg("github source withdrawn: zero probe survivors across the probation window")
+	}
+	st.pruneProbation(known)
+	if len(condemned) > 0 {
+		st.forgetProbation(condemned...)
+		metrics.Crawl.GitHubWithdrawn.Add(int64(len(condemned)))
+	}
+	return withdrawn
+}
+
+// withdrawRoom bounds how many sources one cycle may withdraw. The crawler
+// already refuses to delete a large share of the corpus in one write
+// (allowShrink, bulkPruneMinDrop, bulkPrunePercent) because a provider outage
+// or a tunnel restart fabricates a mass-death verdict; a probation cycle can
+// fabricate the same verdict from one bad service cycle, and rides a path —
+// the curated deny list — that those guards deliberately do not police. The
+// floor keeps a small corpus collectible in one pass while turning a wipe into
+// attrition an operator can see coming in the withdrawn counter.
+func withdrawRoom(population int) int {
+	return max(minWithdrawFloor, population*withdrawPercent/percentScale)
+}
+
+// withdrawPercent and minWithdrawFloor shape that bound: a quarter of the
+// GitHub population per cycle, but never fewer than two, so a corpus of five
+// barren sources still clears in three cycles while sixty take five. Hourly
+// cycles make either fast enough; what the floor buys is the chance to see it
+// happening.
+const (
+	withdrawPercent  = 25
+	minWithdrawFloor = 2
+)
 
 // githubBudget is how long this pass may run: half the cycle's remaining time,
 // capped, so the recheck and the mint that follow keep the other half. A

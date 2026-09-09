@@ -2399,6 +2399,53 @@
         }
       ],
       "description": "Rate-limit sleeps and every failure inside the GitHub phase, per hour. A sleeps line climbing means the per-cycle search caps sit above the token's limits - lower GITHUB_SEARCH_CODE/GITHUB_SEARCH_REPO. The errors line counts API, transport AND per-candidate probe failures, so read it as a rate: a low steady one is candidate churn (a file that vanished between the tree listing and the fetch), a step change is the token, the network or a GitHub outage."
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "GitHub withdrawals",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 117
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_github_withdrawn_total{job=\"$job\"}[1h])",
+          "legendFormat": "withdrawn/h"
+        }
+      ],
+      "description": "GitHub-minted sources probation withdrew per hour: dropped from private.yaml and dead-stamped after GITHUB_PROBATION consecutive survivor-free service cycles. A rise means sources minted on novelty that the probe never validated are leaving the corpus; a rise to the size of the intake means the phase is paying nothing."
     }
   ]
 }

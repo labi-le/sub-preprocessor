@@ -31,7 +31,7 @@ services:
     ports:
       # Loopback only: this surface also carries POST /crawl, an unauthenticated
       # trigger. It exists so the crawl counters (stable_crawl_*, both the topic
-      # family and the GitHub phase's nine) are scrapable at all — the service's
+      # family and the GitHub phase's ten) are scrapable at all — the service's
       # own :9090 renders none of them, and without a scrape the Grafana crawler
       # row reads No data. Scraped under the sub-preprocessor job as a second
       # target (deploy/monitoring.nix).
@@ -65,6 +65,15 @@ services:
       # Explicit because the default is invisible when wrong, like CRAWL_STATE:
       # the census must sit on the writable config mount so it survives restarts.
       - GITHUB_CENSUS=/config/.crawler-census.bin
+      # Probation: a GitHub-minted source that the service's probe never validates
+      # is withdrawn after GITHUB_PROBATION (default 6) consecutive survivor-free
+      # SERVICE cycles — dropped from private.yaml and dead-stamped for CRAWL_DEAD_TTL
+      # so the next cycle does not re-mint it. The crawler reads the service's
+      # per-source outcomes (stable_source_tested_nodes) from its metrics endpoint
+      # once per cycle: GITHUB_OUTCOMES defaults to http://sub-preprocessor:9090/metrics,
+      # reachable because the sub-preprocessor service answers on port 9090 at that
+      # name on this compose network. Both keys run at their compiled-in defaults
+      # here; add an override only to retune.
       # Enables the control surface the port above publishes: GET /metrics,
       # GET /healthz, POST /crawl.
       - CRAWL_HTTP=:9092

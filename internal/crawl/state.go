@@ -32,8 +32,9 @@ type managedState struct {
 
 // state is the crawler's persistent memory across cycles: which channels proved
 // productive (they become depth-0 seeds until they go stale past the TTL), how
-// long each managed source has been failing to serve nodes, and which bulk-prune
-// proposal a cycle already made and was refused.
+// long each managed source has been failing to serve nodes, which bulk-prune
+// proposal a cycle already made and was refused, and the GitHub phase's own
+// memories (Repos, GitHub, Probation below).
 type state struct {
 	Productive map[string]channelState `json:"productive"`
 	// Managed is keyed by managed source URL and bounded by the corpus, not by
@@ -70,6 +71,14 @@ type state struct {
 	// exhaustive pass, and a search cursor is the only part of a discovery pass
 	// that is worth resuming.
 	GitHub ghCursor `json:"github,omitzero"`
+	// Probation is the GitHub phase's withdrawal memory, keyed by source NAME —
+	// the name the service's outcome metric reports (its source= label), not
+	// the URL: how many consecutive service cycles the source has been observed
+	// with no probe survivor. githubWithdrawals folds each reading in and
+	// condemns a source once Barren reaches the configured window, and forgets
+	// the record with the source, so the map holds at most one record per
+	// gh-managed entry private.yaml currently carries.
+	Probation map[string]probationState `json:"probation,omitempty"`
 	// loadFailed marks state that stands in for a file loadState could not
 	// read or parse. saveState refuses to write it: the real file may hold
 	// weeks of productive-channel memory that nothing can reconstruct, and a
@@ -227,6 +236,89 @@ func (s *state) pruneGitHubRepos(cutoff time.Time) {
 		}
 	}
 	if len(s.Repos) != before {
+		s.dirty = true
+	}
+}
+
+// probationState is one GitHub-minted source's service-outcome history: Barren
+// counts the consecutive PUBLISHED service cycles in which the source had no
+// probe survivor, Published is the publish timestamp of the last fold,
+// FirstSeen is when the record was opened and LastLive when the source last
+// had a survivor. Published is what makes a fold an observation: the
+// per-source rows only change when the service publishes a list, so a fold
+// acts only when that timestamp has moved. Six crawler reads of one snapshot
+// count once, and so do six failed service cycles, which bump the attempt
+// counter while leaving the rows frozen.
+type probationState struct {
+	Barren    int       `json:"barren"`
+	Published uint64    `json:"published,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastLive  time.Time `json:"last_live,omitzero"`
+}
+
+// foldOutcome folds one service reading for one source and returns its barren
+// count. A survivor resets the streak to 0 and stamps LastLive; a
+// survivor-free PUBLISHED cycle advances it; a reading whose publish timestamp
+// has not moved past the record's does nothing at all, which is what keeps a
+// re-read of one snapshot — or a run of failed service cycles, whose rows do
+// not change — from counting as observations. A source first seen here is
+// anchored with FirstSeen, but only on an advancing reading: a service that
+// has published nothing yet (published == 0) proves nothing to build on.
+func (s *state) foldOutcome(name string, survivors int, published uint64, now time.Time) (barren int) {
+	e, ok := s.Probation[name]
+	if !ok {
+		if published == 0 {
+			return 0
+		}
+		e.FirstSeen = now
+	} else if published <= e.Published {
+		return e.Barren
+	}
+	e.Published = published
+	if survivors > 0 {
+		e.Barren = 0
+		e.LastLive = now
+	} else {
+		e.Barren++
+	}
+	if s.Probation == nil {
+		s.Probation = make(map[string]probationState, 1)
+	}
+	s.Probation[name] = e
+	s.dirty = true
+	return e.Barren
+}
+
+// forgetProbation drops the records of the named sources. A source withdrawn
+// by githubWithdrawals leaves private.yaml in the same cycle, and its record
+// must not survive the source: a rediscovery after the dead stamp expires
+// would otherwise re-enter probation carrying the old streak.
+func (s *state) forgetProbation(names ...string) {
+	changed := false
+	for _, name := range names {
+		if _, ok := s.Probation[name]; ok {
+			delete(s.Probation, name)
+			changed = true
+		}
+	}
+	if changed {
+		s.dirty = true
+	}
+}
+
+// pruneProbation drops the records of sources private.yaml no longer holds.
+// A record keyed by a name the file cannot mint again is residue nothing else
+// clears: a source that was withdrawn, retired or renamed would keep its
+// streak alive in the state file until a hand edit.
+func (s *state) pruneProbation(known map[string]struct{}) {
+	changed := false
+	for name := range s.Probation {
+		if _, ok := known[name]; !ok {
+			delete(s.Probation, name)
+			changed = true
+		}
+	}
+	if changed {
 		s.dirty = true
 	}
 }

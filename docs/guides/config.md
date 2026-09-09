@@ -86,7 +86,9 @@ operator-provided token file may be absent without failing the cycle — and
 |`GITHUB_ACCEPT_PER_REPO`|`4`|files one repository may contribute|
 |`GITHUB_MIN_NOVEL`|`100`|endpoints a file must add to be minted|
 |`GITHUB_FRESH`|`504h`|how recently a repository must have been pushed|
-|`GITHUB_MAX_SOURCES`|`150`|GitHub-minted sources allowed to exist at once|
+|`GITHUB_MAX_SOURCES`|`60`|GitHub-minted sources allowed to exist at once (150 until probation shipped)|
+|`GITHUB_OUTCOMES`|`http://sub-preprocessor:9090/metrics`|the service metrics endpoint probation reads `stable_source_tested_nodes` from, once per cycle|
+|`GITHUB_PROBATION`|`6`|consecutive survivor-free SERVICE cycles before a GitHub-minted source is withdrawn (mirrors the 6-cycle not-live retirement rule)|
 |`GITHUB_CENSUS_TTL`|`6h`|how long a census is reused before rebuilding|
 |`GITHUB_CENSUS`|`/config/.crawler-census.bin`|census file path|
 |`GITHUB_CONCURRENCY`|`8`|parallel candidate fetches|

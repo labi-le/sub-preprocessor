@@ -459,6 +459,7 @@ func (c *Crawler) RunOnce(ctx context.Context) {
 	// same reason private.yaml is re-read here: an operator broadening the
 	// curated set expects the withholding to apply to the write it races.
 	denied := curatedURLs(c.opts.CuratedPaths, c.logger)
+	c.withholdCondemned(ctx, &st, pf, denied)
 	next, managed, deleted, curated := c.mergeManaged(pf, live, rr, prune, denied)
 	inlineCount := 0
 	if c.opts.InlineEnabled {

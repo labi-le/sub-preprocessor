@@ -572,7 +572,7 @@ vendor the dashboard into the nixos repo.
   `GET /metrics` on the optional `CRAWL_HTTP` trigger listener; a deployment without `CRAWL_HTTP`
   reads the same five numbers off the per-cycle structured log line that every cycle which crawls
   emits (`reportTopics`). No Grafana panel or Prometheus rule consumes the topic family yet —
-  documentation only, by decision — unlike the GitHub discovery phase's nine below, whose panel
+  documentation only, by decision — unlike the GitHub discovery phase's ten below, whose panel
   half shipped with the metrics in the same commit. Semantics:
   `stable_crawl_topic_pages_total` counts successful topic embed fetches (the denominator);
   `stable_crawl_topic_live_total` those yielding at least one live subscription (the numerator);
@@ -596,9 +596,9 @@ vendor the dashboard into the nixos repo.
   stuck near zero over days ⇒ the same-group carve-out is misfiring and intra-forum recursion is
   effectively dead — operator guidance rather than an automated alarm: nothing fires on it, so check
   that before concluding the forums themselves dried up.
-- **The GitHub discovery phase's nine counters share the topic family's label-less lifetime shape,
+- **The GitHub discovery phase's ten counters share the topic family's label-less lifetime shape,
   and they are the crawler counters with a panel half: a `Crawler` row (row panel 28) under the
-  existing tiles holds panels 29-32, every target an `increase(...,[1h])` over the lifetime counter,
+  existing tiles holds panels 29-33, every target an `increase(...,[1h])` over the lifetime counter,
   because a raw cumulative read would only climb.** Rendered by the same `writeCrawl`
   (`internal/metrics/crawl.go`) on the same `GET /metrics`, they answer only where that endpoint is
   scraped under the selected `$job`. The shipped compose provides both halves: `tg-sub-crawler`
@@ -630,7 +630,14 @@ vendor the dashboard into the nixos repo.
   `raw.githubusercontent.com` 404 for a file that vanished between the tree listing and the fetch,
   or a body over the subscription size cap (10 MiB), raises it with no token or network fault.
   Read it as a rate: a low steady value is candidate churn, a step change is the token, the
-  network, or a GitHub outage.
+  network, or a GitHub outage. The tenth and last is the withdrawal counter (panel 33):
+  `stable_crawl_github_withdrawn_total` counts GitHub-minted sources probation condemned —
+  sources minted on novelty that the probe never validated — dropped from `private.yaml` and
+  dead-stamped after `GITHUB_PROBATION` consecutive survivor-free SERVICE cycles (the model
+  and its fail-safe rule: `docs/guides/github.md`). Read it as a rate against the intake: a
+  rise means the withdrawal path is working, and a rise to the size of the intake means the
+  phase is paying nothing — mining and withdrawing at the same pace, which points at the
+  mint's gates rather than the probe.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway

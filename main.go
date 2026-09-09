@@ -52,8 +52,14 @@ const (
 	defaultGitHubFilesPerRepo  = 8
 	defaultGitHubAcceptPerRepo = 4
 	defaultGitHubMinNovel      = 100
-	defaultGitHubMaxSources    = 150
-	defaultGitHubConcurrency   = 8
+	// defaultGitHubMaxSources is 60, down from 150, because the production
+	// reading of 2026-09-08 measured 260 217 valid nodes across 51 GitHub
+	// sources with ZERO probe survivors between them: a probation batch is a
+	// standing cost the corpus pays until each source proves itself or is
+	// withdrawn, so the cap is what bounds that cost, and probation is what
+	// makes a bound this tight affordable.
+	defaultGitHubMaxSources  = 60
+	defaultGitHubConcurrency = 8
 	// defaultGitHubFresh is three weeks: a repository not pushed within it is
 	// refused outright, because a subscription list nobody has updated in
 	// three weeks is a list of endpoints that have been probed to death.
@@ -62,6 +68,17 @@ const (
 	// Rebuilding it fetches the whole corpus once, so a shorter TTL buys
 	// accuracy with a few hundred requests.
 	defaultGitHubCensusTTL = 6 * time.Hour
+	// defaultGitHubOutcomesURL is the service's own metrics endpoint, where
+	// the crawler reads the per-source probe outcome (stable_source_tested_
+	// nodes) that probation folds; the compose service name resolves inside
+	// the network the crawler shares with the preprocessor.
+	defaultGitHubOutcomesURL = "http://sub-preprocessor:9090/metrics"
+	// defaultGitHubProbation mirrors the six-cycle retirement rule: that many
+	// consecutive survivor-free SERVICE cycles — distinct readings of
+	// stable_cycles_total, not crawler cycles — condemn a GitHub-minted
+	// source. Six readings of one service snapshot count once, so the crawler
+	// can never condemn on a snapshot it already folded.
+	defaultGitHubProbation = 6
 )
 
 func main() {
@@ -165,6 +182,8 @@ func githubOptions() crawl.GitHubOptions {
 		CensusPath:    getenv("GITHUB_CENSUS", "/config/.crawler-census.bin"),
 		CensusTTL:     durationDefault(getenv("GITHUB_CENSUS_TTL", ""), defaultGitHubCensusTTL),
 		MaxSources:    intDefault(getenv("GITHUB_MAX_SOURCES", ""), defaultGitHubMaxSources),
+		OutcomesURL:   getenv("GITHUB_OUTCOMES", defaultGitHubOutcomesURL),
+		Probation:     intDefault(getenv("GITHUB_PROBATION", ""), defaultGitHubProbation),
 		Concurrency:   intDefault(getenv("GITHUB_CONCURRENCY", ""), defaultGitHubConcurrency),
 		MaxRepos:      intDefault(getenv("GITHUB_MAX_REPOS", ""), defaultGitHubMaxRepos),
 		FilesPerRepo:  intDefault(getenv("GITHUB_FILES_PER_REPO", ""), defaultGitHubFilesPerRepo),

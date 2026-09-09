@@ -6,7 +6,7 @@ import (
 )
 
 // CrawlCounters holds the crawler's lifetime traversal counters: the topic
-// phase's five below, then the GitHub discovery phase's nine. Atomics rather
+// phase's five below, then the GitHub discovery phase's ten. Atomics rather
 // than the Metrics mutex: the /metrics handler reads them while a cycle is
 // writing, and each counter moves independently of the others.
 //
@@ -62,6 +62,12 @@ type CrawlCounters struct {
 	// the network, or a GitHub outage.
 	GitHubSleeps atomic.Int64
 	GitHubErrors atomic.Int64
+	// GitHubWithdrawn counts GitHub-minted sources the probation fold withdrew
+	// after GitHubOptions.Probation consecutive survivor-free service cycles.
+	// A rise is the phase paying for its novelty-only intake: sources the
+	// service's probe never validated leaving the corpus, each having cost its
+	// standing fetch slot until then.
+	GitHubWithdrawn atomic.Int64
 }
 
 // Crawl is the process-wide counter set: the crawler is a singleton per
@@ -85,6 +91,7 @@ type CrawlStats struct {
 	GitHubNovel     int64
 	GitHubSleeps    int64
 	GitHubErrors    int64
+	GitHubWithdrawn int64
 }
 
 // Stats snapshots the counters.
@@ -104,6 +111,7 @@ func (cc *CrawlCounters) Stats() CrawlStats {
 		GitHubNovel:     cc.GitHubNovel.Load(),
 		GitHubSleeps:    cc.GitHubSleeps.Load(),
 		GitHubErrors:    cc.GitHubErrors.Load(),
+		GitHubWithdrawn: cc.GitHubWithdrawn.Load(),
 	}
 }
 
@@ -127,6 +135,7 @@ func (cc *CrawlCounters) Since(prev CrawlStats) CrawlStats {
 		GitHubNovel:     cur.GitHubNovel - prev.GitHubNovel,
 		GitHubSleeps:    cur.GitHubSleeps - prev.GitHubSleeps,
 		GitHubErrors:    cur.GitHubErrors - prev.GitHubErrors,
+		GitHubWithdrawn: cur.GitHubWithdrawn - prev.GitHubWithdrawn,
 	}
 }
 
@@ -149,6 +158,7 @@ func writeCrawl(w *exposition) {
 	counter(w, "stable_crawl_github_novel_endpoints_total", "Distinct endpoints the accepted files added beyond the census.", s.GitHubNovel)
 	counter(w, "stable_crawl_github_rate_sleeps_total", "Rate-limit sleeps the GitHub phase took; a rise means the per-cycle caps exceed the token's limits.", s.GitHubSleeps)
 	counter(w, "stable_crawl_github_errors_total", "Failures inside the GitHub phase: search/metadata/tree API errors, transport errors, and per-candidate probe errors alike; a low steady rate is candidate churn, a step change the token, the network, or a GitHub outage.", s.GitHubErrors)
+	counter(w, "stable_crawl_github_withdrawn_total", "GitHub-minted sources withdrawn after a probation window with zero probe survivors; a rise means novelty-minted sources the probe never validated are leaving the corpus.", s.GitHubWithdrawn)
 }
 
 // CrawlHandler serves the crawler's counters alone, for the GET /metrics route

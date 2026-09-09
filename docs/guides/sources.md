@@ -262,10 +262,26 @@ cycle's earlier picks do not carry: with no per-file date to read, the census
 is what catches a stale or redundant file, exactly as a source that only
 re-carries an accepted source's nodes is rejected however large it is.
 
+**Novelty is not survival — a fourth observation about the MARGINAL gate's
+limits, not a fourth gate.** Endpoint novelty is what the crawler can measure
+BEFORE minting; whether those endpoints ever pass the probe is a different
+question, measured AFTER the fact, per source and per cycle, by the service.
+For GitHub the two diverged by two orders of magnitude: on production
+2026-09-08 the 62 821 endpoints the 53 GitHub-minted sources reached through
+no other source produced exactly one of the 77 published nodes, against 76
+from the other 73 197 — GitHub-exclusive endpoints ~65x less likely to reach
+the published set (`docs/guides/github.md` records the full reading, the TCP
+gate that measurement refuted, and the probation that now withdraws a mint
+the probe never validates). Nothing measured at mint time predicted survival,
+so the three gates above stay exactly as they are: this is a limit of the
+MARGINAL gate — it prices what a candidate ADDS, not whether it will SURVIVE —
+and the correction is post-mint withdrawal, not a new admission gate.
+
 GitHub-minted sources are not a second kind of managed entry. They join the
 same `live` map, carry `managed: true`, and are aged, retired and pruned by
 the same machinery as every other managed source — "Retiring a source" below
-applies to them verbatim. Only the naming and attribution differ from the
+applies to them verbatim, and probation (github.md) adds one GitHub-only
+withdrawal path on top of it. Only the naming and attribution differ from the
 Telegram shape the next section dissects: a GitHub mint is named
 `gh-<owner>-<repo>` (plus an ordinal when the stem is taken) rather than
 `<channel-slug>-<postid>`, with `feed: gh:<owner>/<repo>` instead of a channel
