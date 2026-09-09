@@ -68,6 +68,18 @@ The phase they configure is the crawler's GitHub discovery half
 (`internal/ghfind` + `internal/crawl/github.go`); the algorithm, the rate
 limits and the gotchas live in `docs/guides/github.md`.
 
+One `CRAWL_*` key does double duty and the coupling is load-bearing:
+`CRAWL_DEAD_TTL` (default `720h`; `0` disables the dead-URL memory — the full
+semantics live in `README.md`) is also the probation withdrawal's re-mint
+suppression. A source probation condemns is dropped from `private.yaml` AND
+dead-stamped with this same TTL (`withholdCondemned` calls `recordDead` with
+`Options.DeadTTL`), and `recordDead` records nothing when the TTL is
+non-positive — so `CRAWL_DEAD_TTL=0`, the documented off switch for the dead
+memory, silently removes the suppression too: the condemned source is dropped,
+but the next cycle that rediscovers it mints it back, oscillating in and out of
+the corpus every probation window. There is no separate stamp TTL for
+withdrawals; the two share the one key (`docs/guides/github.md`, probation).
+
 The credential has two sources: the `GITHUB_TOKEN` env var itself, or the
 file named by `GITHUB_TOKEN_FILE` (the agenix pattern `geoblock.gemini.key_file`
 already uses). Empty disables the phase rather than degrading it, because
@@ -87,8 +99,8 @@ operator-provided token file may be absent without failing the cycle — and
 |`GITHUB_MIN_NOVEL`|`100`|endpoints a file must add to be minted|
 |`GITHUB_FRESH`|`504h`|how recently a repository must have been pushed|
 |`GITHUB_MAX_SOURCES`|`60`|GitHub-minted sources allowed to exist at once (150 until probation shipped)|
-|`GITHUB_OUTCOMES`|`http://sub-preprocessor:9090/metrics`|the service metrics endpoint probation reads `stable_source_tested_nodes` from, once per cycle|
-|`GITHUB_PROBATION`|`6`|consecutive survivor-free SERVICE cycles before a GitHub-minted source is withdrawn (mirrors the 6-cycle not-live retirement rule)|
+|`GITHUB_OUTCOMES`|`http://sub-preprocessor:9090/metrics`|the service metrics endpoint probation reads `stable_source_tested_nodes` and the `stable_last_success_timestamp_seconds` clock from, once per cycle|
+|`GITHUB_PROBATION`|`6`|consecutive survivor-free PUBLISHED service cycles before a GitHub-minted source is withdrawn (mirrors the 6-cycle not-live retirement rule)|
 |`GITHUB_CENSUS_TTL`|`6h`|how long a census is reused before rebuilding|
 |`GITHUB_CENSUS`|`/config/.crawler-census.bin`|census file path|
 |`GITHUB_CONCURRENCY`|`8`|parallel candidate fetches|

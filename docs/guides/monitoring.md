@@ -631,13 +631,18 @@ vendor the dashboard into the nixos repo.
   or a body over the subscription size cap (10 MiB), raises it with no token or network fault.
   Read it as a rate: a low steady value is candidate churn, a step change is the token, the
   network, or a GitHub outage. The tenth and last is the withdrawal counter (panel 33):
-  `stable_crawl_github_withdrawn_total` counts GitHub-minted sources probation condemned —
-  sources minted on novelty that the probe never validated — dropped from `private.yaml` and
-  dead-stamped after `GITHUB_PROBATION` consecutive survivor-free SERVICE cycles (the model
-  and its fail-safe rule: `docs/guides/github.md`). Read it as a rate against the intake: a
-  rise means the withdrawal path is working, and a rise to the size of the intake means the
-  phase is paying nothing — mining and withdrawing at the same pace, which points at the
-  mint's gates rather than the probe.
+  `stable_crawl_github_withdrawn_total` counts the GitHub-minted sources that probation
+  actually withdrew in that cycle — sources minted on novelty that the probe never validated —
+  dropped from `private.yaml` and dead-stamped after `GITHUB_PROBATION` consecutive
+  survivor-free PUBLISHED service cycles (the model and its fail-safe rule:
+  `docs/guides/github.md`). One cycle withdraws at most a quarter of the phase's own
+  population (never fewer than two), longest-barren-first, warning when more came due than
+  the cap admits — so on a capped cycle the counter trails the verdict: the deferred stay
+  due with a streak that only grows and are counted in the cycles that withdraw them, and
+  the per-cycle warn log line carries the due-vs-withdrawn split. Read it as a rate
+  against the intake: a rise means the withdrawal path is working, and a rise to the size
+  of the intake means the phase is paying nothing — mining and withdrawing at the same
+  pace, which points at the mint's gates rather than the probe.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway

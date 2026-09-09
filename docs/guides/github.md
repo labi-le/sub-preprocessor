@@ -86,27 +86,70 @@ Intake keeps its gates and gains no predictor: nothing measured at mint time pre
 survival before the probe, so the phase bounds the DAMAGE instead. A GitHub-minted source
 is minted on novelty and withdrawn again when the service's probe never validates it.
 
-- **The reading.** A minted source enters probation at mint; once per cycle the crawler
-  fetches the service's own per-source outcome — `stable_source_tested_nodes` off its
-  metrics endpoint, `GITHUB_OUTCOMES`
+- **The reading.** Once per cycle the crawler fetches the service's own per-source
+  outcome off its metrics endpoint, `GITHUB_OUTCOMES`
   (default `http://sub-preprocessor:9090/metrics`, the service's own listener, reachable
-  at that name on the compose network) — and folds it into the source's probation record
-  on the state file, keyed by source NAME (`probation` in `.crawler-state.json`).
-- **Service cycles, not crawler cycles.** A fold counts only when the service's
-  `stable_cycles_total` has moved since the last reading: six reads of one snapshot are
-  one observation, and a source the service never probed accumulates nothing. Probation
-  mirrors the corpus's 6-cycle not-live retirement rule, on the service's clock.
-- **The loop fails safe.** An unreachable metrics endpoint, a parse failure, an empty
-  reading or a reading whose cycle has not advanced withdraws NOTHING and folds NOTHING.
-  A source is never condemned on missing evidence — only on positive evidence of a
-  survivor-free service cycle.
-- **Withdrawal.** After `GITHUB_PROBATION` (default 6) consecutive survivor-free service
-  cycles, the source's URL joins the deny set `RunOnce` already builds from the curated
-  URLs, so `mintRetained` drops it from `private.yaml` and logs it, and the same URL is
-  dead-stamped with `recordDead` for `CRAWL_DEAD_TTL` (default 720h), so the next cycle
-  does not re-mint it. The dead stamp expiring is when the URL may be tried again.
+  at that name on the compose network): per source, `stable_source_tested_nodes` (the
+  probe survivors the fold judges by; `stable_source_valid_nodes` is read for the
+  withdrawal log line), beside the clock family `stable_last_success_timestamp_seconds`.
+  The fold writes the source's probation record on the state file, keyed by source NAME
+  (`probation` in `.crawler-state.json`) — but no record is opened at mint: the window
+  anchors at the first reading that ADVANCES the clock, so a source the service has
+  published nothing about yet accumulates nothing. The NAME key is the metric's `source=`
+  label, the service's join key, where every other crawler memory is keyed by URL — so an
+  operator hand-rename of a source starts a fresh window: the old name's record is pruned
+  at the next successful reading, once the file no longer holds the name.
+- **The clock is the publish timestamp, not the attempt counter.** A fold acts only when
+  the service's `stable_last_success_timestamp_seconds` has moved since the last reading.
+  The gauge moves exactly when the service PUBLISHES a list, and the choice matters:
+  `stable_cycles_total` bumps on every attempt — a probe failure, a cancelled cycle, a
+  cycle that merged nothing all advance it (`ObserveError`) — while the per-source rows
+  render from the last PUBLISHED report and stay frozen, so counting attempts would read
+  one genuine survivor-free report six times and condemn a source on five re-renders of
+  it. The timestamp is wall time, so it also survives a service restart honestly, where
+  the in-memory attempt counter resets to zero and would stall every record until it
+  re-lapped. Six crawler reads of one snapshot are one observation, and a source the
+  service never probed accumulates nothing; probation mirrors the corpus's 6-cycle
+  not-live retirement rule, on the service's publish clock.
+- **The loop fails safe.** An unreachable metrics endpoint, a non-2xx answer, a parse
+  failure, an empty reading or a reading whose publish timestamp has not advanced
+  withdraws NOTHING and folds NOTHING, and a source absent from the reading is missing
+  evidence, not a barren cycle. What a zero can prove is narrower than "no survivor
+  anywhere", because of attribution: `stable_source_tested_nodes` is counted AFTER
+  Merge's first-source-wins dedupe by `server:port` (monitoring.md's per-name-tables
+  bullet measures the same mechanism), and `private.yaml` is appended LAST in
+  configuration order, so an endpoint another source also serves can never move this
+  source's counter — 41 314 of the 104 135 GitHub endpoints of the 2026-09-08 reading
+  (39.7%) are shared, and a source all of whose endpoints are shared is frozen at zero,
+  however live they are. The criterion is therefore no EXCLUSIVE probe survivors,
+  not none at all, and it stays fair in the pool-value direction: a source reading zero
+  contributes nothing the pool loses when it goes, because its shared endpoints remain
+  under the winning source's name. The residual risk is bounded: if the winning source
+  dies inside the dead-stamp window, those endpoints sit out until the stamp expires.
+  The withdrawal log line carries the source's valid-node count beside the streak, which
+  is how an operator tells a dedupe-zero from a genuinely empty yield.
+- **Withdrawal.** After `GITHUB_PROBATION` (default 6) consecutive survivor-free
+  PUBLISHED service cycles, the source's URL joins the deny set `RunOnce` already builds
+  from the curated URLs, so `mintRetained` drops it from `private.yaml` and logs it, and
+  the same URL is dead-stamped with `recordDead` for `CRAWL_DEAD_TTL` (default 720h), so
+  the next cycle does not re-mint it; the stamp expiring is when the URL may be tried
+  again. Two bounds shape the write. One cycle withdraws at most a quarter of the GitHub
+  population — `withdrawRoom(population)` = `max(minWithdrawFloor=2, population*25/100)`,
+  so never fewer than two — collecting every source that came due longest-barren-first
+  (tie: name) and warning when more came due than the cap admits; the deferred wait one
+  cycle carrying a streak that only grows. The floor exists for the same reason the
+  corpus's bulk-prune floor does — an outage fabricates a mass-death verdict — and the
+  deny path probation rides is deliberately outside the guards (`allowShrink`,
+  `bulkPruneMinDrop`, `bulkPrunePercent`) that brake ordinary deletions. And the stamp
+  itself is shared with the dead-URL memory, so a coupling follows: `CRAWL_DEAD_TTL=0`,
+  the documented off switch for that memory, also disables the withdrawal's re-mint
+  suppression — the condemned source is still dropped, but without a stamp the next
+  rediscovery can mint it back, oscillating in and out of the corpus every probation
+  window.
 - Each withdrawal increments the crawler's own `stable_crawl_github_withdrawn_total`
-  (operator reading and its panel: `docs/guides/monitoring.md`).
+  (operator reading and its panel: `docs/guides/monitoring.md`). The counter counts
+  sources actually withdrawn, so on a capped cycle it trails the verdict: the deferred
+  sources land in the cycles that withdraw them.
 
 Because probation bounds how long a bad batch stays, intake volume is bounded too:
 `GITHUB_MAX_SOURCES` dropped 150 -> 60. The cap is the standing cost the corpus pays
@@ -246,8 +289,8 @@ the source.
 |`GITHUB_MIN_NOVEL`|`100`|endpoints a file must add to be minted|
 |`GITHUB_FRESH`|`504h`|how recently a repository must have been pushed|
 |`GITHUB_MAX_SOURCES`|`60`|GitHub-minted sources allowed to exist at once (150 until probation shipped)|
-|`GITHUB_OUTCOMES`|`http://sub-preprocessor:9090/metrics`|the service metrics endpoint probation reads `stable_source_tested_nodes` from, once per cycle|
-|`GITHUB_PROBATION`|`6`|consecutive survivor-free SERVICE cycles before a GitHub-minted source is withdrawn (mirrors the 6-cycle not-live retirement rule)|
+|`GITHUB_OUTCOMES`|`http://sub-preprocessor:9090/metrics`|the service metrics endpoint probation reads `stable_source_tested_nodes` and the `stable_last_success_timestamp_seconds` clock from, once per cycle|
+|`GITHUB_PROBATION`|`6`|consecutive survivor-free PUBLISHED service cycles before a GitHub-minted source is withdrawn (mirrors the 6-cycle not-live retirement rule)|
 |`GITHUB_CENSUS_TTL`|`6h`|how long a census is reused before rebuilding|
 |`GITHUB_CENSUS`|`/config/.crawler-census.bin`|census file path|
 |`GITHUB_CONCURRENCY`|`8`|parallel candidate fetches|
