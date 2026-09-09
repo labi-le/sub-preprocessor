@@ -1302,6 +1302,104 @@ func TestGithubWithdrawalsFloorWithdrawsTheNextBatchNextCycle(t *testing.T) {
 	}
 }
 
+// TestGithubWithdrawalsStaleReadingDoesNotDrainTheDeferred pins the guard the
+// cap depends on. A record the cap deferred is already at the window and
+// foldOutcome hands that carried streak back unchanged on a read whose publish
+// timestamp has not advanced, so re-serving the same timestamp — a crawler
+// cycle that runs twice inside one service publish, or failed service cycles
+// re-rendering the frozen snapshot — must withdraw nothing and leave every
+// deferred record alone: only a reading that moved the record's clock may
+// condemn it, and only then does the next tranche go.
+func TestGithubWithdrawalsStaleReadingDoesNotDrainTheDeferred(t *testing.T) {
+	// Not parallel: asserts the process-wide withdrawn counter's delta.
+	const probation = 2
+	names := make([]string, 8)
+	allBarren := make(map[string]int, len(names))
+	probs := make(map[string]probationState, len(names))
+	for i := range names {
+		name := fmt.Sprintf("gh-%02d", i)
+		names[i] = name
+		allBarren[name] = 0
+		// All eight already past the window, the residue a capped fold of an
+		// earlier wipe leaves behind: withdrawRoom(8) = 2 defers six.
+		probs[name] = probationState{Barren: probation, Published: publishedAt(0), FirstSeen: time.Now()}
+	}
+	// The withdrawn leave the corpus, so only the six the cap defers appear in
+	// the readings that follow. Step 2 serves the SAME publish clock again —
+	// the shape of a crawler cycle run twice inside one service publish, or of
+	// failed service cycles re-rendering the frozen snapshot.
+	barren := make(map[string]int, 6)
+	survivors := make(map[string]int, 6)
+	for _, name := range names[2:] {
+		barren[name] = 0
+		survivors[name] = 0
+	}
+	survivors["gh-04"] = 1
+	survivors["gh-05"] = 1
+	srv, hits := probationServer(t, []readingStep{
+		{published: publishedAt(1), survivors: allBarren},
+		{published: publishedAt(1), survivors: barren},
+		{published: publishedAt(2), survivors: survivors},
+	})
+	c := &Crawler{
+		opts:       Options{GitHub: GitHubOptions{Enabled: true, Probation: probation, OutcomesURL: srv.URL}},
+		httpClient: srv.Client(),
+		logger:     zerolog.Nop(),
+	}
+	st := &state{Probation: probs}
+	pf := ghManagedFile(names...)
+	url := func(name string) string { return fmt.Sprintf("https://%s.example/sub", name) }
+
+	before := metrics.Crawl.GitHubWithdrawn.Load()
+	got := probationFold(t, c, st, pf)
+	want := map[string]struct{}{url("gh-00"): {}, url("gh-01"): {}}
+	if !maps.Equal(got, want) {
+		t.Fatalf("first fold withdrew %v, want the cap's tranche %v", got, want)
+	}
+	if d := metrics.Crawl.GitHubWithdrawn.Load() - before; d != 2 {
+		t.Errorf("withdrawn counter rose by %d, want 2", d)
+	}
+	deferred := maps.Clone(st.Probation)
+
+	// The same publish served again: no tranche, no counter move, no record
+	// touched — the next real publish must still get its turn at the streak.
+	got = probationFold(t, c, st, pf)
+	if len(got) != 0 {
+		t.Fatalf("stale reading withdrew %v, want none: the deferred are at the window but this publish did not advance", got)
+	}
+	if d := metrics.Crawl.GitHubWithdrawn.Load() - before; d != 2 {
+		t.Errorf("stale reading moved the withdrawn counter to %d, want it frozen at 2", d)
+	}
+	if !reflect.DeepEqual(st.Probation, deferred) {
+		t.Errorf("stale reading changed the deferred records:\n before %+v\n after  %+v", deferred, st.Probation)
+	}
+
+	// The clock advanced: the next tranche IS withdrawn, so the deferral
+	// stalled nothing — while the deferred record reporting a survivor on the
+	// same fold is cleared, not condemned, the self-heal the cap leaves open.
+	got = probationFold(t, c, st, pf)
+	want = map[string]struct{}{url("gh-02"): {}, url("gh-03"): {}}
+	if !maps.Equal(got, want) {
+		t.Fatalf("advancing fold withdrew %v, want the next tranche %v", got, want)
+	}
+	if d := metrics.Crawl.GitHubWithdrawn.Load() - before; d != 4 {
+		t.Errorf("withdrawn counter rose by %d across three folds, want 4", d)
+	}
+	for _, name := range []string{"gh-04", "gh-05"} {
+		if rec := st.Probation[name]; rec.Barren != 0 || rec.Published != publishedAt(2) || rec.LastLive.IsZero() {
+			t.Errorf("survivor record %s = %+v, want barren 0 at publish %d with last_live stamped", name, rec, publishedAt(2))
+		}
+	}
+	for _, name := range []string{"gh-06", "gh-07"} {
+		if rec := st.Probation[name]; rec.Barren != probation+2 || rec.Published != publishedAt(2) {
+			t.Errorf("next-tranche record %s = %+v, want barren %d at publish %d kept for a later fold", name, rec, probation+2, publishedAt(2))
+		}
+	}
+	if hits.Load() != 3 {
+		t.Errorf("hits = %d, want 3: one reading per fold", hits.Load())
+	}
+}
+
 // TestGithubWithdrawalsNeverCondemnsWhatItDoesNotOwn: the fold's population is
 // the file's MANAGED gh:-feed entries only. A managed Telegram source (its
 // feed is a channel slug, not gh:) and a sheltered hand-added entry that

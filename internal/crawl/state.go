@@ -289,6 +289,47 @@ func (s *state) foldOutcome(name string, survivors int, published uint64, now ti
 	return e.Barren
 }
 
+// dueVerdict is one source the probation window has run out for: the barren
+// streak it reached and the valid-node count that reading reported, both only
+// for the log line the withdrawal writes.
+type dueVerdict struct {
+	name   string
+	barren int
+	valid  int
+}
+
+// foldReading folds one service reading over names and returns those the
+// window condemns, longest-barren first (ties by name, so a capped cycle picks
+// the same set every time). A source the reading does not mention is missing
+// evidence and folds nothing; a record whose clock the reading did not advance
+// is not condemned either, even when it already sits at the window — that is
+// the case the withdrawal cap creates, and executing it on a stale reading
+// would withdraw a tranche per crawler cycle rather than per publish.
+func (s *state) foldReading(names []string, reading outcomeReading, window int, now time.Time) []dueVerdict {
+	var due []dueVerdict
+	for _, name := range names {
+		outcome, seen := reading.Sources[name]
+		if !seen {
+			continue
+		}
+		prev, had := s.Probation[name]
+		barren := s.foldOutcome(name, outcome.Survivors, reading.Published, now)
+		if had && reading.Published <= prev.Published {
+			continue
+		}
+		if barren >= window {
+			due = append(due, dueVerdict{name: name, barren: barren, valid: outcome.Valid})
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].barren != due[j].barren {
+			return due[i].barren > due[j].barren
+		}
+		return due[i].name < due[j].name
+	})
+	return due
+}
+
 // forgetProbation drops the records of the named sources. A source withdrawn
 // by githubWithdrawals leaves private.yaml in the same cycle, and its record
 // must not survive the source: a rediscovery after the dead stamp expires

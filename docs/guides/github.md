@@ -113,9 +113,12 @@ is minted on novelty and withdrawn again when the service's probe never validate
   not-live retirement rule, on the service's publish clock.
 - **The loop fails safe.** An unreachable metrics endpoint, a non-2xx answer, a parse
   failure, an empty reading or a reading whose publish timestamp has not advanced
-  withdraws NOTHING and folds NOTHING, and a source absent from the reading is missing
-  evidence, not a barren cycle. What a zero can prove is narrower than "no survivor
-  anywhere", because of attribution: `stable_source_tested_nodes` is counted AFTER
+  withdraws NOTHING and folds NOTHING — including for a source the cap deferred, which
+  sits at the window already and would otherwise be condemned once per stale reading; only
+  a reading that moved that record's own clock may execute its verdict. A source absent
+  from the reading is missing evidence, not a barren cycle. What a zero can prove is
+  narrower than "no survivor anywhere", because of attribution:
+  `stable_source_tested_nodes` is counted AFTER
   Merge's first-source-wins dedupe by `server:port` (monitoring.md's per-name-tables
   bullet measures the same mechanism), and `private.yaml` is appended LAST in
   configuration order, so an endpoint another source also serves can never move this

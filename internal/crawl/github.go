@@ -201,40 +201,16 @@ func (c *Crawler) githubWithdrawals(ctx context.Context, st *state, pf privateFi
 		names = append(names, name)
 		known[name] = struct{}{}
 	}
-	// Sorted so the per-source lines below read in file order, not map order.
+	// Sorted so the fold and its per-source lines read in file order, not map
+	// order: map iteration would make a capped cycle's tie-breaks random.
 	sort.Strings(names)
-	withdrawn := make(map[string]struct{})
-	type verdict struct {
-		name   string
-		barren int
-		valid  int
-	}
-	var due []verdict
-	for _, name := range names {
-		outcome, ok := reading.Sources[name]
-		if !ok {
-			// No observation for this source in this reading: the service did
-			// not probe it this cycle, which is missing evidence, not a barren
-			// cycle.
-			continue
-		}
-		if barren := st.foldOutcome(name, outcome.Survivors, reading.Published, now); barren >= opts.Probation {
-			due = append(due, verdict{name: name, barren: barren, valid: outcome.Valid})
-		}
-	}
-	// Longest-barren first, so a capped cycle withdraws the least defensible
-	// sources and the rest wait one cycle carrying a streak that only grows.
-	sort.Slice(due, func(i, j int) bool {
-		if due[i].barren != due[j].barren {
-			return due[i].barren > due[j].barren
-		}
-		return due[i].name < due[j].name
-	})
+	due := st.foldReading(names, reading, opts.Probation, now)
 	if room := withdrawRoom(len(byName)); len(due) > room {
 		c.logger.Warn().Int("due", len(due)).Int("withdrawing", room).Int("population", len(byName)).
 			Msg("github probation: more sources came due than one cycle may withdraw; the rest wait for the next reading")
 		due = due[:room]
 	}
+	withdrawn := make(map[string]struct{}, len(due))
 	condemned := make([]string, 0, len(due))
 	for _, v := range due {
 		u := byName[v.name]
@@ -265,10 +241,12 @@ func withdrawRoom(population int) int {
 }
 
 // withdrawPercent and minWithdrawFloor shape that bound: a quarter of the
-// GitHub population per cycle, but never fewer than two, so a corpus of five
-// barren sources still clears in three cycles while sixty take five. Hourly
-// cycles make either fast enough; what the floor buys is the chance to see it
-// happening.
+// GitHub population per cycle, never fewer than two. A wholly barren corpus of
+// five clears in three cycles; sixty takes about twelve, because the quarter
+// is of the SHRINKING population and the floor only takes over at the tail.
+// At hourly cycles that is half a day to empty the phase's whole corpus, which
+// is the point: slow enough to notice in the withdrawn counter, fast enough
+// that nothing barren lingers a week.
 const (
 	withdrawPercent  = 25
 	minWithdrawFloor = 2
