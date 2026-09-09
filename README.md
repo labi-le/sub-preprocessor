@@ -1,5 +1,7 @@
 # sub-preprocessor
 
+[![lines of code](https://img.shields.io/endpoint?url=https%3A%2F%2Fghloc.vercel.app%2Fapi%2Flabi-le%2Fsub-preprocessor%2Fbadge%3Ffilter%3D.go)](https://github.com/labi-le/sub-preprocessor)
+
 An HTTP preprocessor for Mihomo / Clash.Meta proxy subscriptions.
 
 It takes raw proxy subscription lists (public collectors, Telegram channels,
