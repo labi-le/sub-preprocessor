@@ -53,6 +53,12 @@ type state struct {
 	// owns. Bounded twice: by the record's own expiry (pruneDead) and by
 	// maxDead (recordDead).
 	Dead map[string]time.Time `json:"dead,omitempty"`
+	// Ladders is keyed by the slug of a topicless group whose low id window the
+	// topic ladder has already swept, holding when it swept (climbTopics). One
+	// sweep per group is the point: the population is recurring, so without
+	// this memory every cycle would re-probe the same dead ends. Expired by
+	// prune on the channel TTL, which re-sweeps a group that has outlived it.
+	Ladders map[string]time.Time `json:"ladders,omitempty"`
 	// Repos is the GitHub phase's productive memory, keyed "owner/repo": a
 	// repository that contributed an accepted file is revisited every cycle
 	// outside the per-cycle repository budget, until it goes stale past the
@@ -102,6 +108,12 @@ const maxProductive = 200
 // the memory at maxProductive, keeping the most recently productive.
 func (s *state) prune(cutoff time.Time) {
 	s.pruneGitHubRepos(cutoff)
+	for slug, at := range s.Ladders {
+		if at.Before(cutoff) {
+			delete(s.Ladders, slug)
+			s.dirty = true
+		}
+	}
 	before := len(s.Productive)
 	for ch, e := range s.Productive {
 		if e.LastSubAt.Before(cutoff) {

@@ -514,8 +514,9 @@ func TestThematicGateDoesNotExpandBarrenChild(t *testing.T) {
 // listing came back without a message and whose link named no topic warns once,
 // counts once, is fetched once despite leftover budget, and ends the cycle.
 func TestBareGroupDeadEndCounted(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: the assertion below is an exact delta on a process-global
+	// counter, so it must not overlap another test that reaches the dead-end
+	// site (TestLadderSeedsTopicOfListinglessGroup does).
 	const (
 		seedListURL  = "https://t.me/s/srca"
 		groupListURL = "https://t.me/s/deadgrp"
@@ -560,7 +561,7 @@ func TestBareGroupListingFailureNotCounted(t *testing.T) {
 	}
 	before := metrics.Crawl.GroupEmpty.Load()
 	n := scanNode{ref: chanRef{slug: "deadgrp"}, depth: 1}
-	c.scanChannel(context.Background(), n, &state{}, nil, map[string]origin{}, nil, &cursorStats{}, newRejects(zerolog.Nop()))
+	c.scanChannel(context.Background(), n, &state{}, nil, map[string]origin{}, nil, &cursorStats{}, newRejects(zerolog.Nop()), &ladder{})
 	if d := metrics.Crawl.GroupEmpty.Load() - before; d != 0 {
 		t.Errorf("group-empty counter moved %d for a failed listing fetch, want 0", d)
 	}
@@ -600,9 +601,13 @@ func TestTopicMetricsRendered(t *testing.T) {
 	ts := metrics.Crawl.Since(before)
 	cycle := crawlSampleIDs(ts)
 	expect := map[string]int64{
-		"stable_crawl_topic_pages_total":      3, // parent, live sibling and empty sibling embeds all answered
+		// 3 embeds the fixture serves (parent, live sibling, empty sibling)
+		// plus the whole ladder window: deadgrp has no listing and the ref
+		// naming it no topic, so the sweep probes ids 1..ladderIDs and every
+		// one of them answers the fixture's zero-value page.
+		"stable_crawl_topic_pages_total":      3 + ladderIDs,
 		"stable_crawl_topic_live_total":       2, // parent seed page and the live sibling
-		"stable_crawl_topic_empty_total":      1,
+		"stable_crawl_topic_empty_total":      1 + ladderIDs,
 		"stable_crawl_topic_discovered_total": 2, // both same-group edges admitted
 		"stable_crawl_group_empty_total":      1,
 	}
@@ -734,5 +739,69 @@ func TestFixtureSlugsMatchChannelRe(t *testing.T) {
 func TestTopicQueryKeepsCommentCeiling(t *testing.T) {
 	if !strings.Contains(topicQuery, "comments_limit=200") {
 		t.Errorf("topicQuery = %q, want it to keep comments_limit=200", topicQuery)
+	}
+}
+
+// The topic ladder is the only way a DISCOVERED forum group ever becomes
+// readable: its t.me/s/ listing carries no message and the ref that named it
+// carried no topic id, so without a sweep of the low id window the group is a
+// permanent dead end (measured in production: 110-143 such dead ends per
+// cycle). A swept topic that carries a candidate is recorded as a productive
+// FULL ref, which is what buildSeeds seeds from next cycle.
+func TestLadderSeedsTopicOfListinglessGroup(t *testing.T) {
+	const (
+		seedListURL  = "https://t.me/s/srca"
+		groupListURL = "https://t.me/s/deadgrp"
+		subSeed      = "https://sub.example/seed"
+		subTopic     = "https://sub.example/topic"
+	)
+	pages := map[string]string{
+		seedListURL:                           wrapMsg(subSeed) + `<a href="https://t.me/deadgrp">dead end</a>`,
+		groupListURL:                          carveJoinCard,
+		"https://t.me/deadgrp/3" + topicQuery: wrapMsg(subTopic),
+		"https://t.me/deadgrp/7" + topicQuery: `<div class="tgme_widget_message_wrap">no link</div>`,
+	}
+	hits := map[string]int{}
+	var logBuf bytes.Buffer
+	live, st := carveCrawler(t, Options{Channels: []string{"srca"}, Pages: 6, MaxDepth: 3},
+		pageFetcher{hits: hits, pages: pages}, &logBuf)
+
+	if _, ok := st.Productive["deadgrp/3"]; !ok {
+		t.Errorf("productive memory = %v, want the candidate-carrying topic seeded as deadgrp/3", st.Productive)
+	}
+	if _, ok := st.Productive["deadgrp/7"]; ok {
+		t.Error("a topic that carried no candidate must not be seeded")
+	}
+	if _, ok := st.Ladders["deadgrp"]; !ok {
+		t.Error("the sweep must be remembered so the next cycle does not repeat it")
+	}
+	if got := hits["https://t.me/deadgrp/3"+topicQuery]; got != 1 {
+		t.Errorf("topic 3 probed %d time(s), want exactly one", got)
+	}
+	if got := len(hits); got < ladderIDs {
+		t.Errorf("only %d URLs fetched, want the whole %d-id window probed", got, ladderIDs)
+	}
+	if live[subTopic].Slug != "" {
+		t.Error("the ladder must only probe; the topic is harvested on the next cycle")
+	}
+}
+
+// The sweep is remembered even when it finds nothing, and a remembered group is
+// never re-probed: without that, the recurring dead-end population would cost
+// the window every cycle forever.
+func TestLadderSkipsRememberedAndRespectsBudget(t *testing.T) {
+	t.Parallel()
+
+	c := &Crawler{opts: Options{}, client: pageFetcher{}, logger: zerolog.Nop()}
+	st := &state{Ladders: map[string]time.Time{"seen": time.Now()}}
+	lad := ladder{groups: 1}
+	c.climbTopics(context.Background(), "seen", st, &lad, newRejects(zerolog.Nop()))
+	if lad.groups != 1 {
+		t.Error("a remembered group must not spend budget")
+	}
+	spent := ladder{groups: 0}
+	c.climbTopics(context.Background(), "fresh", st, &spent, newRejects(zerolog.Nop()))
+	if _, ok := st.Ladders["fresh"]; ok {
+		t.Error("a group the budget could not reach must stay unremembered for the next cycle")
 	}
 }

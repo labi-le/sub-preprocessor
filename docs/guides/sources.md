@@ -174,6 +174,32 @@ the decay fit is on reachability at the looser 8000 ms gate, which is the arm la
   slug-equals-self exclusion: the scanned node must have been read through its topic embed this
   cycle, the child ref must carry a different numeric topic, and the child faces the same
   productivity gate at its own dequeue.
+- **A topicless group is no longer a dead end: the topic ladder sweeps its low id window
+  once.** Telegram publishes no list of a group's topics, so before this a bare ref to a
+  forum could only ever come from a repost that carried a topic id, the same-group
+  carve-out off a topic already being read, or an operator naming one in `channels.yaml` —
+  everything else logged `discovered group listing carried no message and the link named
+  no topic` and stopped there, 110-143 times per production cycle. `climbTopics`
+  (`ladder.go`) probes ids 1..40 of such a group and records every topic that carries a
+  subscription candidate as a productive FULL ref, which is exactly the shape `buildSeeds`
+  seeds from: the hit becomes a depth-0 seed next cycle and the carve-out reaches its
+  siblings from there. The ladder only probes; the topic is harvested on that next cycle
+  under the normal budget. Why 40: a forum topic id is the message id assigned when the
+  topic was created, and topics are overwhelmingly created before the traffic accumulates.
+  Measured 2026-09-09 over ids 1..40 of the three most-referenced topicless groups —
+  `aboutnpvforum` 10 alive of 40, 6 carrying candidates (best `/12`, 42 URLs);
+  `samnetgroup` 8 alive, 7 carrying (best `/4`, 136 URLs and 23 inline nodes); `mrosko`
+  7 alive, 3 carrying (best `/13`, 61 URLs). Ids far above the window exist —
+  `wildVF/16770` and `/33450` are in this file — and stay out of reach: reaching them
+  means walking message ids, which `topicQuery`'s comment prices at ~1182 requests per
+  pass and refuses. Cost is bounded twice: 5 groups per cycle (200 extra GETs) and one
+  sweep per group ever, remembered in `state.Ladders` whether or not it found anything,
+  because a window holding no topic will not grow one. That memory expires on the same TTL
+  that forgets a channel, so a long-lived group is re-swept rather than written off. The
+  population it works through is recurring, not new — 636 distinct topicless slugs over
+  ~40h of logs against 110-143 dead ends per cycle — so at this budget the standing set is
+  covered in ~5 days and the ladder then runs only for genuinely new groups. Zero new
+  knobs, and `sigridforum/3` in `channels.yaml` is the hand-found precedent it automates.
 - **The measurement that re-opened this question is pre-committed, and it can re-close it.**
   After at least 14 daily cycles, compare the DAY-ZERO pass rate of topic-origin vs
   channel-origin discovered subscription candidates over the SAME window at the SAME gate.

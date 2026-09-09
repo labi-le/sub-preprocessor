@@ -120,6 +120,7 @@ func (c *Crawler) scan(ctx context.Context, st *state, dead map[string]time.Time
 	var deadOut []string
 	discovered := 0
 	var cursors cursorStats
+	lad := newLadder()
 	rej := newRejects(c.logger)
 
 	topicsBefore := metrics.Crawl.Stats()
@@ -158,7 +159,7 @@ func (c *Crawler) scan(ctx context.Context, st *state, dead map[string]time.Time
 
 		// Children enqueue unmarked: admitNode owns every refusal, and
 		// pre-filtering here would double-bookkeep the very maps it marks.
-		children, dead := c.scanChannel(ctx, n, st, dead, live, &inline, &cursors, rej)
+		children, dead := c.scanChannel(ctx, n, st, dead, live, &inline, &cursors, rej, &lad)
 		queue = append(queue, children...)
 		deadOut = append(deadOut, dead...)
 	}
@@ -343,7 +344,7 @@ func (c *Crawler) reportTopics(ts metrics.CrawlStats) {
 //
 // dead is this cycle's remembered-dead set (state.Dead); classifyAll skips
 // those URLs without fetching and reports them under rejectDead. nil-safe.
-func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead map[string]time.Time, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects) (children []scanNode, deadOut []string) {
+func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead map[string]time.Time, live map[string]origin, inline *[]string, cs *cursorStats, rej *rejects, lad *ladder) (children []scanNode, deadOut []string) {
 	pages, cursorLost, viaTopic, listingFailed := c.scrapeChat(ctx, n.ref, c.pagesFor(n))
 	if cursorLost {
 		cs.paged++
@@ -360,6 +361,7 @@ func (c *Crawler) scanChannel(ctx context.Context, n scanNode, st *state, dead m
 		metrics.Crawl.GroupEmpty.Add(1)
 		c.logger.Warn().Str("channel", n.ref.slug).
 			Msg("discovered group listing carried no message and the link named no topic")
+		c.climbTopics(ctx, n.ref.slug, st, lad, rej)
 	}
 	if len(pages) == 0 {
 		return nil, nil

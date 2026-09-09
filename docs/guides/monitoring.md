@@ -580,7 +580,14 @@ vendor the dashboard into the nixos repo.
   message wraps — a gone/private topic or an embed markup change;
   `stable_crawl_topic_discovered_total` same-group carve-out edges admitted into the crawl queue;
   `stable_crawl_group_empty_total` bare discovered groups whose `/s/` listing was reached and
-  empty with no topic hint available — the counted dead end.
+  empty with no topic hint available — the counted dead end, which since the topic ladder is
+  also where a sweep is triggered rather than the end of the story. Read the first three with
+  that in mind: a ladder sweep adds up to 40 fetches to `pages` and, for a group whose window
+  holds nothing, up to 40 to `empty` in ONE cycle, so the empty/pages ratio is no longer a
+  pure embed-markup health signal on cycles that swept. The sweeps themselves are visible only
+  in the log (`topic ladder swept a group with no listing`, with `probed`/`alive`/`seeded`, at
+  warn when it seeded nothing); no counter separates ladder probes from ordinary topic reads,
+  which is the family's known gap.
 - **One automated alarm and one operator check ship with the topic counters; both are fleet-shaped,
   never per-topic.** (1) The empty ratio pinned near 1 while fetches keep rising ⇒ the embed markup
   changed and every topic read is coming back silently empty — fired as a warn from the same per-cycle
