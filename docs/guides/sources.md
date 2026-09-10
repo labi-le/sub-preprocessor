@@ -12,12 +12,18 @@ before the deletion: whitelist file 30228 lines / 15649 merged ranges, 16 source
 and 33 added, 54 shipped, 52 after two later died, every figure in those four measured on
 the 54).
 What follows is the part that outlives the file, and it applies to `config/sources.yaml`
-just as well — 17 of those 52 sources are now IN it (`config/sources.yaml:143-181`), the
-ones that carried endpoints no already-configured source did when the 52 were measured
-against the live 737-source corpus (152165 endpoints) on 2026-08-26: +6935 between them,
-while the other 35 added nothing and died with the directory. The fifth finding is not from
-that round at all — it is a 2026-08-28 measurement against a panel enforcing an HWID device
-limit, and it applies to any deployment, whitelist-gated or not.
+just as well — 17 of those 52 were salvaged into it on 2026-08-26 for carrying endpoints no
+already-configured source did when the 52 were measured against the live 737-source corpus
+(152165 endpoints): +6935 between them, while the other 35 added nothing and died with the
+directory. Thirteen of those 17 were dropped 2026-09-10, leaving the four at
+`config/sources.yaml:96-103` — endpoint novelty at salvage time did not survive to the
+published list, which is the only place it pays, the reading the GitHub phase already acts on
+(`docs/guides/github.md`, probation — off `stable_source_tested_nodes`, the probe survivors;
+this cut read `stable_source_published_nodes`, what reached the list).
+The fifth finding is a 2026-09-10
+measurement off the service's own metrics, and the sixth a 2026-08-28 measurement against a
+panel enforcing an HWID device limit; neither is from that round, and both apply to any
+deployment, whitelist-gated or not.
 
 - **The biggest names marketed FOR whitelist bypass contribute nothing; the bulk comes from
   undifferentiated aggregators.** Measured across ten independent search channels:
@@ -90,6 +96,42 @@ limit, and it applies to any deployment, whitelist-gated or not.
   samples over 1.5h backed dropping 16 redundant sources, and four more (`aetris bijandi
   flat447 prominbro`) were deliberately KEPT because they were redundant in some samples and
   unique in others. A single sample showing a source adds nothing shows only that.
+- **Zero published nodes across the whole retention window is evidence for removal — the
+  strength one sample never has, on a list that rotates hourly.** Measured 2026-09-10
+  against Prometheus on the prod host (`http://127.0.0.1:3020`,
+  `storage.tsdb.retention.time=15d`, job `sub-preprocessor`, scraped at 1/min), off the
+  service's own per-source gauges
+  `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}` labelled
+  `source`/`owner`/`feed`: the window is the full retention, 15 days and ~360 hourly cycles,
+  and the criterion is a curated entry that published ZERO nodes on every day of it.
+  Thirty-seven of the 87 qualified outright, and two more (`ruwbl-outline`, `mirgittech-mia`)
+  published only on its first day — 2 and 9 nodes on 2026-08-26, nothing on any of the 15
+  days after it; both went anyway, since a last productive day at the far edge of the window
+  is the shape the criterion exists to catch. A fortieth, `etoneyaproject`, was dropped for a
+  different reason: its upstream
+  `raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1`
+  answers 404 since 2026-08-30, so it had published nothing for 11 days after contributing
+  7-26 nodes a day while it worked. All forty went, taking the overlay from 87 entries to
+  47, and thirteen of the seventeen salvaged 2026-08-26 on endpoint novelty were among them.
+  The criterion is `published`, not liveness, because `stable_source_published_nodes` counts
+  the nodes a source contributed that reached the published list — summed across sources it
+  equals `stable_kept_nodes` (verified at one scrape: 111 and 111) — so a zero says the
+  published list does not change when the entry goes, whether because another entry already
+  carried the endpoint or because the endpoint never survives the probe. A node-level
+  measurement the same day found both: all 87 URLs re-fetched on prod with the service's own
+  URI parser ported to Python and validated per source against `stable_source_nodes_total`
+  (62 of 87 counts exact, 84 of 84 comparable within the same band against the current
+  sample) shows containment in earlier entries at 100% for `bazz1024-mirror`, `gidro-white`,
+  `prominbro`, `theavel` and `vova`, yet `vdevel26` 89 endpoints unique in the whole file,
+  `kreemchek-26` 705 and `ndsphonemy-ru-arch` 919 whose nodes never passed the probe. Corpus
+  context from the last cycle before the cut: 1185 configured sources of which 1128 fetched,
+  91749 unique nodes merged out of 695842 endpoints counted per source pre-dedupe (a 7.6x
+  overlap), 111 published. The repo's GitHub phase acts on the same principle by another
+  reading (`docs/guides/github.md`, probation judges `stable_source_tested_nodes`, the probe
+  survivors, while this cut judged `stable_source_published_nodes`, what reached the list);
+  this is that principle applied by hand to the curated overlay, which the crawler cannot
+  touch — curated names are protected from the mint and their URLs from being mirrored —
+  over 15 days rather than its 6 cycles.
 - **A panel with the HWID device limit on is FETCHABLE and publishes nothing, so gate 3 is
   the only one that can catch it.** Such a panel advertises `x-hwid-active: true`, and
   measured 2026-08-28 it answers a header-less fetch with **200** carrying a single
@@ -371,11 +413,13 @@ config (same url AND hwid, `config.go:1697-1703`), freezing the file until the p
 to `/config/sources.yaml,/config/config.yaml`). BOTH files are seeded, not just the overlay:
 `validateSources` rules on the whole MERGED list and
 `config.yaml` carries `subscriptions.sources` of its own, so seeding one of the two would fail
-closed on the entire config over a name the crawler had in front of it. Curated names do
-wear the minted shape, in the shipped overlay right now: `goida26-1`, `kreemchek-26`,
-`kort0881-vless-042`, `-041` and `plsn1337-filtered-vless-keys-2` — 5 of the 87 curated
-names in `config/sources.yaml` (`:137`, `:160`, `:164`, `:166`, `:176`, read 2026-08-26).
-The last four arrived that day, salvaged from the retired second instance's list, where they
+closed on the entire config over a name the crawler had in front of it. Curated names CAN
+wear the minted shape — it is a naming rule, not a mark — and five of the 87 did on
+2026-08-26 (`goida26-1`, `kreemchek-26`, `kort0881-vless-042`, `-041` and
+`plsn1337-filtered-vless-keys-2`), but the overlay now wears it on NONE of its 47 names: all
+five were removed 2026-09-10 for never publishing, so the ambiguity a reader cannot see
+coming survives only on crawler-minted names in `private.yaml`.
+Four of them had arrived 2026-08-26, salvaged from the retired second instance's list, where they
 read at `config-vassago/sources.yaml:203,223,251,259` before the directory was deleted.
 The same overlay carried `wepogp-1` and `wepogp-4` until 2026-08-26, when both were pruned
 for yielding 4 and 6 nodes a cycle — the hazard is a naming rule, not any one row. `wepogp-1` is precisely what the mint
@@ -461,14 +505,17 @@ is not changing, which is why the ambiguity is written down here instead of desi
   `file-vpn-2`, and `file-vpn-2-1444c8` strips down to `file-vpn` while `file-vpn-2-3631` — a
   post id — must strip to `file-vpn-2`. The two are indistinguishable as strings. Nothing in a
   name says which trailing digit run was the slug's own. Curated
-  names share the minted shape too, and the count outlived the second instance: 5 of the 87
-  curated names in `config/sources.yaml` wear it (read 2026-08-26) — `kort0881-vless-042`
+  names can wear the minted shape too, but that count is now historical: on 2026-08-26, 5 of
+  the 87 curated names in `config/sources.yaml` wore it — `kort0881-vless-042`
   and `-041` collapsing onto one `kort0881-vless` row no channel produced, `kreemchek-26`
   onto `kreemchek`, `plsn1337-filtered-vless-keys-2` onto `plsn1337-filtered-vless-keys`,
-  `goida26-1` onto `goida26`. The first four were salvaged that day from the retired second
-  instance, where six of its 52 names did the same (counted 2026-08-18 across both
-  instances' curated overlays, the same count that caught `wepogp-1` and `wepogp-4`, then at
-  `config/sources.yaml:91,93` and pruned 2026-08-26). So the mint writes the slug
+  `goida26-1` onto `goida26` — and all five were removed 2026-09-10 for never publishing, so
+  the shipped overlay wears it on NONE of its 47 names and the fold this bullet warns about
+  now has only crawler-minted names in `private.yaml` to be wrong on. The first four were
+  salvaged that day from the retired second instance, where six of its 52 names did the same
+  (counted 2026-08-18 across both
+  instances' curated overlays, the same count that caught `wepogp-1` and `wepogp-4`,
+  pruned 2026-08-26). So the mint writes the slug
   down at the one moment it has it, and no reader guesses.
   `stable_source_dropped_nodes` is the one family carrying neither `feed` nor `owner` —
   `source` and `reason` only — so per-source drops stay a question you ask by name.
@@ -527,7 +574,8 @@ is not changing, which is why the ambiguity is written down here instead of desi
   to 2026-08-15 17:23Z, so any total here is stale within hours. That metric is the live
   figure, drawn as panel 3 "Sources OK / total" at the top of the Grafana dashboard;
   prefer it to any number below. It counts BOTH overlays — `config/sources.yaml`'s curated
-  names (46 when this was written, 70 on 2026-08-26) as well as the crawler's private ones —
+  names (46 when this was written, 70 on 2026-08-26, 47 on 2026-09-10 after the curated
+  cut back to the entries that published) as well as the crawler's private ones —
   and it lags the file on disk by up
   to one cycle, because a reload only reaches the worker when its next cycle starts. At
   17:23Z it read 396 = the 46 curated names plus the 350 private ones the 17:09Z cycle

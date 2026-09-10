@@ -32,20 +32,12 @@ subscriptions:
       url: https://raw.githubusercontent.com/yafeisun/v2raynode/refs/heads/main/result/karing.txt
     - name: ishalumi
       url: https://raw.githubusercontent.com/ishalumi/proxy-node-collector/main/output/nodes.txt
-    - name: yuanxiawan
-      url: https://raw.githubusercontent.com/yuanxiawan/freevless/main/results/valid_vless_configs.txt
     - name: vova
       url: https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt
     - name: avia
       url: https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt
-    - name: niqonopin
-      url: https://raw.githubusercontent.com/niq0n0pin/v2rayfree-nice-tracker/main/backup/nodes.txt
     - name: wind7077
       url: https://raw.githubusercontent.com/Wind7077/vl-checker/main/output/proxies.txt
-    - name: tepo80
-      url: https://raw.githubusercontent.com/tepo80/tepo80/main/vmess.txt
-    - name: etoneyaproject
-      url: https://raw.githubusercontent.com/EtoNeYaProject/etoneyaproject.github.io/refs/heads/main/1
     - name: bywarm-merged
       url: https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt
     - name: goida
@@ -54,22 +46,14 @@ subscriptions:
       url: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt
     - name: prominbro
       url: https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt
-    - name: obhodwl
-      url: https://raw.githubusercontent.com/tankist939-afk/Obhod-WL/refs/heads/main/Obhod%20WL
     - name: reality
       url: https://gitflic.ru/project/sigil/my-new-cool-project/blob/raw?file=whitelist
-    - name: genlib
-      url: https://raw.githubusercontent.com/gergew452/Generation-Liberty/refs/heads/main/githubmirror/best.txt
-    - name: whitelist-sanuyyq
-      url: https://raw.githubusercontent.com/Sanuyyq/sub-storage1/refs/heads/main/bs.txt
     - name: shatak
       url: https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
     - name: rostunnel-gen
       url: https://subrostunnel.vercel.app/gen.txt
     - name: rostunnel-mega
       url: https://rostunnel.vercel.app/mega.txt
-    - name: abikus
-      url: https://cdn.jsdelivr.net/gh/AbikusSudo/RussiaVPN@main/docs/index.html
     - name: flat447
       url: https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_FULL.txt
     - name: fastnodes-se
@@ -78,8 +62,6 @@ subscriptions:
       url: https://raw.githubusercontent.com/rtwo2/FastNodes/main/sub/countries/FI.txt
     - name: vify
       url: https://raw.githubusercontent.com/Mr-Meshky/vify/main/configs/alive.txt
-    - name: bocchi2b
-      url: https://links.bocchi2b.top/clash
     - name: zhuhaiuk
       url: https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt
     - name: kasesm
@@ -88,16 +70,10 @@ subscriptions:
       url: https://gitverse.ru/api/repos/Kernyx/notes/raw/branch/master/sub.txt
     - name: apelsintel
       url: https://gitverse.ru/api/repos/bikinitw22/apelsintel/raw/branch/main/alive_full.txt
-    - name: vdevel26
-      url: https://gitverse.ru/api/repos/vdevel/proxy/raw/branch/main/26.txt
     - name: gidro-white
       url: https://gitverse.ru/api/repos/gidro/white/raw/branch/master/subscription.txt
     - name: fnoide-keys
       url: https://gitverse.ru/api/repos/Fnoide/Keys/raw/branch/main/processed_keys.txt
-    - name: ultav-white
-      url: https://gitverse.ru/api/repos/volondses/ultav/raw/branch/master/UltavWhite.txt
-    - name: bazz1024-mirror
-      url: https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/rkn_white_list
     - name: rjsxrd-bypass
       url: https://raw.githubusercontent.com/whoahaow/rjsxrd/refs/heads/main/githubmirror/bypass/bypass-all.txt
     - name: ruvipien-goida
@@ -108,74 +84,20 @@ subscriptions:
       url: https://gitverse.ru/api/repos/Emillynn/sub-configs-mirror/raw/branch/master/goida-24.txt
     - name: linspisok-all
       url: https://hub.mos.ru/LinSpisokObhod/LInSpisokObhod/-/raw/main/sub/ALL.txt
-    - name: ruwbl-rostun
-      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/RosTun/utf-8_wl.txt
-    - name: xalador
-      url: https://gitverse.ru/api/repos/Xalador/AutoConfig/raw/branch/master/output.txt
-    - name: ruwbl-outline
-      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/OutlineVPN/OutlineVPN.txt
     - name: ayub-mobile
       url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS_mobile.txt
-    - name: ruwbl-zieng2
-      url: https://gitverse.ru/api/repos/ru-wbl/wl/raw/branch/master/Zieng2/Zieng2_vless_lite.txt
-    - name: ayub-rus
-      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS.txt
-    - name: ayub-ss
-      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/BLACK_SS%2BAll_RUS.txt
-    - name: ruvipien-igareck
-      url: https://gitverse.ru/api/repos/RUVIPIEN/russian-white-bolt/raw/branch/master/VPNMIRRORS/vless/VLESS_Reality_White_Lists_RU_Mobile_2__igareck_.txt
-    - name: glproxy
-      url: https://gitverse.ru/api/repos/glprx/glproxy/raw/branch/master/processed.txt
-    - name: ayub-reality
-      url: https://gitverse.ru/api/repos/Ayub/vpn-configs-for-russia/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-    - name: lonnory
-      url: https://gitverse.ru/api/repos/Lonnory/VlessALL/raw/branch/master/Vpn.txt
-    - name: moonlume-vless
-      url: https://gitverse.ru/api/repos/moonlume/ru-whitelist/raw/branch/master/vless.txt
-    - name: mirgittech-mia
-      url: https://gitverse.ru/api/repos/mirgittech/mia/raw/branch/master/configs.txt
-    - name: goida26-1
-      url: https://gitflic.ru/project/id821859431/goida-vpn-configs26/blob/raw?file=1igarec
-    - name: scalavpn
-      url: https://gitflic.ru/project/scala/scalavpn-configs/blob/raw?file=sub
-    - name: revotech
-      url: https://gitverse.ru/api/repos/revotech.ru/xray-vless-gen/raw/branch/master/shadow.txt
     # Salvaged from config-vassago/sources.yaml when that instance was dropped
     # 2026-08-26. Those 52 hand-curated sources were measured against the live
-    # 737-source production corpus (152165 endpoints) the same day: these 17 are
-    # the ones carrying endpoints no already-configured source did, +6935
-    # between them. The other 35 added nothing and died with the directory.
+    # 737-source production corpus (152165 endpoints) the same day: 17 carried
+    # endpoints no already-configured source did, +6935 between them, and the
+    # other 35 added nothing. Thirteen of those 17 were dropped 2026-09-10 —
+    # endpoint novelty at salvage time did not survive to the published list,
+    # which is the only place it pays. The four below did.
     - name: heops6767-whitefiltredhy2vlesstroj
       url: https://raw.githubusercontent.com/heops6767/PypsCFG/main/output/WhiteFiltredHy2VlessTrojan.txt
     - name: holms2012-shj1
       url: https://raw.githubusercontent.com/holms2012/vtor/main/shj1.txt
-    - name: elanski-collected-raw
-      url: https://raw.githubusercontent.com/elanski/proxy-preflight/main/configs/collected_raw
-    - name: ndsphonemy-ru-arch
-      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru-arch.txt
-    - name: kryyyyyyyyyyyyyyyyyyy-blacklist
-      url: https://raw.githubusercontent.com/KRYYYYYYYYYYYYYYYYYYY/local/main/test1/blacklist.txt
     - name: qubertuwu-tgk-raw
       url: https://raw.githubusercontent.com/qubertuwu/Gh0st_WhiteList/main/configs/tgk/tgk_raw.txt
-    - name: kreemchek-26
-      url: https://raw.githubusercontent.com/Kreemchek/goida-vpn-configs/main/githubmirror/26.txt
-    - name: xxx3-lab-ru-white-all-part1
-      url: https://raw.githubusercontent.com/xxx3-lab/ahiteo-vpn/main/ru_white_all_part1.txt
-    - name: kort0881-vless-042
-      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_042.txt
-    - name: kort0881-vless-041
-      url: https://raw.githubusercontent.com/kort0881/sbornik-vless/main/subs/vless_041.txt
     - name: dxfh-ru
       url: https://raw.githubusercontent.com/DXFH/clash-free-cleaner/main/sub/countries/RU.txt
-    - name: kort0881-all-posts
-      url: https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/vpn-files/all_posts.txt
-    - name: recrumptor-vless-sorted
-      url: https://raw.githubusercontent.com/recrumptor/csub/main/vless_sorted.txt
-    - name: rudolfdiesel1488-dot-whitelist-con
-      url: https://raw.githubusercontent.com/rudolfdiesel1488-dot/my-vpn-sub/main/whitelist_configs.txt
-    - name: plsn1337-filtered-vless-keys-2
-      url: https://raw.githubusercontent.com/plsn1337/white-vless/main/filtered_vless_keys_2.txt
-    - name: ndsphonemy-ru
-      url: https://raw.githubusercontent.com/ndsphonemy/proxy-sub/main/ru.txt
-    - name: mgentel1309-vless-lite
-      url: https://raw.githubusercontent.com/mGentel1309/Vpn/main/vless_lite.txt

@@ -241,12 +241,15 @@ vendor the dashboard into the nixos repo.
   trailing strip leaves the collision form `seyedng-3631-1444c8` on its post rather than its
   channel, and a greedy strip mangles any slug ending in a digit run — `channelSlug` keeps digits
   and folds `_` to `-`, and the corpus carries `file-vpn-2`, whose `file-vpn-2-1444c8` would strip
-  to `file-vpn` while `file-vpn-2-3631` must strip to `file-vpn-2`. Curated names share the minted
-  shape too, and in the shipped overlay: `kort0881-vless-042` and `-041`
-  (`config/sources.yaml:164`, `:166` — salvaged from the retired second instance's list
-  2026-08-26) would collapse onto a `kort0881-vless` row no channel produced, and
-  `goida26-1` (`:137`) is exactly what the mint writes for the first postless URL of a
-  channel slugging to `goida26` (`sourceName`, `internal/crawl/crawl.go:966-969`).
+  to `file-vpn` while `file-vpn-2-3631` must strip to `file-vpn-2`. Curated names can wear the
+  minted shape too, though the shipped overlay no longer demonstrates it: `kort0881-vless-042`
+  and `-041` (salvaged from the retired second instance's list 2026-08-26) would collapse
+  onto a `kort0881-vless` row no channel produced, and `goida26-1` is exactly what the mint
+  writes for the first postless URL of a channel slugging to `goida26` (`sourceName`,
+  `internal/crawl/crawl.go:966-969`) — all five curated names that wore the shape (these
+  three plus `kreemchek-26` and `plsn1337-filtered-vless-keys-2`) were removed 2026-09-10 for
+  never publishing, so the collision is raised now only by crawler-minted names in
+  `config/private.yaml`.
   The rows stay mixed, for a reason `owner` makes legible: the inline
   harvest (`inline`, `crawl.go:1155`) records no channel and neither does a bare-hash name
   (`unattributedNameRe`, `crawl.go:68`), so each falls back to naming itself, yet each is an
