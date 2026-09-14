@@ -47,6 +47,69 @@ func exposedLatencyBounds(t *testing.T) []float64 {
 	return bounds
 }
 
+const speedBucketPrefix = `stable_kept_speed_mbps_bucket{le="`
+
+// exposedSpeedBounds reads the speed ladder out of a scrape, for the same
+// reason exposedLatencyBounds does: the exposition is the form the gate has to
+// be visible in.
+func exposedSpeedBounds(t *testing.T) []float64 {
+	t.Helper()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{})
+
+	var bounds []float64
+	for line := range strings.SplitSeq(render(t, m), "\n") {
+		rest, isBucket := strings.CutPrefix(line, speedBucketPrefix)
+		le, _, ok := strings.Cut(rest, `"`)
+		if !isBucket || !ok || le == "+Inf" {
+			continue
+		}
+		v, err := strconv.ParseFloat(le, 64)
+		if err != nil {
+			t.Fatalf("unparseable bucket bound %q: %v", le, err)
+		}
+		bounds = append(bounds, v)
+	}
+	if len(bounds) == 0 {
+		t.Fatalf("no %s… buckets in the exposition", speedBucketPrefix)
+	}
+	return bounds
+}
+
+// TestSpeedBucketsCoverShippedGates is the latency ladder's invariant on the
+// speed side: the bandwidth floor a config ships must be a bucket edge, or the
+// panel interpolates across the one boundary an operator asks about — how many
+// published nodes sit just above the floor, and how much of the list a higher
+// floor would cost.
+func TestSpeedBucketsCoverShippedGates(t *testing.T) {
+	t.Parallel()
+
+	for _, dir := range shippedConfigDirs {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join("..", "..", dir, "config.yaml")
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("load %s: %v", path, err)
+			}
+			for _, spec := range cfg.NodeFilterSpecs() {
+				if spec.Type != config.FilterBandwidth || spec.Bandwidth.MinMbps == nil {
+					continue
+				}
+				gate := float64(*spec.Bandwidth.MinMbps)
+				if gate == 0 {
+					continue // no floor configured: nothing to mark
+				}
+				if bounds := exposedSpeedBounds(t); !slices.Contains(bounds, gate) {
+					t.Errorf("%s: bandwidth min_mbps = %v has no equal bound in the ladder %v", path, gate, bounds)
+				}
+			}
+		})
+	}
+}
+
 // shippedConfigDirs are the config directories the repo ships. The invariant is
 // about what ships, so the test reads those files, not fixtures.
 var shippedConfigDirs = []string{"config"}
