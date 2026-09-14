@@ -43,6 +43,19 @@
   },
   "panels": [
     {
+      "id": 100,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
       "id": 1,
       "type": "stat",
       "title": "Kept nodes (last cycle)",
@@ -54,7 +67,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "options": {
         "colorMode": "value",
@@ -101,7 +114,8 @@
           "expr": "stable_kept_nodes{job=\"$job\"}",
           "instant": true
         }
-      ]
+      ],
+      "description": "Nodes on /stable.txt after the last PUBLISHED cycle - the list a client actually receives. A cycle that fails leaves the previous value standing, so read it against 'Last publish age': a healthy number with a stale age is last hour's list."
     },
     {
       "id": 3,
@@ -115,7 +129,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 0
+        "y": 1
       },
       "options": {
         "colorMode": "value",
@@ -185,7 +199,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 0
+        "y": 1
       },
       "options": {
         "colorMode": "value",
@@ -251,7 +265,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 5
       },
       "fieldConfig": {
         "defaults": {
@@ -314,9 +328,9 @@
       "description": "Last cycle counted through the pipeline, in legend order: merged (unique nodes after dedupe), probed, dead-skipped (never probed \u2014 a recent probe found them dead), kept (published). merged = dead-skipped + probed, so the merged-to-probed gap is the dead cache, not loss; probed to kept is the probe plus the gates."
     },
     {
-      "id": 6,
+      "id": 10,
       "type": "timeseries",
-      "title": "Through-node filters: in vs kept",
+      "title": "Cycle duration, rate & failures",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -325,17 +339,50 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 5
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10
-          }
+          },
+          "unit": "s"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures/h"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cycles/h"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -353,8 +400,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_in_nodes{job=\"$job\"}",
-          "legendFormat": "{{filter}} in"
+          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
+          "legendFormat": "duration"
         },
         {
           "refId": "B",
@@ -362,16 +409,39 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_kept_nodes{job=\"$job\"}",
-          "legendFormat": "{{filter}} kept"
+          "expr": "increase(stable_cycle_failures_total{job=\"$job\"}[1h])",
+          "legendFormat": "failures/h"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_cycles_total{job=\"$job\"}[1h])",
+          "legendFormat": "cycles/h"
         }
-      ]
+      ],
+      "description": "Wall time of the last published cycle in seconds on the left axis; cycles and failures counted over a rolling hour on the right. cycles/h counts every attempt, published or failed, so failures/h is a subset of it \u2014 and both counters are exported before the first cycle publishes, when duration is still absent."
     },
     {
-      "id": 7,
+      "id": 110,
+      "type": "row",
+      "title": "Sources",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      }
+    },
+    {
+      "id": 14,
       "type": "timeseries",
-      "title": "Through-node filter drops by reason",
-      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody \u2014 but not necessarily a clean pass: a gate whose whole survivor batch was condemned had the verdict disbelieved by the plausibility breaker, kept every survivor, and booked the same present zeros, warning instead. Each gate's \"verdict trusted\" line (stable_filter_trusted, right axis) tells the two apart: 1 = the verdict was believed and its drops were enacted last cycle, 0 = the breaker rejected it and nothing was dropped, no line = the gate reached no verdict \u2014 unconfigured, no usable key, or cancelled.",
+      "title": "IP-stage yield",
+      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so survived normally sits far above merged, equal only when nothing is left to dedupe. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -380,7 +450,88 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% survived"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(stable_source_nodes_total{job=\"$job\"})",
+          "legendFormat": "fetched"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(stable_source_valid_nodes{job=\"$job\"})",
+          "legendFormat": "survived IP-stage"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * sum(stable_source_valid_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
+          "legendFormat": "% survived"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "IP-stage drops by reason",
+      "description": "Nodes the per-node IP-stage filters dropped in preprocess, summed over every source and split by reason. unsupported is not a filter drop \u2014 it counts unparseable input lines, which never entered the fetched total \u2014 and a flat zero on geo, asn or cidr may mean the selected job's instance configures no such filter.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
       },
       "fieldConfig": {
         "defaults": {
@@ -393,44 +544,7 @@
             }
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "verdict trusted$"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "min",
-                "value": 0
-              },
-              {
-                "id": "max",
-                "value": 1
-              },
-              {
-                "id": "custom.drawStyle",
-                "value": "line"
-              },
-              {
-                "id": "custom.stacking.mode",
-                "value": "none"
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 2
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -451,17 +565,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_filter_dropped_nodes{job=\"$job\"}",
-          "legendFormat": "{{filter}}/{{reason}}"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_filter_trusted{job=\"$job\"}",
-          "legendFormat": "{{filter}} verdict trusted"
+          "expr": "sum by (reason) (stable_source_dropped_nodes{job=\"$job\"})",
+          "legendFormat": "{{reason}}"
         }
       ]
     },
@@ -476,8 +581,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 12
+        "x": 0,
+        "y": 22
       },
       "options": {
         "showHeader": true,
@@ -587,252 +692,6 @@
       "description": "Per-source counts summed by feed and owner, top 25 ranked on valid. A feed is the channel an entry was minted from, or the entry's own name where none was recorded (metrics.go sourceFeed), so a row folds into one every source the channel it records minted, while an entry that records no channel is its own row -- every curated entry on either instance today, and on the crawler side the inline aggregate and any bare-hash mint. Read this table for the channel view; read it for one entry's total only after checking that entry sets feed. Columns: feed, owner (crawler or curated), then yielded, valid, kept, filtered from nodes_total, valid_nodes, tested_nodes, published_nodes. Both labels come from the exporter, so no name is parsed here."
     },
     {
-      "id": 8,
-      "type": "table",
-      "title": "Crawler sources: top 25 (last cycle)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 20
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "valid",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns",
-            "keepLabels": [
-              "source"
-            ]
-          }
-        },
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "source",
-            "mode": "outer"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 2": true,
-              "Time 3": true,
-              "Time 4": true,
-              "job": true,
-              "instance": true,
-              "__name__": true,
-              "feed": true,
-              "owner": true
-            },
-            "renameByName": {
-              "Value #A": "yielded",
-              "Value #B": "valid",
-              "Value #C": "kept",
-              "Value #D": "filtered"
-            },
-            "indexByName": {
-              "source": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "Value #D": 4
-            }
-          }
-        }
-      ],
-      "description": "Top 25 crawler-managed sources (owner=\"crawler\") ranked on valid, names verbatim: yielded/valid/kept/filtered are nodes_total/valid_nodes/tested_nodes/published_nodes. valid is pre-merge and kept post-merge, so dedup shrinks kept \u2014 and this table is not comparable row-for-row with the curated one beside it."
-    },
-    {
-      "id": 22,
-      "type": "table",
-      "title": "Curated sources: top 25 (last cycle)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 20
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "valid",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "format": "table",
-          "legendFormat": "{{source}}",
-          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns",
-            "keepLabels": [
-              "source"
-            ]
-          }
-        },
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "source",
-            "mode": "outer"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 2": true,
-              "Time 3": true,
-              "Time 4": true,
-              "job": true,
-              "instance": true,
-              "__name__": true,
-              "feed": true,
-              "owner": true
-            },
-            "renameByName": {
-              "Value #A": "yielded",
-              "Value #B": "valid",
-              "Value #C": "kept",
-              "Value #D": "filtered"
-            },
-            "indexByName": {
-              "source": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "Value #D": 4
-            }
-          }
-        }
-      ],
-      "description": "Top 25 hand-curated sources (owner=\"curated\") ranked on valid, names verbatim, same columns as the crawler table. Not comparable row-for-row with it: the curated overlay merges first and Merge is first-wins, so kept and filtered here are inflated against it."
-    },
-    {
       "id": 21,
       "type": "table",
       "title": "Ownership split: crawler vs curated (last cycle)",
@@ -842,9 +701,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 28
+        "w": 12,
+        "x": 12,
+        "y": 22
       },
       "options": {
         "showHeader": true,
@@ -968,153 +827,132 @@
       "description": "Both owner sides summed into two rows \u2014 the exporter's owner label, crawler vs curated \u2014 with the tables' columns plus a count of sources that reported last cycle. filtered is ATTRIBUTION, not contribution: the curated overlay merges first and Merge is first-wins, so a shared node is credited to the curated row."
     },
     {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Cloudflare egress trace",
-      "description": "Published nodes split by whether Cloudflare's cdn-cgi/trace answered, plus moved \u2014 answered nodes whose measured egress country differs from the one the offline chain assigned. Nothing here drops a node, and moved is counted over answered nodes only, so a large unanswered share makes it less representative.",
+      "id": 8,
+      "type": "table",
+      "title": "Crawler sources: top 25 (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
-        "y": 36
+        "y": 30
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "valid",
+            "desc": true
+          }
+        ]
       },
       "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 60,
-            "stacking": {
-              "mode": "none"
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"crawler\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"crawler\"})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "keepLabels": [
+              "source"
+            ]
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "source",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "job": true,
+              "instance": true,
+              "__name__": true,
+              "feed": true,
+              "owner": true
+            },
+            "renameByName": {
+              "Value #A": "yielded",
+              "Value #B": "valid",
+              "Value #C": "kept",
+              "Value #D": "filtered"
+            },
+            "indexByName": {
+              "source": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
             }
           }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "last"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi"
         }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_trace_answered_nodes{job=\"$job\"}",
-          "legendFormat": "answered"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_trace_unanswered_nodes{job=\"$job\"}",
-          "legendFormat": "unanswered"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_trace_moved_nodes{job=\"$job\"}",
-          "legendFormat": "moved (offline chain was wrong)"
-        }
-      ]
+      ],
+      "description": "Top 25 crawler-managed sources (owner=\"crawler\") ranked on valid, names verbatim: yielded/valid/kept/filtered are nodes_total/valid_nodes/tested_nodes/published_nodes. valid is pre-merge and kept post-merge, so dedup shrinks kept \u2014 and this table is not comparable row-for-row with the curated one beside it."
     },
     {
-      "id": 9,
-      "type": "timeseries",
-      "title": "Kept-node speed",
-      "description": "Download speed of the nodes published last cycle: exact avg and max, plus p50/p90 interpolated from fixed buckets topping out at 500 Mbps, so a quantile pinned at 500 means faster than 500, not a plateau. With no bandwidth filter configured, avg still draws a flat zero while p50/p90 and max vanish.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 44
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Mbits",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
-          "legendFormat": "p90"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_kept_speed_max_mbps{job=\"$job\"}",
-          "legendFormat": "max"
-        },
-        {
-          "refId": "E",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_kept_speed_mbps_sum{job=\"$job\"} / clamp_min(stable_kept_speed_mbps_count{job=\"$job\"}, 1)",
-          "legendFormat": "avg"
-        }
-      ]
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "Kept-node latency",
-      "description": "Mean per-node probe delay in ms over the nodes published last cycle \u2014 the value the survivor gate (check.max_avg_ms) admits on and then sorts the list by. Read p90 and max against this job's own threshold: well under it the gate is not binding, pressed against it the cut is sitting inside the live population.",
+      "id": 22,
+      "type": "table",
+      "title": "Curated sources: top 25 (last cycle)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1123,131 +961,20 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
+        "y": 30
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
-          "legendFormat": "p90"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_kept_latency_max_ms{job=\"$job\"}",
-          "legendFormat": "max"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_kept_latency_ms_sum{job=\"$job\"} / clamp_min(stable_kept_latency_ms_count{job=\"$job\"}, 1)",
-          "legendFormat": "avg"
-        }
-      ]
-    },
-    {
-      "id": 10,
-      "type": "timeseries",
-      "title": "Cycle duration, rate & failures",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 52
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
-          "unit": "s"
-        },
-        "overrides": [
+        "showHeader": true,
+        "sortBy": [
           {
-            "matcher": {
-              "id": "byName",
-              "options": "failures/h"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cycles/h"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
+            "displayName": "valid",
+            "desc": true
           }
         ]
       },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
       },
       "targets": [
         {
@@ -1256,8 +983,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
-          "legendFormat": "duration"
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_nodes_total{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         },
         {
           "refId": "B",
@@ -1265,8 +994,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(stable_cycle_failures_total{job=\"$job\"}[1h])",
-          "legendFormat": "failures/h"
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         },
         {
           "refId": "C",
@@ -1274,16 +1005,91 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(stable_cycles_total{job=\"$job\"}[1h])",
-          "legendFormat": "cycles/h"
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_tested_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{source}}",
+          "expr": "stable_source_published_nodes{job=\"$job\",owner=\"curated\"} and on(source) topk(25, stable_source_valid_nodes{job=\"$job\",owner=\"curated\"})"
         }
       ],
-      "description": "Wall time of the last published cycle in seconds on the left axis; cycles and failures counted over a rolling hour on the right. cycles/h counts every attempt, published or failed, so failures/h is a subset of it \u2014 and both counters are exported before the first cycle publishes, when duration is still absent."
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "keepLabels": [
+              "source"
+            ]
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "source",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "job": true,
+              "instance": true,
+              "__name__": true,
+              "feed": true,
+              "owner": true
+            },
+            "renameByName": {
+              "Value #A": "yielded",
+              "Value #B": "valid",
+              "Value #C": "kept",
+              "Value #D": "filtered"
+            },
+            "indexByName": {
+              "source": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
+            }
+          }
+        }
+      ],
+      "description": "Top 25 hand-curated sources (owner=\"curated\") ranked on valid, names verbatim, same columns as the crawler table. Not comparable row-for-row with it: the curated overlay merges first and Merge is first-wins, so kept and filtered here are inflated against it."
     },
     {
-      "id": 11,
+      "id": 120,
+      "type": "row",
+      "title": "Probe",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      }
+    },
+    {
+      "id": 19,
       "type": "timeseries",
-      "title": "Unresolved GEO tags in published list",
+      "title": "TCP pre-check (reachability)",
+      "description": "What the probe phase's TCP reachability pre-check did, in distinct server:port endpoints \u2014 never the condemned NODE count on the probe-outcome panel. trusted = 1: refused endpoints were condemned unprobed and dead-cached; trusted = 0: the breaker rejected the verdict and every node was probed; unresolved fails open.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1291,107 +1097,32 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 52
+        "x": 0,
+        "y": 39
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "% of kept"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_geo_unknown_nodes{job=\"$job\"}",
-          "legendFormat": "unresolved nodes"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "100 * stable_geo_unknown_nodes{job=\"$job\"} / clamp_min(stable_kept_nodes{job=\"$job\"}, 1)",
-          "legendFormat": "% of kept"
-        }
-      ],
-      "description": "Published nodes whose GEO tag came out [GEO:??] because no annotation provider resolved a country, as a count on the left axis and a percentage of the published list on the right. These nodes are absent from the per-country metric, so a collapsing annotation chain is visible only here."
-    },
-    {
-      "id": 17,
-      "type": "timeseries",
-      "title": "Cycle time by phase",
-      "description": "Stacked per-phase wall time, in seconds, of the last cycle that PUBLISHED \u2014 an aborted cycle leaves the previous one standing. The unstacked total runs above the stack because the steps between phases belong to no phase, and probe covers the whole Probe call including the TCP pre-check, which has no phase of its own.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 60
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
           "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 60,
-            "stacking": {
-              "mode": "normal",
-              "group": "phase"
-            }
+            "fillOpacity": 10
           }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "cycle total"
+              "options": "verdict trusted"
             },
             "properties": [
               {
-                "id": "custom.stacking",
-                "value": {
-                  "mode": "none"
-                }
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "max",
+                "value": 1
               },
               {
                 "id": "custom.fillOpacity",
@@ -1400,13 +1131,6 @@
               {
                 "id": "custom.lineWidth",
                 "value": 2
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
               }
             ]
           }
@@ -1418,8 +1142,7 @@
           "placement": "bottom"
         },
         "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+          "mode": "multi"
         }
       },
       "targets": [
@@ -1429,8 +1152,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_cycle_phase_duration_seconds{job=\"$job\"}",
-          "legendFormat": "{{phase}}"
+          "expr": "stable_precheck_dialled_endpoints{job=\"$job\"}",
+          "legendFormat": "dialled"
         },
         {
           "refId": "B",
@@ -1438,8 +1161,26 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
-          "legendFormat": "cycle total"
+          "expr": "stable_precheck_refused_endpoints{job=\"$job\"}",
+          "legendFormat": "refused"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_unresolved_endpoints{job=\"$job\"}",
+          "legendFormat": "unresolved (failed open)"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_precheck_trusted{job=\"$job\"}",
+          "legendFormat": "verdict trusted"
         }
       ]
     },
@@ -1454,9 +1195,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 68
+        "w": 12,
+        "x": 12,
+        "y": 39
       },
       "fieldConfig": {
         "defaults": {
@@ -1568,67 +1309,63 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "100 * stable_probe_outcome_nodes{job=\"$job\",stage=\"condemned\"} / clamp_min(stable_probed_nodes{job=\"$job\"}, 1)",
+          "expr": "100 * sum(stable_probe_outcome_nodes{job=\"$job\",stage=\"condemned\"}) / clamp_min(sum(stable_probed_nodes{job=\"$job\"}), 1)",
           "legendFormat": "condemned %"
         }
       ]
     },
     {
-      "id": 12,
-      "type": "bargauge",
-      "title": "Top countries in published list (last cycle)",
+      "id": 34,
+      "type": "timeseries",
+      "title": "Probe refusals by reason",
+      "description": "Probed nodes no URL test could be built for, split by who refused them: unconvertible = the share-link converter emitted no mapping for the scheme, unparsable = it did and mihomo refused the mapping. With stable_probe_outcome_nodes these partition stable_probed_nodes, so a gap between the two panels and \"probed\" is a prober without the refusal account.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 76
-      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "noValue": "NO COUNTRY COUNTS",
           "min": 0,
-          "color": {
-            "mode": "continuous-BlPu"
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
           }
         },
         "overrides": []
       },
       "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
         },
-        "showUnfilled": true,
-        "sizing": "auto"
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
         {
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "topk(15, stable_kept_country_nodes{job=\"$job\"})",
-          "legendFormat": "{{country}}",
-          "instant": true
+          "expr": "stable_probe_refused_nodes{job=\"$job\"}",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
         }
       ],
-      "description": "Node counts per country over the published list only, top 15 of the last cycle. topk returns a bar solely for countries that have nodes, so a collapsed cycle shows fewer; bar colour is scaled to the largest bar, encoding share of the top country rather than health, and unplaceable nodes are absent from this metric."
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      }
     },
     {
-      "id": 13,
+      "id": 17,
       "type": "timeseries",
-      "title": "IP-stage drops by reason",
-      "description": "Nodes the per-node IP-stage filters dropped in preprocess, summed over every source and split by reason. unsupported is not a filter drop \u2014 it counts unparseable input lines, which never entered the fetched total \u2014 and a flat zero on geo, asn or cidr may mean the selected job's instance configures no such filter.",
+      "title": "Cycle time by phase",
+      "description": "Stacked per-phase wall time, in seconds, of the last cycle that PUBLISHED \u2014 an aborted cycle leaves the previous one standing. The unstacked total runs above the stack because the steps between phases belong to no phase, and probe covers the whole Probe call including the TCP pre-check, which has no phase of its own.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1637,7 +1374,166 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 76
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "phase"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cycle total"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_cycle_phase_duration_seconds{job=\"$job\"}",
+          "legendFormat": "{{phase}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_cycle_duration_seconds{job=\"$job\"}",
+          "legendFormat": "cycle total"
+        }
+      ]
+    },
+    {
+      "id": 130,
+      "type": "row",
+      "title": "Through-node gates",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Through-node filters: in vs kept",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_in_nodes{job=\"$job\"}",
+          "legendFormat": "{{filter}} in"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_kept_nodes{job=\"$job\"}",
+          "legendFormat": "{{filter}} kept"
+        }
+      ],
+      "description": "Nodes entering and leaving each through-node gate, in chain order: every gate's 'in' is the previous gate's 'kept', so the ladder is the egress funnel. A gate whose in==kept every cycle either found nothing to drop or reached no verdict - stable_filter_trusted on the panel beside this one tells those apart."
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Through-node filter drops by reason",
+      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody \u2014 but not necessarily a clean pass: a gate whose whole survivor batch was condemned had the verdict disbelieved by the plausibility breaker, kept every survivor, and booked the same present zeros, warning instead. Each gate's \"verdict trusted\" line (stable_filter_trusted, right axis) tells the two apart: 1 = the verdict was believed and its drops were enacted last cycle, 0 = the breaker rejected it and nothing was dropped, no line = the gate reached no verdict \u2014 unconfigured, no usable key, or cancelled.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -1647,6 +1543,104 @@
             "fillOpacity": 60,
             "stacking": {
               "mode": "normal"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "verdict trusted$"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.stacking.mode",
+                "value": "none"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "last"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_dropped_nodes{job=\"$job\"}",
+          "legendFormat": "{{filter}}/{{reason}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_trusted{job=\"$job\"}",
+          "legendFormat": "{{filter}} verdict trusted"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Cloudflare egress trace",
+      "description": "Published nodes split by whether Cloudflare's cdn-cgi/trace answered, plus moved \u2014 answered nodes whose measured egress country differs from the one the offline chain assigned. Nothing here drops a node, and moved is counted over answered nodes only, so a large unanswered share makes it less representative.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "none"
             }
           }
         },
@@ -1671,16 +1665,47 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (reason) (stable_source_dropped_nodes{job=\"$job\"})",
-          "legendFormat": "{{reason}}"
+          "expr": "stable_trace_answered_nodes{job=\"$job\"}",
+          "legendFormat": "answered"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_trace_unanswered_nodes{job=\"$job\"}",
+          "legendFormat": "unanswered"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_trace_moved_nodes{job=\"$job\"}",
+          "legendFormat": "moved (offline chain was wrong)"
         }
       ]
     },
     {
-      "id": 14,
+      "id": 140,
+      "type": "row",
+      "title": "Published list",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      }
+    },
+    {
+      "id": 9,
       "type": "timeseries",
-      "title": "IP-stage yield",
-      "description": "Nodes every source yielded against those that survived the IP stage, survival share on the right axis. Both are summed per source before dedupe, so survived normally sits far above merged, equal only when nothing is left to dedupe. \"fetched\" excludes lines the parser refused, counted as reason=unsupported.",
+      "title": "Kept-node speed",
+      "description": "Download speed of the nodes published last cycle: exact avg and max, plus p50/p90 interpolated from fixed buckets topping out at 500 Mbps, so a quantile pinned at 500 means faster than 500, not a plateau. With no bandwidth filter configured, avg still draws a flat zero while p50/p90 and max vanish.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1689,34 +1714,17 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 84
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "Mbits",
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "% survived"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -1734,8 +1742,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(stable_source_nodes_total{job=\"$job\"})",
-          "legendFormat": "fetched"
+          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
+          "legendFormat": "p50"
         },
         {
           "refId": "B",
@@ -1743,25 +1751,34 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(stable_source_valid_nodes{job=\"$job\"})",
-          "legendFormat": "survived IP-stage"
+          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_speed_mbps_bucket{job=\"$job\"}))",
+          "legendFormat": "p90"
         },
         {
-          "refId": "C",
+          "refId": "D",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "100 * sum(stable_source_valid_nodes{job=\"$job\"}) / clamp_min(sum(stable_source_nodes_total{job=\"$job\"}), 1)",
-          "legendFormat": "% survived"
+          "expr": "stable_kept_speed_max_mbps{job=\"$job\"}",
+          "legendFormat": "max"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_kept_speed_mbps_sum{job=\"$job\"} / clamp_min(stable_kept_speed_mbps_count{job=\"$job\"}, 1)",
+          "legendFormat": "avg"
         }
       ]
     },
     {
-      "id": 19,
+      "id": 16,
       "type": "timeseries",
-      "title": "TCP pre-check (reachability)",
-      "description": "What the probe phase's TCP reachability pre-check did, in distinct server:port endpoints \u2014 never the condemned NODE count on the probe-outcome panel. trusted = 1: refused endpoints were condemned unprobed and dead-cached; trusted = 0: the breaker rejected the verdict and every node was probed; unresolved fails open.",
+      "title": "Kept-node latency",
+      "description": "Mean per-node probe delay in ms over the nodes published last cycle \u2014 the value the survivor gate (check.max_avg_ms) admits on and then sorts the list by. Read p90 and max against this job's own threshold: well under it the gate is not binding, pressed against it the cut is sitting inside the live population.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1770,43 +1787,17 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 84
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "min": 0,
+          "unit": "ms",
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "verdict trusted"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "max",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 2
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -1824,8 +1815,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_precheck_dialled_endpoints{job=\"$job\"}",
-          "legendFormat": "dialled"
+          "expr": "histogram_quantile(0.5, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
+          "legendFormat": "p50"
         },
         {
           "refId": "B",
@@ -1833,8 +1824,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_precheck_refused_endpoints{job=\"$job\"}",
-          "legendFormat": "refused"
+          "expr": "histogram_quantile(0.9, sum by (le) (stable_kept_latency_ms_bucket{job=\"$job\"}))",
+          "legendFormat": "p90"
         },
         {
           "refId": "C",
@@ -1842,8 +1833,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_precheck_unresolved_endpoints{job=\"$job\"}",
-          "legendFormat": "unresolved (failed open)"
+          "expr": "stable_kept_latency_max_ms{job=\"$job\"}",
+          "legendFormat": "max"
         },
         {
           "refId": "D",
@@ -1851,188 +1842,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "stable_precheck_trusted{job=\"$job\"}",
-          "legendFormat": "verdict trusted"
+          "expr": "stable_kept_latency_ms_sum{job=\"$job\"} / clamp_min(stable_kept_latency_ms_count{job=\"$job\"}, 1)",
+          "legendFormat": "avg"
         }
       ]
-    },
-    {
-      "id": 23,
-      "type": "stat",
-      "title": "Gemini gate enabled",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 92
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "NO GEMINI GATE",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_enabled{job=\"$job\"}",
-          "instant": true
-        }
-      ],
-      "description": "The gemini gate's tri-state, one tile: 1 means the gate ran last cycle and classified responses; 0 means a gemini filter is in this job's chain but had no usable API key, so it checked nothing and every survivor passed through unverified; No data means no gemini gate ran at all - no cycle published yet, no gemini filter in this job's chain, or a configured one that never reached its check (the through-node stage skipped it). A gate that is OFF must not read like a gate that is FINE, and the other two tiles stay at 0 while this reads 0."
-    },
-    {
-      "id": 24,
-      "type": "stat",
-      "title": "Gemini gate checks",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 8,
-        "y": 92
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "NO GEMINI GATE",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "text",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_checks{job=\"$job\"}",
-          "instant": true
-        }
-      ],
-      "description": "Gemini API responses the gate classified last cycle: the denominator for the unverified-checks tile beside it. One per proxy that ANSWERED, so it is neither the node count nor the gemini filter's in count - a multi-port node contributes one per answering port, and a proxy that never answered is in neither term. 0 beside an enabled 1 means the gate ran and every check was verified."
-    },
-    {
-      "id": 25,
-      "type": "stat",
-      "title": "Gemini gate unverified checks",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 16,
-        "y": 92
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "NO GEMINI GATE",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "text",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "stable_gemini_gate_unverified_checks{job=\"$job\"}",
-          "instant": true
-        }
-      ],
-      "description": "Responses that told the gate nothing about the egress location last cycle: the API rejected the request before evaluating it (401/403/404/429, or a 400 API_KEY_INVALID - a rotated, restricted or quota-exhausted key). Those nodes were KEPT and published unverified; this is not a drop, not a block and not a request error. A large share of the checks tile here means the gate is running blind."
     },
     {
       "id": 26,
@@ -2046,7 +1859,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 96
+        "y": 81
       },
       "options": {
         "colorMode": "value",
@@ -2108,7 +1921,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 96
+        "y": 81
       },
       "options": {
         "colorMode": "value",
@@ -2155,16 +1968,273 @@
       "description": "Fastest kept node's mean probe delay last cycle: the head of the latency histogram panel, shown on its own tile because the histogram panel plots the max and the quantiles. Every kept survivor carries a latency, so No data here means no cycle has published nodes yet, not a missing measurement."
     },
     {
+      "id": 12,
+      "type": "bargauge",
+      "title": "Top countries in published list (last cycle)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 85
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "NO COUNTRY COUNTS",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "topk(15, stable_kept_country_nodes{job=\"$job\"})",
+          "legendFormat": "{{country}}",
+          "instant": true
+        }
+      ],
+      "description": "Node counts per country over the published list only, top 15 of the last cycle. topk returns a bar solely for countries that have nodes, so a collapsed cycle shows fewer; bar colour is scaled to the largest bar, encoding share of the top country rather than health, and unplaceable nodes are absent from this metric."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Unresolved GEO tags in published list",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 85
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% of kept"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_geo_unknown_nodes{job=\"$job\"}",
+          "legendFormat": "unresolved nodes"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * stable_geo_unknown_nodes{job=\"$job\"} / clamp_min(stable_kept_nodes{job=\"$job\"}, 1)",
+          "legendFormat": "% of kept"
+        }
+      ],
+      "description": "Published nodes whose GEO tag came out [GEO:??] because no annotation provider resolved a country, as a count on the left axis and a percentage of the published list on the right. These nodes are absent from the per-country metric, so a collapsing annotation chain is visible only here."
+    },
+    {
+      "id": 150,
+      "type": "row",
+      "title": "Crawler: Telegram",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Telegram topic funnel",
+      "description": "Forum-topic windows the crawler read per hour and what they yielded: pages fetched, pages carrying a live subscription URL, and new chats discovered from them. live/pages is the seed list's precision; discovered is the frontier it opens.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_topic_pages_total{job=\"$job\"}[1h])",
+          "legendFormat": "pages/h",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_topic_live_total{job=\"$job\"}[1h])",
+          "legendFormat": "live/h",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_topic_discovered_total{job=\"$job\"}[1h])",
+          "legendFormat": "discovered/h",
+          "refId": "C"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 94
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Telegram empty reads",
+      "description": "Reads that returned nothing per hour: topic windows with no message (topic_empty) and bare groups whose /s listing carries no message wrap (group_empty). Both are pure cost - a group_empty rate climbing with no discovery means the frontier is filling with bare group refs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_topic_empty_total{job=\"$job\"}[1h])",
+          "legendFormat": "topic empty/h",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "increase(stable_crawl_group_empty_total{job=\"$job\"}[1h])",
+          "legendFormat": "group empty/h",
+          "refId": "B"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      }
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 100
+        "y": 102
       },
       "id": 28,
       "panels": [],
-      "title": "Crawler",
+      "title": "Crawler: GitHub",
       "type": "row"
     },
     {
@@ -2179,7 +2249,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 101
+        "y": 103
       },
       "fieldConfig": {
         "defaults": {
@@ -2244,7 +2314,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 101
+        "y": 103
       },
       "fieldConfig": {
         "defaults": {
@@ -2291,7 +2361,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 109
+        "y": 111
       },
       "fieldConfig": {
         "defaults": {
@@ -2356,7 +2426,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 109
+        "y": 111
       },
       "fieldConfig": {
         "defaults": {
@@ -2412,7 +2482,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 117
+        "y": 119
       },
       "fieldConfig": {
         "defaults": {
