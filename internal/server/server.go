@@ -203,26 +203,19 @@ var indexQueryKeys = [...]string{
 }
 
 func repeatedIndexQueryParam(c *fiber.Ctx) string {
-	dup := -1
 	var seen [len(indexQueryKeys)]bool
-	c.Request().URI().QueryArgs().VisitAll(func(k, _ []byte) {
-		if dup >= 0 {
-			return
-		}
+	for k := range c.Request().URI().QueryArgs().All() {
 		for i, key := range indexQueryKeys {
-			if string(k) == key {
-				if seen[i] {
-					dup = i
-					return
-				}
-				seen[i] = true
+			if string(k) != key {
+				continue
 			}
+			if seen[i] {
+				return indexQueryKeys[i]
+			}
+			seen[i] = true
 		}
-	})
-	if dup < 0 {
-		return ""
 	}
-	return indexQueryKeys[dup]
+	return ""
 }
 
 // countryTokenPresent reports whether raw holds at least one non-blank
