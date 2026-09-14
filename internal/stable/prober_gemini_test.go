@@ -1,11 +1,13 @@
 package stable //nolint:testpackage // exercises unexported stable internals
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,6 +186,47 @@ func TestGeminiCheckClassifiesThroughTheFanOut(t *testing.T) {
 				t.Fatalf("blocked outcomes = %d, want blocked=%v for status %d", blocked, tc.wantBlocked, tc.status)
 			}
 		})
+	}
+}
+
+// TestGeminiCheckWarnsWithItsOwnCount pins the account that survived the
+// metric's removal: the counters now feed only this WARN, so a regression that
+// stops counting, counts proxies instead of classifier calls, or drops the
+// denominator would be invisible everywhere else. Three rejected responses and
+// two dead proxies: five proxies handed in, three classified, three
+// unverified.
+func TestGeminiCheckWarnsWithItsOwnCount(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var logged bytes.Buffer
+	m, err := NewMihomoProber(
+		config.CheckConfig{ExpectedStatus: "204"},
+		config.BandwidthConfig{},
+		config.GeoBlockConfig{Gemini: config.GeminiConfig{
+			Endpoint: srv.URL, Model: "gemini-2.0-flash", Marker: "User location is not supported",
+			Timeout: 5 * time.Second, Concurrency: 4,
+		}},
+		config.CloudflareConfig{},
+		"KEY",
+		zerolog.New(&logged),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.GeminiCheck(context.Background(), geminiTestProxies(3, 2))
+
+	out := logged.String()
+	for _, want := range []string{`"unverified_checks":3`, `"classified":3`, `"of":5`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the gate's WARN must carry %s, got:\n%s", want, out)
+		}
 	}
 }
 

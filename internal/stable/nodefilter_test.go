@@ -62,7 +62,8 @@ func TestBuildNodeFilters(t *testing.T) {
 		t.Fatalf("no names -> no filters, got %d", len(fs))
 	}
 
-	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "bandwidth", "bogus"}, prober, nil, zerolog.Nop())
+	store := &stubBlocklist{}
+	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "bandwidth", "bogus"}, prober, store, zerolog.Nop())
 	if len(fs) != 5 {
 		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
 	}
@@ -76,8 +77,15 @@ func TestBuildNodeFilters(t *testing.T) {
 	if gf.enabled == nil {
 		t.Fatal("gemini filter built without its enabled() hook")
 	}
-	if cf, isAPI := fs[1].(*apiFilter); !isAPI || cf.enabled != nil {
-		t.Fatalf("claude filter must be a keyless *apiFilter with no enabled hook, got %T", fs[1])
+	// The store is the gate's only effect that outlives a cycle: a blocked
+	// host stays blocked for the store's whole TTL, across restarts. Wiring
+	// the filter without it is silent — every in/kept/dropped assertion in
+	// this file still passes.
+	if gf.store != store {
+		t.Fatalf("gemini filter built without the geoblock store: %#v", gf.store)
+	}
+	if cf, isAPI := fs[1].(*apiFilter); !isAPI || cf.enabled != nil || cf.store != store {
+		t.Fatalf("claude filter must be a keyless *apiFilter fed the store, got %T", fs[1])
 	}
 	if got := builtFilterName(fs[2]); got != "chatgpt" {
 		t.Fatalf("expected chatgpt filter third, got %q", got)
@@ -443,12 +451,14 @@ func newTestGeminiFilter(gc geminiChecker) *apiFilter {
 	}
 }
 
-// TestGeminiFilterKeepsUnverifiedOutOfDropped: a node the gate could not
-// verify is KEPT and published, and FilterReport.Dropped renders as
-// stable_filter_dropped_nodes{reason=...}, so nothing about it may land there
-// — the defect corrected/unanswered already shipped once (shipped by b545d0a,
-// corrected in e554307).
-func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
+// TestGeminiFilterCleanPassBooksNoDrop: a believed clean verdict books its two
+// drop reasons at zero and nothing else. The filter cannot see verification at
+// all — APIOutcome carries Reachable/Blocked and geminiInconclusive lives in
+// the prober — so a node the gate could not verify reaches here as a plain
+// keep, and FilterReport.Dropped renders as stable_filter_dropped_nodes, where
+// any count would read as a node thrown away (the defect corrected/unanswered
+// shipped once: b545d0a, corrected in e554307).
+func TestGeminiFilterCleanPassBooksNoDrop(t *testing.T) {
 	t.Parallel()
 
 	gc := &fakeGeminiChecker{
@@ -460,7 +470,7 @@ func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
 	kept, rep := f.apply(context.Background(), []Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
 
 	if len(kept) != 1 {
-		t.Fatalf("an unverified node is KEPT, not dropped: kept %d", len(kept))
+		t.Fatalf("a clean verdict keeps its node: kept %d", len(kept))
 	}
 	for reason, n := range rep.Dropped {
 		if n != 0 {

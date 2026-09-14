@@ -402,7 +402,7 @@ func withoutSampleLines(out, prefix string) string {
 // publishes survivors with no egress question asked. Rendering
 // answered=0/unanswered=0 for it is byte-identical to a trace that ran and
 // nobody answered, so the family must be silent -- exactly how writePrecheck
-// and writeGemini treat their absent states.
+// and writeFilters' absent state treat theirs.
 func TestMetricsTraceAbsentRendersNoFamily(t *testing.T) {
 	t.Parallel()
 

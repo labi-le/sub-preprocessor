@@ -20,10 +20,9 @@ vendor the dashboard into the nixos repo.
 - Data flows via the nil-safe `stable.Reporter`: `RunOnce` hands a `CycleReport` to
   `metrics.Metrics.Observe` on a published cycle and `ObserveError()` on any abort.
   **Adding/renaming a metric? Update
-  `deploy/grafana/sub-preprocessor.json` in the same commit.** One family currently ships
-  without that panel half, stated rather than implied: `stable_probe_refused_nodes`
-  (2026-09; the dead-cache bullet below documents it) has no target in
-  `deploy/grafana/sub-preprocessor.json`, so it is read by query until a tile lands.
+  `deploy/grafana/sub-preprocessor.json` in the same commit.** Every family now has its panel
+  half: the last exception, `stable_probe_refused_nodes`, got panel 34 on 2026-09-14, and the
+  five `stable_crawl_topic_*`/`group_empty` counters got panels 35 and 36 in the same pass.
 - **The cycle is timed per PHASE, and the probe phase is not what its name suggests.**
   `stable_cycle_phase_duration_seconds{phase}` carries `fetch`/`merge`/`dead_filter`/
   `probe`/`egress`/`publish`; they sum to slightly LESS than
@@ -157,9 +156,9 @@ vendor the dashboard into the nixos repo.
   exact quantity `SelectSurvivors` admits on, `internal/stable/select.go:84-87`) — so
   its p90 is a percentile over per-node means, which compress the tail.
 - **The per-name tables are a PAIR split by owner, and the split is not an invitation to read
-  them side by side.** Panel 8 (x=0 y=20) takes `{owner="crawler"}`, panel 22 (x=12 y=20) takes
-  `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set;
-  panel 21 sums both sides full-width beneath them. `owner` is an EXPORTER label, and behind it a
+  them side by side.** Panel 8 (left) takes `{owner="crawler"}`, panel 22 (right) takes
+  `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set; panel 21
+  sums both sides into two rows, beside the feed table at the top of the Sources row. `owner` is an EXPORTER label, and behind it a
   FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
   beside `source` (`writeSources`, `internal/metrics/metrics.go:342`), read once per source off
   `SourceReport.Managed` (`:350-352`) and `.Feed` (`:354`, via `sourceFeed` at `:413`) — the
@@ -468,14 +467,12 @@ vendor the dashboard into the nixos repo.
   against a mihomo bump (the same line becomes a probed node the cycle the converter
   learns its scheme or cipher) and a steady value as the corpus's standing share of lines
   this worker's mihomo cannot dial — all four claims are in the `RefusalReport` doc cited
-  above and in the family's HELP text (`metrics.go:270`). The family ships with NO
-  dashboard panel — there is no `stable_probe_refused_nodes` target in
-  `deploy/grafana/sub-preprocessor.json`: panel 18 (`Probe outcome by stage`) reads
-  `stable_probe_outcome_nodes` and panel 5 (`Pipeline funnel`) draws
-  `stable_dead_skipped_nodes` as a line, and nothing draws the refusal pair — so it is
-  read by query until a tile lands; it is the one
-  live exception to the same-commit rule stated at the top of this guide, and the gap is
-  said here rather than implied.
+  above and in the family's HELP text (`metrics.go:270`). The family has drawn on panel 34
+  (`Probe refusals by reason`, the Probe row) since 2026-09-14; before that it was read by
+  query alone. Its neighbours split the same probed set: panel 18 (`Probe outcome by stage`)
+  reads `stable_probe_outcome_nodes` and panel 5 (`Pipeline funnel`) draws
+  `stable_dead_skipped_nodes`, so stages plus refusals closing on `stable_probed_nodes` is
+  something the two panels can now be read against each other for.
 - **The breaker trips on a share of what the pre-check JUDGED, over a floor — and a total
   refusal trips at any sample size.** `filterReachable` (`internal/stable/prober.go:643`) dials
   each distinct `server:port` the payload NAMES — parsable or not, since the parse comes
@@ -569,9 +566,9 @@ vendor the dashboard into the nixos repo.
   and served by the CRAWLER process — not the preprocessor listener described above — at
   `GET /metrics` on the optional `CRAWL_HTTP` trigger listener; a deployment without `CRAWL_HTTP`
   reads the same five numbers off the per-cycle structured log line that every cycle which crawls
-  emits (`reportTopics`). No Grafana panel or Prometheus rule consumes the topic family yet —
-  documentation only, by decision — unlike the GitHub discovery phase's ten below, whose panel
-  half shipped with the metrics in the same commit. Semantics:
+  emits (`reportTopics`). The topic family is drawn by panels 35 and 36
+  (row `Crawler: Telegram`, added 2026-09-14): 35 stacks pages/live/discovered per hour, 36 the
+  two empty-read counters, which are pure cost. Semantics:
   `stable_crawl_topic_pages_total` counts successful topic embed fetches (the denominator);
   `stable_crawl_topic_live_total` those yielding at least one live subscription (the numerator);
   `stable_crawl_topic_empty_total` embed pages that answered with a reachable body but zero
@@ -595,8 +592,8 @@ vendor the dashboard into the nixos repo.
   effectively dead — operator guidance rather than an automated alarm: nothing fires on it, so check
   that before concluding the forums themselves dried up.
 - **The GitHub discovery phase's ten counters share the topic family's label-less lifetime shape,
-  and they are the crawler counters with a panel half: a `Crawler` row (row panel 28) under the
-  existing tiles holds panels 29-33, every target an `increase(...,[1h])` over the lifetime counter,
+  and they sit in the `Crawler: GitHub` row (row panel 28, retitled 2026-09-14 when the Telegram
+  row joined it) holding panels 29-33, every target an `increase(...,[1h])` over the lifetime counter,
   because a raw cumulative read would only climb.** Rendered by the same `writeCrawl`
   (`internal/metrics/crawl.go`) on the same `GET /metrics`, they answer only where that endpoint is
   scraped under the selected `$job`. The shipped compose provides both halves: `tg-sub-crawler`

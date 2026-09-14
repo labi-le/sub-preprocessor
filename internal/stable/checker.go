@@ -607,11 +607,6 @@ func proxiesByLabel(survivors []Survivor, proxies []mihomo.Proxy) map[string][]m
 // annotates: measuring a node a later gate drops would spend a request on a
 // tag nobody sees.
 //
-// The fourth return is the gemini gate's account of itself, empty unless that
-// gate is in the chain. It rides beside the FilterReports rather than inside
-// one because the nodes it counts are KEPT, and a FilterReport's only
-// per-reason field is Dropped.
-//
 // The per-source stage counts are folded in here rather than in RunOnce because
 // this is the only scope that holds both sides of the narrowing at once: tested
 // is what the probe passed over, kept is what the chain left. Deferred so every
