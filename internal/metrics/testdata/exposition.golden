@@ -64,15 +64,6 @@ stable_trace_unanswered_nodes 109
 # HELP stable_trace_moved_nodes Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.
 # TYPE stable_trace_moved_nodes gauge
 stable_trace_moved_nodes 87
-# HELP stable_gemini_gate_enabled 1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.
-# TYPE stable_gemini_gate_enabled gauge
-stable_gemini_gate_enabled 1
-# HELP stable_gemini_gate_checks Gemini API responses the gate classified last cycle: the denominator for stable_gemini_gate_unverified_checks. One per proxy that ANSWERED, so it is neither the node count nor stable_filter_in_nodes{filter="gemini"} -- a mierus:// node contributes one per answering port, not one per configured port. A proxy that never answered is in neither term here, and reaches stable_filter_dropped_nodes{filter="gemini",reason="unreachable"} only when EVERY proxy of its node was unreachable: that reason is counted per SURVIVOR, off an outcome already folded best-of-ports, so one live port keeps the node and its dead siblings are counted nowhere.
-# TYPE stable_gemini_gate_checks gauge
-stable_gemini_gate_checks 654
-# HELP stable_gemini_gate_unverified_checks Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.
-# TYPE stable_gemini_gate_unverified_checks gauge
-stable_gemini_gate_unverified_checks 12
 # HELP stable_kept_country_nodes Published nodes per country, booked by their first rendered [GEO:xx] tag (last cycle).
 # TYPE stable_kept_country_nodes gauge
 stable_kept_country_nodes{country="??"} 3
@@ -231,6 +222,7 @@ stable_source_dropped_nodes{reason="unsupported",source="invalid_utf8"} 0
 stable_kept_speed_mbps_bucket{le="5"} 1
 stable_kept_speed_mbps_bucket{le="10"} 2
 stable_kept_speed_mbps_bucket{le="25"} 3
+stable_kept_speed_mbps_bucket{le="30"} 4
 stable_kept_speed_mbps_bucket{le="50"} 4
 stable_kept_speed_mbps_bucket{le="100"} 5
 stable_kept_speed_mbps_bucket{le="250"} 6
@@ -265,7 +257,7 @@ stable_kept_latency_min_ms 0
 # HELP stable_kept_latency_max_ms Slowest kept node's mean probe delay last cycle: how close the published list runs to max_avg_ms.
 # TYPE stable_kept_latency_max_ms gauge
 stable_kept_latency_max_ms 20000
-# case: tripped pre-check, keyless gate, nothing kept
+# case: tripped pre-check, nothing kept
 # HELP stable_cycles_total Stable cycles attempted (published + failed).
 # TYPE stable_cycles_total counter
 stable_cycles_total 4212
@@ -305,15 +297,6 @@ stable_kept_nodes 0
 # HELP stable_geo_unknown_nodes Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.
 # TYPE stable_geo_unknown_nodes gauge
 stable_geo_unknown_nodes 0
-# HELP stable_gemini_gate_enabled 1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.
-# TYPE stable_gemini_gate_enabled gauge
-stable_gemini_gate_enabled 0
-# HELP stable_gemini_gate_checks Gemini API responses the gate classified last cycle: the denominator for stable_gemini_gate_unverified_checks. One per proxy that ANSWERED, so it is neither the node count nor stable_filter_in_nodes{filter="gemini"} -- a mierus:// node contributes one per answering port, not one per configured port. A proxy that never answered is in neither term here, and reaches stable_filter_dropped_nodes{filter="gemini",reason="unreachable"} only when EVERY proxy of its node was unreachable: that reason is counted per SURVIVOR, off an outcome already folded best-of-ports, so one live port keeps the node and its dead siblings are counted nowhere.
-# TYPE stable_gemini_gate_checks gauge
-stable_gemini_gate_checks 0
-# HELP stable_gemini_gate_unverified_checks Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.
-# TYPE stable_gemini_gate_unverified_checks gauge
-stable_gemini_gate_unverified_checks 0
 # HELP stable_cycle_duration_seconds Wall time of the last cycle.
 # TYPE stable_cycle_duration_seconds gauge
 stable_cycle_duration_seconds 0.5
@@ -351,6 +334,7 @@ stable_last_success_timestamp_seconds 1.755474123e+09
 stable_kept_speed_mbps_bucket{le="5"} 0
 stable_kept_speed_mbps_bucket{le="10"} 0
 stable_kept_speed_mbps_bucket{le="25"} 0
+stable_kept_speed_mbps_bucket{le="30"} 0
 stable_kept_speed_mbps_bucket{le="50"} 0
 stable_kept_speed_mbps_bucket{le="100"} 0
 stable_kept_speed_mbps_bucket{le="250"} 0

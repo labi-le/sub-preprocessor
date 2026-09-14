@@ -324,7 +324,7 @@ published list. The gates:
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
-  below `min_mbps` (default 5) are dropped; an explicit `0` removes the speed
+  below `min_mbps` (code default 5, shipped config 30) are dropped; an explicit `0` removes the speed
   *threshold* — a slow-but-reachable node is then kept — but it is not
   "annotate only": a node whose download failed outright (dial error, refused
   or reset transfer) is still dropped, with only the whole-batch failure
@@ -739,27 +739,23 @@ IP-stage drop reasons are `dns`, `geo`, `cidr`, `asn`, `geoblock`, `ipv6` and
 so a new reason costs no metric name and no query change — only that panel's
 DESCRIPTION, which enumerates the reasons in prose.
 
-A gate that verified nothing is reported separately from a gate that dropped
-nothing. The gemini check needs a working credential to see a location verdict
-at all, so `stable_gemini_gate_checks` / `stable_gemini_gate_unverified_checks`
-publish how many API responses it classified and how many of those arrived
-before the location check (401/403/404/429/5xx, a 400 `API_KEY_INVALID`, or a
-400 whose wording no longer carries the block marker).
-Those nodes are **kept and published unverified**, so the pair is deliberately
-outside the per-filter drop counters. A large unverified share is normally the
-read quota, not the credential: the gate fires one read per survivor against
+The gemini gate publishes no series of its own. It is read through the same
+per-filter family as every other through-node gate:
+`stable_filter_{in,kept,dropped}_nodes{filter="gemini"}` plus
+`stable_filter_trusted{filter="gemini"}`, on the two "Through-node filter"
+panels. The reading that matters is `reason="blocked"` sitting at 0 while the
+other API gates drop nodes: the gemini check needs a working credential to see
+a location verdict at all, so a gate answering 401/403/404/429, a 400
+`API_KEY_INVALID`, or a 400 whose wording no longer carries the marker keeps
+every node and blocks none. Those nodes are **kept and published unverified**,
+never counted as drops. The per-cycle WARN `gemini gate verified nothing for
+these checks` carries the count. A large unverified share is normally the read
+quota, not the credential: the gate fires one read per survivor against
 Google's 200/min per-project-per-region `model_requests` ceiling (measured
 2026-09-03), and a key problem reads as `400 API_KEY_INVALID`, not `429` —
-check the 429 share first, then suspect the key.
-`stable_gemini_gate_enabled` separates
-the third state: 0 renders a gate that ran no checks for want of a usable key.
-The fail-loud rule above keeps the shipped wiring out of that state — an armed
-filter without key material refuses the load, a declared key file that cannot
-be resolved refuses boot (or keeps the previous settings on a reload) — so a
-running, configured gate has always resolved its key and renders 1; the 0
-rendering is the report state a regression that reintroduced the silent skip
-would land in. All three are absent when the gate did not run, which
-is not the same as "not configured".
+check the 429 share first, then suspect the key. A gate that never ran renders
+no `filter="gemini"` series at all, which is not the same as a gate that ran
+and dropped nobody: `stable_filter_trusted{filter="gemini"}` tells those apart.
 
 The metrics listener is bound synchronously at startup, so a port conflict is a
 startup failure like any other rather than a silently missing monitoring

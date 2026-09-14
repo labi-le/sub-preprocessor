@@ -28,13 +28,10 @@ type NodeFilter interface {
 	apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) (kept []Survivor, rep FilterReport)
 }
 
-// geminiChecker is the through-node Gemini capability of a Prober. Unlike its
-// siblings the check also returns an account of itself: the gate's verdict is
-// invisible without a working credential, so how much of it was actually
-// obtained is a number the cycle has to publish (see GeminiReport).
+// geminiChecker is the through-node Gemini capability of a Prober.
 type geminiChecker interface {
 	GeminiEnabled() bool
-	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) (map[string]APIOutcome, GeminiReport)
+	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
 // claudeChecker is the through-node Anthropic capability of a Prober.
@@ -176,65 +173,6 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	return kept, rep
 }
 
-// geminiFilter is the gemini gate: an apiFilter plus the account of how much
-// of that gate's verdict the cycle actually obtained. It exists as its own
-// type for two reasons a shared field on apiFilter could not serve.
-//
-// The concept is gemini's alone. Only gemini's check holds a credential the
-// API can refuse before the location verdict exists, so only it can be
-// answered AHEAD of its own verdict and only its misses can be exposed as an
-// account of the gate: geminiInconclusive counts every answer that is neither
-// a 2xx nor the marker-400 -- 401/403/404/429, API_KEY_INVALID, a 5xx server
-// fault, a misworded refusal. claude and chatgpt geo-block before
-// authentication and carry no credential — a non-marker refusal (429, a CDN
-// challenge) is read as "not blocked" and is not accounted for anywhere — and
-// tidal's verdict is a bare status code. A field on apiFilter would publish a
-// permanently-zero series for each of them, and a zero reads as "measured,
-// fine" — the exact misreading this metric exists to remove.
-//
-// And the DISABLED state has to survive to the report. apiFilter.apply returns
-// before it calls check when enabled() is false, so nothing the check produces
-// can mark that state; the reset here is what does, and it also stops last
-// cycle's numbers being republished when this one never reached the check.
-type geminiFilter struct {
-	apiFilter
-
-	gemini geminiChecker
-	rep    GeminiReport
-}
-
-func newGeminiFilter(gc geminiChecker, store Blocklist, logger zerolog.Logger) *geminiFilter {
-	f := &geminiFilter{gemini: gc}
-	f.apiFilter = apiFilter{
-		filterName: geminiFilterName,
-		enabled:    gc.GeminiEnabled,
-		check:      f.checkAndAccount,
-		store:      store,
-		logger:     logger,
-	}
-	return f
-}
-
-func (f *geminiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
-	f.rep = GeminiReport{State: GeminiGateSkipped}
-	return f.apiFilter.apply(ctx, survivors, proxies)
-}
-
-// verification reports what the gate managed to verify in the cycle just
-// applied. Read once per cycle by filterAndMeasureEgress, on the same
-// goroutine that called apply.
-func (f *geminiFilter) verification() GeminiReport {
-	return f.rep
-}
-
-// checkAndAccount is the apiFilter check hook: it runs the gate and keeps the
-// gate's own account of itself, which apiFilter's map-only return cannot carry.
-func (f *geminiFilter) checkAndAccount(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
-	out, rep := f.gemini.GeminiCheck(ctx, proxies)
-	f.rep = rep
-	return out
-}
-
 // bandwidthFilter keeps only survivors whose measured through-node download
 // speed is at least minMbps and records Mbps on each kept survivor, which the
 // publication turns into the [SPD:] tag. minMbps==0 removes only the speed
@@ -347,7 +285,16 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				logger.Warn().Msg("gemini filter requested but prober lacks Gemini support; skipping")
 				continue
 			}
-			filters = append(filters, newGeminiFilter(gc, store, logger))
+			// The only gate with an enabled() hook: its credential can go
+			// missing at runtime, and a keyless check would pass every node
+			// silently. The others cannot be disabled that way.
+			filters = append(filters, &apiFilter{
+				filterName: geminiFilterName,
+				enabled:    gc.GeminiEnabled,
+				check:      gc.GeminiCheck,
+				store:      store,
+				logger:     logger,
+			})
 		case claudeFilterName:
 			cc, ok := prober.(claudeChecker)
 			if !ok {

@@ -21,7 +21,13 @@ import (
 
 // speedBuckets are the cumulative upper bounds (Mbps) for the kept-node speed
 // histogram.
-var speedBuckets = []float64{5, 10, 25, 50, 100, 250, 500}
+//
+// Invariant, the same one latencyBuckets carries: a bound equals every shipped
+// bandwidth min_mbps, so the gate is a bucket edge and the panel can answer
+// "how much headroom is there above the floor" instead of interpolating across
+// it. 30 is the shipped floor since 2026-09-14;
+// TestSpeedBucketsCoverShippedGates enforces it against the config itself.
+var speedBuckets = []float64{5, 10, 25, 30, 50, 100, 250, 500}
 
 // latencyBuckets are the cumulative upper bounds (ms) for the kept-node
 // latency histogram.
@@ -124,7 +130,6 @@ func (m *Metrics) writeMetrics(dst io.Writer) {
 	gauge(w, "stable_kept_nodes", "Nodes published to /stable.txt.", float64(r.Kept))
 	gauge(w, "stable_geo_unknown_nodes", "Published nodes whose first rendered [GEO:xx] tag is [GEO:??]: the lead tag alone books the country, so a later GEO entry resolving the node does not clear it.", float64(r.GeoUnknown))
 	writeTrace(w, r.Trace)
-	writeGemini(w, r.Gemini)
 	if len(r.KeptCountries) > 0 {
 		help(w, "stable_kept_country_nodes", "gauge", "Published nodes per country, booked by their first rendered [GEO:xx] tag (last cycle).")
 		for _, c := range sortedKeys(r.KeptCountries) {
@@ -324,40 +329,6 @@ func writeTrace(w *exposition, t stable.TraceReport) {
 	gauge(w, "stable_trace_answered_nodes", "Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.", float64(t.Answered))
 	gauge(w, "stable_trace_unanswered_nodes", "Published nodes whose trace did not complete: kept and tagged from the offline chain alone, never dropped.", float64(t.Unanswered))
 	gauge(w, "stable_trace_moved_nodes", "Answered nodes exiting from a country other than the one the offline chain places their resolved address in: how often that chain would have tagged the wrong country.", float64(t.Moved))
-}
-
-// writeGemini renders the gemini gate's self-account. These nodes are KEPT, so
-// none of it belongs in stable_filter_dropped_nodes; a reader of that series
-// must be able to keep reading it as "thrown away".
-//
-// The three gate states render distinguishably, which is the whole point:
-// absent emits NOTHING, matching the way a filter that never ran emits no drop
-// series; configured-but-keyless emits enabled=0 with both counts at zero; a
-// gate that ran emits enabled=1. An explicit 0 rather than absence for the
-// keyless case is deliberate -- absence cannot be pinned on any single cause
-// (no scrape, no cycle published yet, no gemini filter in the chain, or one
-// configured that never reached its check: buildNodeFilters dropped it for
-// want of Gemini support on the prober, or filterAndMeasureEgress bailed
-// before the chain when ParseProxies failed on the no-retention prober
-// fallback) -- and mistaking a dead gate for
-// a healthy one is exactly the failure this metric exists to make visible.
-func writeGemini(w *exposition, g stable.GeminiReport) {
-	if g.State == stable.GeminiGateAbsent {
-		return
-	}
-	var enabled float64
-	if g.State == stable.GeminiGateRan {
-		enabled = 1
-	}
-	gauge(w, "stable_gemini_gate_enabled",
-		"1 when the gemini gate ran last cycle, 0 when it is configured as a filter but was skipped for want of a usable API key -- it then checked nothing and every survivor passed through unverified.",
-		enabled)
-	gauge(w, "stable_gemini_gate_checks",
-		"Gemini API responses the gate classified last cycle: the denominator for stable_gemini_gate_unverified_checks. One per proxy that ANSWERED, so it is neither the node count nor stable_filter_in_nodes{filter=\"gemini\"} -- a mierus:// node contributes one per answering port, not one per configured port. A proxy that never answered is in neither term here, and reaches stable_filter_dropped_nodes{filter=\"gemini\",reason=\"unreachable\"} only when EVERY proxy of its node was unreachable: that reason is counted per SURVIVOR, off an outcome already folded best-of-ports, so one live port keeps the node and its dead siblings are counted nowhere.",
-		float64(g.Checks))
-	gauge(w, "stable_gemini_gate_unverified_checks",
-		"Responses that told the gate nothing about the egress location: the API rejected the request before evaluating it (401/403/404/429, or 400 API_KEY_INVALID -- a rotated, restricted or quota-exhausted key). These nodes were KEPT and published unverified; this is not a drop, not a block and not a request error.",
-		float64(g.Unverified))
 }
 
 // dropReasons is the order the drop family has always rendered in; reason is

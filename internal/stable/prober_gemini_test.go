@@ -111,59 +111,44 @@ func TestGeminiInconclusive(t *testing.T) {
 	}
 }
 
-// TestGeminiCheckAccountsWhatItCouldNotVerify drives the real fan-out and pins
-// the pair the metric publishes. It is the count, not the classification, that
-// TestGeminiInconclusive above cannot see: geminiInconclusive was already
-// correct while a rotated key still degraded the gate silently, because the
-// only thing the count reached was a WARN nothing scrapes.
+// TestGeminiCheckClassifiesThroughTheFanOut drives the real fan-out and pins
+// what each response class becomes in the outcome map. TestGeminiInconclusive
+// above pins the predicate in isolation; this pins that the fan-out actually
+// applies it, which is the difference between a gate that keeps an
+// unverifiable node and one that publishes a geo-blocked one.
 //
-// The denominator is classifier CALLS, not len(proxies): a proxy that never
-// answered is short-circuited before the classifier, so it belongs to no term
-// of this ratio. Nor is it accounted for as its own drop: apiFilter.apply
+// An unreachable proxy is Reachable=false and no verdict at all: apiFilter
 // counts reason="unreachable" per SURVIVOR, off an outcome betterAPIOutcome
 // already folded best-of-ports, so only a node whose EVERY proxy was
 // unreachable reaches that reason.
-func TestGeminiCheckAccountsWhatItCouldNotVerify(t *testing.T) {
+func TestGeminiCheckClassifiesThroughTheFanOut(t *testing.T) {
 	t.Parallel()
 
 	const marker = "User location is not supported for the API use"
 	for name, tc := range map[string]struct {
-		status     int
-		body       string
-		live, dead int
-		want       GeminiReport
+		status      int
+		body        string
+		live, dead  int
+		wantBlocked bool
+		wantLive    int
 	}{
 		"quota answers before the location check": {
-			429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`, 1, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
+			429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`, 1, 0, false, 1,
 		},
 		"a rotated key answers before it too": {
-			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
+			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0, false, 1,
 		},
 		"a server fault answers before it too": {
-			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
+			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0, false, 1,
 		},
 		"a refused location is a verdict": {
-			400, `{"error":{"message":"User location is not supported for the API use."}}`, 1, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 0},
+			400, `{"error":{"message":"User location is not supported for the API use."}}`, 1, 0, true, 1,
 		},
 		"a served model is a verdict": {
-			200, `{"name":"models/gemini-2.0-flash"}`, 1, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 0},
+			200, `{"name":"models/gemini-2.0-flash"}`, 1, 0, false, 1,
 		},
-		"every rejected response counts, not just the first": {
-			403, `{"error":{"status":"PERMISSION_DENIED"}}`, 3, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 3, Unverified: 3},
-		},
-		"an unreachable proxy is in neither term": {
-			429, `{"error":{"code":429}}`, 1, 2,
-			GeminiReport{State: GeminiGateRan, Checks: 1, Unverified: 1},
-		},
-		"a gate that ran clean is still a gate that ran": {
-			200, `{"name":"models/gemini-2.0-flash"}`, 0, 0,
-			GeminiReport{State: GeminiGateRan, Checks: 0, Unverified: 0},
+		"an unreachable proxy carries no verdict": {
+			429, `{"error":{"code":429}}`, 1, 2, false, 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -190,12 +175,31 @@ func TestGeminiCheckAccountsWhatItCouldNotVerify(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, got := m.GeminiCheck(context.Background(), geminiTestProxies(tc.live, tc.dead))
-			if got != tc.want {
-				t.Fatalf("GeminiCheck report = %+v, want %+v", got, tc.want)
+			out := m.GeminiCheck(context.Background(), geminiTestProxies(tc.live, tc.dead))
+			reachable, blocked := countOutcomes(out)
+			if reachable != tc.wantLive {
+				t.Fatalf("reachable outcomes = %d, want %d (%d dead proxies carry no verdict)", reachable, tc.wantLive, tc.dead)
+			}
+			if (blocked > 0) != tc.wantBlocked {
+				t.Fatalf("blocked outcomes = %d, want blocked=%v for status %d", blocked, tc.wantBlocked, tc.status)
 			}
 		})
 	}
+}
+
+// countOutcomes folds an outcome map into the two numbers the fan-out test
+// asserts on: how many proxies answered at all, and how many of those answers
+// were read as a refusal of this egress.
+func countOutcomes(out map[string]APIOutcome) (reachable, blocked int) {
+	for _, o := range out {
+		if o.Reachable {
+			reachable++
+		}
+		if o.Blocked {
+			blocked++
+		}
+	}
+	return reachable, blocked
 }
 
 // TestGeminiCheckPacesRequestStarts pins the pacing contract: request starts
@@ -208,7 +212,7 @@ func TestGeminiCheckPacesRequestStarts(t *testing.T) {
 	// a second, and gaps of ~100ms are nothing like the ~0 an unpaced check
 	// produces, so half the interval is a flake-safe floor.
 	m, arrivals := geminiPacingProber(t, 600)
-	out, rep := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
+	out := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
 
 	times := arrivals.all()
 	if len(times) != 5 {
@@ -221,10 +225,7 @@ func TestGeminiCheckPacesRequestStarts(t *testing.T) {
 		}
 	}
 	if len(out) != 5 {
-		t.Fatalf("GeminiCheck returned %d outcomes, want one per proxy", len(out))
-	}
-	if want := (GeminiReport{State: GeminiGateRan, Checks: 5, Unverified: 0}); rep != want {
-		t.Fatalf("GeminiCheck report = %+v, want %+v: pacing must not skip requests", rep, want)
+		t.Fatalf("GeminiCheck returned %d outcomes, want one per proxy: pacing must throttle, never skip", len(out))
 	}
 }
 
@@ -235,7 +236,7 @@ func TestGeminiCheckRateLimitZeroStaysUnpaced(t *testing.T) {
 	t.Parallel()
 
 	m, arrivals := geminiPacingProber(t, 0)
-	out, rep := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
+	out := m.GeminiCheck(context.Background(), geminiTestProxies(5, 0))
 
 	times := arrivals.all()
 	if len(times) != 5 {
@@ -250,9 +251,6 @@ func TestGeminiCheckRateLimitZeroStaysUnpaced(t *testing.T) {
 	}
 	if len(out) != 5 {
 		t.Fatalf("GeminiCheck returned %d outcomes, want one per proxy", len(out))
-	}
-	if want := (GeminiReport{State: GeminiGateRan, Checks: 5, Unverified: 0}); rep != want {
-		t.Fatalf("GeminiCheck report = %+v, want %+v", rep, want)
 	}
 }
 

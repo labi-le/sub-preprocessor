@@ -39,15 +39,18 @@ func (m *MihomoProber) geminiURL() string {
 // coverage: it publishes geo-blocked nodes.
 //
 // A response that never reached the location check is counted and warned about
-// instead of passing silently as "not blocked": see geminiInconclusive. That
-// count is also RETURNED, because a warning nothing scrapes is how a rotated
-// key stayed invisible on the dashboard -- see GeminiReport.
+// instead of passing silently as "not blocked": see geminiInconclusive. The
+// count rides the warning alone — the gate has no metric series of its own.
+// What a dashboard reads instead is the generic filter family:
+// stable_filter_dropped_nodes{filter="gemini",reason="blocked"} sitting at 0
+// while the other API filters drop nodes is this same condition, one panel
+// over, and it is the reading that survived the tiles being removed.
 //
 // The two counters are atomic because the classifier runs on every fan-out
 // goroutine; they are read once, after apiCheck has joined them all. Both
 // count classifier CALLS, so an unreachable proxy is in neither: apiCheck
 // short-circuits blocked() when nothing came back.
-func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) (map[string]APIOutcome, GeminiReport) {
+func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
 	g := m.geo.Gemini
 	var pace time.Duration
 	if g.RateLimit > 0 {
@@ -63,25 +66,20 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 			}
 			return markerBlocked(body, g.Marker)
 		})
-	rep := GeminiReport{
-		State:      GeminiGateRan,
-		Checks:     int(checks.Load()),
-		Unverified: int(inconclusive.Load()),
-	}
-	if rep.Unverified > 0 {
+	classified, unverified := int(checks.Load()), int(inconclusive.Load())
+	if unverified > 0 {
 		opLog := log.Op(m.logger, "stable.GeminiCheck")
-		// classified is the metric's denominator (stable_gemini_gate_checks);
-		// of= stays the proxy count the fan-out was handed, so the gap between
-		// them is the PROXIES that never answered -- not the node-level
-		// reason="unreachable" drop, which needs every proxy of a node dead --
-		// and the log still matches the series. The leading count is classifier
-		// calls, not nodes (see GeminiReport), so it is keyed like the metric.
-		opLog.Warn().Int("unverified_checks", rep.Unverified).Int("classified", rep.Checks).Int("of", len(proxies)).
+		// classified is the denominator: of= stays the proxy count the fan-out
+		// was handed, so the gap between them is the PROXIES that never
+		// answered -- not the node-level reason="unreachable" drop, which
+		// needs every proxy of a node dead. The leading count is classifier
+		// calls, not nodes.
+		opLog.Warn().Int("unverified_checks", unverified).Int("classified", classified).Int("of", len(proxies)).
 			Msg("gemini gate verified nothing for these checks: the API answered without a location " +
 				"verdict (key rotated/restricted, wrong model, quota, a server fault, or a reworded refusal) -- their nodes were kept")
 	}
 
-	return out, rep
+	return out
 }
 
 // geminiInconclusive reports whether a Gemini API response says nothing about

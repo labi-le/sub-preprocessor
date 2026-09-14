@@ -245,7 +245,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	survivors := SelectSurvivors(probe, res, spec.Rounds, spec.MaxFail, spec.MaxAvgMs)
 	selectedAt := time.Now()
-	survivors, filterReports, trace, gemini := c.filterAndMeasureEgress(ctx, spec, survivors, sourceReports, probed)
+	survivors, filterReports, trace := c.filterAndMeasureEgress(ctx, spec, survivors, sourceReports, probed)
 	filteredAt := time.Now()
 	c.pruneCaches()
 	if err = ctx.Err(); err != nil {
@@ -290,7 +290,6 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 		KeptSpeeds:      keptSpeeds(survivors),
 		KeptLatenciesMs: keptLatencies(survivors),
 		Trace:           trace,
-		Gemini:          gemini,
 	})
 
 	return nil
@@ -622,7 +621,7 @@ func proxiesByLabel(survivors []Survivor, proxies []mihomo.Proxy) map[string][]m
 // test ctx.Err() inside apply and hand their survivors back to the loop below.
 func (c *Checker) filterAndMeasureEgress(
 	ctx context.Context, spec *CheckerSpec, tested []Survivor, sources []SourceReport, probed []mihomo.Proxy,
-) (kept []Survivor, reports []FilterReport, tr TraceReport, gemini GeminiReport) {
+) (kept []Survivor, reports []FilterReport, tr TraceReport) {
 	defer func() { c.countSourceStages(sources, tested, kept) }()
 	kept = tested
 	tracer, canTrace := spec.Prober.(traceChecker)
@@ -631,7 +630,7 @@ func (c *Checker) filterAndMeasureEgress(
 	}
 	trace := spec.Trace && canTrace
 	if (len(spec.Filters) == 0 && !trace) || len(kept) == 0 {
-		return kept, nil, TraceReport{}, GeminiReport{}
+		return kept, nil, TraceReport{}
 	}
 
 	proxies := probed
@@ -642,7 +641,7 @@ func (c *Checker) filterAndMeasureEgress(
 		proxies, err = parseEgressProxies(spec, kept)
 		if err != nil {
 			c.logger.Warn().Err(err).Msg("node filters: parsing survivors failed; skipping filters")
-			return kept, nil, TraceReport{}, GeminiReport{}
+			return kept, nil, TraceReport{}
 		}
 		defer closeProxies(proxies)
 	}
@@ -653,18 +652,12 @@ func (c *Checker) filterAndMeasureEgress(
 		var rep FilterReport
 		kept, rep = f.apply(ctx, kept, byLabel)
 		reports = append(reports, rep)
-		// Optional capability, read exactly like spec.Prober.(traceChecker)
-		// above: only the gemini gate can answer before its own verdict
-		// exists, so only it accounts for what it could not verify.
-		if gf, ok := f.(*geminiFilter); ok {
-			gemini = gf.verification()
-		}
 	}
 	if !trace {
-		return kept, reports, TraceReport{}, gemini
+		return kept, reports, TraceReport{}
 	}
 
-	return kept, reports, applyTrace(ctx, tracer, kept, byLabel), gemini
+	return kept, reports, applyTrace(ctx, tracer, kept, byLabel)
 }
 
 // countSourceStages fills the two post-merge per-source counts. One index

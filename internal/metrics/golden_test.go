@@ -125,18 +125,16 @@ func goldenCases() []goldenCase {
 		KeptSpeeds:      goldenSpeeds(),
 		KeptLatenciesMs: []int{0, 50, 150, 300, 600, 900, 1200, 2000, 3500, 5700, 11000, 20000},
 		Trace:           stable.TraceReport{State: stable.TraceRan, Answered: 1400, Unanswered: 109, Moved: 87},
-		Gemini:          stable.GeminiReport{State: stable.GeminiGateRan, Checks: 654, Unverified: 12},
 	}
 	degraded := &stable.CycleReport{
 		SourcesOK: 0, SourcesTotal: 3,
 		Precheck: stable.PrecheckReport{State: stable.PrecheckTripped, Dialled: 900, Refused: 880, Unresolved: 0},
 		Duration: 500 * time.Millisecond,
-		Gemini:   stable.GeminiReport{State: stable.GeminiGateSkipped},
 	}
 	return []goldenCase{
 		{name: "no cycle published yet", cycles: 7, failed: 2},
 		{name: "full cycle", cycles: 4211, failed: 19, report: full},
-		{name: "tripped pre-check, keyless gate, nothing kept", cycles: 4212, failed: 20, report: degraded},
+		{name: "tripped pre-check, nothing kept", cycles: 4212, failed: 20, report: degraded},
 	}
 }
 

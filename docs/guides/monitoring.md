@@ -84,38 +84,29 @@ vendor the dashboard into the nixos repo.
   `TestLatencyBucketsAreStrictlyIncreasing` catches the duplicate.
 - **A count of nodes the pipeline KEPT never rides `FilterReport.Dropped`.** That map renders as
   `stable_filter_dropped_nodes{filter,reason}`, which the dashboard titles "drops by reason", so a
-  kept count carried through it reads as a drop. The
-  gemini gate's `stable_gemini_gate_{enabled,checks,unverified_checks}` are the worked example of the right
-  shape: a stage-specific report on `CycleReport` (like `TraceReport`), rendered by its own `writeGemini`.
-  They also fix the three states apart, because a gate that is OFF must not read like a gate that is FINE —
-  `enabled 1` = it ran last cycle, `enabled 0` = a configured gate that was skipped for want of a usable
-  key so it checked nothing, and nothing rendered = no gemini report at all. The 2026-09 config round
-  moved the second state out of the config's reach: the LOAD refuses an armed gemini entry with no key
-  material and Apply refuses one whose declared key_file cannot be resolved (see config.md), so a
-  deployed `enabled 0` means a spec wired around those gates — direct construction, a test, a wiring
-  bug — not a live gate that booted without a key. Nothing rendered keeps its FOUR causes rather than
-  "gemini not configured" alone: no
-  scrape, no cycle published yet, no `gemini` in `filters`, or a configured one that never reached its check
-  (`buildNodeFilters` skipped it with only a WARN for want of Gemini support on the prober, or
-  `filterAndMeasureEgress` returned before the chain — which publishes every survivor UNFILTERED;
-  the old `ParseProxies`-failure cause for that last skip now exists only on the no-retention prober
-  fallback, since production's prober hands its probe-built adapters to the egress stage and there is
-  no egress parse to fail). The three families have had their own tiles since the same round: panels
-  23-25 (`Gemini gate enabled`/`checks`/`unverified checks`), and the other two families the
-  same-commit rule then caught up — `stable_kept_speed_min_mbps` and `stable_kept_latency_min_ms` —
-  sit in panels 26 and 27. The trace families got the same absent-gating on the same round:
-  `writeTrace` renders `stable_trace_{answered,unanswered,moved}_nodes` only for a cycle whose egress
-  stage reached the trace (`TraceReport.State`, set only in `applyTrace`), so a gap reads "no trace
-  ran" instead of the old byte-identical "trace ran and nobody answered". Metric names are a wire format from the moment they ship, exactly like the
-  drop-reason strings.
-  The reachability pre-check rides that same shape, for the same reason: `PrecheckReport` on
-  `CycleReport`, rendered by its own `writePrecheck` as
+  kept count carried through it reads as a drop. The reachability pre-check is the worked example of
+  the right shape: `PrecheckReport` on `CycleReport` (like `TraceReport`), rendered by its own
+  `writePrecheck` as
   `stable_precheck_{trusted,dialled_endpoints,refused_endpoints,unresolved_endpoints}`, with the
   three states apart — `trusted 1` = the verdict was used, `trusted 0` = its breaker rejected the
-  verdict as implausible so every node was probed, nothing rendered = no pre-check ran. A tripped
-  breaker condemns nobody, so `stage="condemned"` reads 0 exactly as it does for a pre-check that
-  found every server reachable. The condemned count stays OUT of `Dropped` too: the pre-check is
-  not a filter, and its counts are ENDPOINTS where every filter series counts NODES.
+  verdict as implausible so every node was probed, nothing rendered = no pre-check ran. A gate that
+  is OFF must not read like a gate that is FINE, and a stage that never ran must not read like one
+  that ran and found nothing. A tripped breaker condemns nobody, so `stage="condemned"` reads 0
+  exactly as it does for a pre-check that found every server reachable. The condemned count stays
+  OUT of `Dropped` too: the pre-check is not a filter, and its counts are ENDPOINTS where every
+  filter series counts NODES. The trace families carry the same absent-gating: `writeTrace` renders
+  `stable_trace_{answered,unanswered,moved}_nodes` only for a cycle whose egress stage reached the
+  trace (`TraceReport.State`, set only in `applyTrace`), so a gap reads "no trace ran" instead of
+  the old byte-identical "trace ran and nobody answered". Metric names are a wire format from the
+  moment they ship, exactly like the drop-reason strings — which cuts both ways: the gemini gate
+  once had three tiles and three series of its own (`stable_gemini_gate_*`, panels 23-25), removed
+  2026-09-14 because the per-filter family already carries the gate
+  (`stable_filter_{in,kept,dropped}_nodes{filter="gemini"}`, `stable_filter_trusted{filter="gemini"}`)
+  and a second account of one stage is a second thing to keep true. What the deleted
+  `unverified_checks` used to show is read one panel over: `reason="blocked"` at 0 while the other
+  API gates drop nodes means the gate is answering inconclusively and verifying nothing (production
+  2026-09-09: gemini blocked 0, claude 2, with 223 of 223 checks inconclusive). The count itself
+  survives on the per-cycle WARN `gemini gate verified nothing for these checks`.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
@@ -529,8 +520,12 @@ vendor the dashboard into the nixos repo.
   `continuous-BlPu`, whose low end asserts nothing; a green-yellow-red palette would paint an
   empty panel green.
 - **The speed ladder is fixed, and only its average survives a cycle that measured nothing.**
-  `speedBuckets` is seven bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:24`), so a quantile
-  at the top bound means faster than 500, not a plateau. `keptSpeeds` skips a zero Mbps
+  `speedBuckets` is eight bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:30`), so a quantile
+  at the top bound means faster than 500, not a plateau. One of them, 30, exists because the
+  shipped `min_mbps` is 30: a gate has to be a bucket EDGE or the panel interpolates across the
+  one boundary an operator asks about, and `TestSpeedBucketsCoverShippedGates` fails the build
+  when a config moves the floor off the ladder — the same contract `latencyBuckets` carries for
+  `check.max_avg_ms`. `keptSpeeds` skips a zero Mbps
   (`internal/stable/checker.go:371`), so an unmeasured cycle passes an empty slice and
   `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:139`,
   :431-432): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go

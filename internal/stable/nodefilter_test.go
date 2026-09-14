@@ -66,11 +66,18 @@ func TestBuildNodeFilters(t *testing.T) {
 	if len(fs) != 5 {
 		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
 	}
-	// Concrete type, not just the name: only *geminiFilter carries the gate's
-	// verification account through to the report, and a plain *apiFilter here
-	// would still pass every name and behaviour assertion in this file.
-	if _, ok := fs[0].(*geminiFilter); !ok {
-		t.Fatalf("gemini filter has type %T, want *geminiFilter", fs[0])
+	// The gemini gate is the only one with an enabled() hook: a keyless check
+	// would pass every node silently, and buildNodeFilters wiring it without
+	// that hook is the regression this pins.
+	gf, ok := fs[0].(*apiFilter)
+	if !ok {
+		t.Fatalf("gemini filter has type %T, want *apiFilter", fs[0])
+	}
+	if gf.enabled == nil {
+		t.Fatal("gemini filter built without its enabled() hook")
+	}
+	if cf, isAPI := fs[1].(*apiFilter); !isAPI || cf.enabled != nil {
+		t.Fatalf("claude filter must be a keyless *apiFilter with no enabled hook, got %T", fs[1])
 	}
 	if got := builtFilterName(fs[2]); got != "chatgpt" {
 		t.Fatalf("expected chatgpt filter third, got %q", got)
@@ -89,8 +96,6 @@ func TestBuildNodeFilters(t *testing.T) {
 // types buildNodeFilters returns.
 func builtFilterName(f NodeFilter) string {
 	switch v := f.(type) {
-	case *geminiFilter:
-		return v.filterName
 	case *apiFilter:
 		return v.filterName
 	case *bandwidthFilter:
@@ -326,8 +331,7 @@ func TestApiFilterBelievesPartialVerdict(t *testing.T) {
 
 // TestGeminiFilterBatchBreakerKeepsSurvivors is the gemini gate family's
 // instance of the batch breaker: a whole-batch unreachable verdict through the
-// concrete gemini filter keeps every survivor and leaves the gate's account of
-// itself intact.
+// keyed gate keeps every survivor.
 func TestGeminiFilterBatchBreakerKeepsSurvivors(t *testing.T) {
 	t.Parallel()
 
@@ -338,9 +342,8 @@ func TestGeminiFilterBatchBreakerKeepsSurvivors(t *testing.T) {
 			"s-002": {Server: "h2", Reachable: false},
 			"s-003": {Server: "h3", Reachable: false},
 		},
-		rep: GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 0},
 	}
-	f := newGeminiFilter(gc, nil, zerolog.Nop())
+	f := newTestGeminiFilter(gc)
 	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
 	if len(kept) != 3 {
 		t.Fatalf("a disbelieved batch keeps every survivor: kept %d", len(kept))
@@ -350,9 +353,6 @@ func TestGeminiFilterBatchBreakerKeepsSurvivors(t *testing.T) {
 	}
 	if rep.State != FilterTripped {
 		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
-	}
-	if got := f.verification(); got != gc.rep {
-		t.Fatalf("verification() = %+v, want %+v", got, gc.rep)
 	}
 }
 
@@ -417,50 +417,54 @@ func TestBandwidthFilterBatchBreakerKeepsWholeBatchUnderTheFloor(t *testing.T) {
 }
 
 // fakeGeminiChecker drives the gemini gate with no network: enabled selects
-// apiFilter.apply's disabled branch, and rep is the account GeminiCheck hands
-// back. calls proves the disabled branch never reaches the check at all.
+// apiFilter.apply's disabled branch and calls proves that branch never reaches
+// the check at all.
 type fakeGeminiChecker struct {
 	outcomes map[string]APIOutcome
-	rep      GeminiReport
 	enabled  bool
 	calls    int
 }
 
 func (f *fakeGeminiChecker) GeminiEnabled() bool { return f.enabled }
 
-func (f *fakeGeminiChecker) GeminiCheck(context.Context, []mihomo.Proxy) (map[string]APIOutcome, GeminiReport) {
+func (f *fakeGeminiChecker) GeminiCheck(context.Context, []mihomo.Proxy) map[string]APIOutcome {
 	f.calls++
-	return f.outcomes, f.rep
+	return f.outcomes
 }
 
-// TestGeminiFilterKeepsUnverifiedOutOfDropped is point 2 of the agreement made
-// executable. These nodes are KEPT and published; FilterReport.Dropped renders
-// as stable_filter_dropped_nodes{reason=...}, so a count landing there tells
-// an operator the gate threw away what it actually let through — the defect
-// corrected/unanswered already shipped once (shipped by b545d0a, corrected in
-// e554307).
+// newTestGeminiFilter wires the gate the way buildNodeFilters does, so a
+// change there that drops the enabled() hook cannot pass these tests.
+func newTestGeminiFilter(gc geminiChecker) *apiFilter {
+	return &apiFilter{
+		filterName: geminiFilterName,
+		enabled:    gc.GeminiEnabled,
+		check:      gc.GeminiCheck,
+		logger:     zerolog.Nop(),
+	}
+}
+
+// TestGeminiFilterKeepsUnverifiedOutOfDropped: a node the gate could not
+// verify is KEPT and published, and FilterReport.Dropped renders as
+// stable_filter_dropped_nodes{reason=...}, so nothing about it may land there
+// — the defect corrected/unanswered already shipped once (shipped by b545d0a,
+// corrected in e554307).
 func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
 	t.Parallel()
 
-	const unverified = 22
 	gc := &fakeGeminiChecker{
 		enabled:  true,
 		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
-		rep:      GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: unverified},
 	}
-	f := newGeminiFilter(gc, nil, zerolog.Nop())
+	f := newTestGeminiFilter(gc)
 
 	kept, rep := f.apply(context.Background(), []Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}, nil)
 
 	if len(kept) != 1 {
 		t.Fatalf("an unverified node is KEPT, not dropped: kept %d", len(kept))
 	}
-	if got := f.verification(); got != gc.rep {
-		t.Fatalf("verification() = %+v, want %+v", got, gc.rep)
-	}
 	for reason, n := range rep.Dropped {
-		if n == unverified {
-			t.Fatalf("the unverified count reached Dropped[%q]; it renders as a drop reason", reason)
+		if n != 0 {
+			t.Fatalf("a clean verdict dropped nothing, yet Dropped[%q] = %d", reason, n)
 		}
 	}
 	if len(rep.Dropped) != 2 || rep.Dropped[dropBlocked] != 0 || rep.Dropped[dropUnreachable] != 0 {
@@ -471,11 +475,11 @@ func TestGeminiFilterKeepsUnverifiedOutOfDropped(t *testing.T) {
 	}
 }
 
-// TestGeminiFilterDisabledIsNotAGateThatRanClean covers the state the metric
-// exists for. A keyless gate checks NOTHING and passes every survivor through,
-// which from outside looks exactly like a gate that verified them all; the two
-// must not reach the report as the same value. The second apply also pins that
-// last cycle's numbers are not republished when this cycle never checked.
+// TestGeminiFilterDisabledIsNotAGateThatRanClean covers the state that costs
+// the most to misread. A keyless gate checks NOTHING and passes every
+// survivor through, which from outside looks exactly like a gate that
+// verified them all; FilterReport.State is what keeps the two apart, and the
+// enabled() hook is what makes the check unreachable in that state.
 func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	t.Parallel()
 
@@ -483,11 +487,10 @@ func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	gc := &fakeGeminiChecker{
 		enabled:  true,
 		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
-		rep:      GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 22},
 	}
-	f := newGeminiFilter(gc, nil, zerolog.Nop())
-	if _, _ = f.apply(context.Background(), survivors, nil); f.verification().State != GeminiGateRan {
-		t.Fatalf("setup: an enabled gate must report GeminiGateRan, got %+v", f.verification())
+	f := newTestGeminiFilter(gc)
+	if _, rep := f.apply(context.Background(), survivors, nil); rep.State != FilterRan {
+		t.Fatalf("setup: an enabled gate must report FilterRan, got %v", rep.State)
 	}
 
 	gc.enabled = false
@@ -501,10 +504,6 @@ func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	}
 	if gc.calls != 1 {
 		t.Fatalf("the disabled branch must not call the check: calls = %d", gc.calls)
-	}
-	want := GeminiReport{State: GeminiGateSkipped}
-	if got := f.verification(); got != want {
-		t.Fatalf("verification() = %+v, want %+v (never last cycle's numbers)", got, want)
 	}
 }
 
@@ -534,20 +533,16 @@ type cycleRecorder struct{ last *CycleReport }
 func (r *cycleRecorder) Observe(c CycleReport) { r.last = &c }
 func (r *cycleRecorder) ObserveError()         {}
 
-// TestGeminiAccountReachesTheCycleReport walks the whole seam the metric rides:
-// filter -> filterAndMeasureEgress -> CycleReport -> Reporter. Each hand-off
-// can drop the account without failing anything, because a lost one is the
-// zero GeminiReport and that renders as a gate that never ran -- so the
-// assertion is on what a Reporter actually receives, not on the filter's own
-// verification().
-func TestGeminiAccountReachesTheCycleReport(t *testing.T) {
+// TestGeminiVerdictReachesTheCycleReport walks the seam the gate's series ride
+// since it lost its private ones: filter -> filterAndMeasureEgress ->
+// CycleReport.Filters -> Reporter. A hand-off that drops the report renders as
+// no gemini series at all, which reads like a gate that was never configured.
+func TestGeminiVerdictReachesTheCycleReport(t *testing.T) {
 	t.Parallel()
 
-	want := GeminiReport{State: GeminiGateRan, Checks: 306, Unverified: 22}
 	gc := &fakeGeminiChecker{
 		enabled:  true,
 		outcomes: map[string]APIOutcome{"src-001": {Server: "1.1.1.1", Reachable: true}},
-		rep:      want,
 	}
 	rec := &cycleRecorder{}
 	c := NewChecker(CheckerSpec{
@@ -557,7 +552,7 @@ func TestGeminiAccountReachesTheCycleReport(t *testing.T) {
 		MaxAvgMs:      1000,
 		SourceTimeout: time.Minute,
 		Prober:        oneNodeProber{},
-		Filters:       []NodeFilter{newGeminiFilter(gc, nil, zerolog.Nop())},
+		Filters:       []NodeFilter{newTestGeminiFilter(gc)},
 	}, func() Filterer { return oneNodeFilterer{} }, nil, nil, NewHolder(), "", zerolog.Nop(), rec)
 
 	if err := c.RunOnce(context.Background()); err != nil {
@@ -566,18 +561,22 @@ func TestGeminiAccountReachesTheCycleReport(t *testing.T) {
 	if rec.last == nil {
 		t.Fatal("a published cycle must reach the Reporter")
 	}
-	if rec.last.Gemini != want {
-		t.Fatalf("CycleReport.Gemini = %+v, want %+v", rec.last.Gemini, want)
+	if len(rec.last.Filters) != 1 {
+		t.Fatalf("the gate's report must reach the cycle report: %+v", rec.last.Filters)
+	}
+	got := rec.last.Filters[0]
+	if got.Name != geminiFilterName || got.State != FilterRan || got.In != 1 {
+		t.Fatalf("gemini filter report = %+v, want a ran verdict over one node", got)
 	}
 }
 
-// TestKeylessGateReachesTheReportAsSkipped is the same walk with nothing faked
+// TestKeylessGateReachesTheReportAsAbsent is the same walk with nothing faked
 // between the config name and the report: a real keyless MihomoProber through
 // the real buildNodeFilters. This is the production shape of the failure --
 // the key resolves to "", the filter is built anyway, and the cycle publishes
-// every survivor unverified -- and it must arrive as Skipped, never as the
-// zero value a cycle without a gemini gate at all produces.
-func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
+// every survivor unverified -- and it must arrive as FilterAbsent, never as a
+// clean pass.
+func TestKeylessGateReachesTheReportAsAbsent(t *testing.T) {
 	t.Parallel()
 
 	keyless := testProber(t)
@@ -605,9 +604,8 @@ func TestKeylessGateReachesTheReportAsSkipped(t *testing.T) {
 	if rec.last.Kept != 1 {
 		t.Fatalf("a skipped gate drops nobody, Kept = %d", rec.last.Kept)
 	}
-	want := GeminiReport{State: GeminiGateSkipped}
-	if rec.last.Gemini != want {
-		t.Fatalf("CycleReport.Gemini = %+v, want %+v", rec.last.Gemini, want)
+	if len(rec.last.Filters) != 1 || rec.last.Filters[0].State != FilterAbsent {
+		t.Fatalf("a keyless gate must report FilterAbsent: %+v", rec.last.Filters)
 	}
 }
 
