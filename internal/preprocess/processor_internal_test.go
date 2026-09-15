@@ -600,9 +600,9 @@ func TestGeoDBDoReloadPartialLoadKeepsExistingLookup(t *testing.T) {
 
 // TestDoReloadPartialAcceptedFromEmptyKeepsRetry pins the empty-current half
 // of the swap guards: with nothing to protect, a partial reload is swapped in
-// rather than refused, so the success arm itself must arm the retry. A live
-// geofeed cannot hold an empty lookup (its initial load is fatal on error), so
-// the geoDB twin below is the reachable registry/dbip path.
+// rather than refused, so the success arm itself must arm the retry. Since a
+// failed initial load starts empty instead of refusing to boot, this is the
+// geofeed's own post-failure shape, not only the geoDB/registry one.
 func TestDoReloadPartialAcceptedFromEmptyKeepsRetry(t *testing.T) {
 	t.Parallel()
 
@@ -631,6 +631,54 @@ func TestDoReloadPartialAcceptedFromEmptyKeepsRetry(t *testing.T) {
 	}
 	if !p.shouldReloadGeofeedLocked(now.Add(reloadRetryInterval + time.Minute)) {
 		t.Fatal("the retry must be due within minutes, not a full refresh interval")
+	}
+}
+
+// TestDegradedGeofeedBootIsReplacedByItsRetry is the invariant the non-fatal
+// boot rests on: starting empty is only acceptable because the armed retry
+// closes the window. A swap guard that refused the empty-to-loaded replacement,
+// or a gate that never came due, would leave a service that starts empty and
+// stays empty — worse than the boot this replaced, and invisible in every
+// state assertion the two boot tests make.
+func TestDegradedGeofeedBootIsReplacedByItsRetry(t *testing.T) {
+	t.Parallel()
+
+	state, err := initialGeofeedState(context.Background(), zerolog.Nop(), Options{
+		GeofeedSources:  []geofeed.Source{{URL: "https://127.0.0.1:1/geofeed.csv", Type: "raw"}},
+		RefreshInterval: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("a geofeed failure with a refresh configured must not fail the build: %v", err)
+	}
+
+	p := &Processor{
+		logger:          zerolog.Nop(),
+		countryLookup:   state.Lookup,
+		loadedAt:        state.LoadedAt,
+		retryAt:         state.RetryAt,
+		reloadFailures:  state.Failures,
+		refreshInterval: 24 * time.Hour,
+		loadEntries: func(context.Context) ([]geofeed.Entry, int, error) {
+			return geoEntries(3), 0, nil
+		},
+	}
+
+	if p.shouldReloadGeofeedLocked(time.Now()) {
+		t.Fatal("the armed retry must throttle the first request, not reload on it")
+	}
+	due := state.RetryAt.Add(time.Second)
+	if !p.shouldReloadGeofeedLocked(due) {
+		t.Fatalf("the retry must come due at %v, not wait out the refresh interval", state.RetryAt)
+	}
+
+	p.doReload(context.Background())
+
+	if got := lookupLen(p.countryLookup); got != 3 {
+		t.Fatalf("the retry must replace the empty boot lookup, got %d ranges", got)
+	}
+	if p.loadedAt.IsZero() || !p.retryAt.IsZero() || p.reloadFailures != 0 {
+		t.Fatalf("a clean retry must stamp the load and clear the retry, loadedAt=%v retryAt=%v failures=%d",
+			p.loadedAt, p.retryAt, p.reloadFailures)
 	}
 }
 
@@ -1235,6 +1283,24 @@ func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 	}
 }
 
+// TestNoGeofeedSourcesNeverComesDueForReload is the other half of the
+// no-sources short-circuit: returning a fresh empty lookup only DEFERS the
+// doomed retry, because one refresh interval later the gate comes due and
+// LoadAll takes the empty source list as an error. Nothing to load means
+// nothing to refresh.
+func TestNoGeofeedSourcesNeverComesDueForReload(t *testing.T) {
+	t.Parallel()
+
+	p, err := NewProcessor(t.Context(), zerolog.Nop(), Options{RefreshInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("a config that asks the geofeed nothing must build: %v", err)
+	}
+
+	if p.shouldReloadGeofeedLocked(time.Now().Add(365 * 24 * time.Hour)) {
+		t.Fatal("a geofeed with no sources must never come due: the reload can only fail")
+	}
+}
+
 // TestReloadCarryKeepsGeofeedBackoff pins VP-02. loadedAt marks the last GOOD
 // data, so after a failed reload it reads as permanently stale and only retryAt
 // throttles the next attempt. A config reload builds a fresh Processor from the
@@ -1258,6 +1324,10 @@ func TestReloadCarryKeepsGeofeedBackoff(t *testing.T) {
 	next, err := NewProcessor(t.Context(), zerolog.Nop(), Options{
 		PreloadedGeofeed: failed,
 		RefreshInterval:  24 * time.Hour,
+		// A carry describes a config that still has the feed configured; with
+		// no sources NewProcessor zeroes the refresh and every staleness
+		// question below would answer false for the wrong reason.
+		GeofeedSources: []geofeed.Source{{URL: "https://example.test/geofeed.csv", Type: "raw"}},
 	})
 	if err != nil {
 		t.Fatalf("NewProcessor from carried state: %v", err)

@@ -132,6 +132,99 @@ func TestNewProcessorLoadsGeofeedWhenNotPreloaded(t *testing.T) {
 	}
 }
 
+// TestNewProcessorGeofeedLoadFailureDegrades: a total geofeed load failure is
+// not fatal when a refresh can close the window. Starting empty costs the
+// feed's contribution to the lookup chain for one retry delay — the whole
+// answer only empties where the chain names no other LOCAL provider; refusing to
+// boot answers nothing at all until an operator notices.
+func TestNewProcessorGeofeedLoadFailureDegrades(t *testing.T) {
+	t.Parallel()
+
+	opts := preprocess.Options{
+		// SSRF-unreachable loopback: the load fails without touching the network.
+		GeofeedSources:  []geofeed.Source{{URL: "https://127.0.0.1:1/geofeed.csv", Type: "raw"}},
+		RefreshInterval: time.Hour,
+	}
+
+	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("geofeed load failure must degrade, not fail startup: %v", err)
+	}
+
+	state := p.GeofeedState()
+	if state.Lookup == nil {
+		t.Fatal("failed geofeed load must yield an empty lookup, not nil")
+	}
+	if !state.LoadedAt.IsZero() {
+		t.Fatalf("failed geofeed load must leave LoadedAt zero for retry, got %v", state.LoadedAt)
+	}
+	if state.RetryAt.IsZero() || state.Failures != 1 {
+		t.Fatalf("failed geofeed load must arm a backing-off retry, got RetryAt=%v failures=%d",
+			state.RetryAt, state.Failures)
+	}
+}
+
+// TestNewProcessorGeofeedLoadFailureFatalWithoutRefresh: with the refresh
+// explicitly disabled no retry can fire, so the empty lookup would be
+// permanent and every allow-list answer silently empty. That one stays fatal.
+func TestNewProcessorGeofeedLoadFailureFatalWithoutRefresh(t *testing.T) {
+	t.Parallel()
+
+	opts := preprocess.Options{
+		GeofeedSources: []geofeed.Source{{URL: "https://127.0.0.1:1/geofeed.csv", Type: "raw"}},
+	}
+
+	if _, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts); err == nil {
+		t.Fatal("a geofeed failure with no retry scheduled must fail the build, not place nothing forever")
+	}
+}
+
+// TestNewProcessorRefusesEmptyCarriedGeofeedWithoutRefresh: the reload
+// carry-over is the second way a permanently-empty lookup could be reached —
+// adopting a degraded state into a config that can never refresh it. That one
+// logs nothing but "using preloaded geofeed lookup", so it is refused.
+func TestNewProcessorRefusesEmptyCarriedGeofeedWithoutRefresh(t *testing.T) {
+	t.Parallel()
+
+	opts := preprocess.Options{
+		PreloadedGeofeed: preprocess.GeoState{Lookup: geofeed.NewLookup(nil), Failures: 1},
+		GeofeedSources:   []geofeed.Source{{URL: "https://127.0.0.1:1/geofeed.csv", Type: "raw"}},
+	}
+
+	if _, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts); err == nil {
+		t.Fatal("an empty carried lookup with the refresh disabled must be refused, not adopted forever")
+	}
+
+	opts.RefreshInterval = time.Hour
+	if _, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), opts); err != nil {
+		t.Fatalf("the same carried state is fine where a retry can fire: %v", err)
+	}
+}
+
+// TestNewProcessorWithoutGeofeedSourcesArmsNoRetry: no sources is the legal
+// shape of "nothing asks the provider" (validateGeofeed), but LoadAll calls it
+// an error, so the failure path would arm a retry that cannot succeed and warn
+// on every backoff step forever.
+func TestNewProcessorWithoutGeofeedSourcesArmsNoRetry(t *testing.T) {
+	t.Parallel()
+
+	p, err := preprocess.NewProcessor(context.Background(), zerolog.Nop(), preprocess.Options{
+		RefreshInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("a config that asks the geofeed nothing must build: %v", err)
+	}
+
+	state := p.GeofeedState()
+	if state.Lookup == nil {
+		t.Fatal("an unconfigured geofeed must still hand out an empty lookup, not nil")
+	}
+	if !state.RetryAt.IsZero() || state.Failures != 0 || state.LoadedAt.IsZero() {
+		t.Fatalf("nothing to load means nothing to retry, got RetryAt=%v failures=%d loadedAt=%v",
+			state.RetryAt, state.Failures, state.LoadedAt)
+	}
+}
+
 // TestNewProcessorSkipsUnreferencedGeoDBs: when no annotate entry references
 // dbip/registry, the databases are never built — the state getters return the
 // zero GeoState even though the configs carry (unreachable) URLs that a build
@@ -194,7 +287,7 @@ func TestNewProcessorUsesPreloadedGeoDBs(t *testing.T) {
 }
 
 // TestNewProcessorGeoDBLoadFailureDegrades: a failing initial dbip/registry
-// download must NOT fail startup (unlike geofeed) — the processor starts with
+// download must NOT fail startup — the processor starts with
 // an empty lookup and a zero LoadedAt so the next refresh trigger retries.
 func TestNewProcessorGeoDBLoadFailureDegrades(t *testing.T) {
 	t.Parallel()

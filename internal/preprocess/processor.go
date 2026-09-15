@@ -430,14 +430,58 @@ func providerNeeds(opts Options) (needsASN, wantDBIP, wantRegistry bool) {
 
 func initialGeofeedState(ctx context.Context, initLog zerolog.Logger, opts Options) (GeoState, error) {
 	if opts.PreloadedGeofeed.Lookup != nil {
+		// An empty carried lookup is reachable since a failed initial load stopped
+		// being fatal, and adopting one whole where nothing can refresh it strands
+		// the permanently-empty state the guard below exists to refuse — silently,
+		// because this path logs only that a preload was used. It is refused only
+		// where a source exists to load: the no-sources branch hands out that same
+		// empty lookup on purpose, and carrying it is then the correct answer.
+		if len(opts.GeofeedSources) > 0 && opts.RefreshInterval <= 0 &&
+			lookupLen(opts.PreloadedGeofeed.Lookup) == 0 {
+			return GeoState{}, errors.New("carried geofeed lookup is empty and the refresh is disabled: nothing would ever retry")
+		}
 		initLog.Info().Msg("using preloaded geofeed lookup")
 		// Adopted whole, retry schedule included: see GeoState.
 		return opts.PreloadedGeofeed, nil
 	}
+	if len(opts.GeofeedSources) == 0 {
+		// Legal only when nothing references the provider (validateGeofeed), and
+		// LoadAll calls it an error, so without this the provider nobody asks
+		// would arm a retry that cannot succeed and warn on every backoff step
+		// forever. Fresh, empty and never refreshed is what "not configured"
+		// means here.
+		initLog.Info().Msg("no geofeed sources configured; provider stays empty")
+		return GeoState{Lookup: geofeed.NewLookup(nil), LoadedAt: time.Now()}, nil
+	}
 	initLog.Info().Int("sources", len(opts.GeofeedSources)).Msg("loading geofeed")
 	entries, failed, err := geofeed.LoadAll(ctx, opts.GeofeedSources, initLog)
 	if err != nil {
-		return GeoState{}, fmt.Errorf("load geofeed: %w", err)
+		// A total failure degrades exactly as the geoDBs do: an empty lookup and
+		// a short retry, never a dead service (the cidr allow-list stays fatal —
+		// see newCIDRStore). Startup must not depend on a third-party feed being
+		// up at that minute. The window is not free: for its length the geofeed
+		// contributes nothing to the chain the country FILTER walks — the local
+		// databases alone (geofeed/dbip/registry; localCountryProvider drops
+		// cloudflare and asn from it even where the GEO chain names them) — so a
+		// node only this feed could place goes unplaced, and the answer empties
+		// unless another LOCAL provider in that chain places it. It closes on the
+		// first retry, where a refused boot stays down until someone notices.
+		//
+		// With the refresh explicitly disabled no retry will ever fire, so the
+		// empty lookup would be permanent and the emptiness silent: there the
+		// failure is still fatal, because a config that asks for one load has
+		// asked for that load to succeed.
+		if opts.RefreshInterval <= 0 {
+			return GeoState{}, fmt.Errorf("load geofeed: %w", err)
+		}
+		delay := retryDelay(0, opts.RefreshInterval)
+		initLog.Warn().Err(err).Dur("retry_in", delay).
+			Msg("initial geofeed load failed; starting empty, retrying shortly")
+		return GeoState{
+			Lookup:   geofeed.NewLookup(nil),
+			RetryAt:  time.Now().Add(delay),
+			Failures: 1,
+		}, nil
 	}
 	var state GeoState
 	if failed > 0 {
@@ -506,13 +550,21 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	}
 
 	sources := append([]geofeed.Source(nil), opts.GeofeedSources...)
+	// No sources is no load, so the refresh has nothing to fire at: left armed it
+	// comes due one interval later, calls LoadAll on an empty list, takes its
+	// error and starts exactly the retry-and-warn loop initialGeofeedState's
+	// no-sources branch exists to prevent — a day late rather than never.
+	refresh := opts.RefreshInterval
+	if len(sources) == 0 {
+		refresh = 0
+	}
 	p := &Processor{
 		logger:          logger,
 		countryLookup:   geoState.Lookup,
 		loadedAt:        geoState.LoadedAt,
 		retryAt:         geoState.RetryAt,
 		reloadFailures:  geoState.Failures,
-		refreshInterval: opts.RefreshInterval,
+		refreshInterval: refresh,
 		resolver:        dnsR,
 		blocklist:       opts.Blocklist,
 		fetchTimeout:    opts.FetchTimeout,
@@ -1247,10 +1299,15 @@ func (p *Processor) maybeRefreshDatabases(ctx context.Context) {
 // preloaded state (reload carry-over) is adopted whole — data, load time and
 // the retry schedule in flight — so a mirror that is currently failing keeps
 // its backoff instead of being re-downloaded on the first request after every
-// config reload. Otherwise the initial load runs inline but, unlike geofeed, a
-// failure only WARNs and starts with an empty lookup: startup must never depend
-// on a third-party database mirror. A failed or partial initial load schedules
-// a short retry instead of waiting out the full refresh interval.
+// config reload. Otherwise the initial load runs inline and a failure only
+// WARNs, starting with an empty lookup: startup must never depend on a
+// third-party database mirror. Geofeed degrades the same way now, with one
+// exception of its own: an explicit `refresh_interval: 0` keeps its failure
+// fatal, because nothing would ever retry. The cidr allow-list stays fatal
+// unconditionally, and for the opposite reason (an undownloaded allow-list
+// drops every node instead of placing none). A failed or partial
+// initial load schedules a short retry instead of waiting out the full
+// refresh interval.
 func newGeoDB(
 	ctx context.Context,
 	logger zerolog.Logger,
