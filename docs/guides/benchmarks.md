@@ -16,7 +16,14 @@
   Controlled both times against a hybrid tree holding the fixture constant, the fixture was
   100% of each B/op move. Every `benchmarks/` snapshot older than `5d06fb6` records
   `4640 B/op`, so diffing a fresh `make bench` against one reads a 65% win that does not
-  exist.
+  exist. **Every `BenchmarkProcessBodyPipeline` figure recorded in this file — the `4640`, the
+  `1600` and the 0-alloc settled-tree re-read below — was taken while the arm drove the
+  RENDERING sink (`bufferSink`), the output shape the removed `GET /` endpoint needed. The
+  endpoint, `Processor.Filter` and that sink went out together on 2026-09-12 and the arm now
+  drives `sliceSink`, which RETAINS the survivor nodes the worker annotates, so a slice grows
+  where a reused render buffer did not. No post-cutover reading has been committed: the figures
+  below price the removed arm, and anything quoted about the current one must be re-measured
+  with `nix-shell --run "make bench"`.**
 - **A sub-2% ns delta on these benchmarks is not measurable here and MUST NOT be quoted as
   a result.** The variable is the linked image, not the session: two `git archive` exports
   of byte-identical source, relinked, disagree by up to ~2% on a must-be-zero null control,
@@ -51,7 +58,7 @@
   -count=20` sweeps over two links read the same 13 B/op floor every time and a different
   ceiling every time. Name the floor and the mechanism, quote no ceiling.
   The one deliberate increase is in `countryChainOrder`: a config splitting
-  one `GEO` chain across several entries now pays a per-request `chainLookup` it did not
+  one `GEO` chain across several entries now pays a per-`FilterNodes` `chainLookup` it did not
   before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
   already cost. The shipped config is unmoved, and the alternative was the wrong filter
   verdict - see `Processor.countryChain`.
@@ -115,8 +122,9 @@
   `BenchmarkProcessBodyPipeline` runs through the annotate path, and this wave touched it:
   `rewrite.NodeName` writes the tag prefix, its space and the name straight into the caller's
   buffer (`rewrite.go:55-66`), leaving a contiguous name to be built only by the vmess/ssr
-  payload arms (then `displayName`). Re-read on the settled tree it allocates NOTHING — 0 B/op,
-  0 allocs/op over its 100 nodes — so the `4640 -> 1600` arithmetic describes a tree at
+  payload arms (then `displayName`). Re-read on the settled tree it allocated NOTHING — 0 B/op,
+  0 allocs/op over its 100 nodes, on the rendering sink that no longer exists (see the
+  fixture bullet's cutover note) — so the `4640 -> 1600` arithmetic describes a tree at
   `5d06fb6` and says nothing about this one. Two caveats date that reading, and the
   settled-tree run (bench-20260905T085512Z.txt) resolves both. The fixture is
   100% vless, and the fixture bound is real: vmess/ss-legacy/ssr lines allocate their
@@ -129,9 +137,9 @@
   reads 2878595 B/op / 303 allocs/op against. And the tree the 0-alloc reading was re-read on
   predates the rounds' rewrite change
   (the `displayName` join deleted, the payload arms composing in the rewriters' scratch):
-  re-read on the settled tree, `BenchmarkProcessBodyPipeline` still allocates NOTHING —
-  0 B/op, 0 allocs/op — so the rounds' own refutation held, and the flagship claim survives
-  all three rounds.
+  re-read on the settled tree, `BenchmarkProcessBodyPipeline` still allocated NOTHING —
+  0 B/op, 0 allocs/op — so the rounds' own refutation held, and the flagship claim survived
+  all three rounds on the arm as it then was, the rendering sink included.
   **Two ns/op LOSSES came out of this wave on source it does not touch, and they are
   recorded here rather than against either path.** `BenchmarkParse_SSLegacy` reads 3623 and
   3636 ns/op on two links of HEAD against 3776 and 3876 on two links of the settled tree
@@ -459,13 +467,18 @@
     `BenchmarkCollectSurvivors_*` family) write their bodies through `benchWriteVless`, so
     the vmess/ss-legacy/ssr per-node parse buffers sat outside every guarded envelope; the
     rounds closed that with `BenchmarkProcessBodySlice_MixedSchemes` (92% vless / 4% vmess /
-    2% ss-legacy / 2% ssr) and with `BenchmarkFilterRequest` / `BenchmarkFilterNodesRequest`
-    for the `Filter`/`FilterNodes` entry's fixed per-request allocations (the processBody-only
-    arms construct `pctx` by hand and bypass all of them). The settled-tree run
+    2% ss-legacy / 2% ssr) and with the two entry-point arms for
+    the pipeline entry's own fixed per-call allocations (the processBody-only arms construct
+    `pctx` by hand and bypass all of them). The settled-tree run
     (bench-20260905T085512Z.txt) carries all three arms' first committed readings:
     `BenchmarkProcessBodySlice_MixedSchemes` 2849844 B/op / 1393 allocs/op,
-    `BenchmarkFilterRequest` 1136 B/op / 8 allocs/op and
-    `BenchmarkFilterNodesRequest` 8629 B/op / 9 allocs/op.
+    `BenchmarkFilterNodesRequest` 8629 B/op / 9 allocs/op, and 1136 B/op / 8 allocs/op for
+    `BenchmarkFilterRequest` — the arm over `Processor.Filter`, the rendering entry point the
+    `GET /` endpoint used. **Both that benchmark and `Filter` were deleted with the endpoint
+    (2026-09-12), so its reading prices REMOVED code and is not a figure about this tree:
+    `BenchmarkFilterNodesRequest` is the only surviving entry-point arm, and the two numbers
+    were never comparable anyway — `Filter` rendered a subscription body while `FilterNodes`
+    hands back the survivor slice the worker annotates.**
   - **Nothing drives the `/stable.txt` handler or a full `/metrics` scrape.** The
     X-Stable-Stats header re-formatting the rounds memoized per snapshot, and the hand-rolled
     Prometheus renderer's per-scrape state, have no benchmark at the HTTP layer —

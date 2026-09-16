@@ -5,21 +5,19 @@
 ## What this project is
 
 This is a small HTTP preprocessor for Mihomo-compatible subscription content.
-It exposes two modes.
-
-**On-demand filter (`GET /`)** — filter one subscription URL at request time:
-
-1. accepts `subscription_url` + `countries` (or `groups` referencing `config.groups`) via HTTP query params
-2. downloads subscription text
-3. parses generic URI-style nodes (not VLESS-only; `vmess://` is decoded in both its accepted bodies — the base64-JSON payload and the Xray VMessAEAD `uuid@host:port` authority)
-4. resolves node hostnames
-5. geofilters by IP country from geofeed sources
-6. rewrites node fragment/name with the configured `annotate` tags (shipped config: `[GEO:XX] ...`)
-7. returns raw Mihomo-compatible text/plain subscription body
+It serves ONE product — a curated, probe-verified subscription list — and the
+only work it does is the background cycle that builds it. There is no
+request-time filtering mode: the HTTP surface is `/stable.txt` plus `/healthz`,
+`/favicon.ico` and, on the separate metrics listener, `/metrics` (the
+on-demand `GET /` filter endpoint was removed 2026-09-12; the pipeline it drove
+is now reached only by the worker, through `preprocess.FilterNodes`).
 
 **Stable subscriptions worker (`GET /stable.txt`)** — a background worker keeps
 one curated list built from all `subscriptions.sources`. Each cycle fetches every
-source, runs it through the same IP-stage filter chain (geo/ASN/cidr), merges and dedupes by
+source, parses generic URI-style nodes (not VLESS-only; `vmess://` is decoded in
+both its accepted bodies — the base64-JSON payload and the Xray VMessAEAD
+`uuid@host:port` authority), resolves node hostnames, runs them through the
+configured IP-stage filter chain (geo/ASN/cidr), merges and dedupes by
 `server:port` (first source wins), relabels kept nodes to `<source>-NNN`, probes
 every node with an embedded Mihomo URL test, keeps only those that pass all
 rounds under the latency threshold, then runs the configured through-node
@@ -44,13 +42,12 @@ ENTRY address that had given it its purpose, holding
 `hxehex/russia-mobile-internet-whitelist`, was disabled 2026-08-14 after it
 published 1 node per cycle for 43 cycles; the filter type is still a feature and
 that verdict now sits with it, commented out, in `config/config.yaml`.
-The shipped `country` entry carries no `exclude_*`, so it is inert on
-`/stable.txt` (`GeofeedFilter` early-returns on a full allow set with an empty
-deny set) and is there for `GET /`: without an entry of that type — or a
-`{type: asn}` one — no filter can honour the request's country parameters, so
-the server refuses every country-gated request with a `400` naming the missing
-filter instead of demanding a parameter that nothing would then read (see the
-API section).
+The shipped `country` entry carries no `exclude_*`, so it drops nothing today
+(`GeofeedFilter` early-returns on a full allow set with an empty deny set). It
+is kept because it is the ONLY hook a country exclusion has: `Config.DeniedCountries`
+expands `exclude_countries`/`exclude_groups` over `{type: country}` entries
+alone, so with no such entry an operator's exclusion would be read by nothing
+and the worker's deny-set would silently come out empty.
 
 **Do not read that upstream repository name as a description of the data.** Measured
 2026-08-10 over the whitelist's 15649 intervals: AS749 DNIC (US DoD) is 20.97% of the
@@ -100,7 +97,7 @@ no deployment may be sized off the 15649, only off a measured node count.
 - A subscription URL may also answer with an **Xray JSON config** instead of a URI list — panel software (Hiddify) does. `subscription.Normalize` converts such a document's outbounds into share links, so nothing downstream (`Parse`, `classify`, the geo pipeline, `Merge`, `rewrite`) knows about JSON. The asymmetry with the line above is deliberate, not an oversight: URI parsing is scheme-generic, the JSON conversion covers **vless and hysteria2 only** — 158 of the 160 proxy outbounds in the first measured corpus were vless, and one of the two shadowsocks entries carried the literal address `sdfsdf`, so shadowsocks is still out. Add a protocol when data justifies it: hysteria2 is what that looked like, and it converts at version 2 ONLY, mihomo reading v1 under its own `hysteria://` scheme with a different parameter set.
 - IP-stage filters see only a node's resolved IPs (`Filter.Process`, `internal/preprocess/filters.go`), never its name or protocol: country from the local databases, AS name/country, `cidr` membership.
 - Output rewriting is still **scheme-aware/safe**: it only rewrites parsed URI nodes.
-- The on-demand `/` path does no liveness probing. The `/stable.txt` worker is the only place that probes nodes (embedded Mihomo URL test).
+- Liveness probing happens in ONE place: the `/stable.txt` worker (embedded Mihomo URL test). The IP-stage pipeline (`preprocess.FilterNodes`) never probes — it resolves and filters, and every published node's liveness verdict comes from the worker's probe.
 - In the `/stable.txt` worker a node is identified by its `Entry.Label` (`<source>-NNN`), never by the mihomo proxy name — because the two differ for `mierus://`, which mihomo expands into ONE proxy PER configured port, named `<label>:<port>/<protocol>`. `entryLabel` (`internal/stable/label.go`) folds that back; without it a healthy mieru node matched nothing and was never selected or checked — for a prober without the parse-refusal account it was also booked into the dead cache — and counted `unreachable` in every through-node filter. The latency probe and both through-node outcome maps then fold a label's duplicates **best-of-ports** (the entry survives if any of its ports passed — best-of, never a sum, or `Successes` could exceed `check.rounds`), while the filters' proxy subset keeps EVERY port, so a port dead on our egress cannot mask a live sibling.
 - The resolver keeps an in-memory DNS TTL cache (`resolver.cache_ttl` / `resolver.cache_negative_ttl`) so repeated stable cycles don't hammer the upstream DNS.
 - Geofeed sources are explicit in YAML via `geofeed.sources[].url` + `geofeed.sources[].type`.
@@ -120,21 +117,30 @@ no deployment may be sized off the 15649, only off a measured node count.
 ## API behavior to remember
 
 - `GET /healthz` returns `ok`
-- `GET /` requires:
-  - `subscription_url`
-  - `countries` (comma-separated) OR `groups` (comma-separated, referencing `config.groups`) — or, alone, either `exclude_*` parameter below: an exclusion-only request is accepted, but only if it actually names a country: a value made of blank tokens (`exclude_countries=,,`) carries no exclusion and answers the same `400` as no parameter at all, where it once answered 200 with the FULL unfiltered subscription
-  - optional `exclude_countries` / `exclude_groups` — a true **deny-list**, not a subtraction from the allow-list. A node is dropped only when its IP resolves to an excluded country; an IP no geo provider can place SURVIVES an exclusion-only request. Under an explicit `countries`/`groups` allow-list an unplaceable IP is still dropped — that is what an allow-list means. Unknown group names and non-alpha-2 codes are rejected with `400`, not silently ignored
-  - a country-capable IP filter must exist in the loaded config — a `{type: country}` entry (either provider) or `{type: asn}`. With neither (an empty list or cidr-only) every countries/groups/exclude_* request answers `400` `no country-capable filter configured (filters[].type: country or asn)` instead of 200 with a list the parameters never narrowed (`countryPolicy` in the handler; `config.CountryFilterConfigured`)
-  - each query key is single-valued: a repeated `countries=`/`exclude_countries=`/… answers `400` `repeated query parameter: <key>` rather than silently serving the first value (a dropped second exclusion could serve exactly the jurisdictions the caller asked to exclude)
-- `GET /` does not publish a portless line as a node: a bare `https://t.me/somechannel` in a source body counts in `Stats.Unsupported` (`unsupported=` in `X-Preprocessor-Stats`), as does any other scheme's portless form. A portful one (`https://example.com:8443`) is still a node
-- `GET /` bounds one request: a 60s deadline (`504` on expiry, since fasthttp's request context has neither a deadline nor client-disconnect cancellation) and a 50k node ceiling (`413`). The request's own deadline is also the on-demand DOWNLOAD's budget: `preprocess.Filter` passes no sub-budget, so the subscription fetch inherits the request context — `fetch.timeout` is the worker's fail-fast knob and is NOT applied here (see config.md's `fetch.timeout` entry). The byte ceiling answers the same `413`: a body over the 10 MiB cap is refused by the fetch layer (`response too large: over …`) and mapped to the documented status, so oversize stays distinguishable from an upstream fault (`502`). The node ceiling is a DoS bound shared with the worker's per-source load, not a quality filter — at 20k it dropped a configured 36421-node aggregator source outright
+- `GET /favicon.ico` answers `204` with an empty body, so a browser opening `/stable.txt`
+  does not fill the access log with 404s for a file this service has nothing to serve for
 - `GET /stable.txt` serves the worker's current list; `503` until there is one — the first completed cycle, or the snapshot restored at startup when `subscriptions.snapshot_path` is set AND `subscriptions.sources` is non-empty (an empty source list is the deliberate disable, and restoring then would serve a stale list with no worker ever to replace it — `restoreStableList`, `app.go:193`). A restored list keeps its original `updated=`, so its age shows. Stats are returned in `X-Stable-Stats` (`updated=… sources=ok/total merged=… tested=… kept=…`)
 - Response is `text/plain; charset=utf-8`
-- `/` stats are returned in `X-Preprocessor-Stats`
+- `GET /metrics` is served by a SEPARATE listener (`server.metrics_listen`), not by the
+  listener above, so the Prometheus surface can be bound loopback-only while `/stable.txt`
+  is published — see [`monitoring.md`](./monitoring.md)
+- **Nothing else is routed.** There are no query parameters anywhere on this surface: what gets
+  filtered, and against which countries, comes from the config alone (`subscriptions.sources`,
+  `filters`), never from a caller
+- The pipeline's two ceilings are still enforced, now as worker-side bounds rather than HTTP
+  statuses: a source body over the 10 MiB fetch cap is refused by the fetch layer (`response
+  too large: over …`) and a source yielding more than 50k nodes is refused with
+  `ErrTooManyNodes`. Both are DoS/sanity bounds on ONE source, not quality filters — at 20k
+  the node ceiling dropped a configured 36421-node aggregator source outright. A refused
+  source is one failed source in `sources=ok/total`; the cycle continues
+- A portless line is not a node: a bare `https://t.me/somechannel` in a source body counts in
+  `Stats.Unsupported`, as does any other scheme's portless form. A portful one
+  (`https://example.com:8443`) is still a node
 
 Example:
 
 ```bash
-curl "http://127.0.0.1:8080/?subscription_url=https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt&countries=FI,EE,LV,LT,SE,PL,DE,NL"
-curl "http://127.0.0.1:8080/?subscription_url=https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt&groups=nordics,euronorth"
+curl -sS http://127.0.0.1:7008/healthz
+curl -sS -D- -o/dev/null http://127.0.0.1:7008/stable.txt   # X-Stable-Stats carries the cycle's counts
+curl -sS http://127.0.0.1:9091/metrics | head           # metrics_listen is published on 9091
 ```

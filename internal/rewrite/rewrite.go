@@ -115,12 +115,10 @@ func StripKnownTags(s string) string {
 // `IP:` and `ASN:` have no writer left -- both annotate tags were removed --
 // and both must still stay, on the only path that strips anything: an
 // ANNOTATING config. With `annotate: []` the annotator is nil, so nothing
-// calls NodeName and this function never runs at all:
-// preprocess.bufferSink.emit publishes node.Raw verbatim, while
-// stable.BuildPayload's nil-annotator arm publishes Survivor.Raw -- the
-// Entry.Raw that stable.Merge had already relabelled to <source>-NNN, so no
-// upstream name reaches /stable.txt whatever this function recognises. On `/`
-// every upstream tag survives.
+// calls NodeName and this function never runs at all: stable.BuildPayload's
+// nil-annotator arm publishes Survivor.Raw -- the Entry.Raw that stable.Merge
+// had already relabelled to <source>-NNN, so no upstream name reaches
+// /stable.txt whatever this function recognises.
 //
 // Where it does run, the scan consumes a CONTIGUOUS run and returns the
 // remainder from the first tag it does not recognise, so dropping either arm

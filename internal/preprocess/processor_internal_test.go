@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -88,7 +87,7 @@ func TestProcessNodeKeepsCachedResolvedSlicePristine(t *testing.T) {
 	p := &Processor{filters: []Filter{f}}
 
 	pctx := &PipelineContext{
-		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		sink:     &sliceSink{},
 		Resolved: map[string][]netip.Addr{"example.com": {ipA, ipB}},
 		Stats:    &Stats{},
 	}
@@ -119,7 +118,7 @@ func TestProcessBodyCancelledContextReturnsError(t *testing.T) {
 
 	p := &Processor{}
 	pctx := &PipelineContext{
-		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		sink:     &sliceSink{},
 		Resolved: map[string][]netip.Addr{},
 		Stats:    &Stats{},
 	}
@@ -145,7 +144,7 @@ func TestProcessNodeCancelledBooksNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pctx := &PipelineContext{
-		sink:     &bufferSink{buf: &bytes.Buffer{}},
+		sink:     &sliceSink{},
 		Resolved: map[string][]netip.Addr{},
 		Stats:    &Stats{},
 	}
@@ -159,13 +158,12 @@ func TestProcessNodeCancelledBooksNothing(t *testing.T) {
 	}
 }
 
-// TestFilterInlineBodyNoFetch drives Filter with an inline Body request: the
-// nodes use bare IP servers so resolveNode handles them without DNS, proving the
-// Body path filters directly with no subscription.Load / HTTP fetch. The payload
-// is base64-encoded so the subscription.Normalize step in the inline path is
-// actually exercised. Filters are empty, so every syntactically valid node with
-// a resolvable (bare-IP) server is kept and emitted into the buffer.
-func TestFilterInlineBodyNoFetch(t *testing.T) {
+// TestFilterNodesInlineBodyNoFetch drives an inline Body request: the nodes use
+// bare IP servers so resolveNode handles them without DNS, proving the Body
+// path filters directly with no subscription.Load / HTTP fetch. The payload is
+// base64-encoded so the subscription.Normalize step in the inline path is
+// actually exercised.
+func TestFilterNodesInlineBodyNoFetch(t *testing.T) {
 	t.Parallel()
 
 	plain := "vless://a@1.1.1.1:443#n1\nvless://b@2.2.2.2:443#n2\nvless://c@3.3.3.3:443#n3\n"
@@ -175,27 +173,44 @@ func TestFilterInlineBodyNoFetch(t *testing.T) {
 		resolver: resolver.New(time.Second, "", 0, 0),
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+	nodes, stats, err := p.FilterNodes(context.Background(), FilterRequest{
 		Body:             body,
 		AllowedCountries: filter.All(),
 	})
 	if err != nil {
-		t.Fatalf("inline Filter failed: %v", err)
+		t.Fatalf("inline FilterNodes failed: %v", err)
 	}
 	if stats.Total != 3 || stats.Kept != 3 {
-		t.Fatalf("inline Filter stats = %+v, want total=3 kept=3", stats)
+		t.Fatalf("inline FilterNodes stats = %+v, want total=3 kept=3", stats)
 	}
-	out := buf.String()
+	got := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		got = append(got, n.Raw)
+	}
 	for _, want := range []string{
 		"vless://a@1.1.1.1:443#n1",
 		"vless://b@2.2.2.2:443#n2",
 		"vless://c@3.3.3.3:443#n3",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing node %q; got:\n%s", want, out)
+		if !slices.Contains(got, want) {
+			t.Errorf("output missing node %q; got:\n%v", want, got)
 		}
 	}
+}
+
+// annotateNode renders one survivor the way the worker does: FilterNodes hands
+// back raw lines, so the node has to be re-parsed before the annotator can
+// rewrite its name.
+func annotateNode(t *testing.T, p *Processor, n NodeResult) string {
+	t.Helper()
+	var node subscription.Node
+	subscription.Parse([]byte(n.Raw), func(parsed subscription.Node) bool {
+		node = parsed
+		return false
+	})
+	var dst, scratch bytes.Buffer
+	p.Annotator().Annotate(t.Context(), &dst, &scratch, AnnotateRequest{Node: node, IP: n.IP})
+	return dst.String()
 }
 
 func newInlineProcessor() *Processor {
@@ -205,7 +220,7 @@ func newInlineProcessor() *Processor {
 // A source whose hwid never leaves the process still fetches 200 — the panel
 // answers a placeholder node — so nothing but this assertion separates a
 // carried hwid from a dropped one. loadSubscription is where the URL path hands
-// the value over, and `GET /` (empty HWID) must keep sending nothing. The
+// the value over, and an empty HWID must keep sending no header at all. The
 // loadSubscription swap is package-global, so this test may not call
 // t.Parallel.
 func TestFilterNodesHandsTheRequestHWIDToTheLoad(t *testing.T) {
@@ -240,23 +255,17 @@ func TestFilterNodesHandsTheRequestHWIDToTheLoad(t *testing.T) {
 	}
 }
 
-// TestFilterFetchBudgetSplit pins LogicRequest#2. The URL fetch on the
-// on-demand path (Filter, GET /) used to run under the same fetch.timeout as
-// the worker, so a subscription that answered 200 but streamed past the 3s cap
-// was answered 504 with ~57s of the handler's 60s request budget unused. Filter
-// now inherits the caller's deadline; FilterNodes keeps the fail-fast
-// fetch.timeout so an unresponsive source abandons its 16-way slot quickly
-// instead of holding it for a per-source deadline of minutes. The seam records
-// the fetch context's deadline, so no timer needs to fire. The loadSubscription
-// swap is package-global, so this test may not call t.Parallel.
-func TestFilterFetchBudgetSplit(t *testing.T) {
+// TestFilterNodesFetchBudget pins the worker's fail-fast URL fetch: sixteen
+// sources fetch concurrently, so an unresponsive one must abandon its slot on
+// fetch.timeout instead of riding the caller's unbounded context. The seam
+// records the fetch context's deadline, so no timer needs to fire. The
+// loadSubscription swap is package-global, so this test may not call
+// t.Parallel.
+func TestFilterNodesFetchBudget(t *testing.T) {
 	original := loadSubscription
 	t.Cleanup(func() { loadSubscription = original })
 
-	const (
-		requestBudget = 60 * time.Second
-		failFast      = time.Second
-	)
+	const failFast = time.Second
 	body := []byte("vless://a@192.0.2.1:443#n1\n")
 	url := fetch.SubscriptionURL("https://example.com/sub")
 	var deadlines []time.Time
@@ -269,79 +278,15 @@ func TestFilterFetchBudgetSplit(t *testing.T) {
 	svc := newInlineProcessor()
 	svc.fetchTimeout = failFast
 
-	// On-demand: the handler's own 60s context must BE the fetch budget. The
-	// old code cut the fetch at the 1s fail-fast cap, which this assertion
-	// (deadline equality with the request context) fails.
-	reqCtx, cancel := context.WithTimeout(context.Background(), requestBudget)
-	defer cancel()
-	var buf bytes.Buffer
-	if _, err := svc.Filter(reqCtx, &buf, FilterRequest{
-		SubscriptionURL:  url,
-		AllowedCountries: filter.All(),
-	}); err != nil {
-		t.Fatalf("Filter: %v", err)
-	}
-	outer, _ := reqCtx.Deadline()
-	if got := deadlines[0]; !got.Equal(outer) {
-		t.Fatalf("Filter fetched under a %s deadline, want the request's whole %s budget",
-			time.Until(got).Round(time.Second), requestBudget)
-	}
-
-	// Worker: the fail-fast cap stays. A deadline ~1s out, not the unbounded
-	// background context it was passed.
 	if _, _, err := svc.FilterNodes(context.Background(), FilterRequest{
 		SubscriptionURL:  url,
 		AllowedCountries: filter.All(),
 	}); err != nil {
 		t.Fatalf("FilterNodes: %v", err)
 	}
-	got := deadlines[1]
+	got := deadlines[0]
 	if left := time.Until(got); left > failFast || left <= 0 {
 		t.Fatalf("FilterNodes fetched under a ~%s deadline, want the fail-fast %s", left.Round(time.Millisecond), failFast)
-	}
-}
-
-// TestFilterNodesMatchesFilter pins both entry points to one pipeline: the
-// structural sink must yield exactly the nodes Filter prints, in the same
-// order and with the same stats, each carrying the address the filters judged
-// it by — the worker's later tags describe THAT address, and a mismatch would
-// publish a node under a country nothing checked.
-func TestFilterNodesMatchesFilter(t *testing.T) {
-	t.Parallel()
-
-	const plain = "vless://a@1.1.1.1:443#n1\nvless://b@2.2.2.2:443#n2\nvless://c@3.3.3.3:443#n3"
-	req := func() FilterRequest {
-		return FilterRequest{Body: []byte(plain), AllowedCountries: filter.All()}
-	}
-
-	var buf bytes.Buffer
-	wantStats, err := newInlineProcessor().Filter(context.Background(), &buf, req())
-	if err != nil {
-		t.Fatalf("Filter failed: %v", err)
-	}
-
-	nodes, stats, err := newInlineProcessor().FilterNodes(context.Background(), req())
-	if err != nil {
-		t.Fatalf("FilterNodes failed: %v", err)
-	}
-	if stats != wantStats {
-		t.Fatalf("FilterNodes stats = %+v, want %+v", stats, wantStats)
-	}
-
-	// Bare-IP servers keep the expected addresses readable and the test
-	// resolver-free.
-	wantIPs := []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}
-	lines := strings.Split(buf.String(), "\n")
-	if len(nodes) != len(lines) || len(nodes) != len(wantIPs) {
-		t.Fatalf("FilterNodes returned %d nodes, Filter printed %d lines", len(nodes), len(lines))
-	}
-	for i, line := range lines {
-		if nodes[i].Raw != line {
-			t.Errorf("node %d = %q, Filter printed %q", i, nodes[i].Raw, line)
-		}
-		if want := netip.MustParseAddr(wantIPs[i]); nodes[i].IP != want {
-			t.Errorf("node %d carries IP %v, want %v", i, nodes[i].IP, want)
-		}
 	}
 }
 
@@ -373,9 +318,10 @@ func TestFilterNodesClonesRaw(t *testing.T) {
 	}
 }
 
-// TestFilterNodesSharesFilterRejections: the two entry points must fail alike,
-// or the worker would publish a junk body Filter refuses.
-func TestFilterNodesSharesFilterRejections(t *testing.T) {
+// TestFilterNodesRefusesJunkBodies: a junk body, an empty allow set and an
+// over-ceiling node list must all fail rather than hand the worker something to
+// publish.
+func TestFilterNodesRefusesJunkBodies(t *testing.T) {
 	t.Parallel()
 
 	if _, _, err := newInlineProcessor().FilterNodes(context.Background(), FilterRequest{
@@ -399,7 +345,7 @@ func TestFilterNodesSharesFilterRejections(t *testing.T) {
 		Body:             []byte(big.String()),
 		AllowedCountries: filter.All(),
 	}); !errors.Is(err, ErrTooManyNodes) {
-		t.Fatalf("the node ceiling must bite on FilterNodes too, got err=%v", err)
+		t.Fatalf("the node ceiling must bite, got err=%v", err)
 	}
 }
 
@@ -836,7 +782,7 @@ func TestProcessBodyEnforcesNodeCeiling(t *testing.T) {
 	}
 	newPctx := func() *PipelineContext {
 		return &PipelineContext{
-			sink:     &bufferSink{buf: &bytes.Buffer{}},
+			sink:     &sliceSink{},
 			Resolved: map[string][]netip.Addr{},
 			Stats:    &Stats{},
 		}
@@ -1101,8 +1047,7 @@ func TestFilterIPv6LiteralIsNotADNSFailure(t *testing.T) {
 		resolver: resolver.New(time.Second, "", 0, 0),
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+	_, stats, err := p.FilterNodes(context.Background(), FilterRequest{
 		Body:             []byte("vless://u@[2001:db8::1]:8443#v6\nvless://u@192.0.2.7:443#v4\n"),
 		AllowedCountries: filter.All(),
 	})
@@ -1146,14 +1091,13 @@ func TestFilterIPv4MappedIPv6LiteralRunsAsIPv4(t *testing.T) {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+	nodes, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body: []byte("vless://u@[::ffff:203.0.113.9]:443#mapped\n" +
 			"vless://u@[2001:db8::1]:8443#v6\n"),
 		AllowedCountries: filter.ParseAllowed("NL"),
 	})
 	if err != nil {
-		t.Fatalf("Filter: %v", err)
+		t.Fatalf("FilterNodes: %v", err)
 	}
 	if stats.IPv6Drop != 1 {
 		t.Errorf("ipv6_drop = %d, want 1 (the plain v6 literal only)", stats.IPv6Drop)
@@ -1164,8 +1108,12 @@ func TestFilterIPv4MappedIPv6LiteralRunsAsIPv4(t *testing.T) {
 	if stats.Total != stats.Kept+stats.IPv6Drop {
 		t.Errorf("total %d must equal kept+drops %d", stats.Total, stats.Kept+stats.IPv6Drop)
 	}
-	if got := buf.String(); !strings.Contains(got, "[GEO:NL]") {
-		t.Errorf("published %q, want the mapped node tagged NL: it must be judged and annotated as 203.0.113.9", got)
+	if len(nodes) != 1 {
+		t.Fatalf("kept %d nodes, want the mapped literal alone", len(nodes))
+	}
+	dst := annotateNode(t, p, nodes[0])
+	if !strings.Contains(dst, "[GEO:NL]") {
+		t.Errorf("published %q, want the mapped node tagged NL: it must be judged and annotated as 203.0.113.9", dst)
 	}
 }
 
@@ -1180,8 +1128,7 @@ func TestFilterCountsUnparseableLines(t *testing.T) {
 		resolver: resolver.New(time.Second, "", 0, 0),
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(context.Background(), &buf, FilterRequest{
+	_, stats, err := p.FilterNodes(context.Background(), FilterRequest{
 		Body: []byte("vless://u@192.0.2.7:443#ok\n" +
 			`<a href="https://panel.example/renew">renew</a>` + "\n" +
 			"vmess://!!!not-base64!!!\n"),
@@ -1209,18 +1156,17 @@ func TestFilterHTMLErrorPageFails(t *testing.T) {
 		resolver: resolver.New(time.Second, "", 0, 0),
 	}
 
-	var buf bytes.Buffer
-	_, err := p.Filter(context.Background(), &buf, FilterRequest{
+	nodes, _, err := p.FilterNodes(context.Background(), FilterRequest{
 		Body: []byte("<!DOCTYPE html>\n<html><body>\n" +
 			`<p>Token expired. <a href="https://panel.example/renew">Renew</a></p>` + "\n" +
 			"</body></html>\n"),
 		AllowedCountries: filter.All(),
 	})
 	if err == nil {
-		t.Fatalf("an HTML page must not filter as a healthy subscription; buffer:\n%s", buf.String())
+		t.Fatalf("an HTML page must not filter as a healthy subscription; kept %d nodes", len(nodes))
 	}
-	if buf.Len() != 0 {
-		t.Errorf("nothing may be published from an HTML page, got:\n%s", buf.String())
+	if len(nodes) != 0 {
+		t.Errorf("nothing may be published from an HTML page, got %d nodes", len(nodes))
 	}
 }
 
@@ -1256,8 +1202,7 @@ func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 	body := []byte("vless://u@203.0.113.9:443#n\n")
 
 	// An allow-list the dbip answer satisfies: the node must survive.
-	var kept bytes.Buffer
-	stats, err := newProcessor().Filter(context.Background(), &kept, FilterRequest{
+	_, stats, err := newProcessor().FilterNodes(context.Background(), FilterRequest{
 		Body:             body,
 		AllowedCountries: filter.ParseAllowed("DE"),
 	})
@@ -1269,8 +1214,7 @@ func TestCountryChainConsultsEveryLoadedDatabase(t *testing.T) {
 	}
 
 	// A deny-list naming the same country must now reach it too.
-	var dropped bytes.Buffer
-	stats, err = newProcessor().Filter(context.Background(), &dropped, FilterRequest{
+	_, stats, err = newProcessor().FilterNodes(context.Background(), FilterRequest{
 		Body:             body,
 		AllowedCountries: filter.All(),
 		DeniedCountries:  filter.ParseAllowed("DE"),
@@ -1419,14 +1363,13 @@ func TestCountryChainFollowsConfiguredProviderOrder(t *testing.T) {
 				t.Fatalf("NewProcessor: %v", err)
 			}
 
-			var buf bytes.Buffer
-			stats, errFilter := p.Filter(t.Context(), &buf, FilterRequest{
+			_, stats, errFilter := p.FilterNodes(t.Context(), FilterRequest{
 				Body:             body,
 				AllowedCountries: filter.All(),
 				DeniedCountries:  filter.ParseAllowed("DE"),
 			})
 			if errFilter != nil {
-				t.Fatalf("Filter failed: %v", errFilter)
+				t.Fatalf("FilterNodes failed: %v", errFilter)
 			}
 			if stats.Kept != tc.wantKept {
 				t.Fatalf("kept = %d, want %d: the filter must judge with the configured GEO order %v",
@@ -1440,8 +1383,8 @@ func TestCountryChainFollowsConfiguredProviderOrder(t *testing.T) {
 // shape. countryChainOrder used to stop at the FIRST GEO entry while Annotate
 // resolves across all of them, so splitting one chain over two entries
 // inverted BOTH verdicts on the same node: with the geofeed unable to place
-// 203.0.113.9 and DB-IP placing it in DE, `countries=DE` dropped it as
-// unplaceable and `exclude_countries=DE` KEPT it — a deny-list not working —
+// 203.0.113.9 and DB-IP placing it in DE, an allow-list of DE dropped it as
+// unplaceable and a deny-list of DE KEPT it — a deny-list not working —
 // and published `[GEO:??][GEO:DE]`, naming the very country it was excluded
 // for. Both directions are pinned because only the allow-list one was ever
 // covered, and the deny-list one is the half that fails silently: nothing
@@ -1504,14 +1447,14 @@ func TestEveryGEOEntryFeedsTheCountryFilter(t *testing.T) {
 			// body would t.Fatal on the allow-list half first and never reach
 			// the deny-list assertion, so a regression in the half that fails
 			// SILENTLY would hide behind the half that is already covered.
-			t.Run("countries=DE keeps it", func(t *testing.T) {
+			t.Run("an allow-list naming DE keeps it", func(t *testing.T) {
 				t.Parallel()
 				assertKeptUnderAllowList(t, newProcessor(t, tc.annotate), body)
 			})
 
 			// The half that used to publish `[GEO:??][GEO:DE]` for a node the
 			// operator excluded DE for: nothing warned, no counter moved.
-			t.Run("exclude_countries=DE drops it", func(t *testing.T) {
+			t.Run("a deny-list naming DE drops it", func(t *testing.T) {
 				t.Parallel()
 				assertDroppedUnderDenyList(t, newProcessor(t, tc.annotate), body)
 			})
@@ -1519,49 +1462,51 @@ func TestEveryGEOEntryFeedsTheCountryFilter(t *testing.T) {
 	}
 }
 
-// assertKeptUnderAllowList runs `countries=DE` over body and requires the node
+// assertKeptUnderAllowList runs an allow-list of DE over body and requires the node
 // to survive carrying a DE tag: DB-IP places it, so every GEO entry's chain
 // reaching the filter is what makes the allow-list admit it.
 func assertKeptUnderAllowList(t *testing.T, p *Processor, body []byte) {
 	t.Helper()
 
-	var kept bytes.Buffer
-	stats, err := p.Filter(t.Context(), &kept, FilterRequest{
+	nodes, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body:             body,
 		AllowedCountries: filter.ParseAllowed("DE"),
 	})
 	if err != nil {
-		t.Fatalf("Filter: %v", err)
+		t.Fatalf("FilterNodes: %v", err)
 	}
 	if stats.Kept != 1 || stats.GeoDrop != 0 {
 		t.Fatalf("stats = %+v, want kept=1 geo_drop=0: DB-IP places this node in DE and every GEO entry's chain must reach the filter", stats)
 	}
-	if !strings.Contains(kept.String(), "GEO:DE") {
-		t.Fatalf("published %q, want a DE tag", kept.String())
+	if len(nodes) != 1 {
+		t.Fatalf("kept %d nodes, want 1", len(nodes))
+	}
+	dst := annotateNode(t, p, nodes[0])
+	if !strings.Contains(dst, "GEO:DE") {
+		t.Fatalf("published %q, want a DE tag", dst)
 	}
 }
 
-// assertDroppedUnderDenyList runs `exclude_countries=DE` over the same body and
+// assertDroppedUnderDenyList runs a deny-list of DE over the same body and
 // requires the node to be dropped and nothing published. This is the direction
 // that failed silently: a deny-list that stops reaching a database publishes
 // the node instead, with no warning and no counter moving.
 func assertDroppedUnderDenyList(t *testing.T, p *Processor, body []byte) {
 	t.Helper()
 
-	var dropped bytes.Buffer
-	stats, err := p.Filter(t.Context(), &dropped, FilterRequest{
+	nodes, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body:             body,
 		AllowedCountries: filter.All(),
 		DeniedCountries:  filter.ParseAllowed("DE"),
 	})
 	if err != nil {
-		t.Fatalf("Filter: %v", err)
+		t.Fatalf("FilterNodes: %v", err)
 	}
 	if stats.Kept != 0 || stats.GeoDrop != 1 {
 		t.Fatalf("stats = %+v, want kept=0 geo_drop=1: a deny-list must reach a node only a later GEO entry places", stats)
 	}
-	if dropped.Len() != 0 {
-		t.Fatalf("published %q, want nothing", dropped.String())
+	if len(nodes) != 0 {
+		t.Fatalf("published %d nodes, want none", len(nodes))
 	}
 }
 
@@ -1603,125 +1548,19 @@ func TestGeofeedFilterNeverDropsATagThatPlacesTheNode(t *testing.T) {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+	nodes, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body:             []byte("vless://u@203.0.113.9:443#n\n"),
 		AllowedCountries: filter.ParseAllowed("DE"),
 	})
 	if err != nil {
-		t.Fatalf("Filter: %v", err)
+		t.Fatalf("FilterNodes: %v", err)
 	}
-	if stats.Kept != 1 {
-		t.Fatalf("stats = %+v, want kept=1: the registry entry places this node, so it must not be dropped as unplaceable", stats)
+	if stats.Kept != 1 || len(nodes) != 1 {
+		t.Fatalf("stats = %+v nodes = %d, want kept=1: the registry entry places this node, so it must not be dropped as unplaceable", stats, len(nodes))
 	}
-	if got := buf.String(); !strings.Contains(got, "GEO:DE") {
-		t.Fatalf("published %q, want the placing tag on the kept node", got)
-	}
-}
-
-// midRequestSwapFilter swaps the live databases once, on the first node that
-// reaches it — standing in for the background doReload a stale request arms
-// via currentEntries. It sits AFTER the country filter, so the node's verdict
-// is already made on the request-start generation when the live tables change
-// under the annotator.
-type midRequestSwapFilter struct {
-	once sync.Once
-	swap func()
-}
-
-func (f *midRequestSwapFilter) Process(_ context.Context, ips []netip.Addr, _ *PipelineContext) []netip.Addr {
-	f.once.Do(f.swap)
-	return ips
-}
-
-// TestFilterAndAnnotateReadOneGeoGeneration pins LogicRequest#3 / LogicGeo#5.
-// filterInto captures the country chain once at request start and the filter
-// judges every node with it, but the annotator's providers used to re-read the
-// LIVE databases per node — so a reload that landed between a node's verdict
-// and its [GEO:xx] tag split one response across two generations: an
-// exclude_countries=NL request could keep a node as DE and publish [GEO:NL].
-// The swap filter fires in exactly that window; the rendered tag must still
-// come from the generation the filter judged.
-func TestFilterAndAnnotateReadOneGeoGeneration(t *testing.T) {
-	t.Parallel()
-
-	ip := netip.MustParseAddr("203.0.113.9")
-	entry := func(code geofeed.CountryCode) []geofeed.Entry {
-		return []geofeed.Entry{{Prefix: netip.PrefixFrom(ip, 32), Country: code}}
-	}
-	geofeedElsewhere := geofeed.NewLookup([]geofeed.Entry{
-		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), Country: geofeed.CountryCode{'N', 'L'}},
-	})
-	body := []byte("vless://u@203.0.113.9:443#n\n")
-
-	cases := []struct {
-		name     string
-		annotate []config.AnnotateSpec
-		geofeed  geofeed.CountryLookup
-		dbip     geofeed.CountryLookup
-		// swap moves the LIVE database to the second generation (NL).
-		swap func(p *Processor)
-	}{
-		{
-			name:     "geofeed-only chain",
-			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
-			geofeed:  geofeed.NewLookup(entry(geofeed.CountryCode{'D', 'E'})),
-			swap: func(p *Processor) {
-				p.mu.Lock()
-				p.countryLookup = geofeed.NewLookup(entry(geofeed.CountryCode{'N', 'L'}))
-				p.mu.Unlock()
-			},
-		},
-		{
-			name:     "dbip behind an unplacing geofeed",
-			annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed, config.ProviderDBIP}}},
-			geofeed:  geofeedElsewhere,
-			dbip:     geofeed.NewRangeLookup([]geofeed.Range{{Start: ip, End: ip, Country: geofeed.CountryCode{'D', 'E'}}}),
-			swap: func(p *Processor) {
-				p.dbip.mu.Lock()
-				p.dbip.lookup = geofeed.NewRangeLookup([]geofeed.Range{{Start: ip, End: ip, Country: geofeed.CountryCode{'N', 'L'}}})
-				p.dbip.mu.Unlock()
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			opts := Options{
-				RefreshInterval:  24 * time.Hour,
-				DNSTimeout:       time.Second,
-				PreloadedGeofeed: GeoState{Lookup: tc.geofeed, LoadedAt: time.Now()},
-				IPFilters:        []config.IPFilterSpec{{Type: config.FilterCountry, Provider: config.ProviderGeofeed}},
-				Annotate:         tc.annotate,
-			}
-			if tc.dbip != nil {
-				opts.PreloadedDBIP = GeoState{Lookup: tc.dbip, LoadedAt: time.Now()}
-				// SSRF-unreachable: the preload proves no download is attempted.
-				opts.DBIP = config.DBIPConfig{URL: "https://127.0.0.1:1/db-{yyyy-mm}.csv.gz", RefreshInterval: new(time.Hour)}
-			}
-			p, err := NewProcessor(t.Context(), zerolog.Nop(), opts)
-			if err != nil {
-				t.Fatalf("NewProcessor: %v", err)
-			}
-			p.filters = append(p.filters, &midRequestSwapFilter{swap: func() { tc.swap(p) }})
-
-			var buf bytes.Buffer
-			stats, err := p.Filter(t.Context(), &buf, FilterRequest{
-				Body:             body,
-				AllowedCountries: filter.All(),
-				DeniedCountries:  filter.ParseAllowed("NL"),
-			})
-			if err != nil {
-				t.Fatalf("Filter: %v", err)
-			}
-			if stats.Kept != 1 || stats.GeoDrop != 0 {
-				t.Fatalf("stats = %+v, want kept=1: the request-start generation places the node in DE, which NL's exclusion admits", stats)
-			}
-			if got := buf.String(); !strings.Contains(got, "[GEO:DE]") || strings.Contains(got, "[GEO:NL]") {
-				t.Fatalf("published %q, want the DE tag of the generation the filter judged — a live lookup would render the swapped-in NL", got)
-			}
-		})
+	dst := annotateNode(t, p, nodes[0])
+	if !strings.Contains(dst, "GEO:DE") {
+		t.Fatalf("published %q, want the placing tag on the kept node", dst)
 	}
 }
 
@@ -2235,20 +2074,19 @@ func TestNewProcessorWiresTheStoreIntoTheFilter(t *testing.T) {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+	nodes, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body: []byte("vless://a@198.51.100.10:443#listed\n" +
 			"vless://b@203.0.113.5:443#unlisted\n"),
 		AllowedCountries: filter.All(),
 	})
 	if err != nil {
-		t.Fatalf("Filter failed: %v", err)
+		t.Fatalf("FilterNodes failed: %v", err)
 	}
 	if stats.Kept != 1 || stats.CIDRDrop != 1 {
 		t.Fatalf("stats = %+v, want kept=1 cidr_drop=1: the filter must judge against the store's own set", stats)
 	}
-	if body := buf.String(); !strings.Contains(body, "198.51.100.10") || strings.Contains(body, "203.0.113.5") {
-		t.Fatalf("published %q, want the listed node alone", body)
+	if len(nodes) != 1 || !strings.Contains(nodes[0].Raw, "198.51.100.10") {
+		t.Fatalf("kept %v, want the listed node alone", nodes)
 	}
 }
 
@@ -2355,15 +2193,14 @@ func TestCIDRStoreCleanReloadSwaps(t *testing.T) {
 
 // TestFilterStatsIdentityHoldsWithCIDRDrop: Kept plus every drop reason must
 // still sum to Total, or a node the allow-list dropped is invisible in the
-// X-Preprocessor-Stats header and on the dashboard.
+// cycle's stats and on the dashboard.
 func TestFilterStatsIdentityHoldsWithCIDRDrop(t *testing.T) {
 	t.Parallel()
 
 	p := newInlineProcessor()
 	p.filters = []Filter{NewCIDRFilter(staticCIDR(mustCIDRSet(t, "198.51.100.0/24")))}
 
-	var buf bytes.Buffer
-	stats, err := p.Filter(t.Context(), &buf, FilterRequest{
+	_, stats, err := p.FilterNodes(t.Context(), FilterRequest{
 		Body: []byte("vless://a@198.51.100.10:443#in\n" +
 			"vless://b@203.0.113.5:443#out\n" +
 			"vless://c@[2001:db8::1]:8443#v6\n" +
@@ -2372,7 +2209,7 @@ func TestFilterStatsIdentityHoldsWithCIDRDrop(t *testing.T) {
 		AllowedCountries: filter.All(),
 	})
 	if err != nil {
-		t.Fatalf("Filter failed: %v", err)
+		t.Fatalf("FilterNodes failed: %v", err)
 	}
 	if stats.Kept != 2 || stats.CIDRDrop != 1 || stats.IPv6Drop != 1 {
 		t.Fatalf("stats = %+v, want kept=2 cidr_drop=1 ipv6_drop=1", stats)

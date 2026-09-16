@@ -64,15 +64,6 @@ func TestStripKnownTags(t *testing.T) {
 	}
 }
 
-func TestFormatStats(t *testing.T) {
-	t.Parallel()
-
-	got := preprocess.FormatStats(preprocess.Stats{Total: 10, Kept: 3, DNSDrop: 1, GeoDrop: 6, ASNDrop: 1})
-	if !strings.Contains(got, "total=10") || !strings.Contains(got, "kept=3") {
-		t.Fatalf("unexpected stats: %q", got)
-	}
-}
-
 type fakeCountryLookup struct{}
 
 func (fakeCountryLookup) LookupCountry(_ netip.Addr) geofeed.CountryCode {
@@ -354,22 +345,21 @@ func TestGeoBlockedHostDroppedRegardlessOfCase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var buf bytes.Buffer
 	// The blocked host lowercased, plus a bare-IP control that needs no DNS.
-	stats, err := p.Filter(context.Background(), &buf, preprocess.FilterRequest{
+	nodes, stats, err := p.FilterNodes(context.Background(), preprocess.FilterRequest{
 		Body:             []byte("vless://u@blocked.example.com:443#blocked\nvless://u@192.0.2.7:443#ok\n"),
 		AllowedCountries: filter.All(),
 	})
 	if err != nil {
-		t.Fatalf("Filter: %v", err)
+		t.Fatalf("FilterNodes: %v", err)
 	}
 	if stats.GeoBlockDrop != 1 {
 		t.Errorf("geoblock_drop = %d, want 1: a blocked host drops whatever case the source used", stats.GeoBlockDrop)
 	}
-	if strings.Contains(buf.String(), "blocked.example.com") {
-		t.Errorf("a geo-blocked host was republished:\n%s", buf.String())
+	if len(nodes) != 1 || stats.Kept != 1 {
+		t.Fatalf("kept %d nodes (stats %+v), want the unblocked node alone", len(nodes), stats)
 	}
-	if stats.Kept != 1 || !strings.Contains(buf.String(), "192.0.2.7") {
-		t.Errorf("the unblocked node must survive: kept=%d out=%q", stats.Kept, buf.String())
+	if !strings.Contains(nodes[0].Raw, "192.0.2.7") {
+		t.Errorf("a geo-blocked host was republished: %q", nodes[0].Raw)
 	}
 }

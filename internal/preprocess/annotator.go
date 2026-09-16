@@ -21,8 +21,8 @@ import (
 const UnknownCountry = "??"
 
 // Egress is what a node reported about itself through the cloudflare probe. The
-// zero value means the probe never ran — on `GET /` it never does, and in the
-// worker only nodes that survived the latency probe are traced.
+// zero value means the probe never ran: only nodes that survived the latency
+// probe are traced.
 type Egress struct {
 	IP      netip.Addr
 	Country geofeed.CountryCode
@@ -68,8 +68,8 @@ type Annotator interface {
 // asked about the address the traffic actually LEFT from, which only the node
 // itself can report and only through a proxy that exists. That is the whole
 // value of the provider, and it is why the answer is MEASURED post-probe
-// rather than looked up: it is also the only provider that cannot answer on
-// GET /, where no probe has run.
+// rather than looked up: it is also the only provider with nothing to answer
+// from until a probe has run.
 //
 // So the step repeats what the node already said (req.Egress) instead of
 // resolving anything, and cloudflare is absent from the provider map
@@ -128,26 +128,11 @@ func newAnnotator(logger zerolog.Logger, specs []config.AnnotateSpec, providers 
 	return &annotator{tags: tags}
 }
 
-// Annotate renders the configured tags with the providers' LIVE getters: the
-// no-capture path (the worker's post-probe rendering, which resolves on its
-// own clock, and any direct caller).
+// Annotate renders the configured tags with the providers' live getters.
 func (a *annotator) Annotate(
 	ctx context.Context,
 	dst, scratch *bytes.Buffer,
 	req AnnotateRequest,
-) geofeed.CountryCode {
-	return a.annotate(ctx, dst, scratch, req, nil)
-}
-
-// annotate is Annotate with the request's country-database capture: bufferSink
-// passes the capture countryChain built (pctx.geo), so each tag's LOCAL steps
-// resolve through the same generation the filter judged with — a background
-// reload landing mid-request moves neither the verdict nor the published tag.
-func (a *annotator) annotate(
-	ctx context.Context,
-	dst, scratch *bytes.Buffer,
-	req AnnotateRequest,
-	geo *countryCapture,
 ) geofeed.CountryCode {
 	scratch.Reset()
 	scratch.WriteString(req.Prefix)
@@ -159,22 +144,21 @@ func (a *annotator) annotate(
 		if t.key != config.TagGEO {
 			continue
 		}
-		c := t.lookupCountry(ctx, req, geo)
+		c := t.lookupCountry(ctx, req)
 		// Nothing forbids a second GEO entry with a different chain. The
 		// return is the country the FIRST rendered tag carries — the one a
 		// reader of the name takes — so a lead [GEO:??] books zero even when
 		// a later entry resolved; stable_geo_unknown_nodes counts a node
 		// exactly when its lead tag is [GEO:??]. That cross-entry rule is the
-		// country FILTER's
-		// too: countryChainOrder concatenates every GEO entry's chain, so no
-		// LOCAL database a tag resolved through went unconsulted by the
-		// filter. asn and cloudflare are the standing exceptions — neither is
-		// a local table (see countryChain), so a tag either of them answered
-		// still names a country the filter never asked about. Measured on
-		// `[{GEO,[cloudflare,geofeed]}]`, the shipped chain's first two
-		// providers, with a geofeed that cannot place the IP:
-		// countryChainOrder comes back empty, the node survives
-		// exclude_countries=DE, and the traced egress publishes [GEO:DE].
+		// country FILTER's too: countryChainOrder concatenates every GEO
+		// entry's chain, so no LOCAL database a tag resolved through went
+		// unconsulted by the filter. asn and cloudflare are the standing
+		// exceptions — neither is a local table (see countryChain), so a tag
+		// either of them answered still names a country the filter never asked
+		// about. Measured on `[{GEO,[cloudflare,geofeed]}]`, the shipped
+		// chain's first two providers, with a geofeed that cannot place the IP:
+		// countryChainOrder comes back empty, the node survives a deny-list of
+		// DE, and the traced egress publishes [GEO:DE].
 		if !tookLead {
 			country = c
 			tookLead = true
@@ -198,7 +182,7 @@ func (a *annotator) annotate(
 // all-miss returns the zero code (rendered as ??). The cloudflare step answers
 // only when the trace ran: an unmeasured egress is a miss, so a chain that
 // names cloudflare first still annotates every node the probe skipped.
-func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest, geo *countryCapture) geofeed.CountryCode {
+func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest) geofeed.CountryCode {
 	for _, step := range t.chain {
 		if step.prov == nil {
 			if req.Egress.Valid() {
@@ -206,32 +190,9 @@ func (t *annotTag) lookupCountry(ctx context.Context, req AnnotateRequest, geo *
 			}
 			continue
 		}
-		if c := stepCountry(ctx, step.prov, req.IP, geo); c != (geofeed.CountryCode{}) {
+		if c := step.prov.Lookup(ctx, req.IP).Country; c != (geofeed.CountryCode{}) {
 			return c
 		}
 	}
 	return geofeed.CountryCode{}
-}
-
-// stepCountry resolves one non-cloudflare step. geofeed/dbip/registry answer
-// from the request capture when it holds them — the same objects the filter
-// judged with; a step the capture lacks (asn, or any step under a nil
-// capture, which is the live-getter path the worker's post-probe annotation
-// takes) falls back to the provider itself.
-func stepCountry(ctx context.Context, prov geo.Provider, ip netip.Addr, geo *countryCapture) geofeed.CountryCode {
-	var lookup geofeed.CountryLookup
-	if geo != nil {
-		switch prov.Name() {
-		case config.ProviderGeofeed:
-			lookup = geo.geofeed
-		case config.ProviderDBIP:
-			lookup = geo.dbip
-		case config.ProviderRegistry:
-			lookup = geo.registry
-		}
-	}
-	if lookup != nil {
-		return geofeed.LookupCountry(lookup, ip)
-	}
-	return prov.Lookup(ctx, ip).Country
 }

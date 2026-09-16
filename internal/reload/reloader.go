@@ -8,7 +8,6 @@ import (
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/log"
 	"domains.lst/sub-preprocessor/internal/preprocess"
-	"domains.lst/sub-preprocessor/internal/server"
 )
 
 // Applier hands a validated config to the stable subscription worker.
@@ -18,9 +17,9 @@ type Applier interface {
 }
 
 // Reloader rebuilds the processing pipeline from a config file on demand and
-// atomically swaps it into the server Holder. On any load, validation, or build
-// error it logs the failure and keeps the previously applied settings (the
-// holder is never mutated on a failed reload).
+// atomically swaps it into the Holder the stable worker reads. On any load,
+// validation, or build error it logs the failure and keeps the previously
+// applied settings (the holder is never mutated on a failed reload).
 //
 // currentCfg and currentProc track the last successfully applied state;
 // currentProcCfg records the config that BUILT currentProc (they diverge when
@@ -29,7 +28,7 @@ type Applier interface {
 // so they need no additional locking.
 type Reloader struct {
 	path           string
-	holder         *server.Holder
+	holder         *Holder
 	logger         zerolog.Logger
 	currentCfg     config.Config
 	currentProc    *preprocess.Processor
@@ -42,7 +41,7 @@ type Reloader struct {
 // startup (cfg + proc) so the first Reload can diff against them.
 func NewReloader(
 	path string,
-	holder *server.Holder,
+	holder *Holder,
 	logger zerolog.Logger,
 	cfg config.Config,
 	proc *preprocess.Processor,
@@ -160,9 +159,7 @@ func (r *Reloader) Reload(ctx context.Context) {
 			Msg("geoblock.db_path/geoblock.ttl/deadcache.ttl/subscriptions.snapshot_path change requires restart; stores are built once at startup")
 	}
 
-	snap := server.NewSnapshot(newProc, newProc, newCfg.Groups)
-	snap.CountryFilter = newCfg.CountryFilterConfigured()
-	r.holder.Store(snap)
+	r.holder.Store(newProc)
 
 	// The stable worker derives its allow set and through-node filters from the
 	// unified filters list, plus subscriptions, groups, the through-node prober

@@ -160,18 +160,8 @@ func buildProcessor(ctx context.Context, cfg config.Config, logger zerolog.Logge
 	return svc, nil
 }
 
-// newServerHolder publishes the first snapshot. CountryFilter is set before
-// the holder exists because a published snapshot is immutable: the handler
-// reads the field per request, and a cidr-only filters list must refuse a
-// country-gated GET / rather than answer it unfiltered.
-func newServerHolder(cfg config.Config, svc *preprocess.Processor) *serverpkg.Holder {
-	snap := serverpkg.NewSnapshot(svc, svc, cfg.Groups)
-	snap.CountryFilter = cfg.CountryFilterConfigured()
-	return serverpkg.NewHolder(snap)
-}
-
 // buildWatcher wires the config reloader and its filesystem watcher.
-func buildWatcher(cfg config.Config, logger zerolog.Logger, holder *serverpkg.Holder, svc *preprocess.Processor, ctl *stable.Controller, pblock preprocess.Blocklist) (*reload.Watcher, error) {
+func buildWatcher(cfg config.Config, logger zerolog.Logger, holder *reload.Holder, svc *preprocess.Processor, ctl *stable.Controller, pblock preprocess.Blocklist) (*reload.Watcher, error) {
 	reloader := reload.NewReloader(defaultConfigPath, holder, logger, cfg, svc, ctl, pblock)
 	watcher, err := reload.NewWatcher(defaultConfigPath, reloader.Reload, logger)
 	if err != nil {
@@ -232,18 +222,18 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	holder := newServerHolder(cfg, svc)
+	holder := reload.NewHolder(svc)
 	stableHolder := restoreStableList(cfg, logger)
 	m := metrics.New()
 	ctl := stable.NewController(ctx, stableHolder, func() stable.Filterer {
-		return holder.Load().Worker
+		return holder.Load()
 	}, sblock, dcache, cfg.Subscriptions.SnapshotPath, logger, m)
 	if applyErr := ctl.Apply(cfg); applyErr != nil {
 		return fmt.Errorf("start stable subscriptions worker: %w", applyErr)
 	}
 	defer stopController(ctl, logger)
 
-	srv := serverpkg.New(logger, cfg.Server.Listen, holder, stableHolder)
+	srv := serverpkg.New(logger, cfg.Server.Listen, stableHolder)
 
 	if cfg.Server.MetricsListen != "" {
 		metricsSrv, metricsErr := startMetrics(ctx, cfg.Server.MetricsListen, m, logger)

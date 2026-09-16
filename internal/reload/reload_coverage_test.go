@@ -17,9 +17,9 @@ import (
 // Reload classification of every yaml leaf key. The reload pipeline applies a
 // changed config through exactly one of these paths:
 //
-//	live-processor: reload.OptionsFromConfig -> preprocess.NewProcessor (or the
-//	                Groups map in the same holder snapshot), rebuilt on every
-//	                non-Equal reload.
+//	live-processor: reload.OptionsFromConfig -> preprocess.NewProcessor,
+//	                rebuilt on every non-Equal reload and published through the
+//	                holder the worker reads.
 //	live-worker:    stable.Controller.Apply, gated by one of the Changed()
 //	                helpers in the reloader's subsAffected condition.
 //	live-both:      consumed by both paths above.
@@ -105,10 +105,7 @@ var reloadClassification = map[string]string{
 
 	"annotate[].tag":       liveBoth,
 	"annotate[].providers": liveBoth,
-
-	// groups reaches / through the holder snapshot rather than Options, and the
-	// worker through GroupsChanged.
-	"groups": liveBoth,
+	"groups":               liveWorker,
 
 	"subscriptions.interval":       liveWorker,
 	"subscriptions.sources[].name": liveWorker,
@@ -389,8 +386,8 @@ func TestReloadCoverageComplete(t *testing.T) {
 }
 
 // TestReloadClassificationMatchesBehaviour changes one key at a time and asserts
-// the recorded class matches where the edit lands: which of the holder inputs
-// (Options + Groups) it rebuilds, whether it trips a subsAffected gate that
+// the recorded class matches where the edit lands: whether it rebuilds the
+// processor the holder publishes, whether it trips a subsAffected gate that
 // re-applies the worker, and whether it only earns a restart warning. Without
 // this, a row could claim any reach it liked. It measures through the production
 // helpers rather than through Reload itself, because a Config pair is all a
@@ -453,7 +450,7 @@ func mutatedReach(t *testing.T, key, class string) (reachedPaths, bool) {
 	// key_*/...) only matters if it lands in the NodeFilterSpec the worker
 	// builds, and an exclude_* only via the deny set it expands into.
 	return reachedPaths{
-		proc:           requestPathAffected(base, changed),
+		proc:           processorAffected(base, changed),
 		worker:         workerAffected(base, changed),
 		restart:        restartAffected(base, changed),
 		filtersChanged: !reflect.DeepEqual(base.Filters, changed.Filters),
@@ -473,7 +470,7 @@ func checkClassReach(t *testing.T, key, class string, reach reachedPaths) {
 	switch class {
 	case liveProcessor:
 		if !proc || worker {
-			t.Errorf("%q is %s but proc=%v worker=%v: a live-processor key must rebuild what / serves and leave the worker alone", key, class, proc, worker)
+			t.Errorf("%q is %s but proc=%v worker=%v: a live-processor key must rebuild the published processor and leave the worker alone", key, class, proc, worker)
 		}
 	case liveWorker:
 		if proc || !worker {
@@ -506,10 +503,9 @@ func checkClassReach(t *testing.T, key, class string, reach reachedPaths) {
 	}
 }
 
-// requestPathAffected reports whether the edit changes either input the reloader
-// swaps into the holder: the processor's Options or the Groups map served
-// alongside it.
-func requestPathAffected(base, changed config.Config) bool {
+// processorAffected reports whether the edit changes the processor the reloader
+// rebuilds and stores in the holder.
+func processorAffected(base, changed config.Config) bool {
 	// The compare stays structural on the whole Options value on purpose: any
 	// future config-derived field then counts as a processor-input change
 	// without this test being taught about it. deepequalerrors fires because
@@ -517,10 +513,10 @@ func requestPathAffected(base, changed config.Config) bool {
 	// operands come straight out of OptionsFromConfig, which leaves every
 	// Preloaded* field nil — TestOptionsFromConfig locks that — so DeepEqual
 	// never reaches an error value and its identity comparison cannot mislead.
-	optsChanged := !reflect.DeepEqual( //nolint:govet // no error value is reachable; see above
+	//nolint:govet // no error value is reachable; see above
+	return !reflect.DeepEqual(
 		reload.OptionsFromConfig(base), reload.OptionsFromConfig(changed),
 	)
-	return optsChanged || config.GroupsChanged(base, changed)
 }
 
 // workerAffected re-declares the reloader's subsAffected condition, because a

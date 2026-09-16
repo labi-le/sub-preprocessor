@@ -1,10 +1,19 @@
 # Security and correctness invariants
 
-> **When to read this:** Read before touching `internal/fetch`, anything that handles a user-supplied URL, or the SSRF gates.
+> **When to read this:** Read before touching `internal/fetch`, anything that handles a discovered or configured subscription URL, or the SSRF gates.
 
 ## Important security / correctness notes
 
-- `subscription_url` is user input and must stay protected against SSRF.
+- **Every subscription URL this binary fetches is UNTRUSTED, and none of them is typed by an
+  operator any more.** No HTTP caller supplies one — the request-time filter endpoint is gone —
+  but the crawler mints sources out of URLs it discovers in Telegram channels and GitHub
+  repository trees, writes them into `config/private.yaml`, and the worker then fetches exactly
+  those. A URL harvested from a stranger's repository is attacker-chosen in every way a query
+  parameter was, so the SSRF gates stay fully enforced and MUST NOT be relaxed on the argument
+  that the input is now "configured": `fetch.ValidatePublicHTTPSURL` runs on config load
+  (`internal/config/config.go:1431`, `:1669`), on every crawler mint and recheck
+  (`internal/crawl/crawl.go:734`, `:1623`) and again inside the fetch itself
+  (`internal/fetch/fetch.go:151`), and the guarded dialer below is unchanged.
 - Fetching uses a safe HTTP client:
   - only `https` URLs are allowed
   - userinfo in URL is rejected
@@ -36,9 +45,10 @@
   the PARENT context because its own derived timeout expires `resolveCtx` too,
   and that expiry is a genuine DNS failure that stays cacheable
   (`internal/resolver/resolver.go:108-114`).
-- An oversized subscription body is a 4xx, not an upstream fault: `GET /` maps
-  the fetch layer's `response too large: over …` refusal onto the same 413 as
-  preprocess's 50k-node ceiling, so oversize stays distinguishable from a 502
-  (`isResponseTooLarge`, `internal/server/server.go:293-297` and `:341-345`).
+- An oversized subscription body is refused by the fetch layer itself, streaming: `readBody`
+  reads exactly one byte past the cap and stops, and the `response too large: over …` error is
+  raised off that one byte (`internal/fetch/fetch.go:190-196`), so a hostile source cannot spend the worker's
+  memory on a body it will not keep. It fails ONE source's fetch; the cycle goes on with the
+  rest, and preprocess's 50k-node ceiling bounds the same source on node count.
 - Request context is passed explicitly through the stack. Prefer `ctx context.Context` as the first argument.
 - Root `main.go` is the only normal place where `context.Background()` should be introduced.

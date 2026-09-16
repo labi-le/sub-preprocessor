@@ -14,11 +14,11 @@
 - `internal/filter` — country allow/deny bitset
 - `internal/subscription` — subscription fetch/normalize/parse (scheme-generic, plus dedicated decoders for `vmess://`, legacy `ss://`, `ssr://` and `mierus://` in `vmess.go`/`ss.go`/`ssr.go`/`mieru.go`, Xray-JSON→share-link conversion in `xray.go`, and the vmess/ssr display-name rewriters `RewriteVmessName`/`RewriteSSRName` with their `…Tagged` forms in `vmess.go`/`ssr.go`)
 - `internal/rewrite` — node name/fragment rewrite (`[GEO:XX]` folding); the vmess/ssr payload arms are composed inside `internal/subscription`'s tagged rewriters, which `NodeName` calls with the tag prefix and clean name as separate parts
-- `internal/preprocess` — the core per-node filter pipeline
+- `internal/preprocess` — the core per-node filter pipeline; `FilterNodes` is its single entry point and the `/stable.txt` worker is its only caller
 - `internal/geoblock` — SQLite TTL list of node hosts that failed a through-node API reachability check (gemini/claude/chatgpt)
 - `internal/stable` — `/stable.txt` worker: merge/dedupe/relabel, dead-node cache skip (pre-probe), Mihomo prober + through-node filters (gemini/claude/chatgpt reachability, tidal reachability, bandwidth), the post-filter `cdn-cgi/trace` egress measurement, one-shot name annotation at publication, checker loop, holder, and the JSON snapshot (`snapshot.go`) that carries the published list across a restart
-- `internal/reload` — config file watcher + hot-reload
-- `internal/server` — Fiber HTTP layer
+- `internal/reload` — config file watcher + hot-reload; it also owns the processor holder (`holder.go`, an `atomic.Pointer[preprocess.Processor]`) that publishes the rebuilt processor a reload produced to the next worker cycle
+- `internal/server` — Fiber HTTP layer, serving `/stable.txt`, `/healthz` and `/favicon.ico` ONLY: it owns no filtering handler and no pipeline state, reading nothing but the stable snapshot holder
 - `internal/metrics` — renders stable-cycle stats as hand-rolled Prometheus text exposition; served on `server.metrics_listen`
 - `internal/geo` — the provider adapters (`geofeed`/`dbip`/`registry`/`asn`) the country filter and the annotator share, each named after the data source it queries
 - `internal/classify` — decides whether a URL serves a usable subscription; behind the `classify` subcommand and every crawler candidate

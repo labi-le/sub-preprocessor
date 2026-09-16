@@ -29,9 +29,9 @@ the router's own Mihomo can dial. That single dependency fixes the language.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /` | On-demand filter: fetch one subscription URL, geo-filter it, return the result |
 | `GET /stable.txt` | The curated stable list maintained by the background worker |
 | `GET /healthz` | Returns `ok` |
+| `GET /favicon.ico` | `204`, so a browser probe is not logged as a miss |
 | `GET /metrics` | Prometheus exposition, on a **separate internal listener** (`server.metrics_listen`, default `:9090`) |
 
 Node parsing is scheme-generic: any `scheme://` URI line is parsed (`vless`,
@@ -51,7 +51,7 @@ node kept here is a node the prober can convert. Portless lines are refused,
 and the refusal is not the http/socks one alone: portless
 `http`/`https`/`socks`/`socks5`/`socks5h` is refused because such a proxy is
 `host:port` by definition — so a bare `https://t.me/somechannel` in a source
-body counts as `unsupported=` (see `X-Preprocessor-Stats` below) — and so is
+body counts as `unsupported=` in the worker's per-source stats — and so is
 a legacy `ss` payload whose base64 names no port, a `vmess` JSON body whose
 `port` reads empty (refused rather than defaulted to 443 as it once was), a
 portless Xray VMessAEAD authority (`vmess://uuid@host`), and any other
@@ -69,62 +69,7 @@ Two instances of the service run side by side (see [Deployment](#deployment)),
 so every endpoint above exists twice, on a different port and against a
 different config directory.
 
-### 1. On-demand filter — `GET /`
-
-Filter a single subscription URL at request time by exit country:
-
-```bash
-curl "http://127.0.0.1:8080/?subscription_url=https://example.com/sub&countries=FI,EE,SE,DE,NL"
-curl "http://127.0.0.1:8080/?subscription_url=https://example.com/sub&groups=nordics"
-curl "http://127.0.0.1:8080/?subscription_url=https://example.com/sub&exclude_groups=geo_blocked"
-```
-
-Query params:
-
-- `subscription_url` (required) — the upstream list to fetch (https only, SSRF-protected).
-- `countries` — comma-separated allow-list of exit countries, and/or
-- `groups` — comma-separated names referencing `groups` in `config.yaml`;
-- `exclude_countries` / `exclude_groups` — a deny-list of exit countries to drop.
-
-`countries`/`groups` and the `exclude_*` params are enforced separately: the
-first is an allow-list, the second a deny-list. A node whose exit IP no geo
-source can place is in no excluded country, so an exclusion-only request keeps
-it; an allow-list request drops it, because it is not in the list either. An
-unknown group name or a country that is not a 2-letter code fails the request
-with `400` naming the offending token. So does a request whose exclusions cover
-every allowed country, a request every one of whose country tokens is blank
-(`exclude_countries=,,` is the no-parameter request in disguise and 400s the
-same way), a request that repeats one of the five query keys (`subscription_url`
-/ `countries` / `groups` / `exclude_countries` / `exclude_groups` — fiber would
-silently answer with the first value, so a second `exclude_countries=` would be
-dropped instead of honoured), and a country-gated request against a config
-whose filter list has no country-capable entry (`filters[].type: country` of
-either provider, or `type: asn` — a `cidr` entry alone cannot enforce a country
-policy): the server answers `400` naming the missing filter rather than `200`
-with a list the parameters never constrained.
-
-The response is `text/plain` Mihomo-compatible text; node names are annotated
-according to the `annotate` config (shipped config: `[GEO:XX] <name>`).
-Stats come back in the `X-Preprocessor-Stats` header. This path does **no**
-liveness probing — only IP-stage filtering (see below).
-
-One request is bounded on purpose. fasthttp cannot cancel a handler when the
-client disconnects, so the pipeline — the upstream fetch included, which runs
-on the request's own deadline rather than the worker's 3 s fail-fast
-`fetch.timeout` — runs under an explicit 60 s deadline (`504` when it
-expires). Oversize is refused with `413` at two ceilings of the same wall: a
-body of more than 50 000 parseable nodes is refused before a single DNS lookup
-— resolution is serial, so an unbounded node list would otherwise occupy a
-goroutine for hours after the caller left — and a body over the shared 10 MiB
-fetch cap is refused with the same `413` (for a realistic node shape, ~245
-B/node, the byte cap binds first, at roughly 43k nodes). A panic in the
-request path is recovered as a `500` (logged with
-its stack) instead of taking the process down with the in-memory stable list.
-The access log records the subscription URL as `host#<digest>`, never verbatim:
-these links are capability URLs, and the token would otherwise land in
-`docker logs`.
-
-### 2. Stable subscriptions worker — `GET /stable.txt`
+### Stable subscriptions worker — `GET /stable.txt`
 
 A background worker maintains one curated list from all configured sources.
 Every `subscriptions.interval` it:
@@ -132,7 +77,7 @@ Every `subscriptions.interval` it:
 1. fetches every source in `subscriptions.sources` concurrently (a source is
    either a `url` or an inline base64 `body`, e.g. the crawler's `inline`
    harvest),
-2. runs each through the same IP-stage filter pipeline as `/`,
+2. runs each through the IP-stage filter pipeline described below,
 3. merges and dedupes nodes by lowercased `server:port` (first source wins,
    config order),
 4. relabels each kept node to `<source>-NNN`,
@@ -183,36 +128,34 @@ fails warns without touching the published list.
 All filtering is configured as one ordered `filters:` list. Entries fall into
 two stages:
 
-**IP-stage filters** — run per node on **both** `/` and the stable worker,
-after DNS resolution, before any probing:
+**IP-stage filters** — run per node in the stable worker, after DNS
+resolution, before any probing:
 
-- `country` — keep nodes whose IP's country is allowed, drop those whose
-  country is denied. `provider: geofeed` judges against the same in-memory
-  database chain the `GEO` annotation resolves through (see
-  [Annotation](#annotation)); `provider: asn` judges against a Team Cymru
-  lookup instead. An IP no source can place has no country, so only an
-  allow-list can drop it. `exclude_groups` / `exclude_countries` are
-  **worker-only**: they build the `/stable.txt` deny-set and never reach the
-  `/` chain, where the allowed and denied sets come from the query params
-  alone — and only when the filter list carries a country-capable entry — a
-  `type: country` of either provider, or `type: asn`, which also consults the
-  allowed and denied sets — at all. Nothing is built for a filter type the
-  list does not name, and the server refuses to fake one: a country-gated
-  `GET /` against a config without a country-capable entry answers `400`
-  naming the missing filter (a cidr-only list can no more enforce a country
-  policy than it can
-  read the request), while the parameter-less request still answers `400` for
-  carrying no policy at all.
+- `country` — drop nodes whose IP resolves to a denied country.
+  `provider: geofeed` judges against the same in-memory database chain the
+  `GEO` annotation resolves through (see [Annotation](#annotation));
+  `provider: asn` judges against a Team Cymru lookup instead. The deny-set is
+  built from the config alone (`Config.DeniedCountries`): every code the
+  `country` entries' `exclude_countries` / `exclude_groups` name, group names
+  expanded against `groups:`, accumulated over every country entry. Nothing
+  narrows it per cycle — the worker asks for every country and leaves the
+  verdict to that deny-set — and an exclusion is matched only against a
+  positively resolved country, so an IP no source can place is kept rather
+  than dropped for being unplaceable. Only a country-capable entry builds any
+  of this: a `type: country` of either provider, or `type: asn`, which also
+  consults the allowed and denied sets. Nothing is built for a filter type the
+  list does not name, so a `cidr`-only list enforces no country policy at all.
 - `asn` — drop nodes whose AS name matches `deny_patterns` (regexps), and
   nodes whose Cymru-resolved country is not allowed.
 - `cidr` — an IPv4 **allow-list** downloaded from `urls`: a node survives only
   when at least one of its resolved addresses falls inside one of the ranges.
-  Unlike `country` it reads nothing from the request, so `/` and the worker
-  reach the same verdict and no query param can widen it. The lists are merged
+  It consults no geo source and no per-cycle input, so its verdict comes from
+  the downloaded ranges alone. The lists are merged
   into sorted, disjoint ranges once per refresh, so the per-node cost is one
   binary search — which is why this entry belongs first in `filters:`, ahead of
-  anything that makes a network call. Drops are counted as `cidr_drop=` in
-  `X-Preprocessor-Stats` and as `stable_source_dropped_nodes{reason="cidr"}`.
+  anything that makes a network call. Drops are counted as `cidr_drop=` in the
+  worker's per-source `subscription processed` log line and as
+  `stable_source_dropped_nodes{reason="cidr"}`.
 
   ```yaml
   filters:
@@ -269,11 +212,11 @@ after DNS resolution, before any probing:
   cycle for 43 cycles. What a live run there left is not a count but an
   identity — `total` equals `kept` plus every drop reason, e.g. a source
   answering with 586 nodes booking 25 kept, 533 `cidr_drop` and 28 `geo_drop`
-  under `countries=RU`, which is 586 = 25 + 533 + 28. Counts themselves never
+  under an `RU`-only country policy, which is 586 = 25 + 533 + 28. Counts never
   reproduce: these sources are live and rotate within the hour.
 
 Before any of that, nodes whose host is in the **geoblock store** (see below)
-are dropped outright — on both endpoints, before DNS even runs.
+are dropped outright, before DNS even runs.
 
 **Through-node filters** — run only in the stable worker, after the latency
 probe, routing real requests *through* each surviving node. Every entry is a
@@ -347,8 +290,8 @@ provider, not a gate: see [Annotation](#annotation).
 
 ### Annotation
 
-The ordered `annotate:` list controls the tags prepended to node names on both
-endpoints. `GEO` (`[GEO:XX]`) is the only tag it accepts — `IP` and `ASN` were
+The ordered `annotate:` list controls the tags prepended to published node
+names. `GEO` (`[GEO:XX]`) is the only tag it accepts — `IP` and `ASN` were
 both retired, and naming either now fails the load. The entry takes
 `providers:` — an **ordered lookup chain** (the shipped one is
 `providers: [cloudflare, geofeed, dbip, registry]`): the first provider that
@@ -418,10 +361,10 @@ differs is the ADDRESS it is asked about. Every other provider looks the node's
 Cloudflare's shared anycast ranges, which terminate in many countries at once —
 so a node tagged `CA` was in fact exiting in Germany. Asking the node where its
 traffic leaves from costs one request through it, which only the `/stable.txt`
-worker's post-probe stage can spend: on `GET /` there is nothing to ask, so
-`cloudflare` always misses there and the chain falls through to the offline
-providers. Naming it in a chain is what arms that probe; leaving it out means
-no cycle pays for it.
+worker's post-probe stage can spend: before a node has been probed there is
+nothing to ask, so `cloudflare` misses in any earlier lookup and the chain
+falls through to the offline providers. Naming it in a chain is what arms that
+probe; leaving it out means no cycle pays for it.
 
 Its `timeout`/`concurrency` are `geo.cloudflare.*`. There is deliberately no
 `endpoint` key: the parser encodes Cloudflare's documented reserved `loc`
@@ -434,8 +377,8 @@ The country **filter** (`provider: geofeed`) judges nodes with that same chain,
 in the order the `annotate:` list gives it: it consults every local database
 every `GEO` entry names, concatenated in written order and de-duplicated by
 first occurrence. A node only DB-IP can place is therefore dropped by an
-`exclude_countries` naming that country and kept by a `countries` allow-list
-naming it — the filter's verdict and the `[GEO:...]` tag agree for every LOCAL
+`exclude_countries` naming that country — the filter's verdict and the
+`[GEO:...]` tag agree for every LOCAL
 provider any `GEO` entry names, so splitting one chain across entries changes
 what is RENDERED (`[GEO:??][GEO:DE]` instead of `[GEO:DE]`) and never the
 verdict. Three asymmetries remain:
@@ -459,9 +402,9 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS on both endpoints. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS, before the IP stage runs. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds, keyed together with the address the IP stage resolved for them at verdict time — a hostname re-pointed to a new address is re-probed, not skipped on the old verdict; skipped before probing |
-| stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup — only while subscriptions are enabled; with an empty `subscriptions.sources` it is deliberately not restored (see §2) — so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
+| stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup — only while subscriptions are enabled; with an empty `subscriptions.sources` it is deliberately not restored (see the stable-worker section above) — so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
 | ASN cache (`geo.asn.cache_ttl`, default 24h; 5m negative) | in-memory TTL map, capped | Team Cymru lookups |
 | geofeed data (`geo.geofeed.refresh_interval`, default 24h; explicit `0` = never refresh) | in-memory, refreshed in background | IP→country entries from configured CSV sources |
@@ -683,9 +626,8 @@ Key sections:
   here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` — the worker's fail-fast per-source fetch
-  deadline (on `GET /` the upstream fetch runs on the request's own 60 s
-  budget instead; see the endpoint section).
-- `groups` — named country sets referenced by requests and `exclude_groups`.
+  deadline, the only budget a subscription fetch ever runs on.
+- `groups` — named country sets referenced by `filters[].exclude_groups`.
 - `subscriptions` — `interval`, `sources[]` (`name` + `url` *or* inline
   `body`, the crawler's own `managed` and `feed`, and `hwid`, which rides as
   the `x-hwid` request header on that source's fetch — and on the crawler's
@@ -706,7 +648,9 @@ Key sections:
 
 ## Security
 
-`subscription_url` is untrusted input. The fetcher enforces https-only,
+Every source URL the worker fetches is untrusted input — the configured ones
+as much as the URLs the crawler discovers on Telegram, which nobody vetted
+before they landed in `private.yaml`. The fetcher enforces https-only,
 rejects URL userinfo, and disables env proxies; the SSRF IP policy lives in
 the HTTP client's **dialer** — resolved non-public IPs (private, loopback,
 link-local, CGN, benchmarking, class-E) are refused at dial time, so DNS

@@ -109,9 +109,9 @@ const (
 	// through cdn-cgi/trace from the node itself (the stable worker runs it
 	// after the probes). Its siblings look up the address the RESOLVER
 	// returned; this one looks up the address the traffic actually LEFT from,
-	// which is the same kind of answer about a better question. The on-demand
-	// GET / path has no post-probe stage, so there it always misses and the
-	// chain falls through to the offline providers below.
+	// which is the same kind of answer about a better question. Until a probe
+	// has run it always misses and the chain falls through to the offline
+	// providers below.
 	ProviderCloudflare = "cloudflare"
 	ProviderGeofeed    = "geofeed"
 	ProviderDBIP       = "dbip"
@@ -264,10 +264,8 @@ type FilterConfig struct {
 	Type string `yaml:"type"`
 
 	// country / asn. Provider and DenyPatterns build the IP-stage chain in
-	// preprocess; ExcludeGroups/ExcludeCountries do NOT reach it -- they are
-	// read only by the stable worker, through Config.DeniedCountries, so on the
-	// on-demand GET / path the country constraint comes from the query params
-	// alone.
+	// preprocess; ExcludeGroups/ExcludeCountries do not reach it -- they are
+	// read only by the stable worker, through Config.DeniedCountries.
 	Provider         string   `yaml:"provider"`
 	ExcludeGroups    []string `yaml:"exclude_groups"`
 	ExcludeCountries []string `yaml:"exclude_countries"`
@@ -324,8 +322,8 @@ type FilterConfig struct {
 // reach the same verdict; only the rendering differs, [GEO:DE] against
 // [GEO:??][GEO:DE]. Splitting the chain used to change the verdict too, in
 // both directions — the filter saw the first entry alone, so a node only DB-IP
-// could place was dropped under `countries=DE` and KEPT under
-// `exclude_countries=DE`.
+// could place was dropped under an allow-list of DE and KEPT under a deny-list
+// of DE.
 //
 // The retired single-provider "provider" key needs no field here: the strict
 // decode in decodeStrict rejects it, and every future rename with it.
@@ -389,20 +387,6 @@ func (cfg *Config) IPFilterSpecs() []IPFilterSpec {
 		}
 	}
 	return specs
-}
-
-// CountryFilterConfigured reports whether the IP-stage chain can enforce a
-// request's country allow/deny sets. Only a country entry (either provider)
-// and an asn entry consult them — a cidr entry never does — so a cidr-only
-// deployment cannot answer a country-gated GET / request at all, and the
-// server refuses it rather than serving a list the parameters never narrowed.
-func (cfg *Config) CountryFilterConfigured() bool {
-	for _, f := range cfg.Filters {
-		if f.Type == FilterCountry || f.Type == FilterASN {
-			return true
-		}
-	}
-	return false
 }
 
 // DeniedCountries builds the stable worker's country deny-set: every code the

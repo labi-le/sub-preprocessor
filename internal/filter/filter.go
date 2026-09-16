@@ -62,8 +62,7 @@ func Permitted(lookup geofeed.CountryLookup, ips []netip.Addr, allowed, denied C
 
 // Add parses a single country code string and adds it to the set. Whitespace is
 // trimmed and case is normalized to uppercase. It reports whether part was a
-// 2-letter ASCII code; a false return means nothing was added, which callers
-// validating user-supplied input must not ignore.
+// 2-letter ASCII code; a false return means nothing was added.
 func (s *CountrySet) Add(part string) bool {
 	return parseCountryPart(s, part)
 }
@@ -112,13 +111,6 @@ func IsEmpty(s CountrySet) bool {
 		}
 	}
 	return true
-}
-
-// Exclude unsets every country code that is present in other.
-func (s *CountrySet) Exclude(other CountrySet) {
-	for i := range s {
-		s[i] &^= other[i]
-	}
 }
 
 func parseCountryPart(set *CountrySet, part string) bool {

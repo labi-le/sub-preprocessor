@@ -1,7 +1,7 @@
 %% sub-preprocessor - processing pipeline
 %% ONE ordered `filters:` list feeds two stages:
-%%   IP-stage      = cidr/country/asn, per node by IP, on / and the worker
-%%   through-node  = gemini/claude/chatgpt/tidal/bandwidth, worker only
+%%   IP-stage      = cidr/country/asn, per node by IP, in the worker's preprocess
+%%   through-node  = gemini/claude/chatgpt/tidal/bandwidth, after the latency probe
 flowchart TD
   %% ================= Crawler =================
   subgraph CRAWLER["tg-sub-crawler - CRAWL_INTERVAL (30m) or daily CRAWL_AT"]
@@ -24,19 +24,14 @@ flowchart TD
   PRIV --> SRC
   PRIV -. hot-reload .-> SRC
 
-  %% ================= IP-stage filters (shared by both paths) =================
-  subgraph FILTER["svc.Filter - IP-stage, per node, by IP - shared by / and worker"]
+  %% ================= IP-stage filters =================
+  subgraph FILTER["svc.FilterNodes - IP-stage, per node, by IP"]
     direction TB
     GBH["geoblock skip - node host in blocklist? (pre-DNS)"]
     RES["DNS resolve host to IPs - TTL cached"]
     IPF["filters: cidr (urls allow-list) / country (provider geofeed|asn) / asn (deny_patterns)"]
-    ANN["annotate: - prepend GEO tags to the node name"]
-    GBH --> RES --> IPF --> ANN
+    GBH --> RES --> IPF
   end
-
-  %% ================= On-demand path (/) =================
-  REQ["GET / - subscription_url + countries/groups"] --> FILTER
-  FILTER -->|on-demand| OUT1["/ response - text/plain, annotated, no probing"]
 
   %% ================= Stable worker =================
   subgraph WORKER["stable worker - every subscriptions.interval (1h)"]
@@ -50,11 +45,12 @@ flowchart TD
     CGP["chatgpt - keyless GET api.openai.com/compliance/cookie_requirements, scan body"]
     TDL["tidal - keyless GET api.tidal.com/v1/country, fail-closed: keep only 2xx with a readable countryCode (refused egress = CloudFront 403, no JSON)"]
     BWD["bandwidth - download test_url through the node, drop below min_mbps (last: fewest nodes)"]
+    ANN["annotate - build GEO tags from the address that survived (traced egress when there is one)"]
     PUBL["GET /stable.txt - Tagged names (GEO/SPD tags + src-NNN)"]
-    MERGE --> DEAD --> LAT --> SEL --> GEM --> CLA --> CGP --> TDL --> BWD --> PUBL
+    MERGE --> DEAD --> LAT --> SEL --> GEM --> CLA --> CGP --> TDL --> BWD --> ANN --> PUBL
   end
   SRC --> FILTER
-  FILTER -->|worker| MERGE
+  FILTER --> MERGE
 
   %% ================= Stores =================
   GEODB[("geoblock.db - SQLite, geoblock.ttl 30d, key=host")]

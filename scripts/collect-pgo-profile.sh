@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Collect a PGO profile from realistic HTTP traffic.
+# Collect a PGO profile from the stable worker's own cycle.
 #
 # Usage:  ./scripts/collect-pgo-profile.sh [duration_seconds]
 #   Default duration: 60 seconds.
 #
+# The worker runs one cycle immediately at startup (stable.Checker.Run), so the
+# profile window opens on the process's real workload: fetch, parse, resolve,
+# the IP-stage filters, then the probes. A whole cycle takes minutes (the
+# latency probe owns most of it), so the default 60s window prices the fetch and
+# IP-stage half; pass a longer duration to weight the probe half instead.
+#
 # Prerequisites: the server must be startable on :8080 and pprof on :6060.
-#   - config.yaml must be present (default location)
-#   - Geofeed sources should be reachable (the server loads them at startup)
-#   - A subscription URL that works-ish (default: the one from the Makefile)
+#   - config.yaml must be present (default location), with sources configured:
+#     an empty source list is the deliberate disable and profiles nothing
+#   - Geofeed sources and the configured subscriptions should be reachable
 
 PROFILE_DIR="$(dirname "$0")/.."
 DURATION="${1:-60}"
 PPROF_PORT=":6060"
 SERVER_PORT=":8080"
-# A PGO profile is only worth the build it shapes if the workload is real: a dead
-# subscription profiles the error path. mifa.world served 24h trials and expired,
-# so this points at a source config/sources.yaml actually carries.
-SUBSCRIPTION_URL="https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/refs/heads/main/configs.txt"
 
 echo "=== Building server binary (without PGO) ==="
 cd "$PROFILE_DIR"
@@ -72,40 +74,7 @@ done
 # Allow a moment for geofeed loading
 sleep 2
 
-echo "=== Generating HTTP traffic for ${DURATION}s ==="
-
-# Background: hammer the server with concurrent requests simulating diverse traffic
-hammer() {
-  local regions=(
-    "FI,EE,LV,LT,SE,PL,DE,NL"
-    "US,CA"
-    "GB,FR,DE,IT,ES"
-    "JP,KR,SG"
-    "AU,NZ"
-    "BR,AR,CL"
-  )
-  local urls=(
-    "$SUBSCRIPTION_URL"
-    "https://raw.githubusercontent.com/RKPchannel/RKP_bypass_configs/refs/heads/main/whitelist.txt"
-    "https://example.com/sub"
-  )
-
-  end=$((SECONDS + DURATION + 5))
-  while [ "$SECONDS" -lt "$end" ]; do
-    region="${regions[$((RANDOM % ${#regions[@]}))]}"
-    url="${urls[$((RANDOM % ${#urls[@]}))]}"
-    curl -sf \
-      "http://127.0.0.1${SERVER_PORT}/?subscription_url=${url}&countries=${region}" \
-      -o /dev/null 2>/dev/null || true
-  done
-}
-
-# Start 8 concurrent hammer workers
-for _ in $(seq 1 8); do
-  hammer &
-done
-
-echo "  Hammer workers started, collecting profile..."
+echo "=== Profiling the worker's startup cycle for ${DURATION}s ==="
 
 # Collect the CPU profile from pprof
 GOOGLE_PROFILE=/tmp/profile.pprof \
@@ -113,7 +82,14 @@ GOOGLE_PROFILE=/tmp/profile.pprof \
 
 echo "=== Profile collected ($(wc -c < /tmp/profile.pprof) bytes) ==="
 
-# Stop the server and hammer workers
+# Which half of the cycle the window covered. Both are legitimate profiles; the
+# line only records which one this run priced.
+if curl -sfI "http://127.0.0.1${SERVER_PORT}/stable.txt" > /dev/null 2>&1; then
+  echo "  /stable.txt answered 200: the window covered a whole cycle, probes included"
+else
+  echo "  /stable.txt still 503: the window covered the fetch and IP-stage half only"
+fi
+
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 

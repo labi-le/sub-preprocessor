@@ -347,10 +347,10 @@ vendor the dashboard into the nixos repo.
   and `dns` to `resolveNode` in `processNode` (`:829`, `:833`), `unsupported` the parser — so
   their zero is real. Seven holds for the current build only: `ipv6` joined the table in `1638523`
   (2026-07-29) and `cidr` in `82e8ef3` (2026-08-09), so a range reaching back past either plots
-  fewer series, and an absence there is not a zero. Worker cycles only: the on-demand `GET /`
-  path runs the same IP-stage chain but samples nothing, every `stable_source_*` series coming
-  out of the cycle report (`internal/metrics/metrics.go:138`), so preprocessing done for an HTTP
-  request is invisible here.
+  fewer series, and an absence there is not a zero. Worker cycles only, and now that is everything the
+  IP-stage chain runs for: every `stable_source_*` series comes out of the cycle report
+  (`internal/metrics/metrics.go:138`), so a cycle that never completes — cancelled at shutdown,
+  or still in flight — contributes no sample at all, not a zero.
 - **The through-node drops panel (panel 7, `Through-node filter drops by reason`) has three
   states, not two — and the batch breaker is a fourth that the drop series cannot show: it
   reads on its own family, `stable_filter_trusted{filter}`, which panel 7 draws per gate as

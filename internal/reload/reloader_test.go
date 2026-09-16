@@ -20,7 +20,6 @@ import (
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/reload"
-	"domains.lst/sub-preprocessor/internal/server"
 	"domains.lst/sub-preprocessor/internal/stable"
 )
 
@@ -71,7 +70,7 @@ func setupReloader(
 	logger zerolog.Logger,
 	loadedAt time.Time,
 	ctl reload.Applier,
-) (*reload.Reloader, *server.Holder, string) {
+) (*reload.Reloader, *reload.Holder, string) {
 	t.Helper()
 	ctx := t.Context()
 
@@ -91,7 +90,7 @@ func setupReloader(
 		t.Fatalf("initial processor: %v", err)
 	}
 
-	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	holder := reload.NewHolder(proc)
 	r := reload.NewReloader(path, holder, logger, cfg, proc, ctl, nil)
 	return r, holder, path
 }
@@ -273,17 +272,9 @@ func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
 	r.Reload(t.Context())
 
-	after := holder.Load()
-	if after == before {
-		t.Fatal("AC8: valid reload must swap the holder snapshot")
-	}
-	if after.Svc == before.Svc {
+	newProc := holder.Load()
+	if newProc == before {
 		t.Fatal("AC8: valid reload must build a new Processor")
-	}
-
-	newProc, ok := after.Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
 	}
 	state := newProc.GeofeedState()
 	if state.Lookup == nil {
@@ -296,8 +287,7 @@ func TestReloadValidSwapCarriesGeofeed(t *testing.T) {
 
 // TestReloadFirstReloadCarriesLoadedAt covers AC12: on the first reload after
 // startup, when geofeed.sources are unchanged, the existing LoadedAt must be
-// carried over to the rebuilt Processor (no spurious geofeed reload), and the
-// other changed fields (groups) must be applied to the new snapshot.
+// carried over to the rebuilt Processor (no spurious geofeed reload).
 func TestReloadFirstReloadCarriesLoadedAt(t *testing.T) {
 	loadedAt := time.Now().Add(-90 * time.Minute)
 	r, holder, path := setupReloader(t, zerolog.Nop(), loadedAt, nil)
@@ -305,16 +295,9 @@ func TestReloadFirstReloadCarriesLoadedAt(t *testing.T) {
 	writeConfig(t, path, baseGeofeedYAML+"groups:\n  nordics:\n    - FI\n    - SE\n")
 	r.Reload(t.Context())
 
-	after := holder.Load()
-	newProc, ok := after.Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
-	}
+	newProc := holder.Load()
 	if at := newProc.GeofeedState().LoadedAt; !at.Equal(loadedAt) {
 		t.Fatalf("AC12: first reload must carry LoadedAt: got %v want %v", at, loadedAt)
-	}
-	if len(after.Groups["nordics"]) != 2 {
-		t.Fatalf("AC12: new groups must be applied in the swapped snapshot, got %v", after.Groups)
 	}
 }
 
@@ -349,7 +332,7 @@ func TestReloadCarriesGeofeedRetrySchedule(t *testing.T) {
 		t.Fatalf("initial processor: %v", err)
 	}
 
-	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	holder := reload.NewHolder(proc)
 	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
 
 	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
@@ -609,7 +592,7 @@ const geoDBYAML = baseGeofeedYAML +
 func setupGeoDBReloader(
 	t *testing.T,
 	geofeedAt, dbipAt, registryAt time.Time,
-) (*reload.Reloader, *server.Holder, string) {
+) (*reload.Reloader, *reload.Holder, string) {
 	t.Helper()
 	ctx := t.Context()
 
@@ -631,7 +614,7 @@ func setupGeoDBReloader(
 		t.Fatalf("initial processor: %v", err)
 	}
 
-	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	holder := reload.NewHolder(proc)
 	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
 	return r, holder, path
 }
@@ -650,13 +633,9 @@ func TestReloadCarriesDBIPAndRegistry(t *testing.T) {
 	writeConfig(t, path, geoDBYAML+"resolver:\n  timeout: 10s\n")
 	r.Reload(t.Context())
 
-	after := holder.Load()
-	if after == before {
-		t.Fatal("valid reload must swap the holder snapshot")
-	}
-	newProc, ok := after.Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
+	newProc := holder.Load()
+	if newProc == before {
+		t.Fatal("valid reload must build a new Processor")
 	}
 	dbip := newProc.DBIPState()
 	if dbip.Lookup == nil {
@@ -690,10 +669,7 @@ func TestReloadRefetchesDBIPOnConfigChange(t *testing.T) {
 	writeConfig(t, path, changed)
 	r.Reload(t.Context())
 
-	newProc, ok := holder.Load().Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", holder.Load().Svc)
-	}
+	newProc := holder.Load()
 	dbip := newProc.DBIPState()
 	if dbip.Lookup == nil {
 		t.Fatal("changed dbip must still be built (empty lookup), not nil")
@@ -721,13 +697,9 @@ const cacheYAML = "geo:\n" +
 	"  - tag: GEO\n" +
 	"    providers: [geofeed, asn]\n"
 
-func reloadedProcessor(t *testing.T, holder *server.Holder) *preprocess.Processor {
+func reloadedProcessor(t *testing.T, holder *reload.Holder) *preprocess.Processor {
 	t.Helper()
-	proc, ok := holder.Load().Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", holder.Load().Svc)
-	}
-	return proc
+	return holder.Load()
 }
 
 // TestReloadCarriesResolverCaches: the DNS and Cymru caches are the reload's
@@ -761,7 +733,7 @@ func TestReloadCarriesResolverCaches(t *testing.T) {
 		t.Fatal("an asn annotate provider must build an ASN resolver")
 	}
 
-	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	holder := reload.NewHolder(proc)
 	r := reload.NewReloader(path, holder, zerolog.Nop(), cfg, proc, nil, nil)
 
 	// An edit that changes the processor but touches neither resolver block.
@@ -812,7 +784,7 @@ func setupCIDRReloader(
 	t *testing.T,
 	logger zerolog.Logger,
 	cidrAt time.Time,
-) (*reload.Reloader, *server.Holder, string) {
+) (*reload.Reloader, *reload.Holder, string) {
 	t.Helper()
 	ctx := t.Context()
 
@@ -838,7 +810,7 @@ func setupCIDRReloader(
 		t.Fatalf("initial processor: %v", err)
 	}
 
-	holder := server.NewHolder(&server.Snapshot{Svc: proc, Groups: cfg.Groups})
+	holder := reload.NewHolder(proc)
 	return reload.NewReloader(path, holder, logger, cfg, proc, nil, nil), holder, path
 }
 
@@ -854,13 +826,9 @@ func TestReloadCarriesCIDRAllowList(t *testing.T) {
 	writeConfig(t, path, cidrYAML+"resolver:\n  timeout: 10s\n")
 	r.Reload(t.Context())
 
-	after := holder.Load()
-	if after == before {
-		t.Fatal("valid reload must swap the holder snapshot")
-	}
-	newProc, ok := after.Svc.(*preprocess.Processor)
-	if !ok {
-		t.Fatalf("snapshot Svc must be *preprocess.Processor, got %T", after.Svc)
+	newProc := holder.Load()
+	if newProc == before {
+		t.Fatal("valid reload must build a new Processor")
 	}
 	state := newProc.CIDRState()
 	if state.Set.Len() == 0 {

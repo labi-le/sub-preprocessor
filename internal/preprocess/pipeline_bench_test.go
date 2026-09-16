@@ -72,36 +72,20 @@ func newBenchProcessor(b *testing.B) *Processor {
 }
 
 // BenchmarkProcessBodyPipeline measures the network-free per-request hot loop:
-// parse -> resolve (bare-IPv4 short circuit) -> geofeed filter -> annotate
-// rewrite -> buffer, across 100 nodes. The resolved map is cleared each
-// iteration to mirror a fresh request (no cross-request DNS cache reuse).
-//
-// It annotates exactly ONE tag, GEO via geofeed, and that count is a FIXTURE
-// (newBenchProcessor's Annotate list), not a property of the pipeline: editing
-// it moves this benchmark's baseline with no production code involved. It has.
-// `5d06fb6` dropped a second `{Tag: IP}` entry from that list, and holding
-// production code at `23df10f` while taking only that fixture moves the numbers
-// 18686 -> 15933 ns/op and 4642 -> 1600 B/op. AGENTS.md's bench notes carry the
-// full four-tree measurement, including the +280 ns/op once attributed to the
-// production change and since shown to be indistinguishable from the per-binary
-// link floor. Nothing here can attribute a move to the annotator, which is
-// what BenchmarkAnnotate (annotator_bench_test.go) is for. Its tag list is
-// fixed in ITS OWN file, so a move there is normally the code — the ASN
-// removal is the one round where that fixture changed too (two tags down to
-// one), and AGENTS.md records the control that separates the two. THIS
-// benchmark's fixture was already GEO-only and did not move that round.
+// parse -> resolve (bare-IPv4 short circuit) -> geofeed filter -> collect,
+// across 100 nodes. The resolved map is cleared and the sink zeroed each
+// iteration to mirror a fresh request: FilterNodes allocates its own sink per
+// call, so the survivor slice and arena are part of what this prices.
 func BenchmarkProcessBodyPipeline(b *testing.B) {
 	p := newBenchProcessor(b)
 	body := benchBody()
 	lookup := p.GeofeedState().Lookup
 	allowed := filter.ParseAllowed("NL")
 
-	buf := &bytes.Buffer{}
-	buf.Grow(64 << 10)
 	resolved := p.resolver.GetResolvedMap()
 	defer p.resolver.PutResolvedMap(resolved)
 	stats := Stats{}
-	sink := &bufferSink{buf: buf, annotator: p.annotator}
+	sink := &sliceSink{}
 	pctx := &PipelineContext{
 		sink:     sink,
 		Lookup:   lookup,
@@ -113,10 +97,9 @@ func BenchmarkProcessBodyPipeline(b *testing.B) {
 	ctx := context.Background()
 	b.ReportAllocs()
 	for b.Loop() {
-		buf.Reset()
 		clear(resolved)
 		stats = Stats{}
-		sink.wrote = false
+		*sink = sliceSink{}
 		if err := p.processBody(ctx, body, pctx); err != nil {
 			b.Fatalf("processBody: %v", err)
 		}
@@ -126,12 +109,11 @@ func BenchmarkProcessBodyPipeline(b *testing.B) {
 	}
 }
 
-// The two benchmarks below drive the sink the /stable.txt worker uses —
-// sliceSink, which clones each survivor's line — where BenchmarkProcessBodyPipeline
-// above drives the "/" endpoint's rendering sink. Both bodies are bare-IPv4
-// nodes so no DNS is touched, which is also the corpus's majority shape: of
-// 73256 nodes measured across all 163 configured sources on 2026-08-14, 53066
-// (72%) carry a literal IP and 20190 carry a hostname over 8327 unique names.
+// The two benchmarks below drive one cycle's shapes through the same sink. Both
+// bodies are bare-IPv4 nodes so no DNS is touched, which is also the corpus's
+// majority shape: of 73256 nodes measured across all 163 configured sources on
+// 2026-08-14, 53066 (72%) carry a literal IP and 20190 carry a hostname over
+// 8327 unique names.
 //
 // The country filter is armed the way the worker arms it — every country
 // allowed, a deny list non-empty — so filter.Permitted runs per node instead of
@@ -466,15 +448,14 @@ func benchShippedProcessor(b *testing.B) *Processor {
 	return p
 }
 
-// benchEntryRequest drives one Filter/FilterNodes call per iteration with the
-// URL the real endpoints use, the loadSubscription seam standing in for the
-// network — so every request-level fixed cost of filterInto is measured: the
-// SubscriptionURL label copy, the logger context clone, the PipelineContext
-// and Stats escape, and countryChain's per-request chainLookup. The
-// processBody-only benchmarks above construct pctx by hand and bypass all of
-// them, which is exactly the gap this pair closes.
-func benchEntryRequest(b *testing.B, filterEntry bool) {
-	b.Helper()
+// BenchmarkFilterNodesRequest drives one FilterNodes call per iteration with
+// the URL the worker uses, the loadSubscription seam standing in for the
+// network — so every request-level fixed cost is measured: the SubscriptionURL
+// label copy, the logger context clone, the PipelineContext and Stats escape,
+// and countryChain's per-request chainLookup. The processBody-only benchmarks
+// above construct pctx by hand and bypass all of them, which is exactly the
+// gap this one closes.
+func BenchmarkFilterNodesRequest(b *testing.B) {
 	p := benchShippedProcessor(b)
 	body := benchBody()
 	const url = "https://sub.example.com/feed"
@@ -484,25 +465,9 @@ func benchEntryRequest(b *testing.B, filterEntry bool) {
 		return body, nil
 	}
 	ctx := context.Background()
-	buf := &bytes.Buffer{}
-	buf.Grow(64 << 10)
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if filterEntry {
-			buf.Reset()
-			stats, err := p.Filter(ctx, buf, FilterRequest{
-				SubscriptionURL:  url,
-				AllowedCountries: filter.ParseAllowed("NL"),
-			})
-			if err != nil {
-				b.Fatalf("Filter: %v", err)
-			}
-			if stats.Kept != 100 {
-				b.Fatalf("kept = %d, want 100", stats.Kept)
-			}
-			continue
-		}
 		nodes, stats, err := p.FilterNodes(ctx, FilterRequest{
 			SubscriptionURL:  url,
 			AllowedCountries: filter.All(),
@@ -515,15 +480,4 @@ func benchEntryRequest(b *testing.B, filterEntry bool) {
 			b.Fatalf("kept = %d, nodes = %d, want 100", stats.Kept, len(nodes))
 		}
 	}
-}
-
-// BenchmarkFilterRequest prices the GET / path end to end minus the network.
-func BenchmarkFilterRequest(b *testing.B) {
-	benchEntryRequest(b, true)
-}
-
-// BenchmarkFilterNodesRequest prices the worker's per-source entry the same
-// way.
-func BenchmarkFilterNodesRequest(b *testing.B) {
-	benchEntryRequest(b, false)
 }

@@ -80,9 +80,9 @@ func parseVmess(line string, schemeEnd int) (Node, bool) {
 	// then Std (convert/base64.go:24-33) — so a producer's url-safe body,
 	// which decodeBase64Tolerant accepts, is dropped by the client's mihomo:
 	// the decode fails there and the body is misparsed as an AEAD authority.
-	// Parse is the single seam every published line passes through — merge's
-	// relabel already re-encodes for /stable.txt, but the on-demand /
-	// endpoints emit Raw — so healing the body here heals both.
+	// Parse is the single seam every published line passes through, and merge's
+	// relabel re-encodes on top of it, so healing the body here heals every
+	// published line.
 	raw := line
 	if strings.ContainsAny(vmessBody(payload), "-_") {
 		frag := ""

@@ -94,16 +94,16 @@ const (
 	// stream is legitimately far ahead of the wire bytes consumed so far.
 	expansionFloor = 1 << 20
 	// maxEagerBody caps what an announced Content-Length may allocate before a
-	// single byte has arrived. On GET / the URL is user input, so the
-	// announcement is hostile input: sized straight off it, a peer that
-	// announces the cap and then sends nothing costs limit bytes per request.
+	// single byte has arrived. A crawler-discovered URL is content-supplied, so
+	// the announcement is hostile input: sized straight off it, a peer that
+	// announces the cap and then sends nothing costs limit bytes per fetch.
 	// 256 KiB is the first power of two past the corpus p90 (198272 B) and
 	// covers 133 of the 145 configured sources that announce a length; the 12
 	// above it reach their size in at most four growth steps. A second corpus,
 	// measured 2026-08-14 on the second instance (retired 2026-08-26), was a
 	// different distribution — 52 answering sources, median 283358 B, p90
 	// 1794886 B, 24 of 52 under this ceiling — and it stayed one constant
-	// anyway: the ceiling bounds a HOSTILE announcement on GET / rather than a
+	// anyway: the ceiling bounds a HOSTILE announcement rather than a
 	// configured source, and a configured source above it pays only a bounded
 	// doubling chain per cycle.
 	maxEagerBody = 256 << 10
@@ -212,8 +212,8 @@ func BytesWithTypeHWID(ctx context.Context, rawURL SubscriptionURL, limit int64,
 // with its own body; the 2 that state nothing frame the response with HTTP/2
 // DATA frames instead.
 //
-// The header is only a claim, and on GET / it is a claim by whoever chose
-// subscription_url, so it is trusted for maxEagerBody up front and past that
+// The header is only a claim, and for a discovered URL it is a claim by
+// whoever published it, so it is trusted for maxEagerBody up front and past that
 // only as far as the peer keeps delivering: the buffer never exceeds the ceiling
 // or twice what has arrived, whichever is larger. A body may also run past its
 // announcement, so the buffer keeps one spare byte to notice and grows for the
@@ -508,7 +508,7 @@ func hexDigitValue(c byte) int {
 
 // NewSafeHTTPClient returns a client with the full SSRF guard: https-only, no
 // proxy, and resolved non-public IPs refused at dial time. Used for anything
-// fetching user- or content-supplied URLs (the / endpoint, subscriptions).
+// fetching content-supplied URLs (crawler candidates, subscription sources).
 func NewSafeHTTPClient() *http.Client { return newHTTPClient(true) }
 
 // NewUnrestrictedHTTPClient returns a client that still forbids proxies and

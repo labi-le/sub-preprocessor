@@ -177,37 +177,6 @@ func TestPermits_UnknownCountry(t *testing.T) {
 	}
 }
 
-func TestCountrySetExclude_RemovesSpecificCountries(t *testing.T) {
-	t.Parallel()
-
-	set := filter.ParseAllowed("DE,US,NL")
-	set.Exclude(filter.ParseAllowed("US,NL"))
-
-	if !set.Has(geofeed.CountryCode{'D', 'E'}) {
-		t.Fatal("expected DE to remain")
-	}
-	if set.Has(geofeed.CountryCode{'U', 'S'}) {
-		t.Fatal("expected US to be excluded")
-	}
-	if set.Has(geofeed.CountryCode{'N', 'L'}) {
-		t.Fatal("expected NL to be excluded")
-	}
-}
-
-func TestCountrySetExclude_UnknownIgnored(t *testing.T) {
-	t.Parallel()
-
-	set := filter.ParseAllowed("DE,US")
-	set.Exclude(filter.ParseAllowed("XXX,AA, U "))
-
-	if !set.Has(geofeed.CountryCode{'D', 'E'}) {
-		t.Fatal("expected DE to remain")
-	}
-	if !set.Has(geofeed.CountryCode{'U', 'S'}) {
-		t.Fatal("expected US to remain")
-	}
-}
-
 func TestCountrySetAll(t *testing.T) {
 	t.Parallel()
 
@@ -222,53 +191,8 @@ func TestCountrySetAll(t *testing.T) {
 	}
 }
 
-func TestCountrySetAll_ExceptExcluded(t *testing.T) {
-	t.Parallel()
-
-	set := filter.All()
-	set.Exclude(filter.ParseAllowed("DE,US"))
-
-	for c1 := byte('A'); c1 <= 'Z'; c1++ {
-		for c2 := byte('A'); c2 <= 'Z'; c2++ {
-			cc := geofeed.CountryCode{c1, c2}
-			want := (c1 != 'D' || c2 != 'E') && (c1 != 'U' || c2 != 'S')
-			if got := set.Has(cc); got != want {
-				t.Fatalf("%s: got %v, want %v", cc, got, want)
-			}
-		}
-	}
-}
-
-func TestAllMinusEveryCodeIsEmpty(t *testing.T) {
-	t.Parallel()
-
-	// All() must set exactly the 676 addressable bits. Any bit above ZZ is
-	// unreachable by Exclude, and would keep IsEmpty false however much the
-	// caller excludes — making the documented "nothing left" 400 unreachable.
-	set := filter.All()
-	for c1 := byte('A'); c1 <= 'Z'; c1++ {
-		for c2 := byte('A'); c2 <= 'Z'; c2++ {
-			set.Exclude(filter.ParseAllowed(string([]byte{c1, c2})))
-		}
-	}
-
-	if !filter.IsEmpty(set) {
-		t.Fatalf("excluding every code must empty the set, got %v", set)
-	}
-}
-
 func BenchmarkCountrySetAll(b *testing.B) {
 	for b.Loop() {
 		_ = filter.All()
-	}
-}
-
-func BenchmarkCountrySetExclude(b *testing.B) {
-	allowed := filter.ParseAllowed("DE,US,NL,FI,EE,GB,FR")
-	excluded := filter.ParseAllowed("US,GB")
-
-	for b.Loop() {
-		set := allowed
-		set.Exclude(excluded)
 	}
 }

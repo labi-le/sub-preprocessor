@@ -129,9 +129,8 @@ type FilterRequest struct {
 	// without any HTTP fetch. It is normalized with the same base64-tolerant
 	// decoder used for fetched subscriptions. Takes precedence over SubscriptionURL.
 	Body []byte
-	// HWID rides out as the x-hwid header. `GET /` leaves it empty: that
-	// endpoint has no source config to read it from, so the value belongs to
-	// the /stable.txt worker's per-source entry.
+	// HWID rides out as the x-hwid header, from the worker's per-source entry;
+	// empty sends no header at all.
 	HWID string
 }
 
@@ -221,7 +220,7 @@ type cidrStore struct {
 	load           cidrLoader
 }
 
-// Stats counts one Filter call. Total is the nodes the parser produced, and
+// Stats counts one FilterNodes call. Total is the nodes the parser produced, and
 // Kept plus every Drop reason sums back to it. Unsupported sits outside that
 // identity on purpose: it counts URI-shaped input lines the parser refused, so
 // they never became nodes and were never in Total.
@@ -246,26 +245,14 @@ type Stats struct {
 
 // PipelineContext holds request-scoped state shared across the processing pipeline.
 type PipelineContext struct {
-	// sink receives every node that survived the IP stage. Emission is behind
-	// an interface because the two callers want different things out of the
-	// same pipeline: `GET /` wants the published text, the stable worker wants
-	// the nodes themselves so it can annotate after probing them.
-	sink nodeSink
+	sink *sliceSink
 	// Lookup is the country-resolution chain the geofeed country filter judges
 	// nodes with: the LOCAL country databases every GEO annotate entry names,
 	// concatenated in written order. Not "every database this process loaded"
 	// — a chain naming only dbip leaves the geofeed out — and never asn or
 	// cloudflare, which are not local tables, so the verdict and the published
 	// [GEO:xx] tag agree on everything but those two; see countryChain.
-	Lookup geofeed.CountryLookup
-	// geo is the SAME request-start read, kept per provider. Lookup is the
-	// merged verdict chain; a tag renders its own entry's chain (a split
-	// two-entry config publishes [GEO:??][GEO:DE], not the merged first
-	// answer), so inline annotation needs the members, not the merge — and it
-	// must read them from the generation the filter judged, or a background
-	// reload landing mid-request splits the two. Zero when a caller built pctx
-	// by hand; bufferSink then falls back to the annotator's live getters.
-	geo      countryCapture
+	Lookup   geofeed.CountryLookup
 	Allowed  filter.CountrySet
 	Denied   filter.CountrySet
 	Resolved map[string][]netip.Addr
@@ -288,36 +275,6 @@ type NodeResult struct {
 	IP  netip.Addr
 }
 
-// geo is pctx.geo: the members the annotator must resolve inline tags through
-// so a rendered [GEO:xx] cannot straddle a reload the filter did not. The
-// sliceSink ignores it — the worker annotates after probing, on its own clock,
-// with no request left to capture.
-type nodeSink interface {
-	emit(ctx context.Context, node subscription.Node, ip netip.Addr, geo *countryCapture)
-}
-
-// bufferSink renders nodes into the response buffer as they survive. The
-// separator and the tag prefix are both part of the published text, so they
-// belong here rather than in the pipeline.
-type bufferSink struct {
-	buf       *bytes.Buffer
-	annotator *annotator
-	tagBuf    bytes.Buffer
-	wrote     bool
-}
-
-func (s *bufferSink) emit(ctx context.Context, node subscription.Node, ip netip.Addr, geo *countryCapture) {
-	if s.wrote {
-		s.buf.WriteByte('\n')
-	}
-	s.wrote = true
-	if s.annotator == nil {
-		s.buf.WriteString(node.Raw)
-		return
-	}
-	s.annotator.annotate(ctx, s.buf, &s.tagBuf, AnnotateRequest{Node: node, IP: ip}, geo)
-}
-
 // sliceSink collects survivors for a caller that annotates later. arena packs
 // their line bytes back to back, so a body costs a handful of allocations
 // instead of one per node; byteBound is what is left of the upper bound on
@@ -328,7 +285,7 @@ type sliceSink struct {
 	byteBound int
 }
 
-func (s *sliceSink) emit(_ context.Context, node subscription.Node, ip netip.Addr, _ *countryCapture) {
+func (s *sliceSink) emit(node subscription.Node, ip netip.Addr) {
 	s.nodes = append(s.nodes, NodeResult{Raw: s.intern(node.Raw), IP: ip})
 }
 
@@ -355,13 +312,6 @@ func (s *sliceSink) intern(line string) string {
 // halving it costs ~65% more allocs/op, and doubling it takes the filtering
 // shape's B/op from 1.7% over its pre-arena baseline to 6.4%.
 const arenaChunk = 8192
-
-// sizer is a sink that can be told how many nodes may follow. Only the
-// collecting sink implements it — bufferSink renders into a buffer its caller
-// owns and sizes.
-type sizer interface {
-	reserve(nodes, byteBound int)
-}
 
 // reserve sizes the survivor slice once, from a bound the parse loop already
 // knows. Growing into it instead cost a measured 7.6 MB per cycle over the
@@ -619,33 +569,11 @@ func NewProcessor(ctx context.Context, logger zerolog.Logger, opts Options) (*Pr
 	return p, nil
 }
 
-// Filter renders the surviving nodes as the published subscription text,
-// annotated inline: `GET /` has no post-probe stage to annotate in.
-func (p *Processor) Filter(ctx context.Context, b *bytes.Buffer, req FilterRequest) (Stats, error) {
-	// The on-demand URL fetch inherits the caller's own deadline — GET /'s 60s
-	// request context, answered 504 on expiry. fetch.timeout is the worker's
-	// fail-fast knob, and shared use cut a slow-but-healthy subscription at 3s
-	// with most of the advertised request budget unused; 0 means no sub-budget.
-	return p.filterInto(ctx, &bufferSink{buf: b, annotator: p.annotator}, req, 0)
-}
-
-// FilterNodes runs the same pipeline but hands the survivors back unannotated,
-// each paired with the address the filters judged it by. The stable worker
-// annotates only after probing, so the tags can carry what the probes learned
-// — and must carry them for THIS address, never a second resolution of the
-// same hostname.
+// FilterNodes runs the pipeline and hands the survivors back unannotated, each
+// paired with the address the filters judged it by: the stable worker annotates
+// only after probing, and the tags must describe THAT address, never a second
+// resolution of the same hostname.
 func (p *Processor) FilterNodes(ctx context.Context, req FilterRequest) ([]NodeResult, Stats, error) {
-	sink := &sliceSink{}
-	// The worker keeps fetch.timeout as its URL-fetch budget: sixteen sources
-	// fetch concurrently under per-source deadlines of minutes, so an
-	// unresponsive one must fail fast instead of holding its slot.
-	stats, err := p.filterInto(ctx, sink, req, p.fetchTimeout)
-	return sink.fit(), stats, err
-}
-
-// filterInto runs the shared pipeline. fetchBudget bounds the URL fetch when
-// req.Body is empty; 0 lets it inherit ctx (the caller's own deadline).
-func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterRequest, fetchBudget time.Duration) (Stats, error) {
 	label := string(req.SubscriptionURL)
 	if len(req.Body) > 0 {
 		label = "inline"
@@ -654,28 +582,30 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	start := time.Now()
 
 	p.maybeRefreshDatabases(ctx)
-	lookup, capture := p.countryChain(ctx)
+	lookup := p.countryChain(ctx)
 
 	allowed := req.AllowedCountries
 	if filter.IsEmpty(allowed) {
-		return Stats{}, errors.New("no allowed countries provided")
+		return nil, Stats{}, errors.New("no allowed countries provided")
 	}
 
 	var body []byte
 	if len(req.Body) > 0 {
-		// Inline source: normalize the pasted payload with the same
-		// base64-tolerant decoder used for fetched bodies; no HTTP fetch.
 		body = subscription.Normalize(req.Body)
 	} else {
+		// Sixteen sources fetch concurrently, so an unresponsive one must fail
+		// fast on fetch.timeout instead of holding its slot for the cycle. A
+		// zero timeout is "no sub-budget", not an expired deadline: a Processor
+		// built without Options.FetchTimeout then inherits the caller's ctx.
 		fetchCtx := ctx
-		if fetchBudget > 0 {
+		if p.fetchTimeout > 0 {
 			var cancelFetch context.CancelFunc
-			fetchCtx, cancelFetch = context.WithTimeout(ctx, fetchBudget)
+			fetchCtx, cancelFetch = context.WithTimeout(ctx, p.fetchTimeout)
 			defer cancelFetch()
 		}
 		loaded, errLoad := loadSubscription(fetchCtx, req.SubscriptionURL, req.HWID)
 		if errLoad != nil {
-			return Stats{}, fmt.Errorf("load subscription: %w", errLoad)
+			return nil, Stats{}, fmt.Errorf("load subscription: %w", errLoad)
 		}
 		body = loaded
 	}
@@ -685,10 +615,10 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	resolved := p.resolver.GetResolvedMap()
 	defer p.resolver.PutResolvedMap(resolved)
 
+	sink := &sliceSink{}
 	pctx := &PipelineContext{
 		sink:     sink,
 		Lookup:   lookup,
-		geo:      capture,
 		Allowed:  allowed,
 		Denied:   req.DeniedCountries,
 		Resolved: resolved,
@@ -696,11 +626,11 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 	}
 
 	if err := p.processBody(ctx, body, pctx); err != nil {
-		return stats, err
+		return nil, stats, err
 	}
 
 	if stats.Total == 0 {
-		return stats, errors.New("no supported URI nodes found")
+		return nil, stats, errors.New("no supported URI nodes found")
 	}
 
 	requestLog.Info().
@@ -716,10 +646,10 @@ func (p *Processor) filterInto(ctx context.Context, sink nodeSink, req FilterReq
 		Dur("latency", time.Since(start)).
 		Msg("subscription processed")
 
-	return stats, nil
+	return sink.fit(), stats, nil
 }
 
-// maxSubscriptionNodes caps how many parseable nodes one Filter call accepts.
+// maxSubscriptionNodes caps how many parseable nodes one call accepts.
 // Nodes are resolved serially with a per-hostname DNS timeout, so an unbounded
 // node list turns a single request into hours of lookups.
 //
@@ -747,7 +677,7 @@ var ErrTooManyNodes = fmt.Errorf("subscription has more than %d nodes", maxSubsc
 // Lines the parser refused are booked as Stats.Unsupported. They are the only
 // evidence that a source has started answering with something that is not a
 // node list, and they are deliberately kept out of Stats.Total so a body of
-// pure junk still trips Filter's "no supported URI nodes found".
+// pure junk still trips the "no supported URI nodes found" refusal.
 func (p *Processor) processBody(ctx context.Context, body []byte, pctx *PipelineContext) error {
 	// Parse yields at most one node per line, so the newline count bounds the
 	// node count above in one vectorized pass — enough for both the DoS ceiling
@@ -759,11 +689,9 @@ func (p *Processor) processBody(ctx context.Context, body []byte, pctx *Pipeline
 	if lines > maxSubscriptionNodes && countNodes(body, maxSubscriptionNodes) > maxSubscriptionNodes {
 		return ErrTooManyNodes
 	}
-	if s, ok := pctx.sink.(sizer); ok {
-		// The same count bounds the survivor BYTES: node lines are disjoint
-		// slices of the body, and none of them holds one of its separators.
-		s.reserve(min(lines, maxNodeHint), len(body)-lines+1)
-	}
+	// The same count bounds the survivor BYTES: node lines are disjoint slices
+	// of the body, and none of them holds one of its separators.
+	pctx.sink.reserve(min(lines, maxNodeHint), len(body)-lines+1)
 	pctx.Stats.Unsupported += subscription.Parse(body, func(node subscription.Node) bool {
 		select {
 		case <-ctx.Done():
@@ -897,7 +825,7 @@ func (p *Processor) processNode(ctx context.Context, node subscription.Node, pct
 		}
 	}
 
-	pctx.sink.emit(ctx, node, ips[0], &pctx.geo)
+	pctx.sink.emit(node, ips[0])
 	pctx.Stats.Kept++
 }
 
@@ -916,9 +844,7 @@ func (p *Processor) Annotator() Annotator {
 // snapshotLookup returns the processor's current geofeed lookup under the read
 // lock. It backs the annotator's geofeed provider for the paths that annotate
 // on the live getters — the worker's post-probe rendering above all — where
-// per-node lookups SHOULD reflect background reloads. GET /'s inline tags do
-// not come through here: filterInto captures the generation once (countryChain)
-// and the rendering sink resolves through the capture instead.
+// per-node lookups SHOULD reflect background reloads.
 //
 //nolint:ireturn // returns the CountryLookup interface for the geo.Provider getter
 func (p *Processor) snapshotLookup() geofeed.CountryLookup {
@@ -947,53 +873,32 @@ func (p *Processor) currentEntries(ctx context.Context) geofeed.CountryLookup {
 	return lookup
 }
 
-// countryCapture is one request's read of the LOCAL country databases — the
-// geofeed plus whichever downloadable tables the GEO chains name — every one
-// read at the same instant as the merged chain countryChain builds. Inline
-// annotation resolves each tag's local steps through these same objects, so a
-// background reload that swaps p.countryLookup or a geoDB mid-request moves
-// neither the filter verdict nor the rendered tag. A nil member falls back to
-// the step's live getter: that is the no-capture path (a pctx built by hand,
-// or the worker's post-probe Annotate, which passes no capture at all).
-type countryCapture struct {
-	geofeed  geofeed.CountryLookup
-	dbip     geofeed.CountryLookup
-	registry geofeed.CountryLookup
-}
-
-// countryChain returns the lookup the country filter judges nodes with — the
+// countryChain returns the lookup the country filter judges nodes with: the
 // local country databases the configured GEO annotate chains name, in written
-// order — and the per-provider capture of that same read. The capture is the
-// annotator's half of the agreement: GET / renders each [GEO:xx] tag through
-// it, so a background reload landing mid-request moves neither the verdict nor
-// the published name (see countryCapture).
+// order.
 //
 //nolint:ireturn // returns the CountryLookup interface, like currentEntries
-func (p *Processor) countryChain(ctx context.Context) (geofeed.CountryLookup, countryCapture) {
+func (p *Processor) countryChain(ctx context.Context) geofeed.CountryLookup {
 	// currentEntries doubles as the opportunistic background-reload trigger, so
 	// it runs on every request whether or not the geofeed is in the chain.
 	lookup := p.currentEntries(ctx)
-	var capture countryCapture
-	capture.geofeed = lookup
 	if len(p.countryOrder) == 0 {
-		return lookup, capture
+		return lookup
 	}
 	chain := make(chainLookup, len(p.countryOrder))
 	for i, name := range p.countryOrder {
 		switch name {
 		case config.ProviderDBIP:
-			capture.dbip = p.dbip.snapshot()
-			chain[i] = capture.dbip
+			chain[i] = p.dbip.snapshot()
 		case config.ProviderRegistry:
-			capture.registry = p.registry.snapshot()
-			chain[i] = capture.registry
+			chain[i] = p.registry.snapshot()
 		default:
 			// countryChainOrder emits nothing but the three local providers,
 			// and the two above are taken: the remainder is the geofeed.
 			chain[i] = lookup
 		}
 	}
-	return chain, capture
+	return chain
 }
 
 // countryChainOrder is the provider order countryChain walks: EVERY GEO
@@ -1002,8 +907,8 @@ func (p *Processor) countryChain(ctx context.Context) (geofeed.CountryLookup, co
 // through the same databases in the same precedence. Reading the FIRST entry
 // alone inverted both verdicts on a config that split one chain across two
 // entries: with the geofeed unable to place an IP DB-IP puts in DE and
-// `[{GEO,[geofeed]},{GEO,[dbip]}]` written, `countries=DE` dropped the node as
-// unplaceable while `exclude_countries=DE` KEPT it and published
+// `[{GEO,[geofeed]},{GEO,[dbip]}]` written, an allow-list of DE dropped the node
+// as unplaceable while a deny-list of DE KEPT it and published
 // `[GEO:??][GEO:DE]` — a deny-list quietly ceasing to work. Concatenation is a
 // no-op for every single-entry config, the shipped one included.
 //
@@ -1036,7 +941,7 @@ func (p *Processor) countryChain(ctx context.Context) (geofeed.CountryLookup, co
 // 16 -> 48; 1 alloc/op throughout except the nil collapse, which reaches 0.
 //
 // The PER-REQUEST cost is where this change is not free, and it is accepted,
-// not absent. countryChain runs once per request from filterInto, and for a
+// not absent. countryChain runs once per request from FilterNodes, and for a
 // split-chain config p.countryOrder goes nil -> 2 or 3 entries, so that call
 // stops handing back the geofeed lookup untouched and starts building a
 // chainLookup and boxing it: `[{GEO,[geofeed]},{GEO,[dbip]}]` measures
@@ -1627,9 +1532,4 @@ func (s *cidrStore) doReload(ctx context.Context, logger zerolog.Logger) {
 	s.retryAt = time.Time{}
 	s.reloadFailures = 0
 	logger.Info().Int("ranges", next.Len()).Msg("cidr allow-list reloaded in background")
-}
-
-func FormatStats(stats Stats) string {
-	return fmt.Sprintf("done: total=%d kept=%d dns_drop=%d geo_drop=%d asn_drop=%d cidr_drop=%d geoblock_drop=%d ipv6_drop=%d unsupported=%d",
-		stats.Total, stats.Kept, stats.DNSDrop, stats.GeoDrop, stats.ASNDrop, stats.CIDRDrop, stats.GeoBlockDrop, stats.IPv6Drop, stats.Unsupported)
 }
