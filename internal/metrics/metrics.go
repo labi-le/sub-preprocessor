@@ -25,9 +25,9 @@ import (
 // Invariant, the same one latencyBuckets carries: a bound equals every shipped
 // bandwidth min_mbps, so the gate is a bucket edge and the panel can answer
 // "how much headroom is there above the floor" instead of interpolating across
-// it. 30 is the shipped floor since 2026-09-14;
+// it. 15 is the shipped floor since 2026-09-18, 30 was it from 2026-09-14;
 // TestSpeedBucketsCoverShippedGates enforces it against the config itself.
-var speedBuckets = []float64{5, 10, 25, 30, 50, 100, 250, 500}
+var speedBuckets = []float64{5, 10, 15, 25, 30, 50, 100, 250, 500}
 
 // latencyBuckets are the cumulative upper bounds (ms) for the kept-node
 // latency histogram.

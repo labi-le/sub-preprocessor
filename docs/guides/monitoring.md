@@ -517,9 +517,10 @@ vendor the dashboard into the nixos repo.
   `continuous-BlPu`, whose low end asserts nothing; a green-yellow-red palette would paint an
   empty panel green.
 - **The speed ladder is fixed, and only its average survives a cycle that measured nothing.**
-  `speedBuckets` is eight bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:30`), so a quantile
-  at the top bound means faster than 500, not a plateau. One of them, 30, exists because the
-  shipped `min_mbps` is 30: a gate has to be a bucket EDGE or the panel interpolates across the
+  `speedBuckets` is nine bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:30`), so a quantile
+  at the top bound means faster than 500, not a plateau. One of them, 15, exists because the
+  shipped `min_mbps` is 15 since 2026-09-18 (30 carried that role from 2026-09-14 and stays a
+  bound): a gate has to be a bucket EDGE or the panel interpolates across the
   one boundary an operator asks about, and `TestSpeedBucketsCoverShippedGates` fails the build
   when a config moves the floor off the ladder — the same contract `latencyBuckets` carries for
   `check.max_avg_ms`. `keptSpeeds` skips a zero Mbps

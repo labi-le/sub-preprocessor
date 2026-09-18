@@ -267,7 +267,8 @@ published list. The gates:
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
-  below `min_mbps` (code default 5, shipped config 30) are dropped; an explicit `0` removes the speed
+  below `min_mbps` (code default 5, shipped config 15) are dropped; an explicit
+  `0` removes the speed
   *threshold* — a slow-but-reachable node is then kept — but it is not
   "annotate only": a node whose download failed outright (dial error, refused
   or reset transfer) is still dropped, with only the whole-batch failure

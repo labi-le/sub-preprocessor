@@ -221,6 +221,7 @@ stable_source_dropped_nodes{reason="unsupported",source="invalid_utf8"} 0
 # TYPE stable_kept_speed_mbps histogram
 stable_kept_speed_mbps_bucket{le="5"} 1
 stable_kept_speed_mbps_bucket{le="10"} 2
+stable_kept_speed_mbps_bucket{le="15"} 3
 stable_kept_speed_mbps_bucket{le="25"} 3
 stable_kept_speed_mbps_bucket{le="30"} 4
 stable_kept_speed_mbps_bucket{le="50"} 4
@@ -333,6 +334,7 @@ stable_last_success_timestamp_seconds 1.755474123e+09
 # TYPE stable_kept_speed_mbps histogram
 stable_kept_speed_mbps_bucket{le="5"} 0
 stable_kept_speed_mbps_bucket{le="10"} 0
+stable_kept_speed_mbps_bucket{le="15"} 0
 stable_kept_speed_mbps_bucket{le="25"} 0
 stable_kept_speed_mbps_bucket{le="30"} 0
 stable_kept_speed_mbps_bucket{le="50"} 0
