@@ -101,3 +101,5 @@ subscriptions:
       url: https://raw.githubusercontent.com/qubertuwu/Gh0st_WhiteList/main/configs/tgk/tgk_raw.txt
     - name: dxfh-ru
       url: https://raw.githubusercontent.com/DXFH/clash-free-cleaner/main/sub/countries/RU.txt
+    - name: pizduk
+      url: https://gitverse.ru/api/repos/Pizduk/PizdukVPN/raw/branch/master/sub.txt
