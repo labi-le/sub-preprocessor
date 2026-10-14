@@ -146,7 +146,7 @@ geoblock:
   db_path: /config/.geoblock.db
   ttl: 720h
   gemini:
-    model: gemini-2.0-flash
+    model: gemini-3.5-flash-lite
     key_file: /run/agenix/litellm-env
     key_var: LITELLM_GOOGLE_API_KEY
     timeout: 15s
