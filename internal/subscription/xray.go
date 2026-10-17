@@ -26,6 +26,15 @@ import (
 const (
 	maxJSONOutbounds = 50_000
 
+	// maxXrayReservation caps the speculative Grow after the first converted
+	// link. Both of its terms — the link's length and the number of outbounds
+	// still to come — come from the upstream document, so an uncapped product
+	// lets a small accepted body reserve megabytes (gigabytes at the body and
+	// outbound ceilings). The measured homogeneous shape, 160 vless outbounds,
+	// needs ~50 KiB, well inside the cap; anything larger regrows like any
+	// other slice.
+	maxXrayReservation = 1 << 20
+
 	// queryHint sizes the share-link query array: the widest shape converted
 	// (reality over ws) sets encryption, flow, type, security, sni, pbk, sid,
 	// fp, path and host.
@@ -128,6 +137,7 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 
 	var out []byte
 	written := 0
+	pending := convertibleOutbounds(configs)
 	for i := range configs {
 		for j := range configs[i].Outbounds {
 			if written >= maxJSONOutbounds {
@@ -142,13 +152,13 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 			out = link
 			out = append(out, '\n')
 			written++
+			pending--
 			if written == 1 {
-				// One Grow off the first link instead of a doubling chain. It
-				// counts outbounds that convert to nothing (every config ships
-				// a "direct" one) so it over-reserves rather than regrows;
-				// reserving BEFORE the first link would charge a document that
-				// converts nothing at all, which a sing-box config decodes as.
-				out = slices.Grow(out, len(out)*(outboundCount(configs)-1))
+				// One Grow off the first link instead of a doubling chain.
+				// Only outbounds that can still produce a link are worth
+				// reserving for, and xrayReservation caps the product because
+				// the document controls both terms.
+				out = slices.Grow(out, xrayReservation(len(out), pending))
 			}
 		}
 	}
@@ -159,10 +169,29 @@ func convertXrayJSON(body []byte) ([]byte, bool) {
 	return out[:len(out)-1], true
 }
 
-func outboundCount(configs []xrayConfig) int {
+// xrayReservation sizes the single Grow after the first link: one link per
+// convertible outbound still expected, capped so upstream-controlled
+// arithmetic cannot preallocate an unbounded buffer.
+func xrayReservation(linkLen, pending int) int {
+	if pending <= 0 {
+		return 0
+	}
+
+	return int(min(int64(linkLen)*int64(pending), maxXrayReservation))
+}
+
+// convertibleOutbounds counts the outbounds whose protocol has a share-link
+// renderer. Every config ships entries that convert to nothing (direct,
+// freedom, block); charging the reservation for them multiplied the first
+// link's length by the whole document instead of by the links still to come.
+func convertibleOutbounds(configs []xrayConfig) int {
 	n := 0
 	for i := range configs {
-		n += len(configs[i].Outbounds)
+		for j := range configs[i].Outbounds {
+			if outboundConverter(configs[i].Outbounds[j].Protocol) != nil {
+				n++
+			}
+		}
 	}
 
 	return min(n, maxJSONOutbounds)
@@ -177,14 +206,26 @@ func outboundCount(configs []xrayConfig) int {
 // string: strings.Builder growth was 23% of this path's alloc_objects
 // (2026-08-18), every bit of it for bytes then copied into the output again.
 func appendOutboundShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]byte, bool) {
-	switch strings.ToLower(ob.Protocol) {
-	case "vless":
-		return appendVlessShareLink(dst, ob, remarks)
-	case "hysteria", schemeHysteria2, schemeHy2:
-		return appendHysteria2ShareLink(dst, ob, remarks)
+	convert := outboundConverter(ob.Protocol)
+	if convert == nil {
+		return dst, false
 	}
 
-	return dst, false
+	return convert(dst, ob, remarks)
+}
+
+// outboundConverter maps a protocol name to its renderer. The append and the
+// reservation count ask this one table, so a protocol cannot be counted but
+// left unrendered, or rendered but never reserved for.
+func outboundConverter(protocol string) func([]byte, *xrayOutbound, string) ([]byte, bool) {
+	switch strings.ToLower(protocol) {
+	case "vless":
+		return appendVlessShareLink
+	case "hysteria", schemeHysteria2, schemeHy2:
+		return appendHysteria2ShareLink
+	}
+
+	return nil
 }
 
 // appendHysteria2ShareLink renders a hysteria2 outbound as the share link

@@ -91,8 +91,11 @@
     (bench-20260905T085512Z.txt) holds their allocation counts and re-prices the changed
     work.** `BenchmarkParse_SSR` still reads 100 allocs/op (8000 B/op), `BenchmarkRewriteVmessName`
     3 allocs/op (448 B/op) and `BenchmarkNormalizeParse_XrayJSON160Outbounds` 3067 allocs/op
-    (343137 B/op) — the vmess number gate hoisted above `json.Unmarshal` (a bare `"port":443`
-    used to pay one heap `&UnmarshalTypeError` per node for a decode that could never succeed)
+    (343137 B/op; 302136 B/op since 2026-10-17 — the Xray reservation now counts only
+    outbounds that can convert and caps the product at 1 MiB, so the fixture's 160 `freedom`
+    outbounds no longer buy capacity; allocs/op are unchanged) — the vmess number gate hoisted
+    above `json.Unmarshal` (a bare `"port":443` used to pay one heap `&UnmarshalTypeError` per
+    node for a decode that could never succeed)
     and the display-name join moved into the tagged payload rewriters, which compose the tag
     prefix and clean name in their own scratch instead of joining them into one heap string per
     annotated node (`RewriteVmessNameTagged`/`RewriteSSRNameTagged`). The new arms prove the
