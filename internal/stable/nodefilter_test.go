@@ -158,7 +158,7 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	tidal.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
 		return map[string]APIOutcome{
 			"s-001": {Server: "h1", Reachable: true, Blocked: true},
-			"s-002": {Server: "h2", Reachable: true},
+			"s-002": {Server: "h2", Reachable: true, Verified: true},
 		}
 	}
 	kept, rep := tidal.apply(context.Background(),
@@ -208,7 +208,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 	check := func(_ context.Context, given []mihomo.Proxy) map[string]APIOutcome {
 		out := make(map[string]APIOutcome, len(given))
 		for _, p := range given {
-			out[p.Name()] = APIOutcome{Server: p.Name(), Reachable: true}
+			out[p.Name()] = APIOutcome{Server: p.Name(), Reachable: true, Verified: true}
 		}
 		return out
 	}
@@ -318,7 +318,7 @@ func TestApiFilterBelievesPartialVerdict(t *testing.T) {
 		return map[string]APIOutcome{
 			"s-001": {Server: "h1", Reachable: true, Blocked: true},
 			"s-002": {Server: "h2", Reachable: true, Blocked: true},
-			"s-003": {Server: "h3", Reachable: true},
+			"s-003": {Server: "h3", Reachable: true, Verified: true},
 		}
 	}
 	f := &apiFilter{filterName: "test", check: check, store: store, logger: zerolog.Nop()}
@@ -334,6 +334,38 @@ func TestApiFilterBelievesPartialVerdict(t *testing.T) {
 	}
 	if len(store.blocked) != 2 || store.blocked[0] != "h1" || store.blocked[1] != "h2" {
 		t.Fatalf("a believed partial verdict persists its blocked hosts: %v", store.blocked)
+	}
+}
+
+// TestApiFilterKeepsUnverifiedWithoutDrop pins the retention policy for a
+// response that answered but was not read to its end: the node is kept
+// (fail-open, like geminiInconclusive), never written to the geoblock store,
+// and never booked as a drop -- Dropped renders as
+// stable_filter_dropped_nodes, where any count reads as a node thrown away.
+func TestApiFilterKeepsUnverifiedWithoutDrop(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingBlocklist{}
+	check := func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true},
+			"s-002": {Server: "h2", Reachable: true},
+			"s-003": {Server: "h3", Reachable: true, Blocked: true},
+		}
+	}
+	f := &apiFilter{filterName: "test", check: check, store: store, logger: zerolog.Nop()}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 2 || kept[0].Label != "s-001" || kept[1].Label != "s-002" {
+		t.Fatalf("unverified nodes must be kept: %+v", kept)
+	}
+	if rep.Kept != 2 || rep.Dropped[dropBlocked] != 1 || rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("only the blocked node may be dropped: %+v", rep)
+	}
+	if len(store.blocked) != 1 || store.blocked[0] != "h3" {
+		t.Fatalf("an unverified host must not be persisted: %v", store.blocked)
+	}
+	if rep.State != FilterRan {
+		t.Fatalf("a believed verdict must report FilterRan: %+v", rep)
 	}
 }
 
@@ -452,18 +484,17 @@ func newTestGeminiFilter(gc geminiChecker) *apiFilter {
 }
 
 // TestGeminiFilterCleanPassBooksNoDrop: a believed clean verdict books its two
-// drop reasons at zero and nothing else. The filter cannot see verification at
-// all — APIOutcome carries Reachable/Blocked and geminiInconclusive lives in
-// the prober — so a node the gate could not verify reaches here as a plain
-// keep, and FilterReport.Dropped renders as stable_filter_dropped_nodes, where
-// any count would read as a node thrown away (the defect corrected/unanswered
-// shipped once: b545d0a, corrected in e554307).
+// drop reasons at zero and nothing else. An unverified outcome (the gate could
+// not read the evidence) is KEPT by apiFilter.apply, not dropped, so it renders
+// as a plain keep here and never as a count: FilterReport.Dropped renders as
+// stable_filter_dropped_nodes, where any count would read as a node thrown away
+// (the defect corrected/unanswered shipped once: b545d0a, corrected in e554307).
 func TestGeminiFilterCleanPassBooksNoDrop(t *testing.T) {
 	t.Parallel()
 
 	gc := &fakeGeminiChecker{
 		enabled:  true,
-		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
+		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Verified: true}},
 	}
 	f := newTestGeminiFilter(gc)
 
@@ -496,7 +527,7 @@ func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	survivors := []Survivor{{Entry: Entry{Label: "s-001", Addr: "h1:443"}}}
 	gc := &fakeGeminiChecker{
 		enabled:  true,
-		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true}},
+		outcomes: map[string]APIOutcome{"s-001": {Server: "h1", Reachable: true, Verified: true}},
 	}
 	f := newTestGeminiFilter(gc)
 	if _, rep := f.apply(context.Background(), survivors, nil); rep.State != FilterRan {
@@ -552,7 +583,7 @@ func TestGeminiVerdictReachesTheCycleReport(t *testing.T) {
 
 	gc := &fakeGeminiChecker{
 		enabled:  true,
-		outcomes: map[string]APIOutcome{"src-001": {Server: "1.1.1.1", Reachable: true}},
+		outcomes: map[string]APIOutcome{"src-001": {Server: "1.1.1.1", Reachable: true, Verified: true}},
 	}
 	rec := &cycleRecorder{}
 	c := NewChecker(CheckerSpec{

@@ -84,6 +84,13 @@ const (
 // the check is always active (e.g. Anthropic geo-blocks before authentication,
 // so its check is keyless).
 //
+// A response the check could not read to its end -- a read error, a timeout
+// after the headers, or a body past maxAPIBody -- is NOT a pass for a
+// marker-based check, and neither is a Gemini answer that carries no location
+// verdict (geminiInconclusive): in both cases APIOutcome.Verified stays false,
+// and the node is kept unverified (fail-open) with no store write. Tidal's
+// status-only check is unaffected: the status is already the whole verdict.
+//
 // A verdict that condemns the whole survivor batch is disbelieved before any
 // drop or store write, like the pre-check's (breakerTrips, in apply): every
 // node dials the SAME endpoint, so a wholesale refusal is the endpoint's or
@@ -120,15 +127,20 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	// persisting it would evict every survivor host from the geoblock store --
 	// so the count precedes the drops and the store writes, and a disbelieved
 	// batch is kept, warned about and re-checked next cycle.
-	blocked, unreachable := 0, 0
+	blocked, unreachable, unverified := 0, 0, 0
 	for _, s := range survivors {
 		switch o := outcomes[s.Label]; {
 		case o.Blocked:
 			blocked++
 		case !o.Reachable:
 			unreachable++
+		case !o.Verified:
+			unverified++
 		}
 	}
+	// Unverified is counted but not part of the breaker: those nodes answered,
+	// and an unread body is neither a refusal nor a death. They are kept and
+	// warned about below.
 	if breakerTrips(blocked+unreachable, len(survivors)) {
 		f.logger.Warn().Str("filter", f.filterName).Int("survivors", len(survivors)).
 			Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).
@@ -162,11 +174,22 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 			// this endpoint is as likely to be a transient path failure as a
 			// standing one, and the next cycle is cheap enough to find out.
 		default:
+			// Covers a verified pass and an unverified response alike. The
+			// latter is kept, not credited: the check reached the node but
+			// never obtained the evidence it reads (a body cut short by a read
+			// error or by maxAPIBody, or a Gemini answer with no location
+			// verdict), so absence of a marker supports no verdict. Keeping is
+			// the same fail-open as geminiInconclusive, and the count rides the
+			// WARN below -- never Dropped, whose series means "thrown away".
 			kept = append(kept, s)
 		}
 	}
+	if unverified > 0 {
+		f.logger.Warn().Str("filter", f.filterName).Int("unverified", unverified).Int("survivors", len(survivors)).
+			Msg("API checks reached these survivors without a conclusive verdict; their nodes are kept unverified")
+	}
 	f.logger.Info().Str("filter", f.filterName).Int("survivors", len(survivors)).Int("kept", len(kept)).
-		Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).Msg("node filter")
+		Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).Int("unverified", unverified).Msg("node filter")
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{dropBlocked: blocked, dropUnreachable: unreachable}
 	rep.State = FilterRan

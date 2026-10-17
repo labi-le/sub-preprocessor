@@ -38,9 +38,14 @@ func (m *MihomoProber) geminiURL() string {
 // node is KEPT and published, so an unpaced gate does not merely lose
 // coverage: it publishes geo-blocked nodes.
 //
-// A response that never reached the location check is counted and warned about
-// instead of passing silently as "not blocked": see geminiInconclusive. The
-// count rides the warning alone — the gate has no metric series of its own.
+// A response that never reached the location check is an UNVERIFIED outcome,
+// not a pass: geminiInconclusive names it, geminiVerdict returns apiUnverified,
+// and this check warns about the count. A response whose body did not read to
+// its end is unverified the same way (a truncated 2xx cannot be certified
+// either): markerVerdict's rule is folded into geminiVerdict, and
+// apiFilter.apply carries that count in its own per-cycle WARN too. The count
+// rides the warning alone — the gate has no metric series of its own.
+//
 // What a dashboard reads instead is the generic filter family:
 // stable_filter_dropped_nodes{filter="gemini",reason="blocked"} sitting at 0
 // while the other API filters drop nodes is this same condition, one panel
@@ -49,7 +54,7 @@ func (m *MihomoProber) geminiURL() string {
 // The two counters are atomic because the classifier runs on every fan-out
 // goroutine; they are read once, after apiCheck has joined them all. Both
 // count classifier CALLS, so an unreachable proxy is in neither: apiCheck
-// short-circuits blocked() when nothing came back.
+// short-circuits classify() when nothing came back.
 func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
 	g := m.geo.Gemini
 	var pace time.Duration
@@ -59,12 +64,12 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 	var checks, inconclusive atomic.Int64
 	out := m.apiCheck(ctx, "stable.GeminiCheck", "gemini check", proxies,
 		m.geminiURL(), nil, g.Timeout, g.Concurrency, pace, true,
-		func(status int, body string) bool {
+		func(status int, body string, complete bool) apiVerdict {
 			checks.Add(1)
 			if geminiInconclusive(status, body, g.Marker) {
 				inconclusive.Add(1)
 			}
-			return markerBlocked(body, g.Marker)
+			return geminiVerdict(status, body, g.Marker, complete)
 		})
 	classified, unverified := int(checks.Load()), int(inconclusive.Load())
 	if unverified > 0 {
@@ -107,4 +112,18 @@ func geminiInconclusive(status int, body, marker string) bool {
 	default:
 		return true
 	}
+}
+
+// geminiVerdict is markerVerdict plus the gate's own status account: a
+// geminiInconclusive answer is unverified even when its body arrived whole,
+// because the read succeeded without carrying the location verdict. The node is
+// still kept (fail-open); it is just not credited.
+func geminiVerdict(status int, body, marker string, complete bool) apiVerdict {
+	if markerBlocked(body, marker) {
+		return apiBlocked
+	}
+	if !complete || geminiInconclusive(status, body, marker) {
+		return apiUnverified
+	}
+	return apiAccepted
 }
