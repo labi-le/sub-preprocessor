@@ -217,11 +217,19 @@ func appendOutboundShareLink(dst []byte, ob *xrayOutbound, remarks string) ([]by
 // outboundConverter maps a protocol name to its renderer. The append and the
 // reservation count ask this one table, so a protocol cannot be counted but
 // left unrendered, or rendered but never reserved for.
+//
+// EqualFold, not ToLower: both callers run per outbound, and ToLower allocates
+// a lowercase copy for every uppercase protocol a document carries. With the
+// name resolved twice (count scan, then dispatch), 1000 uppercase FREEDOM
+// outbounds cost 2000 allocations per document — all of it on a document that
+// converts nothing at all, so no reservation saving can pay for it.
 func outboundConverter(protocol string) func([]byte, *xrayOutbound, string) ([]byte, bool) {
-	switch strings.ToLower(protocol) {
-	case "vless":
+	switch {
+	case strings.EqualFold(protocol, "vless"):
 		return appendVlessShareLink
-	case "hysteria", schemeHysteria2, schemeHy2:
+	case strings.EqualFold(protocol, "hysteria"),
+		strings.EqualFold(protocol, schemeHysteria2),
+		strings.EqualFold(protocol, schemeHy2):
 		return appendHysteria2ShareLink
 	}
 
