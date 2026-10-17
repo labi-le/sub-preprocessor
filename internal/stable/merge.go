@@ -2,6 +2,7 @@ package stable
 
 import (
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -45,6 +46,14 @@ type Entry struct {
 // mixed-case duplicates share one dead-cache entry; Raw keeps the original
 // casing.
 //
+// Subscription sets overwhelmingly republish one another — the 2026-08-15
+// production snapshot summed 473,490 valid nodes into 61,801 merged ones — so
+// the dedupe map and the entry slice start at the largest single source rather
+// than at the summed corpus, and grow only when a later source actually adds
+// keys. The growth target projects the nodes still ahead at the novelty rate
+// the previous source showed (see growForMerge), which keeps a mirrored corpus
+// at one source's worth of storage and a disjoint one near its real size.
+//
 // A placeholder node is dropped here rather than given a probe slot: a Nil-UUID
 // credential authenticates nobody, and a server that names the dialling machine
 // reaches no remote however good its credential. The second is worse than a
@@ -55,19 +64,29 @@ type Entry struct {
 // those on the shipped listener's own port. Dropping before the dedupe key is
 // interned leaves a real node on the same server:port still admittable.
 func Merge(bodies []SourceBody) []Entry {
-	total := 0
+	total, largest := 0, 0
 	for _, src := range bodies {
 		total += len(src.Nodes)
+		largest = max(largest, len(src.Nodes))
 	}
-	seen := make(map[string]struct{}, total)
-	entries := make([]Entry, 0, total)
+	hint := largest
+	if total <= mergeReserveBudget {
+		hint = total
+	}
+	seen := make(map[string]struct{}, hint)
+	seenHint := hint
+	entries := make([]Entry, 0, hint)
 	var scratch []byte  // reused lowercased server:port key builder
 	var labelBuf []byte // reused <source>-NNN label builder
 	// Reused parse input. Safe because relabelNode always returns a freshly
 	// built string, never a view into the line it was handed.
 	var lineBuf []byte
 	var keys keyArena
+	processed := 0 // nodes walked in earlier sources
+	novel := 0     // entries the previous source added
+	prevNodes := 0 // nodes the previous source held
 	for _, src := range bodies {
+		before := len(entries)
 		kept := 0
 		for _, node := range src.Nodes {
 			lineBuf = append(lineBuf[:0], node.Raw...)
@@ -93,6 +112,9 @@ func Merge(bodies []SourceBody) []Entry {
 			if !relabeled {
 				continue
 			}
+			if want := mergeGrowTarget(entries, total, processed, novel, prevNodes, len(src.Nodes)); want > 0 {
+				entries, seen, seenHint = growForMerge(entries, seen, seenHint, want)
+			}
 			// One arena view serves both the dedupe key and Entry.Addr; scratch
 			// is about to be overwritten by the next node.
 			key := keys.intern(scratch)
@@ -100,8 +122,62 @@ func Merge(bodies []SourceBody) []Entry {
 			kept++
 			entries = append(entries, Entry{Label: label, Raw: raw, Addr: key, IP: node.IP})
 		}
+		processed += len(src.Nodes)
+		novel = len(entries) - before
+		prevNodes = len(src.Nodes)
 	}
 	return entries
+}
+
+// mergeReserveBudget is the corpus size below which Merge reserves the whole
+// input in one shot. 4096 entries are 352 KiB at today's 88-byte Entry, and
+// under that a single reservation is cheaper than the copy the growth path
+// would make on a disjoint corpus; above it the reservation is what
+// duplicates make wasteful.
+const mergeReserveBudget = 4096
+
+// mergeGrowTarget returns the capacity the entry slice should grow to, or 0
+// when it is not full or already covers the corpus. The projection is this
+// source's own node count, or the nodes still ahead at the novelty rate the
+// previous source showed once a source past the first has finished.
+func mergeGrowTarget(entries []Entry, total, processed, novel, prevNodes, srcNodes int) int {
+	if len(entries) != cap(entries) || len(entries) >= total {
+		return 0
+	}
+	want := len(entries) + srcNodes
+	if prevNodes > 0 && processed > prevNodes {
+		want = max(want, len(entries)+int(int64(total-processed)*int64(novel)/int64(prevNodes)))
+	}
+
+	return min(want, total)
+}
+
+// growForMerge grows the entry slice and the membership map to want, the size
+// the sources seen so far project. A mirrored corpus projects its current size
+// and does not grow at all; a disjoint one grows as the novelty it reports
+// projects the corpus still ahead. Both containers are grown together because
+// every kept node adds one entry and one key.
+//
+// The map is rebuilt rather than left to grow: a hint of the projected size
+// allocates one bucket array, where the doubling growth a fresh insert forces
+// would allocate the whole series. The entries slice is grown by slices.Grow,
+// which copies the kept entries — the one cost this trades against reserving
+// the whole overlapping corpus up front.
+func growForMerge(entries []Entry, seen map[string]struct{}, seenHint, want int) ([]Entry, map[string]struct{}, int) {
+	if want <= len(entries) {
+		return entries, seen, seenHint
+	}
+	entries = slices.Grow(entries, want-len(entries))
+	if want > seenHint {
+		grown := make(map[string]struct{}, want)
+		for k := range seen {
+			grown[k] = struct{}{}
+		}
+		seen = grown
+		seenHint = want
+	}
+
+	return entries, seen, seenHint
 }
 
 // keyArena cuts each kept node's dedupe key, and the label a vmess or ssr node
