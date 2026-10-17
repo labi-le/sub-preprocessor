@@ -43,13 +43,15 @@ func (m *MihomoProber) geminiURL() string {
 // and this check warns about the count. A response whose body did not read to
 // its end is unverified the same way (a truncated 2xx cannot be certified
 // either): markerVerdict's rule is folded into geminiVerdict, and
-// apiFilter.apply carries that count in its own per-cycle WARN too. The count
-// rides the warning alone — the gate has no metric series of its own.
+// apiFilter.apply carries that count in its own per-cycle WARN too.
 //
-// What a dashboard reads instead is the generic filter family:
-// stable_filter_dropped_nodes{filter="gemini",reason="blocked"} sitting at 0
-// while the other API filters drop nodes is this same condition, one panel
-// over, and it is the reading that survived the tiles being removed.
+// The same survivors feed FilterReport.Coverage, rendered as
+// stable_filter_{verified,unverified}_nodes{filter="gemini"} beside every other
+// gate. That pair is the direct dashboard read: a credential that verifies
+// nothing shows verified=0 with unverified=N. It replaces the old inference
+// from stable_filter_dropped_nodes{filter="gemini",reason="blocked"} sitting at
+// 0 while other gates drop. The per-cycle WARN remains as the per-check-call
+// detail.
 //
 // The two counters are atomic because the classifier runs on every fan-out
 // goroutine; they are read once, after apiCheck has joined them all. Both

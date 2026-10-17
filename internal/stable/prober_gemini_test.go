@@ -142,6 +142,9 @@ func TestGeminiCheckClassifiesThroughTheFanOut(t *testing.T) {
 		"a rotated key answers before it too": {
 			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0, false, 1, false,
 		},
+		"suspended credential answers before it too": {
+			403, `{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"CONSUMER_SUSPENDED"}]}}`, 1, 0, false, 1, false,
+		},
 		"a server fault answers before it too": {
 			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0, false, 1, false,
 		},
@@ -219,7 +222,7 @@ func TestGeminiCheckWarnsWithItsOwnCount(t *testing.T) {
 		}},
 		config.CloudflareConfig{},
 		"KEY",
-		zerolog.New(&logged),
+		zerolog.New(zerolog.SyncWriter(&logged)),
 	)
 	if err != nil {
 		t.Fatal(err)

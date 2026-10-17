@@ -1468,7 +1468,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Through-node filters: in vs kept",
+      "title": "Through-node filters: in, kept, coverage",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1516,9 +1516,27 @@
           },
           "expr": "stable_filter_kept_nodes{job=\"$job\"}",
           "legendFormat": "{{filter}} kept"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_verified_nodes{job=\"$job\"}",
+          "legendFormat": "{{filter}} verified"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "stable_filter_unverified_nodes{job=\"$job\"}",
+          "legendFormat": "{{filter}} unverified"
         }
       ],
-      "description": "Nodes entering and leaving each through-node gate, in chain order: every gate's 'in' is the previous gate's 'kept', so the ladder is the egress funnel. A gate whose in==kept every cycle either found nothing to drop or reached no verdict - stable_filter_trusted on the panel beside this one tells those apart."
+      "description": "Nodes entering, leaving and actually classified by each through-node gate, in chain order: every gate's 'in' is the previous gate's 'kept', so the ladder is the egress funnel. 'verified' counts entries whose check reached a conclusive verdict - a clean pass or a refusal - and 'unverified' those that answered without the evidence the classifier reads; both count entry labels of the last published cycle. An entry that never answered appears in neither: a believed batch drops it as unreachable, while a tripped batch keeps it and zeroes that drop (verdict trusted 0 on the panel beside this one). A gate that ran and verified nothing draws verified 0 rather than disappearing, while a gate that never ran - or the bandwidth filter, which has no API verdict account - draws no coverage line. stable_filter_trusted on the panel beside this one separates a believed drop policy from a tripped breaker."
     },
     {
       "id": 7,

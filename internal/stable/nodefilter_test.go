@@ -48,8 +48,12 @@ func TestBandwidthFilterApply(t *testing.T) {
 	// cancelled ctx: no-op, survivors unchanged.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got, _ := f.apply(ctx, survivors, nil); len(got) != len(survivors) {
+	got, rep := f.apply(ctx, survivors, nil)
+	if len(got) != len(survivors) {
 		t.Fatalf("cancelled ctx must pass survivors through, got %d", len(got))
+	}
+	if rep.State != FilterAbsent || rep.Coverage.Measured {
+		t.Fatalf("a cancelled check must report FilterAbsent with no coverage: %+v", rep)
 	}
 }
 
@@ -213,7 +217,7 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		return out
 	}
 	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
-	kept, _ := f.apply(context.Background(), survivors, proxies)
+	kept, rep := f.apply(context.Background(), survivors, proxies)
 	if len(kept) != 2 {
 		t.Fatalf("expected s-001 and s-002 kept, got %+v", kept)
 	}
@@ -221,6 +225,9 @@ func TestApiFilterDropsSurvivorAbsentFromProxyMap(t *testing.T) {
 		if s.Label == "s-003" {
 			t.Fatal("s-003 (absent from proxy map) must be dropped as unreachable")
 		}
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 2 || got.Unverified != 0 {
+		t.Fatalf("coverage = %+v, want the two answered survivors verified and the absent one in neither count", got)
 	}
 }
 
@@ -272,6 +279,9 @@ func TestApiFilterBatchBreakerKeepsSurvivorsOnWholeBatchUnreachable(t *testing.T
 	if rep.State != FilterTripped {
 		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
 	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 0 || got.Unverified != 0 {
+		t.Fatalf("a ran check with no answers must report measured zero coverage, got %+v", got)
+	}
 }
 
 // TestApiFilterBatchBreakerSkipsStoreOnWholeBatchBlocked pins the write side of
@@ -304,6 +314,11 @@ func TestApiFilterBatchBreakerSkipsStoreOnWholeBatchBlocked(t *testing.T) {
 	if rep.State != FilterTripped {
 		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
 	}
+	// The breaker discards the DROPS, not the evidence: every refusal was still
+	// a conclusive verdict about the shared host.
+	if got := rep.Coverage; !got.Measured || got.Verified != 3 || got.Unverified != 0 {
+		t.Fatalf("a tripped batch must keep its measured coverage, got %+v", got)
+	}
 }
 
 // TestApiFilterBelievesPartialVerdict pins that the breaker only disbelieves
@@ -331,6 +346,9 @@ func TestApiFilterBelievesPartialVerdict(t *testing.T) {
 	}
 	if rep.State != FilterRan {
 		t.Fatalf("a believed verdict must report FilterRan: %+v", rep)
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 3 || got.Unverified != 0 {
+		t.Fatalf("coverage = %+v, want 3 measured verdicts (two refusals plus a pass)", got)
 	}
 	if len(store.blocked) != 2 || store.blocked[0] != "h1" || store.blocked[1] != "h2" {
 		t.Fatalf("a believed partial verdict persists its blocked hosts: %v", store.blocked)
@@ -366,6 +384,37 @@ func TestApiFilterKeepsUnverifiedWithoutDrop(t *testing.T) {
 	}
 	if rep.State != FilterRan {
 		t.Fatalf("a believed verdict must report FilterRan: %+v", rep)
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 1 || got.Unverified != 2 {
+		t.Fatalf("coverage = %+v, want the refusal verified and both silences unverified", got)
+	}
+}
+
+// TestApiFilterCancelledCheckReportsNoCoverage pins the other absent path: the
+// check may have produced outcomes, but a cancelled cycle discards them before
+// any drop or count, so the report must not read as a measured account.
+func TestApiFilterCancelledCheckReportsNoCoverage(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	check := func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Verified: true},
+			"s-002": {Server: "h2", Reachable: true},
+			"s-003": {Server: "h3", Reachable: true, Blocked: true},
+		}
+	}
+	f := &apiFilter{filterName: "test", check: check, logger: zerolog.Nop()}
+	kept, rep := f.apply(ctx, threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a cancelled check keeps every survivor: kept %d", len(kept))
+	}
+	if rep.State != FilterAbsent {
+		t.Fatalf("a cancelled check reached no verdict: State = %v", rep.State)
+	}
+	if rep.Coverage.Measured {
+		t.Fatalf("a cancelled check has no coverage to report: %+v", rep.Coverage)
 	}
 }
 
@@ -449,6 +498,9 @@ func TestBandwidthFilterBatchBreakerKeepsWholeBatchUnderTheFloor(t *testing.T) {
 	if rep.State != FilterTripped {
 		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
 	}
+	if rep.Coverage.Measured {
+		t.Fatalf("the bandwidth filter has no API verdict coverage: %+v", rep.Coverage)
+	}
 	for _, s := range kept {
 		if s.Mbps != 0 {
 			t.Fatalf("a disbelieved measurement must not be tagged: %s carries Mbps %d", s.Label, s.Mbps)
@@ -514,6 +566,9 @@ func TestGeminiFilterCleanPassBooksNoDrop(t *testing.T) {
 	if rep.State != FilterRan {
 		t.Fatalf("a believed clean verdict must report FilterRan: %+v", rep)
 	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 1 || got.Unverified != 0 {
+		t.Fatalf("coverage = %+v, want the clean node counted as verified", got)
+	}
 }
 
 // TestGeminiFilterDisabledIsNotAGateThatRanClean covers the state that costs
@@ -545,6 +600,9 @@ func TestGeminiFilterDisabledIsNotAGateThatRanClean(t *testing.T) {
 	}
 	if gc.calls != 1 {
 		t.Fatalf("the disabled branch must not call the check: calls = %d", gc.calls)
+	}
+	if rep.Coverage.Measured {
+		t.Fatalf("a skipped gate has no coverage to report: %+v", rep.Coverage)
 	}
 }
 
@@ -609,6 +667,9 @@ func TestGeminiVerdictReachesTheCycleReport(t *testing.T) {
 	if got.Name != geminiFilterName || got.State != FilterRan || got.In != 1 {
 		t.Fatalf("gemini filter report = %+v, want a ran verdict over one node", got)
 	}
+	if cov := got.Coverage; !cov.Measured || cov.Verified != 1 || cov.Unverified != 0 {
+		t.Fatalf("gemini coverage = %+v, want the verified node carried to the report", cov)
+	}
 }
 
 // TestKeylessGateReachesTheReportAsAbsent is the same walk with nothing faked
@@ -647,6 +708,9 @@ func TestKeylessGateReachesTheReportAsAbsent(t *testing.T) {
 	}
 	if len(rec.last.Filters) != 1 || rec.last.Filters[0].State != FilterAbsent {
 		t.Fatalf("a keyless gate must report FilterAbsent: %+v", rec.last.Filters)
+	}
+	if rec.last.Filters[0].Coverage.Measured {
+		t.Fatalf("a keyless gate verified nothing and must report no coverage: %+v", rec.last.Filters[0].Coverage)
 	}
 }
 

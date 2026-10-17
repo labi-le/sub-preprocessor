@@ -291,19 +291,43 @@ const (
 	FilterRan
 )
 
+// FilterCoverage is a check's verdict coverage over a filter's input, counted
+// in SURVIVORS (entry labels) after the check folded per-port proxy outcomes
+// onto them: a mierus:// node with several ports counts once, by its best
+// folded outcome, never once per port. Verified counts entries the classifier
+// reached a verdict on -- a clean pass or a refusal, so a dropped blocked node
+// is covered too even when the batch breaker later discards the drop;
+// Unverified counts entries whose check answered without the evidence the
+// classifier reads. An entry that never answered is in NEITHER: a believed
+// batch drops it as unreachable, while a tripped batch discards that drop and
+// keeps it.
+//
+// Measured separates a measured zero (the check ran and every answer was
+// inconclusive) from a filter that has no coverage account this cycle: one
+// that never reached its check (FilterAbsent) or does not classify API
+// responses at all (the bandwidth filter).
+type FilterCoverage struct {
+	Verified   int
+	Unverified int
+	Measured   bool
+}
+
 // FilterReport is one through-node filter's effect on the survivor set: how
 // many entered, how many it kept, and how many it dropped keyed by reason
 // (blocked/slow/unreachable).
 //
 // State is what a kept-everything report does not say on its own: both a
 // verified clean pass and a disbelieved wholesale refusal read In==Kept with
-// zero drops, and only State separates them (see FilterState).
+// zero drops, and only State separates them (see FilterState). Coverage is a
+// different axis: how much of the input the check actually classified, which
+// neither In/Kept nor State carries.
 type FilterReport struct {
-	Name    string
-	In      int
-	Kept    int
-	Dropped map[string]int
-	State   FilterState
+	Name     string
+	In       int
+	Kept     int
+	Dropped  map[string]int
+	State    FilterState
+	Coverage FilterCoverage
 }
 
 // Reporter receives the outcome of each cycle. A nil Reporter disables
