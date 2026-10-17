@@ -189,6 +189,10 @@ func TestResolve_CoalescesConcurrentSameIP(t *testing.T) {
 	}
 	close(start)
 	<-started
+	// Wait until every caller has joined the same flight. Without coalescing
+	// the waiters never accumulate, so the test fails instead of racing the
+	// first lookup's completion.
+	waitFlightWaiters(t, r, ip, workers)
 	close(release)
 	wg.Wait()
 	close(results)
