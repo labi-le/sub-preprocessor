@@ -13,7 +13,7 @@
   that the input is now "configured": `fetch.ValidatePublicHTTPSURL` runs on config load
   (`internal/config/config.go:1431`, `:1669`), on every crawler mint and recheck
   (`internal/crawl/crawl.go:734`, `:1623`) and again inside the fetch itself
-  (`internal/fetch/fetch.go:151`), and the guarded dialer below is unchanged.
+  (`internal/fetch/fetch.go:158`), and the guarded dialer below is unchanged.
 - Fetching uses a safe HTTP client:
   - only `https` URLs are allowed
   - userinfo in URL is rejected
@@ -23,7 +23,7 @@
     of the live v4 one) must not burn the request, so each public address is
     dialed in order and the last dial error is returned only when all of them
     failed — `non-public target is not allowed` means the answer held NO public
-    address at all (`dialPublicAddrs`, `internal/fetch/fetch.go:571-586`)
+    address at all (`dialPublicAddrs`, `internal/fetch/fetch.go:587-602`)
   - a host whose EVERY dot-separated part is a number `inet_aton` accepts —
     decimal, `0x` hex or `0`-prefixed octal — is rejected rather than passing the
     IP gate as a hostname. **That rule is the contract; the spellings below are
@@ -47,7 +47,7 @@
   (`internal/resolver/resolver.go:108-114`).
 - An oversized subscription body is refused by the fetch layer itself, streaming: `readBody`
   reads exactly one byte past the cap and stops, and the `response too large: over …` error is
-  raised off that one byte (`internal/fetch/fetch.go:190-196`), so a hostile source cannot spend the worker's
+  raised off that one byte (`internal/fetch/fetch.go:197-203`), so a hostile source cannot spend the worker's
   memory on a body it will not keep. It fails ONE source's fetch; the cycle goes on with the
   rest, and preprocess's 50k-node ceiling bounds the same source on node count.
 - Request context is passed explicitly through the stack. Prefer `ctx context.Context` as the first argument.
