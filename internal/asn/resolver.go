@@ -45,16 +45,59 @@ type cachedResult struct {
 	expiresAt time.Time
 }
 
+// cachedName is the AS<n>.asn.cymru.com half of a lookup, keyed by ASN rather
+// than IP. The country stays in cachedResult: it comes from the origin record
+// and differs per prefix even under one AS.
+type cachedName struct {
+	name      string
+	err       error
+	expiresAt time.Time
+}
+
+// ipFlight and nameFlight let concurrent resolves share one lookup. A flight
+// is resolver-owned: its context carries the total budget (r.timeout for an
+// IP, r.timeout for a name query), not any caller's cancellation, and it is
+// cancelled once its last waiter leaves. The result fields are published under
+// flightMu and done is closed after them, so a receiver of done has a
+// happens-before edge.
+type ipFlight struct {
+	done      chan struct{}
+	result    Result
+	err       error
+	cancel    context.CancelFunc
+	waiters   int
+	finished  bool
+	abandoned bool
+}
+
+type nameFlight struct {
+	done      chan struct{}
+	name      string
+	expiresAt time.Time
+	err       error
+	cancel    context.CancelFunc
+	waiters   int
+	finished  bool
+	abandoned bool
+}
+
 type Resolver struct {
-	timeout  time.Duration
-	cacheTTL time.Duration
-	cache    map[netip.Addr]cachedResult
-	mu       sync.RWMutex
+	timeout     time.Duration
+	cacheTTL    time.Duration
+	cache       map[netip.Addr]cachedResult
+	nameCache   map[uint32]cachedName
+	mu          sync.RWMutex
+	flights     map[netip.Addr]*ipFlight
+	nameFlights map[uint32]*nameFlight
+	flightMu    sync.Mutex
 	// lookupResolver is the one net.Resolver every Cymru query goes through,
 	// shared like internal/resolver shares its instance (and set once here so
 	// a cache miss does not allocate a fresh one per IP). Tests replace it
 	// with a resolver dialing a local fake DNS server.
 	lookupResolver *net.Resolver
+	// lookupTXT overrides the TXT query in tests; nil means
+	// lookupResolver.LookupTXT.
+	lookupTXT func(ctx context.Context, name string) ([]string, error)
 	// lookupFn overrides the Cymru DNS lookup in tests; nil means r.lookup.
 	lookupFn func(ctx context.Context, ip netip.Addr) (Result, error)
 }
@@ -67,6 +110,9 @@ func New(timeout, cacheTTL time.Duration) *Resolver {
 		timeout:        timeout,
 		cacheTTL:       cacheTTL,
 		cache:          make(map[netip.Addr]cachedResult),
+		nameCache:      make(map[uint32]cachedName),
+		flights:        make(map[netip.Addr]*ipFlight),
+		nameFlights:    make(map[uint32]*nameFlight),
 		lookupResolver: &net.Resolver{PreferGo: true},
 	}
 }
@@ -77,32 +123,137 @@ func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (Result, error) {
 	}
 
 	// A warm entry is read-only, and every per-node ASN filter call pays this
-	// lock once per IP, so the hit path takes the read lock; only storeCache
-	// (and its eviction) takes the write one.
-	r.mu.RLock()
-	if cached, ok := r.cache[ip]; ok && time.Now().Before(cached.expiresAt) {
-		r.mu.RUnlock()
+	// lock once per IP, so the hit path takes the read lock; only the stores
+	// (and their eviction) take the write one. The warm success and negative
+	// paths do no allocation and never inspect the caller's context.
+	if cached, ok := r.cachedResult(ip); ok {
 		return cached.result, cached.err
 	}
+	return r.resolveCold(ctx, ip)
+}
+
+func (r *Resolver) cachedResult(ip netip.Addr) (cachedResult, bool) {
+	r.mu.RLock()
+	entry, ok := r.cache[ip]
 	r.mu.RUnlock()
-
-	lookup := r.lookupFn
-	if lookup == nil {
-		lookup = r.lookup
+	if !ok || !time.Now().Before(entry.expiresAt) {
+		return cachedResult{}, false
 	}
-	result, err := lookup(ctx, ip)
-	if err != nil {
-		// Negative-cache the failure unless the caller's context is done —
-		// a cancellation says nothing about Cymru's reachability.
-		if ctx.Err() == nil {
-			r.storeCache(ip, cachedResult{err: err, expiresAt: time.Now().Add(negativeCacheTTL)})
+	return entry, true
+}
+
+// resolveCold joins the in-flight lookup for ip or starts one. A flight is
+// resolver-owned: it runs on its own r.timeout budget, and a caller only waits
+// on it. A caller's cancellation removes that waiter and, when it was the last
+// one, cancels and unregisters the flight; it never fails the remaining
+// waiters.
+func (r *Resolver) resolveCold(ctx context.Context, ip netip.Addr) (Result, error) {
+	// An already-canceled caller has nothing to wait for, and the cancellation
+	// is not a Cymru answer: do not start or join a flight for it.
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("resolve canceled: %w", err)
+	}
+
+	r.flightMu.Lock()
+	if f, ok := r.flights[ip]; ok {
+		f.waiters++
+		r.flightMu.Unlock()
+		return r.waitIPFlight(ctx, ip, f)
+	}
+	f := &ipFlight{done: make(chan struct{}), waiters: 1}
+	flightCtx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	f.cancel = cancel
+	r.flights[ip] = f
+	r.flightMu.Unlock()
+
+	// A lookup can finish between the cache probe and the registration above;
+	// re-check so a just-warmed IP does not issue a second query.
+	if cached, ok := r.cachedResult(ip); ok {
+		r.finishIPFlight(ip, f, cached.result, cached.err)
+		return cached.result, cached.err
+	}
+
+	go r.runIPFlight(flightCtx, ip, f)
+	return r.waitIPFlight(ctx, ip, f)
+}
+
+// runIPFlight owns the one budget that covers the origin and AS-name halves of
+// an IP lookup, matching the pre-coalescing resolveCtx.
+func (r *Resolver) runIPFlight(ctx context.Context, ip netip.Addr, f *ipFlight) {
+	var result Result
+	var capExpiry time.Time
+	var err error
+	if r.lookupFn != nil {
+		result, err = r.lookupFn(ctx, ip)
+	} else {
+		result, capExpiry, err = r.lookup(ctx, ip)
+	}
+
+	if err == nil {
+		expiresAt := time.Now().Add(r.cacheTTL)
+		if !capExpiry.IsZero() && capExpiry.Before(expiresAt) {
+			expiresAt = capExpiry
 		}
-		return Result{}, err
+		r.storeCache(ip, cachedResult{result: result, expiresAt: expiresAt})
+	} else if !errors.Is(err, context.Canceled) && !r.ipFlightAbandoned(f) {
+		// A cancellation says nothing about Cymru; a resolver-owned timeout
+		// does, and stays cacheable as before. A reused AS-name error caps the
+		// IP entry so a fresh IP cannot extend the failure past the name entry
+		// it was built from.
+		expiresAt := time.Now().Add(negativeCacheTTL)
+		if !capExpiry.IsZero() && capExpiry.Before(expiresAt) {
+			expiresAt = capExpiry
+		}
+		r.storeCache(ip, cachedResult{err: err, expiresAt: expiresAt})
 	}
 
-	r.storeCache(ip, cachedResult{result: result, expiresAt: time.Now().Add(r.cacheTTL)})
+	r.finishIPFlight(ip, f, result, err)
+}
 
-	return result, nil
+func (r *Resolver) waitIPFlight(ctx context.Context, ip netip.Addr, f *ipFlight) (Result, error) {
+	select {
+	case <-f.done:
+		return f.result, f.err
+	case <-ctx.Done():
+		r.dropIPWaiter(ip, f)
+		return Result{}, fmt.Errorf("resolve canceled: %w", ctx.Err())
+	}
+}
+
+// dropIPWaiter unregisters one waiter. The flight is cancelled only when no
+// waiter remains and it has not finished, so abandoned work does not run out
+// its full timeout.
+func (r *Resolver) dropIPWaiter(ip netip.Addr, f *ipFlight) {
+	r.flightMu.Lock()
+	f.waiters--
+	if f.waiters > 0 || f.finished {
+		r.flightMu.Unlock()
+		return
+	}
+	f.abandoned = true
+	if r.flights[ip] == f {
+		delete(r.flights, ip)
+	}
+	r.flightMu.Unlock()
+	f.cancel()
+}
+
+func (r *Resolver) ipFlightAbandoned(f *ipFlight) bool {
+	r.flightMu.Lock()
+	defer r.flightMu.Unlock()
+	return f.abandoned
+}
+
+func (r *Resolver) finishIPFlight(ip netip.Addr, f *ipFlight, result Result, err error) {
+	r.flightMu.Lock()
+	f.result, f.err = result, err
+	f.finished = true
+	if r.flights[ip] == f {
+		delete(r.flights, ip)
+	}
+	r.flightMu.Unlock()
+	f.cancel()
+	close(f.done)
 }
 
 func (r *Resolver) storeCache(ip netip.Addr, entry cachedResult) {
@@ -146,36 +297,188 @@ func reverseIP(ip netip.Addr) string {
 	return fmt.Sprintf("%d.%d.%d.%d", ip4[3], ip4[2], ip4[1], ip4[0])
 }
 
-func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, error) {
-	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-
+// lookup runs under the IP flight's total budget and returns the expiry of
+// the AS-name entry it used, so the caller can cap the IP entry by it. A zero
+// expiry means no AS-name entry was involved (origin failure).
+func (r *Resolver) lookup(ctx context.Context, ip netip.Addr) (Result, time.Time, error) {
 	rev := reverseIP(ip)
 
-	originTXT, err := r.lookupResolver.LookupTXT(resolveCtx, rev+"."+cymruOriginDomain)
+	originTXT, err := r.queryTXT(ctx, rev+"."+cymruOriginDomain)
 	if err != nil {
-		return Result{}, fmt.Errorf("cymru origin lookup: %w", err)
+		return Result{}, time.Time{}, fmt.Errorf("cymru origin lookup: %w", err)
 	}
 
 	asn, country, err := parseOriginRecords(originTXT)
 	if err != nil {
-		return Result{}, fmt.Errorf("parse origin record: %w", err)
+		return Result{}, time.Time{}, fmt.Errorf("parse origin record: %w", err)
 	}
 
-	asTXT, err := r.lookupResolver.LookupTXT(resolveCtx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
+	name, nameExpiresAt, err := r.lookupName(ctx, asn)
 	if err != nil {
-		return Result{}, fmt.Errorf("cymru as lookup: %w", err)
+		return Result{}, nameExpiresAt, fmt.Errorf("cymru as lookup: %w", err)
 	}
 
-	name := ""
+	return Result{Country: country, Name: name}, nameExpiresAt, nil
+}
+
+func (r *Resolver) queryTXT(ctx context.Context, name string) ([]string, error) {
+	if r.lookupTXT != nil {
+		return r.lookupTXT(ctx, name)
+	}
+	txt, err := r.lookupResolver.LookupTXT(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("lookup TXT %s: %w", name, err)
+	}
+	return txt, nil
+}
+
+// lookupName resolves AS<n>.asn.cymru.com once per ASN and shares an
+// in-flight query between the IP lookups that need the same name. The cached
+// entry carries only the name (or its error) and its expiry; the country is
+// never part of it. Waiters stop at their own IP budget, while the query
+// itself is bounded by a resolver-owned r.timeout.
+func (r *Resolver) lookupName(ctx context.Context, asn uint32) (string, time.Time, error) {
+	if entry, ok := r.cachedName(asn); ok {
+		return entry.name, entry.expiresAt, entry.err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", time.Time{}, fmt.Errorf("AS name lookup canceled: %w", err)
+	}
+
+	r.flightMu.Lock()
+	if f, ok := r.nameFlights[asn]; ok {
+		f.waiters++
+		r.flightMu.Unlock()
+		return r.waitNameFlight(ctx, asn, f)
+	}
+	f := &nameFlight{done: make(chan struct{}), waiters: 1}
+	nameCtx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	f.cancel = cancel
+	r.nameFlights[asn] = f
+	r.flightMu.Unlock()
+
+	// Same race as resolveCold: a name lookup may finish between the cache
+	// probe and the registration.
+	if entry, ok := r.cachedName(asn); ok {
+		r.finishNameFlight(asn, f, entry.name, entry.expiresAt, entry.err)
+		return entry.name, entry.expiresAt, entry.err
+	}
+
+	go r.runNameFlight(nameCtx, asn, f)
+	return r.waitNameFlight(ctx, asn, f)
+}
+
+func (r *Resolver) runNameFlight(ctx context.Context, asn uint32, f *nameFlight) {
+	name, err := r.queryName(ctx, asn)
+	var expiresAt time.Time
+	if err == nil {
+		// An empty name is a successful answer, not a missing one: Cymru
+		// answered and no parseable record was in it.
+		expiresAt = time.Now().Add(r.cacheTTL)
+		r.storeName(asn, cachedName{name: name, expiresAt: expiresAt})
+	} else if !errors.Is(err, context.Canceled) && !r.nameFlightAbandoned(f) {
+		// ASN-wide negative caching is deliberate: one failed AS-name query is
+		// shared by every cold IP in that AS for negativeCacheTTL.
+		expiresAt = time.Now().Add(negativeCacheTTL)
+		r.storeName(asn, cachedName{err: err, expiresAt: expiresAt})
+	}
+	r.finishNameFlight(asn, f, name, expiresAt, err)
+}
+
+func (r *Resolver) queryName(ctx context.Context, asn uint32) (string, error) {
+	asTXT, err := r.queryTXT(ctx, fmt.Sprintf("AS%d.%s", asn, cymruASDomain))
+	if err != nil {
+		return "", err
+	}
 	for _, txt := range asTXT {
 		if n := parseASRecord(txt); n != "" {
-			name = n
-			break
+			return n, nil
 		}
 	}
+	return "", nil
+}
 
-	return Result{Country: country, Name: name}, nil
+func (r *Resolver) waitNameFlight(ctx context.Context, asn uint32, f *nameFlight) (string, time.Time, error) {
+	select {
+	case <-f.done:
+		return f.name, f.expiresAt, f.err
+	case <-ctx.Done():
+		r.dropNameWaiter(asn, f)
+		return "", time.Time{}, fmt.Errorf("AS name lookup canceled: %w", ctx.Err())
+	}
+}
+
+func (r *Resolver) dropNameWaiter(asn uint32, f *nameFlight) {
+	r.flightMu.Lock()
+	f.waiters--
+	if f.waiters > 0 || f.finished {
+		r.flightMu.Unlock()
+		return
+	}
+	f.abandoned = true
+	if r.nameFlights[asn] == f {
+		delete(r.nameFlights, asn)
+	}
+	r.flightMu.Unlock()
+	f.cancel()
+}
+
+func (r *Resolver) nameFlightAbandoned(f *nameFlight) bool {
+	r.flightMu.Lock()
+	defer r.flightMu.Unlock()
+	return f.abandoned
+}
+
+func (r *Resolver) finishNameFlight(asn uint32, f *nameFlight, name string, expiresAt time.Time, err error) {
+	r.flightMu.Lock()
+	f.name, f.expiresAt, f.err = name, expiresAt, err
+	f.finished = true
+	if r.nameFlights[asn] == f {
+		delete(r.nameFlights, asn)
+	}
+	r.flightMu.Unlock()
+	f.cancel()
+	close(f.done)
+}
+
+func (r *Resolver) cachedName(asn uint32) (cachedName, bool) {
+	r.mu.RLock()
+	entry, ok := r.nameCache[asn]
+	r.mu.RUnlock()
+	if !ok || !time.Now().Before(entry.expiresAt) {
+		return cachedName{}, false
+	}
+	return entry, true
+}
+
+func (r *Resolver) storeName(asn uint32, entry cachedName) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.nameCache) >= maxCacheEntries {
+		r.evictExpiredNamesLocked(time.Now())
+	}
+	r.nameCache[asn] = entry
+}
+
+// evictExpiredNamesLocked applies the same policy as evictExpiredLocked to the
+// ASN-keyed names, so the optimization cannot grow an unbounded second map.
+func (r *Resolver) evictExpiredNamesLocked(now time.Time) {
+	for asn, entry := range r.nameCache {
+		if now.After(entry.expiresAt) {
+			delete(r.nameCache, asn)
+		}
+	}
+	if len(r.nameCache) < maxCacheEntries {
+		return
+	}
+	drop := maxCacheEntries / evictFraction
+	for asn := range r.nameCache {
+		delete(r.nameCache, asn)
+		drop--
+		if drop == 0 {
+			return
+		}
+	}
 }
 
 // errEmptyOriginAnswer marks a Cymru origin answer with no records at all,
