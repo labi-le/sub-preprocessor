@@ -86,9 +86,11 @@ const (
 //
 // A response the check could not read to its end -- a read error, a timeout
 // after the headers, or a body past maxAPIBody -- is NOT a pass for a
-// marker-based check, and neither is a Gemini answer that carries no location
-// verdict (geminiInconclusive): in both cases APIOutcome.Verified stays false,
-// and the node is kept unverified (fail-open) with no store write. Tidal's
+// marker-based check unless the bytes received already carry the marker: an
+// observed marker is a refusal, so it stays Blocked/Verified and can drop the
+// node and write the store. Without one, and for a Gemini answer that carries
+// no location verdict (geminiInconclusive), APIOutcome.Verified stays false and
+// the node is kept unverified (fail-open) with no store write. Tidal's
 // status-only check is unaffected: the status is already the whole verdict.
 //
 // A verdict that condemns the whole survivor batch is disbelieved before any

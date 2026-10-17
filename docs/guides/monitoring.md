@@ -108,8 +108,10 @@ vendor the dashboard into the nixos repo.
   survives on the per-cycle WARN `gemini gate verified nothing for these checks`. A marker gate's
   body that was not read to its end (a read error, the deadline expiring after the headers, or a
   body past `maxAPIBody`) is kept the same way and warned about by `apiFilter.apply`'s per-cycle
-  WARN, as is every Gemini answer `geminiInconclusive` flags; it changes no series, because the
-  node was not dropped and there is no `unverified` reason in `stable_filter_dropped_nodes`.
+  WARN **when the bytes received carried no marker**; an observed marker is still a refusal and
+  books `reason="blocked"` like any complete one. Every Gemini answer `geminiInconclusive` flags
+  rides the same unverified count. None of this adds a series for the kept case: there is no
+  `unverified` reason in `stable_filter_dropped_nodes`.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:

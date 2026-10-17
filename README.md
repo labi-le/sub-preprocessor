@@ -278,14 +278,16 @@ published list. The gates:
   Results are never cached — measured fresh each cycle.
 
 A marker gate (`gemini`, `claude`, `chatgpt`) never certifies a body it did not
-finish reading. A read error, a timeout after the headers, or a body past the
-64 KiB scan cap leaves the response **unverified**: the node is kept (the same
-fail-open as an inconclusive Gemini answer) and a per-cycle WARN carries the
-count, but the check is not credited as a pass and the host is not written to
-the geoblock store. `tidal` is the exception by design: it passes
-`readBody=false`, so the probe returns as soon as the headers arrive and the
-body is closed unread — the status is the whole verdict, and a truncated body
-cannot change it.
+finish reading **unless the bytes it did receive already carry the service's
+refusal marker**: an observed marker is a real refusal, so the node is dropped
+and its host persisted as usual. A read error, a timeout after the headers, or
+a body past the 64 KiB scan cap with no observed marker leaves the response
+**unverified**: the node is kept (the same fail-open as an inconclusive Gemini
+answer) and a per-cycle WARN carries the count, but the check is not credited
+as a pass and the host is not written to the geoblock store. `tidal` is the
+exception by design: it passes `readBody=false`, so the probe returns as soon
+as the headers arrive and the body is closed unread — the status is the whole
+verdict, and a truncated body cannot change it.
 
 Filter order is honoured, and it is load-bearing rather than cosmetic in both
 stages. The chain stops at the first filter that leaves a node with no
