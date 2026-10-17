@@ -422,7 +422,7 @@ func TestThroughNodeChecksFoldToTheLivePort(t *testing.T) {
 			ctx := context.Background()
 
 			api := m.apiCheck(ctx, "test.api", "api", pxs, srv.URL, nil,
-				timeout, 2, 0, true, func(int, string) bool { return false })
+				timeout, 2, 0, true, func(int, string, bool) apiVerdict { return apiAccepted })
 			if len(api) != 1 {
 				t.Fatalf("apiCheck outcomes keyed %v, want the single label %s", mapKeys(api), label)
 			}
@@ -462,7 +462,7 @@ func TestFilterMieruSurvivorEntersSubset(t *testing.T) {
 		out := make(map[string]APIOutcome, len(given))
 		for _, px := range given {
 			checked = append(checked, px.Name())
-			out[entryLabel(px)] = APIOutcome{Server: px.Addr(), Reachable: true}
+			out[entryLabel(px)] = APIOutcome{Server: px.Addr(), Reachable: true, Verified: true}
 		}
 
 		return out
@@ -509,7 +509,8 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 		subset = proxyNames(given)
 		out := make(map[string]APIOutcome, len(given))
 		for _, px := range given {
-			o := APIOutcome{Server: px.Addr(), Reachable: !strings.Contains(px.Name(), deadPort)}
+			live := !strings.Contains(px.Name(), deadPort)
+			o := APIOutcome{Server: px.Addr(), Reachable: live, Verified: live}
 			label := entryLabel(px)
 			if prev, ok := out[label]; !ok || betterAPIOutcome(o, prev) {
 				out[label] = o
@@ -560,15 +561,18 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 func TestBetterAPIOutcomePriority(t *testing.T) {
 	t.Parallel()
 
-	// Weakest first: an unreachable port says nothing, a block is a real
-	// verdict about the shared host, and a clean response keeps the node.
+	// Weakest first: an unreachable port says nothing, an unverified one
+	// answered without giving the check its evidence, a block is a real
+	// verdict about the shared host, and a verified clean response keeps the
+	// node.
 	ranked := []struct {
 		desc string
 		o    APIOutcome
 	}{
 		{"no response", APIOutcome{Server: "h"}},
+		{"unverified response", APIOutcome{Server: "h", Reachable: true}},
 		{"geo-blocked", APIOutcome{Server: "h", Reachable: true, Blocked: true}},
-		{"clean response", APIOutcome{Server: "h", Reachable: true}},
+		{"clean response", APIOutcome{Server: "h", Reachable: true, Verified: true}},
 	}
 	for i, a := range ranked {
 		for j, b := range ranked {

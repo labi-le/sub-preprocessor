@@ -105,7 +105,13 @@ vendor the dashboard into the nixos repo.
   `unverified_checks` used to show is read one panel over: `reason="blocked"` at 0 while the other
   API gates drop nodes means the gate is answering inconclusively and verifying nothing (production
   2026-09-09: gemini blocked 0, claude 2, with 223 of 223 checks inconclusive). The count itself
-  survives on the per-cycle WARN `gemini gate verified nothing for these checks`.
+  survives on the per-cycle WARN `gemini gate verified nothing for these checks`. A marker gate's
+  body that was not read to its end (a read error, the deadline expiring after the headers, or a
+  body past `maxAPIBody`) is kept the same way and warned about by `apiFilter.apply`'s per-cycle
+  WARN **when the bytes received carried no marker**; an observed marker is still a refusal and
+  books `reason="blocked"` like any complete one. Every Gemini answer `geminiInconclusive` flags
+  rides the same unverified count. None of this adds a series for the kept case: there is no
+  `unverified` reason in `stable_filter_dropped_nodes`.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
