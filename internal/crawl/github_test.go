@@ -432,8 +432,11 @@ func TestScanGitHubOffSwitches(t *testing.T) {
 			t.Errorf("live mutated by a disabled pass: %+v -> %+v", beforeLive, live)
 		}
 	}
-	run(t, GitHubOptions{Enabled: false, Token: "token"})
-	run(t, GitHubOptions{Enabled: true, Token: ""})
+	// Room is positive so the cap guard cannot stand in for an off switch:
+	// with MaxSources unset, room is already 0 and these cases pass even when
+	// the Enabled/Token guard is gone.
+	run(t, GitHubOptions{Enabled: false, Token: "token", MaxSources: 5})
+	run(t, GitHubOptions{Enabled: true, Token: "", MaxSources: 5})
 	run(t, GitHubOptions{}) // the zero value keeps the phase off
 }
 
