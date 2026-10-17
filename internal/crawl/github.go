@@ -82,6 +82,15 @@ func (c *Crawler) scanGitHub(ctx context.Context, st *state, pf privateFile, liv
 	if !opts.Enabled || opts.Token == "" {
 		return
 	}
+	// The cap cannot move during the pass, so a full cap is decided before any
+	// network work: a census rebuild against a corpus of slow hosts costs one
+	// fetch per source and could not buy a single admission this cycle.
+	room := opts.MaxSources - ghManagedCount(pf)
+	if room <= 0 {
+		c.logger.Info().Int("cap", opts.MaxSources).
+			Msg("github phase: source cap reached; revisiting nothing this cycle")
+		return
+	}
 	budget := githubBudget(ctx)
 	if budget <= 0 {
 		c.logger.Warn().Msg("github phase: no cycle budget left; skipping the pass")
@@ -93,12 +102,6 @@ func (c *Crawler) scanGitHub(ctx context.Context, st *state, pf privateFile, liv
 	if census == nil {
 		c.logger.Error().Msg("github phase: no endpoint census; refusing to accept anything rather than minting against no baseline")
 		metrics.Crawl.GitHubErrors.Add(1)
-		return
-	}
-	room := opts.MaxSources - ghManagedCount(pf)
-	if room <= 0 {
-		c.logger.Info().Int("cap", opts.MaxSources).
-			Msg("github phase: source cap reached; revisiting nothing this cycle")
 		return
 	}
 	finder := ghfind.New(ghfind.Options{
