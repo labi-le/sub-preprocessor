@@ -84,6 +84,42 @@ func TestCandidatesWaivesFloorForHighScore(t *testing.T) {
 	}
 }
 
+// TestCandidatesShrinksUnderfilledResults pins the other half of the bound:
+// when fewer entries pass the filter than the preallocated capacity allows
+// (a sparse tree or a wholly refused one), the returned slice must not keep
+// capacity for entries that were never selected.
+func TestCandidatesShrinksUnderfilledResults(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tree []ghfind.TreeEntry
+		want int
+	}{
+		{"one eligible", []ghfind.TreeEntry{
+			treeEntry("sub/v2ray-free.txt", 600), // score 9, waives the size floor
+			treeEntry("output.txt", 600),         // score 3, refused by the floor
+		}, 1},
+		{"all refused", []ghfind.TreeEntry{
+			treeEntry("README.md", 600),  // refused extension and name
+			treeEntry("output.txt", 600), // refused by the size floor
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ghfind.Candidates(tc.tree, 4)
+			if len(got) != tc.want {
+				t.Fatalf("Candidates returned %d entries, want %d", len(got), tc.want)
+			}
+			if cap(got) != tc.want {
+				t.Fatalf("Candidates cap = %d, want %d: the returned slice keeps capacity for entries never selected", cap(got), tc.want)
+			}
+		})
+	}
+}
+
 // TestCandidatesBoundsRetainedCapacity pins the bounded selection: with more
 // eligible entries than the limit, the returned slice carries exactly limit
 // entries and a backing array no larger than that, so the discarded candidates

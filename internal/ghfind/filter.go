@@ -130,6 +130,14 @@ func Candidates(tree []TreeEntry, limit int) []Scored {
 		c := Scored{Path: e.Path, Size: e.Size, Score: score}
 		out = keepCandidate(out, c, limit)
 	}
+	// A tree that yields fewer entries than the preallocated capacity would
+	// otherwise return that capacity, keeping the unused backing array alive.
+	// Copy into an exactly sized one; dense results already have len == cap.
+	if len(out) < cap(out) {
+		shrunk := make([]Scored, len(out))
+		copy(shrunk, out)
+		out = shrunk
+	}
 	slices.SortFunc(out, candidateOrder)
 	return out
 }
