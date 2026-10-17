@@ -38,11 +38,6 @@ const (
 	scoreWaive = 7 // the measured 85-90% live band; waives sizeFloor
 )
 
-// candidatesHeadroom doubles the preallocation over the limit, so a tree
-// whose passing blobs outnumber the fetch budget grows only when it is
-// unusually rich.
-const candidatesHeadroom = 2
-
 // Extension score classes. .yaml and .yml are absent on purpose: their
 // exclusion is the single most valuable filter the measurement found (0-2%
 // live over 238 files), because subscription.Normalize cannot read Clash
@@ -96,17 +91,24 @@ var (
 	base64Ext = []byte("base64")
 )
 
+// heapBranching is the arity of the binary max-heap behind Candidates: the
+// children of index i are heapBranching*i+1 and heapBranching*i+2, and the
+// last parent is len(h)/heapBranching-1.
+const heapBranching = 2
+
 // Candidates keeps the blobs of one repository tree that are worth fetching —
 // decodable extension, plausible size, no refused directory — ordered by the
 // calibrated Score then Size (both descending) and capped at limit. Matching
 // folds each path's ASCII case once into a reusable buffer, so no regexp is
-// compiled or run and nothing allocates per tree entry; the returned slice
-// is sorted in place.
+// compiled or run and nothing allocates per tree entry. Only the selected
+// entries are retained: once limit entries are collected the scan keeps them in
+// a max-heap whose root is the worst one, so the returned slice never owns the
+// discarded candidates.
 func Candidates(tree []TreeEntry, limit int) []Scored {
 	if limit <= 0 {
 		return nil
 	}
-	out := make([]Scored, 0, min(limit*candidatesHeadroom, len(tree)))
+	out := make([]Scored, 0, min(limit, len(tree)))
 	var fold []byte
 	for _, e := range tree {
 		if !e.Blob || e.Size <= 0 || e.Size > subscription.MaxSubscriptionSize {
@@ -125,21 +127,78 @@ func Candidates(tree []TreeEntry, limit int) []Scored {
 		if e.Size < sizeFloor && score < scoreWaive {
 			continue
 		}
-		out = append(out, Scored{Path: e.Path, Size: e.Size, Score: score})
+		c := Scored{Path: e.Path, Size: e.Size, Score: score}
+		out = keepCandidate(out, c, limit)
 	}
-	slices.SortFunc(out, func(a, b Scored) int {
-		if c := cmp.Compare(a.Score, b.Score); c != 0 {
-			return -c
+	// A tree that yields fewer entries than the preallocated capacity would
+	// otherwise return that capacity, keeping the unused backing array alive.
+	// Copy into an exactly sized one; dense results already have len == cap.
+	if len(out) < cap(out) {
+		shrunk := make([]Scored, len(out))
+		copy(shrunk, out)
+		out = shrunk
+	}
+	slices.SortFunc(out, candidateOrder)
+	return out
+}
+
+// keepCandidate offers c to the bounded set: until limit entries are collected
+// it appends, and once the set is full it replaces the heap root only when c
+// sorts before it. Capacity is min(limit, len(tree)), the most entries the
+// call can return, so the append never grows the array.
+func keepCandidate(out []Scored, c Scored, limit int) []Scored {
+	if len(out) < limit {
+		out = append(out, c)
+		if len(out) == limit {
+			heapifyCandidates(out)
 		}
-		if c := cmp.Compare(a.Size, b.Size); c != 0 {
-			return -c
-		}
-		return cmp.Compare(a.Path, b.Path)
-	})
-	if len(out) > limit {
-		out = out[:limit]
+		return out
+	}
+	if candidateOrder(c, out[0]) < 0 {
+		out[0] = c
+		siftCandidate(out, 0)
 	}
 	return out
+}
+
+// candidateOrder sorts a Scored slice the way Candidates returns it: higher
+// Score first, then larger Size, then lexically smaller Path.
+func candidateOrder(a, b Scored) int {
+	if c := cmp.Compare(b.Score, a.Score); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(b.Size, a.Size); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.Path, b.Path)
+}
+
+// heapifyCandidates builds the max-heap of a full out slice in place, so the
+// root is the entry that sorts last — the only one a new candidate must beat.
+func heapifyCandidates(h []Scored) {
+	for i := len(h)/heapBranching - 1; i >= 0; i-- {
+		siftCandidate(h, i)
+	}
+}
+
+// siftCandidate restores the max-heap property below i; the heap order is
+// candidateOrder reversed, because index 0 holds the worst kept candidate.
+func siftCandidate(h []Scored, i int) {
+	for {
+		worst := i
+		l := heapBranching*i + 1
+		if l < len(h) && candidateOrder(h[l], h[worst]) > 0 {
+			worst = l
+		}
+		if r := l + 1; r < len(h) && candidateOrder(h[r], h[worst]) > 0 {
+			worst = r
+		}
+		if worst == i {
+			return
+		}
+		h[i], h[worst] = h[worst], h[i]
+		i = worst
+	}
 }
 
 // asciiFold lowercases the ASCII letters of s into dst, growing dst when the

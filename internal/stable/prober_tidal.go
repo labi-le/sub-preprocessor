@@ -21,7 +21,13 @@ func (m *MihomoProber) tidalURL() string {
 func (m *MihomoProber) TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome {
 	c := m.geo.Tidal
 	return m.apiCheck(ctx, "stable.TidalCheck", "tidal check", proxies,
-		m.tidalURL(), nil, c.Timeout, c.Concurrency, 0, false, tidalBlocked)
+		m.tidalURL(), nil, c.Timeout, c.Concurrency, 0, false,
+		func(status int, _ string, _ bool) apiVerdict {
+			if tidalBlocked(status, "") {
+				return apiBlocked
+			}
+			return apiAccepted
+		})
 }
 
 // tidalBlocked reads the status and nothing else: a 2xx means the request got
@@ -41,6 +47,8 @@ func (m *MihomoProber) TidalCheck(ctx context.Context, proxies []mihomo.Proxy) m
 // a parseable countryCode to prove the answer came from Tidal -- is gone with
 // it. The accepted cost: a node whose upstream answers 2xx from something that
 // is not Tidal (an ISP block page, a captive portal) now counts as passed.
+// Body completeness is part of that: a truncated read cannot change a verdict
+// the status already carries, so this gate stays verified on its status alone.
 func tidalBlocked(status int, _ string) bool {
 	return status < http.StatusOK || status >= http.StatusMultipleChoices
 }

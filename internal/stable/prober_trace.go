@@ -93,13 +93,13 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 		wg.Go(func() {
 			defer func() { <-sem }()
 
-			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout, true)
+			reachable, status, body, complete := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout, true)
 			res, ok := parseTrace(body)
 			host := proxyHost(px)
 			n := prog.step()
 			ev := opLog.Debug().Str("node", px.Name()).Str("server", host).
 				Bool("reachable", reachable).Int("status", status).
-				Bool("answered", ok).
+				Bool("answered", ok).Bool("complete", complete).
 				Int64("n", n).Int64("of", prog.total)
 			// loc and egress exist only for a parsed answer: the zero Country
 			// would log as two NUL bytes and a zero Addr as "invalid IP",
@@ -108,7 +108,9 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 				ev = ev.Stringer("loc", res.Country).Stringer("egress", res.IP)
 			}
 			ev.Msg("cloudflare trace")
-			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok {
+			// A partial trace is not an answer: a line cut mid-value can parse
+			// as a different address, and the missing lines say nothing.
+			if !reachable || status < http.StatusOK || status >= http.StatusMultipleChoices || !ok || !complete {
 				return
 			}
 			mu.Lock()

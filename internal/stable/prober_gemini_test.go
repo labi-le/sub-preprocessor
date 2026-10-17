@@ -117,7 +117,8 @@ func TestGeminiInconclusive(t *testing.T) {
 // what each response class becomes in the outcome map. TestGeminiInconclusive
 // above pins the predicate in isolation; this pins that the fan-out actually
 // applies it, which is the difference between a gate that keeps an
-// unverifiable node and one that publishes a geo-blocked one.
+// unverifiable node and one that publishes a geo-blocked one, and that an
+// inconclusive answer is an UNVERIFIED outcome rather than a certified pass.
 //
 // An unreachable proxy is Reachable=false and no verdict at all: apiFilter
 // counts reason="unreachable" per SURVIVOR, off an outcome betterAPIOutcome
@@ -128,29 +129,30 @@ func TestGeminiCheckClassifiesThroughTheFanOut(t *testing.T) {
 
 	const marker = "User location is not supported for the API use"
 	for name, tc := range map[string]struct {
-		status      int
-		body        string
-		live, dead  int
-		wantBlocked bool
-		wantLive    int
+		status       int
+		body         string
+		live, dead   int
+		wantBlocked  bool
+		wantLive     int
+		wantVerified bool
 	}{
 		"quota answers before the location check": {
-			429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`, 1, 0, false, 1,
+			429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`, 1, 0, false, 1, false,
 		},
 		"a rotated key answers before it too": {
-			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0, false, 1,
+			400, `{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}`, 1, 0, false, 1, false,
 		},
 		"a server fault answers before it too": {
-			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0, false, 1,
+			503, `{"error":{"code":503,"status":"UNAVAILABLE"}}`, 1, 0, false, 1, false,
 		},
 		"a refused location is a verdict": {
-			400, `{"error":{"message":"User location is not supported for the API use."}}`, 1, 0, true, 1,
+			400, `{"error":{"message":"User location is not supported for the API use."}}`, 1, 0, true, 1, false,
 		},
 		"a served model is a verdict": {
-			200, `{"name":"models/gemini-2.0-flash"}`, 1, 0, false, 1,
+			200, `{"name":"models/gemini-2.0-flash"}`, 1, 0, false, 1, true,
 		},
 		"an unreachable proxy carries no verdict": {
-			429, `{"error":{"code":429}}`, 1, 2, false, 1,
+			429, `{"error":{"code":429}}`, 1, 2, false, 1, false,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -178,12 +180,15 @@ func TestGeminiCheckClassifiesThroughTheFanOut(t *testing.T) {
 			}
 
 			out := m.GeminiCheck(context.Background(), geminiTestProxies(tc.live, tc.dead))
-			reachable, blocked := countOutcomes(out)
+			reachable, blocked, certified := countOutcomes(out)
 			if reachable != tc.wantLive {
 				t.Fatalf("reachable outcomes = %d, want %d (%d dead proxies carry no verdict)", reachable, tc.wantLive, tc.dead)
 			}
 			if (blocked > 0) != tc.wantBlocked {
 				t.Fatalf("blocked outcomes = %d, want blocked=%v for status %d", blocked, tc.wantBlocked, tc.status)
+			}
+			if (certified > 0) != tc.wantVerified {
+				t.Fatalf("certified non-blocked outcomes = %d, want verified=%v for status %d", certified, tc.wantVerified, tc.status)
 			}
 		})
 	}
@@ -230,10 +235,11 @@ func TestGeminiCheckWarnsWithItsOwnCount(t *testing.T) {
 	}
 }
 
-// countOutcomes folds an outcome map into the two numbers the fan-out test
-// asserts on: how many proxies answered at all, and how many of those answers
-// were read as a refusal of this egress.
-func countOutcomes(out map[string]APIOutcome) (reachable, blocked int) {
+// countOutcomes folds an outcome map into the numbers the fan-out test asserts
+// on: how many proxies answered at all, how many of those answers were read as
+// a refusal of this egress, and how many were certified as non-blocked (i.e.
+// verified rather than merely reachable).
+func countOutcomes(out map[string]APIOutcome) (reachable, blocked, certified int) {
 	for _, o := range out {
 		if o.Reachable {
 			reachable++
@@ -241,8 +247,11 @@ func countOutcomes(out map[string]APIOutcome) (reachable, blocked int) {
 		if o.Blocked {
 			blocked++
 		}
+		if o.Reachable && !o.Blocked && o.Verified {
+			certified++
+		}
 	}
-	return reachable, blocked
+	return reachable, blocked, certified
 }
 
 // TestGeminiCheckPacesRequestStarts pins the pacing contract: request starts
