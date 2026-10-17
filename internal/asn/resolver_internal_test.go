@@ -257,11 +257,11 @@ func TestResolve_CanceledLeaderDoesNotFailWaiters(t *testing.T) {
 	waitFlightWaiters(t, r, ip, 2)
 
 	cancelLeader()
-	close(release)
-
 	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
 		t.Fatalf("leader err = %v, want context.Canceled", err)
 	}
+	close(release)
+
 	if err := <-waiterErr; err != nil {
 		t.Fatalf("waiter err = %v, want nil", err)
 	}
@@ -664,6 +664,10 @@ func TestResolve_CoalescesConcurrentNameLookups(t *testing.T) {
 	}
 
 	<-nameStarted
+	// Both IP lookups must be waiting on the same name flight before release;
+	// otherwise a sequential name-cache reuse could pass this test with name
+	// coalescing disabled.
+	waitNameFlightWaiters(t, r, 64500, 2)
 	close(release)
 	wg.Wait()
 	close(results)
@@ -690,6 +694,144 @@ func TestResolve_CoalescesConcurrentNameLookups(t *testing.T) {
 	}
 	if originQueries != 2 {
 		t.Fatalf("origin queries = %d, want 2", originQueries)
+	}
+}
+
+// TestResolve_AbandonedIPFlightCannotOverwriteReplacement pins cache
+// publication to current-flight ownership: a lookup whose last waiter left
+// completes after a replacement cached its own result and must not overwrite
+// it. Cancelling the context is not an ownership guard on its own.
+func TestResolve_AbandonedIPFlightCannotOverwriteReplacement(t *testing.T) {
+	t.Parallel()
+
+	oldResult := Result{Country: geofeed.CountryCode{'U', 'S'}, Name: "OLD"}
+	newResult := Result{Country: geofeed.CountryCode{'D', 'E'}, Name: "NEW"}
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int64
+	r := New(time.Second, time.Hour)
+	r.lookupFn = func(_ context.Context, _ netip.Addr) (Result, error) {
+		if calls.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return oldResult, nil
+		}
+		return newResult, nil
+	}
+
+	ip := netip.MustParseAddr("198.18.0.20")
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := r.Resolve(ctx, ip)
+		errCh <- err
+	}()
+	<-firstStarted
+
+	r.flightMu.Lock()
+	oldFlight := r.flights[ip]
+	r.flightMu.Unlock()
+	if oldFlight == nil {
+		t.Fatal("first flight not registered")
+	}
+
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled resolve err = %v, want context.Canceled", err)
+	}
+
+	got, err := r.Resolve(context.Background(), ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != newResult {
+		t.Fatalf("replacement result = %+v, want %+v", got, newResult)
+	}
+
+	close(releaseFirst)
+	<-oldFlight.done
+
+	got, err = r.Resolve(context.Background(), ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != newResult {
+		t.Fatalf("stale completion overwrote the cache: %+v, want %+v", got, newResult)
+	}
+}
+
+// TestResolve_AbandonedNameFlightCannotOverwriteReplacement is the same
+// ownership check one level down: an abandoned AS name query that completes
+// late must not replace a name cached by the replacement flight.
+func TestResolve_AbandonedNameFlightCannotOverwriteReplacement(t *testing.T) {
+	t.Parallel()
+
+	oldName, newName := "OLD", "NEW"
+	var mu sync.Mutex
+	nameQueries := 0
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	r := New(5*time.Second, time.Hour)
+	r.lookupTXT = func(_ context.Context, name string) ([]string, error) {
+		if strings.HasSuffix(name, cymruOriginDomain) {
+			return []string{"64500 | 198.18.0.0/24 | US | arin | 2020-01-01"}, nil
+		}
+		mu.Lock()
+		nameQueries++
+		n := nameQueries
+		mu.Unlock()
+		if n == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return []string{"64500 | US | arin | 2020-01-01 | " + oldName}, nil
+		}
+		return []string{"64500 | US | arin | 2020-01-01 | " + newName}, nil
+	}
+
+	ip1 := netip.MustParseAddr("198.18.0.1")
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := r.Resolve(ctx, ip1)
+		errCh <- err
+	}()
+	<-firstStarted
+
+	r.flightMu.Lock()
+	oldFlight := r.nameFlights[64500]
+	r.flightMu.Unlock()
+	if oldFlight == nil {
+		t.Fatal("first name flight not registered")
+	}
+
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled resolve err = %v, want context.Canceled", err)
+	}
+	// The canceled IP flight drops its name waiter asynchronously; wait until
+	// the abandoned name flight is unregistered before starting the
+	// replacement, or the replacement would legitimately join the old query
+	// and receive its result.
+	waitNoNameFlight(t, r, 64500)
+
+	wantNew := Result{Country: geofeed.CountryCode{'U', 'S'}, Name: newName}
+	got, err := r.Resolve(context.Background(), netip.MustParseAddr("198.18.0.2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantNew {
+		t.Fatalf("replacement result = %+v, want %+v", got, wantNew)
+	}
+
+	close(releaseFirst)
+	<-oldFlight.done
+
+	got, err = r.Resolve(context.Background(), netip.MustParseAddr("198.18.0.3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantNew {
+		t.Fatalf("stale name completion overwrote the cache: %+v, want %+v", got, wantNew)
 	}
 }
 
@@ -781,6 +923,46 @@ func waitFlightWaiters(t *testing.T, r *Resolver, ip netip.Addr, want int) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("flight waiters = %d, want %d", n, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitNameFlightWaiters is the same barrier for the ASN-keyed name flight.
+func waitNameFlightWaiters(t *testing.T, r *Resolver, asn uint32, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.flightMu.Lock()
+		n := 0
+		if f := r.nameFlights[asn]; f != nil {
+			n = f.waiters
+		}
+		r.flightMu.Unlock()
+		if n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("name flight waiters = %d, want %d", n, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitNoNameFlight blocks until no name flight is registered for asn, which
+// also means its last waiter has dropped out.
+func waitNoNameFlight(t *testing.T, r *Resolver, asn uint32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.flightMu.Lock()
+		_, exists := r.nameFlights[asn]
+		r.flightMu.Unlock()
+		if !exists {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("abandoned name flight still registered")
 		}
 		time.Sleep(time.Millisecond)
 	}

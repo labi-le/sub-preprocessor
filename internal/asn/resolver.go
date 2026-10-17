@@ -169,7 +169,7 @@ func (r *Resolver) resolveCold(ctx context.Context, ip netip.Addr) (Result, erro
 	// A lookup can finish between the cache probe and the registration above;
 	// re-check so a just-warmed IP does not issue a second query.
 	if cached, ok := r.cachedResult(ip); ok {
-		r.finishIPFlight(ip, f, cached.result, cached.err)
+		r.finishIPFlight(ip, f, cached.result, cached.err, nil)
 		return cached.result, cached.err
 	}
 
@@ -189,13 +189,14 @@ func (r *Resolver) runIPFlight(ctx context.Context, ip netip.Addr, f *ipFlight) 
 		result, capExpiry, err = r.lookup(ctx, ip)
 	}
 
+	var entry *cachedResult
 	if err == nil {
 		expiresAt := time.Now().Add(r.cacheTTL)
 		if !capExpiry.IsZero() && capExpiry.Before(expiresAt) {
 			expiresAt = capExpiry
 		}
-		r.storeCache(ip, cachedResult{result: result, expiresAt: expiresAt})
-	} else if !errors.Is(err, context.Canceled) && !r.ipFlightAbandoned(f) {
+		entry = &cachedResult{result: result, expiresAt: expiresAt}
+	} else if !errors.Is(err, context.Canceled) {
 		// A cancellation says nothing about Cymru; a resolver-owned timeout
 		// does, and stays cacheable as before. A reused AS-name error caps the
 		// IP entry so a fresh IP cannot extend the failure past the name entry
@@ -204,10 +205,10 @@ func (r *Resolver) runIPFlight(ctx context.Context, ip netip.Addr, f *ipFlight) 
 		if !capExpiry.IsZero() && capExpiry.Before(expiresAt) {
 			expiresAt = capExpiry
 		}
-		r.storeCache(ip, cachedResult{err: err, expiresAt: expiresAt})
+		entry = &cachedResult{err: err, expiresAt: expiresAt}
 	}
 
-	r.finishIPFlight(ip, f, result, err)
+	r.finishIPFlight(ip, f, result, err, entry)
 }
 
 func (r *Resolver) waitIPFlight(ctx context.Context, ip netip.Addr, f *ipFlight) (Result, error) {
@@ -238,18 +239,20 @@ func (r *Resolver) dropIPWaiter(ip netip.Addr, f *ipFlight) {
 	f.cancel()
 }
 
-func (r *Resolver) ipFlightAbandoned(f *ipFlight) bool {
-	r.flightMu.Lock()
-	defer r.flightMu.Unlock()
-	return f.abandoned
-}
-
-func (r *Resolver) finishIPFlight(ip netip.Addr, f *ipFlight, result Result, err error) {
+// finishIPFlight publishes the result and commits its cache entry only while
+// this flight still owns the IP. A flight whose last waiter left is already
+// unregistered, and a replacement can own the IP by the time the old lookup
+// returns; neither case may publish stale work. The cache store takes r.mu
+// under flightMu; no path holds r.mu and then takes flightMu.
+func (r *Resolver) finishIPFlight(ip netip.Addr, f *ipFlight, result Result, err error, entry *cachedResult) {
 	r.flightMu.Lock()
 	f.result, f.err = result, err
 	f.finished = true
 	if r.flights[ip] == f {
 		delete(r.flights, ip)
+		if entry != nil && !f.abandoned {
+			r.storeCache(ip, *entry)
+		}
 	}
 	r.flightMu.Unlock()
 	f.cancel()
@@ -325,11 +328,7 @@ func (r *Resolver) queryTXT(ctx context.Context, name string) ([]string, error) 
 	if r.lookupTXT != nil {
 		return r.lookupTXT(ctx, name)
 	}
-	txt, err := r.lookupResolver.LookupTXT(ctx, name)
-	if err != nil {
-		return nil, fmt.Errorf("lookup TXT %s: %w", name, err)
-	}
-	return txt, nil
+	return r.lookupResolver.LookupTXT(ctx, name) //nolint:wrapcheck // lookup wraps it with the stage-specific prefix
 }
 
 // lookupName resolves AS<n>.asn.cymru.com once per ASN and shares an
@@ -360,7 +359,7 @@ func (r *Resolver) lookupName(ctx context.Context, asn uint32) (string, time.Tim
 	// Same race as resolveCold: a name lookup may finish between the cache
 	// probe and the registration.
 	if entry, ok := r.cachedName(asn); ok {
-		r.finishNameFlight(asn, f, entry.name, entry.expiresAt, entry.err)
+		r.finishNameFlight(asn, f, entry.name, entry.expiresAt, entry.err, nil)
 		return entry.name, entry.expiresAt, entry.err
 	}
 
@@ -371,18 +370,19 @@ func (r *Resolver) lookupName(ctx context.Context, asn uint32) (string, time.Tim
 func (r *Resolver) runNameFlight(ctx context.Context, asn uint32, f *nameFlight) {
 	name, err := r.queryName(ctx, asn)
 	var expiresAt time.Time
+	var entry *cachedName
 	if err == nil {
 		// An empty name is a successful answer, not a missing one: Cymru
 		// answered and no parseable record was in it.
 		expiresAt = time.Now().Add(r.cacheTTL)
-		r.storeName(asn, cachedName{name: name, expiresAt: expiresAt})
-	} else if !errors.Is(err, context.Canceled) && !r.nameFlightAbandoned(f) {
+		entry = &cachedName{name: name, expiresAt: expiresAt}
+	} else if !errors.Is(err, context.Canceled) {
 		// ASN-wide negative caching is deliberate: one failed AS-name query is
 		// shared by every cold IP in that AS for negativeCacheTTL.
 		expiresAt = time.Now().Add(negativeCacheTTL)
-		r.storeName(asn, cachedName{err: err, expiresAt: expiresAt})
+		entry = &cachedName{err: err, expiresAt: expiresAt}
 	}
-	r.finishNameFlight(asn, f, name, expiresAt, err)
+	r.finishNameFlight(asn, f, name, expiresAt, err, entry)
 }
 
 func (r *Resolver) queryName(ctx context.Context, asn uint32) (string, error) {
@@ -423,18 +423,19 @@ func (r *Resolver) dropNameWaiter(asn uint32, f *nameFlight) {
 	f.cancel()
 }
 
-func (r *Resolver) nameFlightAbandoned(f *nameFlight) bool {
-	r.flightMu.Lock()
-	defer r.flightMu.Unlock()
-	return f.abandoned
-}
-
-func (r *Resolver) finishNameFlight(asn uint32, f *nameFlight, name string, expiresAt time.Time, err error) {
+// finishNameFlight mirrors finishIPFlight: the ASN-keyed entry is committed
+// only while this flight still owns the ASN, so an abandoned or replaced name
+// query cannot overwrite newer work. storeName takes r.mu under flightMu, the
+// same one-way nesting as the IP cache.
+func (r *Resolver) finishNameFlight(asn uint32, f *nameFlight, name string, expiresAt time.Time, err error, entry *cachedName) {
 	r.flightMu.Lock()
 	f.name, f.expiresAt, f.err = name, expiresAt, err
 	f.finished = true
 	if r.nameFlights[asn] == f {
 		delete(r.nameFlights, asn)
+		if entry != nil && !f.abandoned {
+			r.storeName(asn, *entry)
+		}
 	}
 	r.flightMu.Unlock()
 	f.cancel()
