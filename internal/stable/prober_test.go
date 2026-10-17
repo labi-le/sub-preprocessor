@@ -248,7 +248,7 @@ func testProbeNodes(t *testing.T, payload string) []probeNode {
 		t.Fatal(err)
 	}
 
-	return probeNodes(mappings)
+	return probeNodes(mappings, nil)
 }
 
 // dialsAddrOverTCP is dialsServerOverTCP keyed on the PARSED adapter type, the
@@ -411,7 +411,7 @@ func TestProbeAddrReadsAnIntPortLikeTheAdapter(t *testing.T) {
 		"name": "int-port", "type": "vmess", "server": "203.0.113.12",
 		"port": 8443, "uuid": benchUUID, "alterId": 0, "cipher": "auto",
 	}
-	addr, addressable := probeAddr(mapping)
+	addr, addressable := probeAddr(mapping, nil)
 	if !addressable {
 		t.Fatal("probeAddr refused a mapping the adapter reads")
 	}

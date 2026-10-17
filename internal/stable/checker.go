@@ -34,6 +34,16 @@ type traceChecker interface {
 	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
 }
 
+// boundProber is the optional half of a Prober that binds every dial to the
+// address the IP stage selected for the entry. The binding is what makes a
+// zero-success verdict attributable to Entry.IP: an unbound prober resolves the
+// URI hostname independently in the pre-check and in the adapter, so a verdict
+// reached at one DNS answer can be cached against a different selected address
+// (issue #5). A Prober without the capability keeps the raw-payload contract.
+type boundProber interface {
+	ProbeBound(ctx context.Context, entries []Entry) (map[string]ProbeResult, error)
+}
+
 // probedAdapterSource is the optional half of a Prober that keeps the adapter
 // objects its last successful Probe built alive past the call, so the egress
 // stage can consume them by label instead of converting and re-parsing the
@@ -214,7 +224,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", skipped).
 		Int("rounds", spec.Rounds).Msg("probing merged nodes")
-	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
+	res, err := probeEntries(ctx, spec.Prober, probe)
 	probedAt := time.Now()
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
@@ -828,6 +838,21 @@ func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, o
 		return nil, deadSkipped, false
 	}
 	return probe, deadSkipped, true
+}
+
+// probeEntries hands entries to a Prober that can bind its dials to the
+// IP-stage address, and falls back to the raw payload for one that cannot. The
+// fallback preserves the interface for other Prober implementations; such a
+// prober resolves each hostname independently, so its verdicts carry the
+// pre-binding attribution limitation.
+func probeEntries(ctx context.Context, p Prober, entries []Entry) (map[string]ProbeResult, error) {
+	if binder, ok := p.(boundProber); ok {
+		//nolint:wrapcheck // RunOnce wraps probe errors with the "probe:" context
+		return binder.ProbeBound(ctx, entries)
+	}
+
+	//nolint:wrapcheck // RunOnce wraps probe errors with the "probe:" context
+	return p.Probe(ctx, entriesPayload(entries))
 }
 
 // recordDead caches nodes whose probe proved them dead so later cycles skip

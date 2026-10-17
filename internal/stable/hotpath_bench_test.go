@@ -246,7 +246,7 @@ func BenchmarkProbeParseCondemned(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		nodes := probeNodes(mappings)
+		nodes := probeNodes(mappings, nil)
 		live := benchSpareEvery(len(nodes), benchCondemnedPercent)
 		live = prober.parseLive(mappings, nodes, live)
 		if len(live) == 0 {

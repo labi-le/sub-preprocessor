@@ -5,14 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/trie"
 	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
@@ -135,6 +139,9 @@ func betterProbe(a, b ProbeResult) bool {
 // (see entryLabel) for every node that reached the prober, failures included:
 // Successes == 0 is what marks a node dead, never absence.
 //
+// Probe carries no IP-stage selection, so each dial resolves the URI's hostname
+// on its own (see ProbeBound for the bound form).
+//
 // On success the parsed adapters are NOT closed here: the checker's egress
 // stage consumes them by label through TakeProbedAdapters (probedAdapterSource)
 // instead of re-parsing the survivors, and closing them would force that
@@ -144,6 +151,31 @@ func betterProbe(a, b ProbeResult) bool {
 // computes (see probeNodes), and at the measured condemned share most of those
 // adapters would be built only to be thrown away unread.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
+	return m.probe(ctx, payload, nil)
+}
+
+// ProbeBound probes entries with every dial bound to the address the IP stage
+// selected for each one. The bindings go into mihomo's resolver host table for
+// the duration of the call, so the adapter still carries the original server
+// name — TLS SNI and transport Host headers derived from it stay intact — while
+// every lookup for that name returns the selected address.
+//
+// Without the binding the pre-check and the URL test resolve the URI hostname
+// independently. A refusal or failed round from an address the IP stage did not
+// select is then recorded by recordDead under the selected address, which no
+// path tested, and a live node stays skipped for the whole dead-cache TTL.
+func (m *MihomoProber) ProbeBound(ctx context.Context, entries []Entry) (map[string]ProbeResult, error) {
+	pins := selectedIPs(entries)
+	restore := pinHosts(pins)
+	defer restore()
+
+	return m.probe(ctx, entriesPayload(entries), pins)
+}
+
+// probe is the shared implementation. pins is empty for an unbound call, which
+// leaves both the pre-check dial and mihomo's resolver at their normal
+// behaviour.
+func (m *MihomoProber) probe(ctx context.Context, payload []byte, pins map[string]netip.Addr) (map[string]ProbeResult, error) {
 	// Never last cycle's verdict: a Probe that fails before the pre-check must
 	// report PrecheckAbsent, not the previous pool's numbers. The parse-refusal
 	// account resets beside it: a stale one would attribute a cycle whose parse
@@ -155,7 +187,7 @@ func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]Pr
 	// so none of it can be in flight.
 	m.releaseProbed()
 	opLog := log.Op(m.logger, "stable.Probe")
-	nodes, live, condemned, err := m.probeSet(ctx, opLog, payload)
+	nodes, live, condemned, err := m.probeSet(ctx, opLog, payload, pins)
 	if err != nil {
 		return nil, err
 	}
@@ -321,6 +353,11 @@ type probeNode struct {
 // with every mapping TCP-typed, 601 -> 481 at a 20% hysteria2 share, 601 -> 301
 // at 50%.
 //
+// pins is non-empty only for a bound probe (see ProbeBound): then the address
+// this position would dial is the IP stage's selection, not the mapping's
+// hostname, so the pre-check and the URL test cannot disagree about the
+// endpoint.
+//
 // The label a position folds under is NOT derived here: the fold reads it only
 // where no adapter was built, which is exactly the pre-check's condemned set,
 // so probeSet derives it for those positions alone, while the raw mappings are
@@ -330,7 +367,7 @@ type probeNode struct {
 // result-map miss, is counted among the unconvertible refusals and is re-judged
 // next cycle, the one dial the dead-cache skip would have saved (recordDead no
 // longer caches an attributed miss, for the shadowing reasons its doc gives).
-func probeNodes(mappings []map[string]any) []probeNode {
+func probeNodes(mappings []map[string]any, pins map[string]netip.Addr) []probeNode {
 	nodes := make([]probeNode, len(mappings))
 	for i, mapping := range mappings {
 		typ, _ := mapping["type"].(string)
@@ -338,7 +375,7 @@ func probeNodes(mappings []map[string]any) []probeNode {
 		if !named || !dialsServerOverTCP(typ, mapping) {
 			continue
 		}
-		nodes[i].addr, nodes[i].tcpServer = probeAddr(mapping)
+		nodes[i].addr, nodes[i].tcpServer = probeAddr(mapping, pins)
 	}
 
 	return nodes
@@ -347,8 +384,10 @@ func probeNodes(mappings []map[string]any) []probeNode {
 // probeAddr answers what Addr() would for every type dialsServerOverTCP lists
 // (adapter/outbound/vless.go:452, vmess.go:379, trojan.go:249,
 // shadowsocks.go:280, shadowsocksr.go:116, socks5.go:193, http.go:172,
-// anytls.go:87).
-func probeAddr(mapping map[string]any) (string, bool) {
+// anytls.go:87), except that a pinned hostname answers the selected address:
+// the pre-check must dial the address the IP stage chose, not whatever the
+// resolver would pick now.
+func probeAddr(mapping map[string]any, pins map[string]netip.Addr) (string, bool) {
 	server, ok := mapping["server"].(string)
 	if !ok {
 		return "", false
@@ -357,8 +396,76 @@ func probeAddr(mapping map[string]any) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	if ip, pinned := pins[pinKey(server)]; pinned {
+		server = ip.String()
+	}
 
 	return net.JoinHostPort(server, strconv.Itoa(port)), true
+}
+
+// pinKey normalises the hostname both sides of the binding agree on: DNS names
+// are case-insensitive, and a trailing dot names the same absolute name but is
+// refused by mihomo's hosts trie, so leaving it on would pin the pre-check
+// while the URL test resolved normally.
+func pinKey(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+// selectedIPs maps each entry's hostname to the address the IP stage selected
+// for it. Literal-IP servers are skipped: they already dial that address.
+//
+// Keyed by hostname because that is what a mapping server and a resolver
+// lookup both carry. Merge dedupes by server:port and the IP stage resolves per
+// server, so one hostname cannot carry two selected addresses in one cycle.
+func selectedIPs(entries []Entry) map[string]netip.Addr {
+	pins := make(map[string]netip.Addr, len(entries))
+	for _, e := range entries {
+		host, _, err := net.SplitHostPort(e.Addr)
+		if err != nil || !e.IP.IsValid() {
+			continue
+		}
+		if _, literal := netip.ParseAddr(host); literal == nil {
+			continue
+		}
+		pins[pinKey(host)] = e.IP
+	}
+
+	return pins
+}
+
+// pinHosts installs pins into mihomo's resolver host table and returns the
+// restore function. That table is process-global and read concurrently by the
+// URL-test goroutines, so every write happens before they start and the restore
+// after they finish; cycles never overlap, so no other reader can observe an
+// intermediate table. A fresh tree replaces the old one because DomainTrie has
+// no removal; the previous table is put back on return.
+func pinHosts(pins map[string]netip.Addr) (restore func()) {
+	if len(pins) == 0 {
+		return func() {}
+	}
+	tree := trie.New[resolver.HostValue]()
+	previous := resolver.DefaultHosts
+	if previous.DomainTrie != nil {
+		previous.Foreach(func(domain string, value resolver.HostValue) bool {
+			_ = tree.Insert(domain, value)
+
+			return true
+		})
+	}
+	for host, ip := range pins {
+		value, err := resolver.NewHostValue([]string{ip.String()})
+		if err != nil {
+			continue
+		}
+		_ = tree.Insert(host, value)
+	}
+	//nolint:reassign // mihomo exposes its resolver host table only as a package variable; this worker is its sole reader and probe cycles never overlap
+	resolver.DefaultHosts = resolver.NewHosts(tree)
+
+	return func() {
+		//nolint:reassign // restores the table saved above
+		resolver.DefaultHosts = previous
+	}
 }
 
 // mappingPort reproduces the weakly-typed int decode mihomo performs on the
@@ -389,13 +496,13 @@ func mappingPort(v any) (int, bool) {
 // production shape holding them across the rounds would pin megabytes of
 // decoded share links for the whole probe.
 func (m *MihomoProber) probeSet(
-	ctx context.Context, opLog zerolog.Logger, payload []byte,
+	ctx context.Context, opLog zerolog.Logger, payload []byte, pins map[string]netip.Addr,
 ) (nodes []probeNode, live, condemned []int, err error) {
 	mappings, err := convert.ConvertsV2Ray(payload)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("convert payload: %w", err)
 	}
-	nodes = probeNodes(mappings)
+	nodes = probeNodes(mappings, pins)
 	live, condemned = m.filterReachable(ctx, opLog, nodes)
 	// The fold reads a position's label only where no adapter exists, which is
 	// exactly the condemned set; derive it here while the mappings are in
@@ -549,9 +656,10 @@ func breakerTrips(blocked, total int) bool {
 // All precheckAttempts attempts share exactly ONE url-test round's budget,
 // which is what makes the verdict safe by construction: a node that cannot
 // finish a bare TCP handshake inside check.timeout cannot finish TCP, TLS,
-// tunnel and GET inside it either. The budget binds on a black-holed endpoint
-// and on a lookup that does not answer inside it — a refused SYN returns in
-// microseconds — and only the first of those two condemns.
+// tunnel and GET inside it either. The budget binds on a black-holed endpoint —
+// and, for an unbound Probe only, on a lookup that does not answer inside it;
+// ProbeBound dials the IP-stage address and has no lookup on this path. A
+// refused SYN returns in microseconds.
 func (m *MihomoProber) precheckDialBudget() time.Duration {
 	return m.cfg.Timeout / precheckAttempts
 }
@@ -640,6 +748,12 @@ func dialsServerOverQUIC(mapping map[string]any) bool {
 // is evidence about this path's resolver rather than about the node, and
 // condemning on it would dead-cache a live node for a jittered [3h, 4.5h)
 // against a 1h interval.
+//
+// ProbeBound removes the lookup from both halves of that asymmetry: probeAddr
+// answers the IP-stage address, pinHosts installs the same hostname→address
+// pair for mihomo's resolver, so the pre-check and the URL test dial one
+// address and no resolver's current answer can condemn another. The paragraphs
+// above still describe Probe, whose payload carries no selection.
 func (m *MihomoProber) filterReachable(
 	ctx context.Context,
 	opLog zerolog.Logger,
