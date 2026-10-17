@@ -696,23 +696,33 @@ IP-stage drop reasons are `dns`, `geo`, `cidr`, `asn`, `geoblock`, `ipv6` and
 so a new reason costs no metric name and no query change — only that panel's
 DESCRIPTION, which enumerates the reasons in prose.
 
-The gemini gate publishes no series of its own. It is read through the same
-per-filter family as every other through-node gate:
-`stable_filter_{in,kept,dropped}_nodes{filter="gemini"}` plus
-`stable_filter_trusted{filter="gemini"}`, on the two "Through-node filter"
-panels. The reading that matters is `reason="blocked"` sitting at 0 while the
-other API gates drop nodes: the gemini check needs a working credential to see
-a location verdict at all, so a gate answering 401/403/404/429, a 400
-`API_KEY_INVALID`, or a 400 whose wording no longer carries the marker keeps
-every node and blocks none. Those nodes are **kept and published unverified**,
-never counted as drops. The per-cycle WARN `gemini gate verified nothing for
-these checks` carries the count. A large unverified share is normally the read
+The gemini gate publishes no series of its own; every through-node gate reads
+through the same per-filter family: `stable_filter_{in,kept,dropped}_nodes{filter="gemini"}`,
+`stable_filter_trusted{filter="gemini"}`, and the coverage pair
+`stable_filter_{verified,unverified}_nodes{filter="gemini"}`, on the
+"Through-node filters" panels. The coverage pair is the direct read on whether
+the gate obtained a regional verdict at all. `verified` counts entries whose
+check was conclusive — a clean pass or a refusal, so a refusal is counted
+there even when the batch breaker discards its drop; `unverified` counts
+entries that answered without the evidence the classifier reads. Both count
+SURVIVORS (entry labels) after the per-port outcome fold, so a multi-port node
+is one node, and both are gauges of the last published cycle. A node that
+never answered is in neither count: a believed batch drops it as
+`reason="unreachable"`, while a tripped batch discards that drop and keeps it
+(`trusted=0`). The suspended/rotated-credential shape is
+therefore `verified=0` with `unverified=N` — the gate ran, every answer was
+inconclusive, and those nodes are **kept and published unverified**, never
+counted as drops — while `verified=0, unverified=0` is a batch that got no
+answers at all. The per-cycle WARN `gemini gate verified nothing for these
+checks` still carries the count. A large unverified share is normally the read
 quota, not the credential: the gate fires one read per survivor against
 Google's 200/min per-project-per-region `model_requests` ceiling (measured
 2026-09-03), and a key problem reads as `400 API_KEY_INVALID`, not `429` —
 check the 429 share first, then suspect the key. A gate that never ran renders
-no `filter="gemini"` series at all, which is not the same as a gate that ran
-and dropped nobody: `stable_filter_trusted{filter="gemini"}` tells those apart.
+no `filter="gemini"` coverage series at all, which is not the same as a gate
+that ran and measured zero: `stable_filter_trusted{filter="gemini"}` tells
+those apart, and 0 on it still means only that the batch breaker rejected the
+verdict, never that coverage was missing.
 
 The metrics listener is bound synchronously at startup, so a port conflict is a
 startup failure like any other rather than a silently missing monitoring

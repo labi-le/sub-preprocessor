@@ -101,6 +101,14 @@ stable_filter_in_nodes{filter="gemini"} 700
 stable_filter_kept_nodes{filter="geoblock"} 850
 stable_filter_kept_nodes{filter="bandwidth"} 700
 stable_filter_kept_nodes{filter="gemini"} 700
+# HELP stable_filter_verified_nodes Survivors entering each through-node filter whose check reached a conclusive verdict last published cycle -- a clean pass or a refusal, so a refusal is counted here even when the batch breaker discards its drop. One survivor (entry label) counts once after the per-port outcome fold, never once per proxy port; this is a gauge of the last published cycle, not a cumulative count. An entry that never answered is in neither coverage series: a believed batch drops it as reason="unreachable", while a tripped batch discards that drop and keeps it (trusted=0). Absent when the filter reached no verdict (skipped or cancelled) or does not classify API responses (bandwidth).
+# TYPE stable_filter_verified_nodes gauge
+stable_filter_verified_nodes{filter="geoblock"} 900
+stable_filter_verified_nodes{filter="gemini"} 640
+# HELP stable_filter_unverified_nodes Survivors entering each through-node filter that answered without the evidence the classifier reads, so they were kept and published unverified; same survivor/entry-label unit, per-port fold, and last-published-cycle lifetime as stable_filter_verified_nodes. Zero is an answer: the check ran and every answer carried a verdict. An entry that never answered is in neither coverage series. Absent when the filter reached no verdict or does not classify API responses (bandwidth).
+# TYPE stable_filter_unverified_nodes gauge
+stable_filter_unverified_nodes{filter="geoblock"} 0
+stable_filter_unverified_nodes{filter="gemini"} 60
 # HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
 # TYPE stable_filter_dropped_nodes gauge
 stable_filter_dropped_nodes{filter="geoblock",reason="blocked"} 50
@@ -318,6 +326,10 @@ stable_last_success_timestamp_seconds 1.755474123e+09
 # TYPE stable_filter_in_nodes gauge
 # HELP stable_filter_kept_nodes Survivors kept by each through-node filter.
 # TYPE stable_filter_kept_nodes gauge
+# HELP stable_filter_verified_nodes Survivors entering each through-node filter whose check reached a conclusive verdict last published cycle -- a clean pass or a refusal, so a refusal is counted here even when the batch breaker discards its drop. One survivor (entry label) counts once after the per-port outcome fold, never once per proxy port; this is a gauge of the last published cycle, not a cumulative count. An entry that never answered is in neither coverage series: a believed batch drops it as reason="unreachable", while a tripped batch discards that drop and keeps it (trusted=0). Absent when the filter reached no verdict (skipped or cancelled) or does not classify API responses (bandwidth).
+# TYPE stable_filter_verified_nodes gauge
+# HELP stable_filter_unverified_nodes Survivors entering each through-node filter that answered without the evidence the classifier reads, so they were kept and published unverified; same survivor/entry-label unit, per-port fold, and last-published-cycle lifetime as stable_filter_verified_nodes. Zero is an answer: the check ran and every answer carried a verdict. An entry that never answered is in neither coverage series. Absent when the filter reached no verdict or does not classify API responses (bandwidth).
+# TYPE stable_filter_unverified_nodes gauge
 # HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
 # TYPE stable_filter_dropped_nodes gauge
 # HELP stable_source_nodes_total Nodes each source yielded before filtering last cycle. source is the verbatim config key; owner and feed are the entry's own fields, never re-derived from the name -- owner=crawler when the crawler minted the entry and curated when it was hand-added, feed the channel it was minted from, or the name itself where no channel was recorded.

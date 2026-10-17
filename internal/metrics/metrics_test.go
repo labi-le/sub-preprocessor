@@ -35,7 +35,8 @@ func TestMetricsObserveRender(t *testing.T) {
 			{Name: "mifa", Total: 133, Valid: 20, Tested: 14, Filtered: 9, DNSDrop: 5, GeoDrop: 71, CIDRDrop: 33, GeoBlockDrop: 4},
 		},
 		Filters: []stable.FilterReport{
-			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}, State: stable.FilterRan},
+			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 380, Unverified: 14}},
 			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}, State: stable.FilterRan},
 		},
 		Trace:         stable.TraceReport{State: stable.TraceRan, Answered: 157, Unanswered: 8, Moved: 47},
@@ -60,6 +61,8 @@ func TestMetricsObserveRender(t *testing.T) {
 		`stable_filter_dropped_nodes{filter="claude",reason="blocked"} 7`,
 		`stable_filter_trusted{filter="bandwidth"} 1`,
 		`stable_filter_trusted{filter="claude"} 1`,
+		`stable_filter_verified_nodes{filter="claude"} 380`,
+		`stable_filter_unverified_nodes{filter="claude"} 14`,
 		"# HELP stable_trace_answered_nodes Published nodes that reported their own egress through cdn-cgi/trace; their tags describe that address.",
 		"# TYPE stable_trace_answered_nodes gauge",
 		"stable_trace_answered_nodes 157",
@@ -327,6 +330,42 @@ func TestMetricsFilterStatesRenderApart(t *testing.T) {
 				t.Errorf("filter states %d and %d render the trusted family identically as %q", a, b, ra)
 			}
 		}
+	}
+}
+
+// TestMetricsFilterCoverageKeepsAbsentApartFromMeasuredZero pins the coverage
+// pair's three states: a measured account renders both gauges even when one is
+// zero, while a filter with no account (bandwidth) or no verdict (absent)
+// renders no sample. "Verified nothing" and "did not check" must never
+// collapse into the same reading.
+func TestMetricsFilterCoverageKeepsAbsentApartFromMeasuredZero(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.Observe(stable.CycleReport{
+		Filters: []stable.FilterReport{
+			{Name: "claude", In: 3, Kept: 3, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 3}},
+			{Name: "gemini", In: 700, Kept: 700, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Unverified: 700}},
+			{Name: "bandwidth", In: 700, Kept: 700, Dropped: map[string]int{"slow": 0, "unreachable": 0}, State: stable.FilterRan},
+			// Absent wins even over a stray Measured flag: the state is what
+			// says the check never ran.
+			{Name: "tidal", In: 0, Kept: 0, Dropped: map[string]int{}, State: stable.FilterAbsent,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 9}},
+		},
+	})
+
+	out := render(t, m)
+	if got, want := familyLines(out, "stable_filter_verified_nodes"),
+		`stable_filter_verified_nodes{filter="claude"} 3`+"\n"+
+			`stable_filter_verified_nodes{filter="gemini"} 0`+"\n"; got != want {
+		t.Errorf("verified coverage = %q, want %q:\n%s", got, want, out)
+	}
+	if got, want := familyLines(out, "stable_filter_unverified_nodes"),
+		`stable_filter_unverified_nodes{filter="claude"} 0`+"\n"+
+			`stable_filter_unverified_nodes{filter="gemini"} 700`+"\n"; got != want {
+		t.Errorf("unverified coverage = %q, want %q:\n%s", got, want, out)
 	}
 }
 

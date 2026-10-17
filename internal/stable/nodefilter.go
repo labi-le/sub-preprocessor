@@ -93,6 +93,11 @@ const (
 // the node is kept unverified (fail-open) with no store write. Tidal's
 // status-only check is unaffected: the status is already the whole verdict.
 //
+// The report's Coverage counts those outcomes per SURVIVOR label, not per
+// proxy port, and is measured on every completing path including the breaker's
+// (the check ran; the breaker only discards its drops). It changes nothing
+// about retention: an unverified node is kept exactly as before.
+//
 // A verdict that condemns the whole survivor batch is disbelieved before any
 // drop or store write, like the pre-check's (breakerTrips, in apply): every
 // node dials the SAME endpoint, so a wholesale refusal is the endpoint's or
@@ -129,20 +134,27 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	// persisting it would evict every survivor host from the geoblock store --
 	// so the count precedes the drops and the store writes, and a disbelieved
 	// batch is kept, warned about and re-checked next cycle.
-	blocked, unreachable, unverified := 0, 0, 0
+	blocked, unreachable, unverified, verified := 0, 0, 0, 0
 	for _, s := range survivors {
 		switch o := outcomes[s.Label]; {
 		case o.Blocked:
 			blocked++
+			verified++
 		case !o.Reachable:
 			unreachable++
-		case !o.Verified:
+		case o.Verified:
+			verified++
+		default:
 			unverified++
 		}
 	}
 	// Unverified is counted but not part of the breaker: those nodes answered,
 	// and an unread body is neither a refusal nor a death. They are kept and
-	// warned about below.
+	// warned about below. Verified counts refusals too -- a block is conclusive
+	// evidence about the egress -- and an unreachable entry is in neither
+	// coverage count. Coverage is measured from here on: the check ran, so a
+	// zero is an answer, unlike the absent/cancelled returns above.
+	rep.Coverage = FilterCoverage{Verified: verified, Unverified: unverified, Measured: true}
 	if breakerTrips(blocked+unreachable, len(survivors)) {
 		f.logger.Warn().Str("filter", f.filterName).Int("survivors", len(survivors)).
 			Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).

@@ -163,6 +163,12 @@ func (m *Metrics) writeMetrics(dst io.Writer) {
 // gemini gate; a cancelled check never publishes). Rendering nothing for that
 // last case is deliberate, exactly as for stable_precheck_trusted: the absent
 // per-filter series means "no verdict this cycle", never "disbelieved".
+//
+// Coverage answers the question neither in/kept nor trusted can: how many of
+// the entries the gate looked at actually got a verdict. It is a separate pair
+// of gauges, emitted only for a measured account (see FilterCoverage), so a
+// gate that ran and verified nothing renders explicit zeros instead of
+// disappearing, while an absent gate and the bandwidth filter render nothing.
 func writeFilters(w *exposition, filters []stable.FilterReport) {
 	help(w, "stable_filter_trusted", "gauge",
 		"1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.")
@@ -186,6 +192,28 @@ func writeFilters(w *exposition, filters []stable.FilterReport) {
 	help(w, "stable_filter_kept_nodes", "gauge", "Survivors kept by each through-node filter.")
 	for _, f := range filters {
 		sampleEsc(w, "stable_filter_kept_nodes", labelFilter, f.Name, float64(f.Kept))
+	}
+	// Coverage is a different axis from in/kept/dropped: how much of the input
+	// the check actually classified. It is emitted ONLY when the report says it
+	// was measured -- a check that ran and got no verdict is an explicit zero,
+	// while an absent/cancelled check and the bandwidth filter (no
+	// APIOutcome.Verified) stay absent, so neither reads as measured coverage.
+	help(w, "stable_filter_verified_nodes", "gauge",
+		"Survivors entering each through-node filter whose check reached a conclusive verdict last published cycle -- a clean pass or a refusal, so a refusal is counted here even when the batch breaker discards its drop. One survivor (entry label) counts once after the per-port outcome fold, never once per proxy port; this is a gauge of the last published cycle, not a cumulative count. An entry that never answered is in neither coverage series: a believed batch drops it as reason=\"unreachable\", while a tripped batch discards that drop and keeps it (trusted=0). Absent when the filter reached no verdict (skipped or cancelled) or does not classify API responses (bandwidth).")
+	covered := func(f stable.FilterReport) bool {
+		return f.State != stable.FilterAbsent && f.Coverage.Measured
+	}
+	for _, f := range filters {
+		if covered(f) {
+			sampleEsc(w, "stable_filter_verified_nodes", labelFilter, f.Name, float64(f.Coverage.Verified))
+		}
+	}
+	help(w, "stable_filter_unverified_nodes", "gauge",
+		"Survivors entering each through-node filter that answered without the evidence the classifier reads, so they were kept and published unverified; same survivor/entry-label unit, per-port fold, and last-published-cycle lifetime as stable_filter_verified_nodes. Zero is an answer: the check ran and every answer carried a verdict. An entry that never answered is in neither coverage series. Absent when the filter reached no verdict or does not classify API responses (bandwidth).")
+	for _, f := range filters {
+		if covered(f) {
+			sampleEsc(w, "stable_filter_unverified_nodes", labelFilter, f.Name, float64(f.Coverage.Unverified))
+		}
 	}
 	help(w, "stable_filter_dropped_nodes", "gauge", "Survivors dropped by each through-node filter, by reason.")
 	lbl := make([]byte, 0, labelScratch)

@@ -553,6 +553,17 @@ func TestFilterMieruDeadPortDoesNotVetoLivePort(t *testing.T) {
 	if kept[0].Mbps != 50 {
 		t.Errorf("kept Mbps %d, want the live port's 50", kept[0].Mbps)
 	}
+	assertFoldedCoverage(t, reports[0].Coverage)
+}
+
+// assertFoldedCoverage requires the two ports of one mieru link to reach the
+// report as ONE measured, verified survivor. Kept out of the test body so the
+// fold test stays under the cognitive-complexity gate.
+func assertFoldedCoverage(t *testing.T, cov FilterCoverage) {
+	t.Helper()
+	if !cov.Measured || cov.Verified != 1 || cov.Unverified != 0 {
+		t.Errorf("coverage = %+v, want the two ports folded into ONE verified survivor", cov)
+	}
 }
 
 // TestBetterAPIOutcomePriority pins the order the ports of one mierus:// link

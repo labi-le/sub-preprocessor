@@ -101,17 +101,27 @@ vendor the dashboard into the nixos repo.
   once had three tiles and three series of its own (`stable_gemini_gate_*`, panels 23-25), removed
   2026-09-14 because the per-filter family already carries the gate
   (`stable_filter_{in,kept,dropped}_nodes{filter="gemini"}`, `stable_filter_trusted{filter="gemini"}`)
-  and a second account of one stage is a second thing to keep true. What the deleted
-  `unverified_checks` used to show is read one panel over: `reason="blocked"` at 0 while the other
-  API gates drop nodes means the gate is answering inconclusively and verifying nothing (production
-  2026-09-09: gemini blocked 0, claude 2, with 223 of 223 checks inconclusive). The count itself
-  survives on the per-cycle WARN `gemini gate verified nothing for these checks`. A marker gate's
+  and a second account of one stage is a second thing to keep true. The direct account came back
+  as two coverage gauges on the same per-filter family, `stable_filter_{verified,unverified}_nodes{filter}`
+  (2026-10-17): `verified` counts survivors whose check reached a conclusive verdict — a pass OR a
+  refusal, so a refusal appears there even when the breaker discards its drop — and `unverified`
+  counts survivors that answered without the evidence the classifier reads. Both count entry
+  labels after the port fold and both describe the last published cycle. An unreachable entry is
+  in neither: a believed batch drops it, while a tripped batch keeps it and zeroes that drop
+  (`trusted=0`). They render ONLY for a measured account, so a ran-but-blind
+  gate reads `verified 0` / `unverified N`; an absent/cancelled gate and the bandwidth filter
+  render no coverage sample at all. The old cross-panel inference — `reason="blocked"` at 0 while
+  the other API gates drop nodes (production 2026-09-09: gemini blocked 0, claude 2, with 223 of
+  223 checks inconclusive) — is no longer the reading to use; the coverage pair states it directly.
+  The count itself also survives on the per-cycle WARN `gemini gate verified nothing for these
+  checks`. A marker gate's
   body that was not read to its end (a read error, the deadline expiring after the headers, or a
   body past `maxAPIBody`) is kept the same way and warned about by `apiFilter.apply`'s per-cycle
   WARN **when the bytes received carried no marker**; an observed marker is still a refusal and
   books `reason="blocked"` like any complete one. Every Gemini answer `geminiInconclusive` flags
-  rides the same unverified count. None of this adds a series for the kept case: there is no
-  `unverified` reason in `stable_filter_dropped_nodes`.
+  rides the same unverified count. Nothing here adds a reason to
+  `stable_filter_dropped_nodes`: the kept-unverified count lives on
+  `stable_filter_unverified_nodes`, and there is still no `unverified` reason in the drop family.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
@@ -166,8 +176,8 @@ vendor the dashboard into the nixos repo.
   `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set; panel 21
   sums both sides into two rows, beside the feed table at the top of the Sources row. `owner` is an EXPORTER label, and behind it a
   FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
-  beside `source` (`writeSources`, `internal/metrics/metrics.go:342`), read once per source off
-  `SourceReport.Managed` (`:350-352`) and `.Feed` (`:354`, via `sourceFeed` at `:413`) — the
+  beside `source` (`writeSources`, `internal/metrics/metrics.go:366`), read once per source off
+  `SourceReport.Managed` (`:375`) and `.Feed` (`:378`, via `sourceFeed` at `:437`) — the
   entry's own fields, carried through `internal/stable/report.go:236-244` (`SourceReport`'s
   `Managed`/`Feed` fields) from the config entry (`checker.go:739-744`) and written by the
   crawler at mint, so a panel, an ad-hoc query and an
@@ -230,7 +240,7 @@ vendor the dashboard into the nixos repo.
   computed: `owner` is `SubscriptionSource.Managed` and `feed` is `SubscriptionSource.Feed`
   (`internal/config/config.go:639,644`), which the crawler writes at mint, so every URL of one
   channel shares that channel's row and a curated entry, which normally sets no `feed`, falls back
-  to naming itself (`sourceFeed`, `metrics.go:413`). Group by the PAIR, never `by
+  to naming itself (`sourceFeed`, `metrics.go:437`). Group by the PAIR, never `by
   (feed)` alone: a curated name equal to some channel's slug would otherwise merge two
   owners into one row.
   Attribution is recorded, not recovered, because no fold over the NAME survives the corpus: one
@@ -340,7 +350,7 @@ vendor the dashboard into the nixos repo.
   leave it.
 - **Every IP-stage drop reason is emitted every cycle, so a zero is an answer on four of the
   seven.** `writeSources` builds a FIXED seven-entry table per source, never reading `filters:`
-  (`internal/metrics/metrics.go:384-400`, reason names at :340): `dns` (nothing resolved), `ipv6`
+  (`internal/metrics/metrics.go:412-428`, reason names at :364): `dns` (nothing resolved), `ipv6`
   (a non-IPv4 literal, unlooked-up), `geo` (country policy), `asn` (ASN deny-patterns), `cidr`
   (outside the allow-list), `geoblock` (host in the geoblock store), `unsupported`. A zero on the
   middle three is ambiguous — no filter, nothing to exclude, or broken — and each gate differs:
@@ -355,27 +365,27 @@ vendor the dashboard into the nixos repo.
   (2026-07-29) and `cidr` in `82e8ef3` (2026-08-09), so a range reaching back past either plots
   fewer series, and an absence there is not a zero. Worker cycles only, and now that is everything the
   IP-stage chain runs for: every `stable_source_*` series comes out of the cycle report
-  (`internal/metrics/metrics.go:138`), so a cycle that never completes — cancelled at shutdown,
+  (`internal/metrics/metrics.go:144`), so a cycle that never completes — cancelled at shutdown,
   or still in flight — contributes no sample at all, not a zero.
 - **The through-node drops panel (panel 7, `Through-node filter drops by reason`) has three
   states, not two — and the batch breaker is a fourth that the drop series cannot show: it
   reads on its own family, `stable_filter_trusted{filter}`, which panel 7 draws per gate as
   a "verdict trusted" line.** `apiFilter.apply` and `bandwidthFilter.apply` each
   assign a full `Dropped` map on the completing path — `{blocked, unreachable}` at
-  `internal/stable/nodefilter.go:174`, `{slow, unreachable}` at :311, both keys either way — so a
+  `internal/stable/nodefilter.go:208`, `{slow, unreachable}` at :286, both keys either way — so a
   gate that ran clean emits a PRESENT ZERO. The early returns keep the empty map created at
-  :103/:254 (`apiFilter` disabled-for-no-key at :104-107 and cancelled context at :111-116;
-  `bandwidthFilter` cancelled at :257-260; the old `outcomes == nil` guard is gone — it was
+  :114/:229 (`apiFilter` disabled-for-no-key at :115-118 and cancelled context at :122-127;
+  `bandwidthFilter` cancelled at :232-235; the old `outcomes == nil` guard is gone — it was
   unreachable and untested, so an empty outcome map is no longer a skip), and `writeFilters`
-  iterates only the keys present (`internal/metrics/metrics.go:160`), so an inert gate writes NO
+  iterates only the keys present (`internal/metrics/metrics.go:221`), so an inert gate writes NO
   drop series though its `filter_in`/`filter_kept` still land. Third: a gate dropped from
   `filters:` adds nothing, yet its old rows stop rather than vanish, so a long range still draws
   lines ending at that sample; the legend reduces with `last`, not `lastNotNull`, so its cell
   reads empty rather than frozen.
   The whole-batch breaker is the round's fourth state, and it is the one the drop series CANNOT
   carry: a gate whose batch verdict tripped `breakerTrips` keeps every survivor and
-  writes `Dropped[blocked]=0`/`Dropped[unreachable]=0` (`nodefilter.go:140-141`, bandwidth at
-  `:283-284`) — byte-identical to the ran-clean present-zero case above. The disbelief rides
+  writes `Dropped[blocked]=0`/`Dropped[unreachable]=0` (`nodefilter.go:163-164`, bandwidth at
+  `:259-260`) — byte-identical to the ran-clean present-zero case above. The disbelief rides
   the report instead: both filters mark `FilterReport.State` (`FilterTripped` on that path,
   `FilterRan` on the believed one), and `writeFilters` renders it per filter on the pre-check's
   pattern —
@@ -390,7 +400,10 @@ vendor the dashboard into the nixos repo.
   0 or 1 under the panel's `last` calc, so a tripped gate shows as its line stepping from 1
   to 0 while its drop rows stay at zero — visible without opening Prometheus. The gate's WARN
   log ("gate refused every survivor; treating the batch verdict as the endpoint's or our
-  egress's ... and keeping all survivors") still fires alongside the 0. What IS
+  egress's ... and keeping all survivors") still fires alongside the 0. Coverage is a third
+  axis, on panel 6: `stable_filter_{verified,unverified}_nodes` renders one line per gate beside
+  in/kept, so a gate that ran and verified nothing reads `verified 0` while an absent/cancelled
+  gate and the bandwidth filter draw no coverage line at all. What IS
   distinguishable on the drop series themselves: a gate that genuinely ran (drop series
   present, in/kept landing) against one that never reached the chain (no report at all — no
   filter configured, zero survivors entering egress, or the no-retention prober's `ParseProxies`
@@ -447,7 +460,7 @@ vendor the dashboard into the nixos repo.
   dead-cached, the refused mapping is neither.
 - **The probed nodes no URL test could be built for are their own family, absent-gated on
   the trace's pattern.** `stable_probe_refused_nodes{reason="unconvertible"|"unparsable"}`
-  (`writeRefusals`, `internal/metrics/metrics.go:265-273`) counts precisely the result-map
+  (`writeRefusals`, `internal/metrics/metrics.go:298-305`) counts precisely the result-map
   misses the stage family above refuses to index. `unconvertible` = the node's line never
   became a mapping: mihomo's `convert.ConvertsV2Ray` has no case for its scheme —
   `wireguard`/`wg` 32 lines, `ssh` 10, `amneziawg` and `vmvless` 1 each in the measured
@@ -461,10 +474,10 @@ vendor the dashboard into the nixos repo.
   `checker.go:432-452`). Rendering is gated like the trace's: only a cycle whose probe
   ACCOUNTED its parse renders the family — production's `Probe` does on every successful
   cycle — and then BOTH reasons render, zeros included, because "the converter mapped
-  every probed node" is an answer (`writeRefusals`'s doc, `metrics.go:258-264`;
-  `TestMetricsRefusalStatesRenderApart`, `internal/metrics/metrics_test.go:554`). Stage
+  every probed node" is an answer (`writeRefusals`'s doc, `metrics.go:286-292`;
+  `TestMetricsRefusalStatesRenderApart`, `internal/metrics/metrics_test.go:500`). Stage
   counts plus refusal counts then sum to `stable_probed_nodes` (`report.go:19-25`;
-  `metrics.go:231-236`). No sample at all means the prober has no account or its `Probe`
+  `metrics.go:280-288`). No sample at all means the prober has no account or its `Probe`
   failed before the parse ran, and those cycles' misses index as `stage="unknown"`
   instead: absent is NOT "nothing was refused" (`report.go:222-228`). What an operator
   should conclude from each reason: neither is a probe outcome and neither is a death
@@ -473,7 +486,7 @@ vendor the dashboard into the nixos repo.
   against a mihomo bump (the same line becomes a probed node the cycle the converter
   learns its scheme or cipher) and a steady value as the corpus's standing share of lines
   this worker's mihomo cannot dial — all four claims are in the `RefusalReport` doc cited
-  above and in the family's HELP text (`metrics.go:270`). The family has drawn on panel 34
+  above and in the family's HELP text (`metrics.go:302-303`). The family has drawn on panel 34
   (`Probe refusals by reason`, the Probe row) since 2026-09-14; before that it was read by
   query alone. Its neighbours split the same probed set: panel 18 (`Probe outcome by stage`)
   reads `stable_probe_outcome_nodes` and panel 5 (`Pipeline funnel`) draws
@@ -532,7 +545,7 @@ vendor the dashboard into the nixos repo.
   `check.max_avg_ms`. `keptSpeeds` skips a zero Mbps
   (`internal/stable/checker.go:371`), so an unmeasured cycle passes an empty slice and
   `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:139`,
-  :431-432): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
+  :482-483): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
   NaN over all-zero buckets and the guarded max (:142) vanishes. `stable_kept_speed_min_mbps` is
   exported (:141) and since the 2026-09 round has its own tile — panel 26, "Kept-node speed min
   (last cycle)" — whose no-data means nothing was measured that cycle, exactly like the max line;
