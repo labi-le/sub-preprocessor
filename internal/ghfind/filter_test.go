@@ -1,6 +1,7 @@
 package ghfind_test
 
 import (
+	"fmt"
 	"testing"
 
 	"domains.lst/sub-preprocessor/internal/ghfind"
@@ -80,5 +81,73 @@ func TestCandidatesWaivesFloorForHighScore(t *testing.T) {
 	got := ghfind.Candidates(tree, 4)
 	if len(got) != 1 || got[0].Path != "sub/v2ray-free.txt" {
 		t.Fatalf("Candidates = %+v, want only the high-scoring tiny file kept", got)
+	}
+}
+
+// TestCandidatesShrinksUnderfilledResults pins the other half of the bound:
+// when fewer entries pass the filter than the preallocated capacity allows
+// (a sparse tree or a wholly refused one), the returned slice must not keep
+// capacity for entries that were never selected.
+func TestCandidatesShrinksUnderfilledResults(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tree []ghfind.TreeEntry
+		want int
+	}{
+		{"one eligible", []ghfind.TreeEntry{
+			treeEntry("sub/v2ray-free.txt", 600), // score 9, waives the size floor
+			treeEntry("output.txt", 600),         // score 3, refused by the floor
+		}, 1},
+		{"all refused", []ghfind.TreeEntry{
+			treeEntry("README.md", 600),  // refused extension and name
+			treeEntry("output.txt", 600), // refused by the size floor
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ghfind.Candidates(tc.tree, 4)
+			if len(got) != tc.want {
+				t.Fatalf("Candidates returned %d entries, want %d", len(got), tc.want)
+			}
+			if cap(got) != tc.want {
+				t.Fatalf("Candidates cap = %d, want %d: the returned slice keeps capacity for entries never selected", cap(got), tc.want)
+			}
+		})
+	}
+}
+
+// TestCandidatesBoundsRetainedCapacity pins the bounded selection: with more
+// eligible entries than the limit, the returned slice carries exactly limit
+// entries and a backing array no larger than that, so the discarded candidates
+// and their paths are not kept alive. The tree is fed worst-first, so every
+// entry after the first limit replaces the heap root.
+func TestCandidatesBoundsRetainedCapacity(t *testing.T) {
+	t.Parallel()
+
+	const (
+		total = 256
+		limit = 8
+	)
+	tree := make([]ghfind.TreeEntry, 0, total)
+	for i := total - 1; i >= 0; i-- {
+		tree = append(tree, treeEntry(fmt.Sprintf("sub/config-%03d.txt", i), 4096))
+	}
+
+	got := ghfind.Candidates(tree, limit)
+	if len(got) != limit {
+		t.Fatalf("Candidates returned %d entries, want %d", len(got), limit)
+	}
+	if cap(got) != limit {
+		t.Fatalf("Candidates cap = %d for limit %d, want the discarded entries released", cap(got), limit)
+	}
+	for i := range limit {
+		want := fmt.Sprintf("sub/config-%03d.txt", i)
+		if got[i].Path != want {
+			t.Fatalf("entry %d = %q, want %q (best-first, lowest path wins the tie)", i, got[i].Path, want)
+		}
 	}
 }
