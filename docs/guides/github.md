@@ -223,7 +223,10 @@ working, not the phase running out of GitHub.
 ## The algorithm
 
 One pass per crawl cycle, all of it budget-capped and resumable through a cursor in
-`.crawler-state.json`:
+`.crawler-state.json`. A full source cap ends the pass before step 1: the remaining room is
+`GITHUB_MAX_SOURCES` minus the sources already minted, and a census rebuild could not buy an
+admission the cap cannot spend, so a capped pass fetches no census or discovery URL (the
+probation reading still runs once per cycle).
 
 1. **Census.** Novelty needs a baseline, and the baseline doctrine (`sources.md`) is the
    WHOLE shipped corpus, not the curated part. Every configured source URL is fetched once

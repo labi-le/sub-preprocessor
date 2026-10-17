@@ -3,6 +3,7 @@ package crawl //nolint:testpackage // exercises the crawl-side GitHub glue: unex
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -449,11 +450,110 @@ func TestScanGitHubSkipsWhenNoBudgetRemains(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
-	(&Crawler{opts: Options{GitHub: GitHubOptions{Enabled: true, Token: "token"}}, logger: zerolog.Nop()}).
+	(&Crawler{opts: Options{GitHub: GitHubOptions{Enabled: true, Token: "token", MaxSources: 5}}, logger: zerolog.Nop()}).
 		scanGitHub(ctx, &st, pf, live, nil)
 
 	if !reflect.DeepEqual(st, state{GitHub: ghCursor{Code: 1, Repo: 2}}) || len(live) != 0 {
 		t.Errorf("expired-budget pass touched state (%+v) or live (%v)", st, live)
+	}
+}
+
+// ghPhaseTransport counts corpus fetches and fails any GitHub API call, so a
+// pass with room builds its census and then dies in discovery instead of
+// reaching the live API.
+type ghPhaseTransport struct {
+	corpus atomic.Int64
+	github atomic.Int64
+}
+
+func (r *ghPhaseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "api.github.com" {
+		r.github.Add(1)
+		return nil, errors.New("test transport: no GitHub network")
+	}
+	r.corpus.Add(1)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.1:443#n")),
+		Request:    req,
+	}, nil
+}
+
+// TestScanGitHubSkipsCensusAtCap pins the pass order: a full source cap is
+// decided before the census, so a missing census does not buy one fetch per
+// corpus URL for admissions the cap can never spend. The transport counts every
+// call, and a corpus of 1000 distinct URLs makes an accidental rebuild
+// unmissable.
+func TestScanGitHubSkipsCensusAtCap(t *testing.T) {
+	t.Parallel()
+
+	rt := &ghPhaseTransport{}
+	var pf privateFile
+	for i := range 1000 {
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{
+			Name: fmt.Sprintf("source-%d", i), URL: fmt.Sprintf("https://source-%d.example/sub", i),
+			Managed: true, Feed: "telegram",
+		})
+	}
+	pf.Subscriptions.Sources[0].Feed = ghFeedPrefix + "fixture/repo"
+	st := state{}
+	live := map[string]origin{}
+
+	c := &Crawler{
+		opts:       Options{GitHub: GitHubOptions{Enabled: true, Token: "fixture", MaxSources: 1, Concurrency: 8}},
+		httpClient: &http.Client{Transport: rt},
+		logger:     zerolog.Nop(),
+	}
+	c.scanGitHub(context.Background(), &st, pf, live, nil)
+
+	if got := rt.corpus.Load(); got != 0 {
+		t.Errorf("capped pass fetched %d corpus URLs, want 0", got)
+	}
+	if got := rt.github.Load(); got != 0 {
+		t.Errorf("capped pass made %d GitHub API calls, want 0", got)
+	}
+	if len(live) != 0 {
+		t.Errorf("capped pass admitted %v, want nothing", live)
+	}
+	if !reflect.DeepEqual(st, state{}) {
+		t.Errorf("capped pass mutated state: %+v", st)
+	}
+}
+
+// TestScanGitHubBuildsCensusWhenRoomExists is the other half of the order
+// change: with room the missing census is still built from the whole corpus
+// before discovery runs, so the cap check did not become a substitute for it.
+func TestScanGitHubBuildsCensusWhenRoomExists(t *testing.T) {
+	t.Parallel()
+
+	rt := &ghPhaseTransport{}
+	corpus := []string{
+		"https://one.example/sub",
+		"https://two.example/sub",
+		"https://three.example/sub",
+	}
+	var pf privateFile
+	for i, u := range corpus {
+		pf.Subscriptions.Sources = append(pf.Subscriptions.Sources, source{
+			Name: fmt.Sprintf("source-%d", i), URL: u, Managed: true, Feed: "telegram",
+		})
+	}
+	st := state{}
+	live := map[string]origin{}
+
+	c := &Crawler{
+		opts:       Options{GitHub: GitHubOptions{Enabled: true, Token: "fixture", MaxSources: 5, Concurrency: 2}},
+		httpClient: &http.Client{Transport: rt},
+		logger:     zerolog.Nop(),
+	}
+	c.scanGitHub(context.Background(), &st, pf, live, nil)
+
+	if got := rt.corpus.Load(); got != int64(len(corpus)) {
+		t.Errorf("census fetched %d corpus URLs, want %d", got, len(corpus))
+	}
+	if rt.github.Load() == 0 {
+		t.Error("discovery never ran: the pass must continue past the census when room exists")
 	}
 }
 
