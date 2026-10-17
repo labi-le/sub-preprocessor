@@ -29,6 +29,10 @@ import (
 // a common WAF / geo-panel block trigger that would skew reachability results.
 const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
+// schemeHTTP is both the mihomo network name for the HTTP transport and a URL
+// scheme this package inspects (prober_bandwidth).
+const schemeHTTP = "http"
+
 // Prober measures reachability of the proxy nodes in a subscription payload.
 //
 // The label-keyed map is the carrier, and it stays one: RunOnce joins it three
@@ -552,10 +556,12 @@ func (b *binding) urlBound(server string) bool {
 }
 
 // normalisePinnedServers makes a trailing-dot server match the resolver host
-// table, which refuses a dotted name, while keeping the configured hostname in
-// the SNI fields mihomo derives from `server` when they are absent. Only
-// hostnames with an installable pin are touched: an unbound mapping is left
-// exactly as the converter built it.
+// table, which refuses a dotted name, while preserving the effective TLS SNI
+// and transport Host the adapter would have derived from the original server.
+// The dial spelling changes; the identity and the wire strings do not.
+//
+// Only hostnames with an installable pin are touched: an unbound mapping is
+// left exactly as the converter built it.
 func normalisePinnedServers(mappings []map[string]any, b *binding) {
 	if b == nil || len(b.hosts) == 0 {
 		return
@@ -569,13 +575,123 @@ func normalisePinnedServers(mappings []map[string]any, b *binding) {
 			continue
 		}
 		mapping["server"] = strings.TrimSuffix(server, ".")
-		if _, present := mapping["servername"]; !present {
-			mapping["servername"] = server
-		}
-		if _, present := mapping["sni"]; !present {
-			mapping["sni"] = server
+		preserveDerivedHost(mapping, server)
+	}
+}
+
+// preserveDerivedHost keeps the pre-normalisation SNI and transport Host for a
+// mapping whose server lost its trailing dot. mihomo's derivations differ by
+// transport, and injecting servername blindly changes the precedence:
+//
+//   - VLESS/VMess ws/httpupgrade: TLS SNI is servername, else the WS Host
+//     header, else the server. An explicit WS Host therefore wins, and leaving
+//     servername absent preserves it. With no Host, both the SNI and the
+//     default Host derive from the server, so pinning the Host to the original
+//     spelling preserves both. Without TLS the default Host is randomised, so
+//     it must be left alone.
+//   - VLESS/VMess http transport: the default Host is the server, so it is
+//     pinned explicitly; SNI still comes from servername/else-server below.
+//   - Everything else: SNI is servername (VLESS/VMess) or sni
+//     (trojan/http/socks5/anytls/hysteria2/tuic), else the server, so writing
+//     the original into those absent fields restores it. Trojan ws also builds
+//     its default Host from sni, so that write covers it too.
+func preserveDerivedHost(mapping map[string]any, original string) {
+	typ, _ := mapping["type"].(string)
+	network, _ := mapping["network"].(string)
+	if typ == "vless" || typ == "vmess" {
+		switch network {
+		case "ws", "httpupgrade":
+			if _, explicit := wsHeaderHost(mapping); !explicit && mappingHasTLS(mapping) {
+				setWSHeaderHost(mapping, original)
+			}
+
+			return
+		case schemeHTTP:
+			if !httpHeaderHostPresent(mapping) {
+				setHTTPHeaderHost(mapping, original)
+			}
 		}
 	}
+	if _, present := mapping["servername"]; !present {
+		mapping["servername"] = original
+	}
+	if _, present := mapping["sni"]; !present {
+		mapping["sni"] = original
+	}
+}
+
+func mappingHasTLS(mapping map[string]any) bool {
+	tlsEnabled, _ := mapping["tls"].(bool)
+
+	return tlsEnabled
+}
+
+// wsHeaderHost reports a non-empty Host in ws-opts.headers. An empty value is
+// what the converter writes when the link has no host=, and mihomo treats it as
+// absent.
+func wsHeaderHost(mapping map[string]any) (string, bool) {
+	wsOpts, _ := mapping["ws-opts"].(map[string]any)
+	headers, _ := wsOpts["headers"].(map[string]any)
+
+	return headerString(headers, "Host")
+}
+
+func setWSHeaderHost(mapping map[string]any, host string) {
+	wsOpts, ok := mapping["ws-opts"].(map[string]any)
+	if !ok {
+		wsOpts = make(map[string]any)
+		mapping["ws-opts"] = wsOpts
+	}
+	headers, ok := wsOpts["headers"].(map[string]any)
+	if !ok {
+		headers = make(map[string]any, 1)
+		wsOpts["headers"] = headers
+	}
+	headers["Host"] = host
+}
+
+func httpHeaderHostPresent(mapping map[string]any) bool {
+	httpOpts, _ := mapping["http-opts"].(map[string]any)
+	headers, _ := httpOpts["headers"].(map[string]any)
+	_, present := headerString(headers, "Host")
+
+	return present
+}
+
+func setHTTPHeaderHost(mapping map[string]any, host string) {
+	httpOpts, ok := mapping["http-opts"].(map[string]any)
+	if !ok {
+		httpOpts = make(map[string]any)
+		mapping["http-opts"] = httpOpts
+	}
+	headers, ok := httpOpts["headers"].(map[string]any)
+	if !ok {
+		headers = make(map[string]any, 1)
+		httpOpts["headers"] = headers
+	}
+	headers["Host"] = []string{host}
+}
+
+// headerString reads the header shapes the converter emits: a bare string for
+// ws-opts, a []string for http-opts. A missing, empty or unreadable value is
+// reported as absent.
+func headerString(headers map[string]any, key string) (string, bool) {
+	switch value := headers[key].(type) {
+	case string:
+		return value, value != ""
+	case []string:
+		if len(value) > 0 && value[0] != "" {
+			return value[0], true
+		}
+	case []any:
+		if len(value) > 0 {
+			if s, ok := value[0].(string); ok && s != "" {
+				return s, true
+			}
+		}
+	}
+
+	return "", false
 }
 
 // pinHosts installs pins into mihomo's resolver host table and returns the

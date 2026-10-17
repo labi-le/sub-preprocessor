@@ -3,20 +3,31 @@ package stable //nolint:testpackage // exercises unexported stable internals
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"math/big"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/common/convert"
+	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/component/resolver"
+	mihomo "github.com/metacubex/mihomo/constant"
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/geoblock"
 )
 
 // startConnectProxy serves HTTP CONNECT then a 204 for the tunneled GET, which
@@ -236,6 +247,183 @@ func TestProbeBoundDoesNotAttributeAConflictingSelection(t *testing.T) {
 	}
 }
 
+// selfSignedCert is enough for the capture: the adapter sets skip-cert-verify,
+// so only the handshake and the ClientHello matter.
+func selfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"localhost", "front.example"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+type wsWire struct {
+	sni  string
+	host string
+}
+
+// captureVlessWS runs the adapter's real StreamConnContext against a local TLS
+// listener and reports what went on the wire: the ClientHello SNI and the WS
+// upgrade Host header. It is the observable form of the precedence rules, which
+// mapping-field assertions cannot pin.
+func captureVlessWS(t *testing.T, streamer interface {
+	StreamConnContext(context.Context, net.Conn, *mihomo.Metadata) (net.Conn, error)
+}) wsWire {
+	t.Helper()
+
+	cert := selfSignedCert(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	result := make(chan wsWire, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var sni string
+		tlsConn := tls.Server(conn, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				sni = hello.ServerName
+
+				//nolint:nilnil // a nil config makes the server use its base config
+				return nil, nil
+			},
+		})
+		if handshakeErr := tlsConn.Handshake(); handshakeErr != nil {
+			result <- wsWire{sni: sni}
+
+			return
+		}
+		reader := bufio.NewReader(tlsConn)
+		if _, readErr := reader.ReadString('\n'); readErr != nil {
+			result <- wsWire{sni: sni}
+
+			return
+		}
+		var host string
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil || line == "\r\n" {
+				break
+			}
+			if strings.HasPrefix(strings.ToLower(line), "host:") {
+				host = strings.TrimSpace(line[len("host:"):])
+			}
+		}
+		result <- wsWire{sni: sni, host: host}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	var meta mihomo.Metadata
+	if metaErr := meta.SetRemoteAddress("example.com:443"); metaErr != nil {
+		t.Fatal(metaErr)
+	}
+	_, _ = streamer.StreamConnContext(context.Background(), conn, &meta)
+
+	select {
+	case got := <-result:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the TLS/WS capture")
+	}
+
+	return wsWire{}
+}
+
+// TestProbeBoundPreservesDottedSNIAndHost is the wire regression for the
+// trailing-dot rewrite: mihomo's VLESS ws precedence is servername, then the WS
+// Host header, then the adapter address. Injecting servername for a dotted
+// origin overrides an explicit host=front.example and changes the transmitted
+// SNI; leaving the Host unset changes the default WS Host as well.
+func TestProbeBoundPreservesDottedSNIAndHost(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hostQ    string
+		wantSNI  string
+		wantHost string
+	}{
+		{
+			name: "no explicit host preserves the dotted server in both",
+			// crypto/tls strips a trailing dot before putting the name in the
+			// ClientHello (handshake_client.go hostnameInSNI), so the wire SNI
+			// is undotted even when the effective name was dotted. The WS Host
+			// is not normalized and is what distinguishes the two paths.
+			wantSNI:  "localhost",
+			wantHost: "localhost.",
+		},
+		{
+			name:     "explicit ws host still drives SNI and Host",
+			hostQ:    "&host=front.example",
+			wantSNI:  "front.example",
+			wantHost: "front.example",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@localhost.:443" +
+				"?encryption=none&security=tls&type=ws" + tc.hostQ + "#wire"
+			entries := []Entry{{
+				Label: "wire",
+				Raw:   raw,
+				Addr:  "localhost.:443",
+				IP:    netip.MustParseAddr("127.0.0.2"),
+			}}
+			b := newBinding(entries)
+			mappings, convErr := convert.ConvertsV2Ray(entriesPayload(entries))
+			if convErr != nil {
+				t.Fatal(convErr)
+			}
+			normalisePinnedServers(mappings, b)
+			if got := mappings[0]["server"]; got != "localhost" {
+				t.Fatalf("mapping server = %v, want localhost", got)
+			}
+			mappings[0]["skip-cert-verify"] = true
+			delete(mappings[0], "client-fingerprint") // use crypto/tls, not uTLS
+			decoder := structure.NewDecoder(structure.Option{
+				TagName: "proxy", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer,
+			})
+			var opt outbound.VlessOption
+			if decodeErr := decoder.Decode(mappings[0], &opt); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			px, parseErr := outbound.NewVless(opt)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			t.Cleanup(func() { _ = px.Close() })
+
+			got := captureVlessWS(t, px)
+			if got.sni != tc.wantSNI {
+				t.Errorf("ClientHello SNI = %q, want %q", got.sni, tc.wantSNI)
+			}
+			if got.host != tc.wantHost {
+				t.Errorf("WS Host = %q, want %q", got.host, tc.wantHost)
+			}
+		})
+	}
+}
+
 // TestProbeBoundMatchesATrailingDotHostname covers the spelling mismatch: the
 // resolver host trie refuses a dotted name, so the pin has to be installed
 // under the undotted spelling while the configured hostname stays the source of
@@ -283,11 +471,11 @@ func TestProbeBoundMatchesATrailingDotHostname(t *testing.T) {
 	if got := mappings[0]["server"]; got != "localhost" {
 		t.Errorf("mapping server = %v, want localhost", got)
 	}
-	if got := mappings[0]["servername"]; got != "localhost." {
-		t.Errorf("TLS servername = %v, want the configured localhost.", got)
+	if got, present := mappings[0]["servername"]; present {
+		t.Errorf("servername = %v, want absent: the WS Host carries the derived name", got)
 	}
-	if got := mappings[0]["sni"]; got != "localhost." {
-		t.Errorf("sni = %v, want the configured localhost.", got)
+	if host, ok := wsHeaderHost(mappings[0]); !ok || host != "localhost." {
+		t.Errorf("WS Host = %q/%v, want the configured localhost.", host, ok)
 	}
 	px, parseErr := adapter.ParseProxy(mappings[0])
 	if parseErr != nil {
@@ -296,6 +484,20 @@ func TestProbeBoundMatchesATrailingDotHostname(t *testing.T) {
 	_ = px.Close()
 	if got, want := px.Addr(), "localhost:443"; got != want {
 		t.Errorf("adapter Addr() = %q, want %q", got, want)
+	}
+
+	// The adapter's dial spelling feeds the geoblock writer, while the raw
+	// entry keeps the dotted name. Both must address one store entry.
+	store, err := geoblock.Open(filepath.Join(t.TempDir(), "gb.db"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if blockErr := store.Block(proxyHost(px)); blockErr != nil {
+		t.Fatal(blockErr)
+	}
+	if !store.Blocked("localhost.") {
+		t.Fatal("the normalized adapter host did not block the raw dotted host")
 	}
 }
 

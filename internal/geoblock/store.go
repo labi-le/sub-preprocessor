@@ -4,9 +4,12 @@
 // the SQLite file is touched only on writes, prune, and startup load, so it
 // survives restarts.
 //
-// Hosts are DNS names, which are case-insensitive, so every key is folded to
-// lower case on write, read and load: two sources listing the same host in
-// different case must resolve to one entry, not two.
+// Hosts are DNS names, which are case-insensitive and treat a trailing dot as
+// the same absolute name, so every key is folded to lower case and stripped of
+// one trailing dot on write, read and load: two sources spelling the same host
+// differently must resolve to one entry, not two. The prober strips the dot
+// from a pinned server for resolver lookup, so this fold is also what keeps the
+// adapter's dial spelling and the raw entry's dotted host one identity.
 package geoblock
 
 import (
@@ -20,8 +23,8 @@ import (
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite" (works with CGO_ENABLED=0)
 )
 
-// Store is a TTL blocklist keyed by the lowercased node host (server), backed
-// by SQLite.
+// Store is a TTL blocklist keyed by the lowercased node host (server) with one
+// trailing dot stripped, backed by SQLite.
 type Store struct {
 	db  *sql.DB
 	ttl time.Duration
@@ -77,10 +80,11 @@ func (s *Store) load() error {
 			return fmt.Errorf("geoblock scan: %w", scanErr)
 		}
 		// Rows written before the keys were normalised keep their original
-		// casing, so two of them can fold onto one key here; the later expiry
-		// wins, which keeps the merge independent of row order. Their
-		// mixed-case rows are never refreshed again and age out under the TTL.
-		key := strings.ToLower(host)
+		// casing and dotted spelling, so several of them can fold onto one key
+		// here; the later expiry wins, which keeps the merge independent of
+		// row order. Those rows are never refreshed again and age out under the
+		// TTL.
+		key := hostKey(host)
 		if exp > s.blocked[key] {
 			s.blocked[key] = exp
 		}
@@ -91,13 +95,20 @@ func (s *Store) load() error {
 	return nil
 }
 
+// hostKey folds the two spellings of one DNS name into the store's key:
+// lowercase, with one trailing dot stripped.
+func hostKey(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
 // Blocked reports whether host is currently blocked (present and not expired).
-// The lookup is case-insensitive.
+// The lookup is case-insensitive and folds one trailing dot, so a dotted name
+// matches the undotted spelling the prober records.
 func (s *Store) Blocked(host string) bool {
 	if host == "" {
 		return false
 	}
-	key := strings.ToLower(host)
+	key := hostKey(host)
 	s.mu.RLock()
 	exp, ok := s.blocked[key]
 	s.mu.RUnlock()
@@ -105,16 +116,16 @@ func (s *Store) Blocked(host string) bool {
 }
 
 // Block records host as blocked until now+ttl (upsert; refreshes the expiry).
-// The key is the bare lowercased host and nothing else, so one entry evicts
-// every node sharing that hostname -- other ports, other sources, possibly a
-// different endpoint behind a CDN name -- for the whole TTL. The stable
-// worker's apiFilter is the only writer and spells out that blast radius at
-// the call site.
+// The key is the bare lowercased, dot-folded host and nothing else, so one
+// entry evicts every node sharing that hostname -- other ports, other sources,
+// possibly a different endpoint behind the same CDN name -- for the whole TTL.
+// The stable worker's apiFilter is the only writer and spells out that blast
+// radius at the call site.
 func (s *Store) Block(host string) error {
 	if host == "" {
 		return nil
 	}
-	key := strings.ToLower(host)
+	key := hostKey(host)
 	exp := time.Now().Add(s.ttl).UnixNano()
 	s.mu.Lock()
 	s.blocked[key] = exp
