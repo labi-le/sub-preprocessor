@@ -22,6 +22,7 @@ import (
 
 	"domains.lst/sub-preprocessor/internal/config"
 	"domains.lst/sub-preprocessor/internal/fetch"
+	"domains.lst/sub-preprocessor/internal/filter"
 	"domains.lst/sub-preprocessor/internal/geofeed"
 	"domains.lst/sub-preprocessor/internal/preprocess"
 	"domains.lst/sub-preprocessor/internal/stable"
@@ -996,7 +997,7 @@ func TestReconfigureLeavesCycleInFlightIntact(t *testing.T) {
 	// Reload arrives mid-probe, dropping a source.
 	spec := testCheckerSpec(prober)
 	spec.Sources = spec.Sources[:1]
-	c.Reconfigure(spec)
+	c.Reconfigure(spec, filterer)
 	close(prober.release)
 
 	if err := <-done; err != nil {
@@ -1008,6 +1009,76 @@ func TestReconfigureLeavesCycleInFlightIntact(t *testing.T) {
 	}
 	if snap.Stats.SourcesTotal != 2 {
 		t.Fatalf("SourcesTotal = %d, want 2: the cycle must report the spec it started with", snap.Stats.SourcesTotal)
+	}
+}
+
+// generationFilterer records the deny-set of the spec that drove it, so a test
+// can prove which configuration generation a cycle used.
+type generationFilterer struct {
+	calls  int
+	denied filter.CountrySet
+}
+
+func (f *generationFilterer) FilterNodes(
+	_ context.Context, req preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	f.calls++
+	f.denied = req.DeniedCountries
+
+	return sourceBody("", "vless://u@192.0.2.1:443#alpha-001\n").Nodes, preprocess.Stats{Total: 1, Kept: 1}, nil
+}
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (f *generationFilterer) Annotator() preprocess.Annotator { return nil }
+
+// TestReconfigureSwapsOneGeneration: the processor is part of the published
+// spec, so a reload landing mid-cycle leaves the in-flight cycle on the pair it
+// started with and the next cycle reads the complete new pair. A cycle that
+// mixed the two would pair one generation's deny-set with another's lookup and
+// filter chain.
+func TestReconfigureSwapsOneGeneration(t *testing.T) {
+	t.Parallel()
+
+	oldF := &generationFilterer{}
+	newF := &generationFilterer{}
+	blocking := &blockingProber{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		res:     map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}},
+	}
+	oldSpec := testCheckerSpec(blocking)
+	oldSpec.Sources = oldSpec.Sources[:1]
+	oldSpec.Denied = filter.ParseAllowed("RU")
+	c := stable.NewChecker(oldSpec, func() stable.Filterer { return oldF }, nil, nil, stable.NewHolder(), "", zerolog.Nop(), nil)
+
+	done := make(chan error, 1)
+	go func() { done <- c.RunOnce(context.Background()) }()
+	<-blocking.entered
+
+	newSpec := testCheckerSpec(&fakeProber{res: map[string]stable.ProbeResult{"alpha-001": {Successes: 5, MeanMs: 100}}})
+	newSpec.Sources = oldSpec.Sources
+	newSpec.Denied = filter.ParseAllowed("US")
+	c.Reconfigure(newSpec, newF)
+	close(blocking.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("cycle must complete despite the reload: %v", err)
+	}
+	if oldF.calls != 1 || newF.calls != 0 {
+		t.Fatalf("in-flight cycle filterer calls: old=%d new=%d, want old=1 new=0", oldF.calls, newF.calls)
+	}
+	if !oldF.denied.Has(geofeed.CountryCode{'R', 'U'}) {
+		t.Fatalf("in-flight cycle used the old processor with the new deny-set")
+	}
+
+	if err := c.RunOnce(context.Background()); err != nil {
+		t.Fatalf("next cycle: %v", err)
+	}
+	if newF.calls != 1 {
+		t.Fatalf("next cycle filterer calls: new=%d, want 1", newF.calls)
+	}
+	if !newF.denied.Has(geofeed.CountryCode{'U', 'S'}) {
+		t.Fatalf("next cycle used the new processor with the old deny-set")
 	}
 }
 
@@ -1061,7 +1132,7 @@ func TestReconfigureAppliesIntervalWhileIdle(t *testing.T) {
 
 	shortened := testCheckerSpec(prober)
 	shortened.Interval = 10 * time.Millisecond
-	c.Reconfigure(shortened)
+	c.Reconfigure(shortened, filterer)
 
 	select {
 	case <-prober.calls:
@@ -1689,7 +1760,9 @@ func TestProbedAdaptersClosedOnceWhenNothingSurvives(t *testing.T) {
 func TestCheckerDeadCacheReProbesWhenResolvedAddressChanges(t *testing.T) {
 	t.Parallel()
 
-	filterer := fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
+	// A pointer: the checker resolves the processor once at construction, so
+	// the test mutates the same value the published generation carries.
+	filterer := &fakeFilterer{bodies: map[fetch.SubscriptionURL]string{
 		"https://alpha.example/sub": "vless://u@dead.example:443#a\n",
 		"https://beta.example/sub":  "vless://u@192.0.2.2:443#b\n",
 	}}

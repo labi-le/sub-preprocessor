@@ -49,6 +49,19 @@ func (emptyFilterer) FilterNodes(
 //nolint:ireturn // implements stable.Filterer; handing out the interface is the point
 func (emptyFilterer) Annotator() preprocess.Annotator { return nil }
 
+// stubFilterer is an emptyFilterer with an identity, so a test can prove which
+// processor generation the worker published.
+type stubFilterer struct{ tag string }
+
+func (stubFilterer) FilterNodes(
+	context.Context, preprocess.FilterRequest,
+) ([]preprocess.NodeResult, preprocess.Stats, error) {
+	return nil, preprocess.Stats{}, nil
+}
+
+//nolint:ireturn // implements stable.Filterer; handing out the interface is the point
+func (stubFilterer) Annotator() preprocess.Annotator { return nil }
+
 // The interval is fixed: every caller wants a cycle that never fires a second
 // time on its own, so the test drives Apply/Reconfigure rather than the clock.
 func testControllerConfig(sources ...string) config.Config {
@@ -99,6 +112,70 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 	}
 	if got := len(ctl.checker.spec.Load().Sources); got != 2 {
 		t.Fatalf("reconfigured worker sees %d sources, want 2", got)
+	}
+}
+
+// TestApplyPublishesProcessorWithPolicy: the spec published to the running
+// worker carries the processor the reloader just built, and the next Apply
+// replaces both together. A worker that resolved the processor separately could
+// pair one generation's deny-set with another's filter chain.
+func TestApplyPublishesProcessorWithPolicy(t *testing.T) {
+	t.Parallel()
+
+	proc := stubFilterer{tag: "first"}
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return proc },
+		nil, nil, "", zerolog.Nop(), nil)
+	defer ctl.Stop()
+
+	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	if got := ctl.checker.spec.Load().Filterer; got != proc {
+		t.Fatalf("published filterer = %v, want the one the getter returned", got)
+	}
+
+	next := stubFilterer{tag: "second"}
+	proc = next
+	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	spec := ctl.checker.spec.Load()
+	if spec.Filterer != next {
+		t.Fatal("reconfigured spec must carry the replacement processor")
+	}
+	if got := len(spec.Sources); got != 2 {
+		t.Fatalf("reconfigured worker sees %d sources, want 2", got)
+	}
+}
+
+// TestUseFiltererKeepsPolicy: a processor-only swap copies the live spec
+// forward, so the published generation keeps its policy and only changes the
+// processor it is paired with.
+func TestUseFiltererKeepsPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return stubFilterer{tag: "first"} },
+		nil, nil, "", zerolog.Nop(), nil)
+	defer ctl.Stop()
+
+	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	before := ctl.checker.spec.Load()
+
+	ctl.checker.UseFilterer(stubFilterer{tag: "second"})
+	after := ctl.checker.spec.Load()
+
+	if after == before {
+		t.Fatal("UseFilterer must publish a new generation")
+	}
+	if after.Filterer == before.Filterer {
+		t.Fatal("the published generation must carry the replacement processor")
+	}
+	if after.Interval != before.Interval || len(after.Sources) != len(before.Sources) || after.Denied != before.Denied {
+		t.Fatal("UseFilterer must keep the live policy")
 	}
 }
 

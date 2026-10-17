@@ -7,6 +7,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"domains.lst/sub-preprocessor/internal/config"
+	"domains.lst/sub-preprocessor/internal/preprocess"
 )
 
 // Controller owns the background subscription checker: it starts one on the
@@ -15,9 +16,10 @@ import (
 //
 // checker/cancel/done are mutated without locking because callers are
 // serialized: app.Run performs the first Apply before starting the config
-// watcher, every later Apply comes from that single watcher goroutine, and the
-// deferred Stop is registered so LIFO joins the watcher first. Calling Apply
-// from a second goroutine would race and could leave two workers running.
+// watcher, every later Apply and UseProcessor comes from that single watcher
+// goroutine, and the deferred Stop is registered so LIFO joins the watcher
+// first. Calling them from a second goroutine would race and could leave two
+// workers running.
 type Controller struct {
 	baseCtx  context.Context
 	holder   *Holder
@@ -56,15 +58,20 @@ func NewController(
 // The prober and node filters are built first, so a failed construction leaves
 // the previous configuration in place. A reload NEVER restarts a live worker:
 // it swaps the spec the next cycle reads, letting the cycle in flight run to
-// publication instead of being cancelled and losing its whole probe pass.
+// publication instead of being cancelled and losing its whole probe pass. The
+// processor the filterer getter resolves at this point becomes part of that
+// spec, so the policy and the processor built from the same config are
+// published as one generation.
 //
 // An empty merged source list is refused rather than obeyed once a worker runs.
 // Every source of this deployment comes from an overlay, so an empty list is
 // nearly always a missing or truncated sources.yaml/private.yaml, and stopping
 // the worker on it would cancel the cycle in flight and freeze /stable.txt on
 // its last publication with nothing behind it. Keeping the previous spec live
-// costs a stale source list until the config is fixed, and a deliberate disable
-// is a restart (or an explicitly empty list at startup, which never starts one).
+// -- processor included, so no cycle runs with this config's processor and the
+// older policy -- costs a stale source list until the config is fixed, and a
+// deliberate disable is a restart (or an explicitly empty list at startup,
+// which never starts one).
 func (c *Controller) Apply(cfg config.Config) error {
 	if !cfg.SubscriptionsEnabled() {
 		if c.checker != nil {
@@ -128,7 +135,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	}
 
 	if c.checker != nil {
-		c.checker.Reconfigure(spec)
+		c.checker.Reconfigure(spec, c.filterer())
 		c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).
 			Msg("subscription checker reconfigured; the new settings apply from its next scheduled cycle")
 
@@ -148,6 +155,18 @@ func (c *Controller) Apply(cfg config.Config) error {
 	c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).Msg("subscription checker started")
 
 	return nil
+}
+
+// UseProcessor publishes p for the next cycle without rebuilding the worker
+// policy, for a reload that changed only processor-owned settings (geo
+// sources, resolvers, the cidr allow-list) and never went through Apply. The
+// swap still lands as a whole generation: the live spec is copied forward with
+// the new processor, so the next cycle reads one coherent pair.
+func (c *Controller) UseProcessor(p *preprocess.Processor) {
+	if c.checker == nil {
+		return
+	}
+	c.checker.UseFilterer(p)
 }
 
 // resolveGeminiKey returns the key an ARMED gemini gate will check with, or an

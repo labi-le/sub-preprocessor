@@ -439,10 +439,12 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 }
 
 // fakeApplier implements reload.Applier: the first `failures` Apply calls
-// error, later ones succeed; calls counts every invocation.
+// error, later ones succeed; calls counts every invocation, used records every
+// processor published outside Apply.
 type fakeApplier struct {
 	calls    int
 	failures int
+	used     []*preprocess.Processor
 }
 
 func (f *fakeApplier) Apply(config.Config) error {
@@ -452,6 +454,8 @@ func (f *fakeApplier) Apply(config.Config) error {
 	}
 	return nil
 }
+
+func (f *fakeApplier) UseProcessor(p *preprocess.Processor) { f.used = append(f.used, p) }
 
 // TestReloadRetriesApplyAfterFailure: a failed ctl.Apply must not commit the
 // new config as current — re-saving the identical file must diff as changed
@@ -467,6 +471,9 @@ func TestReloadRetriesApplyAfterFailure(t *testing.T) {
 	if fake.calls != 1 {
 		t.Fatalf("first reload: expected 1 Apply call, got %d", fake.calls)
 	}
+	if len(fake.used) != 1 {
+		t.Fatalf("failed Apply must still publish the rebuilt processor once, got %d", len(fake.used))
+	}
 
 	r.Reload(t.Context()) // identical file re-saved after the failure
 	if fake.calls != 2 {
@@ -476,6 +483,34 @@ func TestReloadRetriesApplyAfterFailure(t *testing.T) {
 	r.Reload(t.Context()) // committed now; identical config is a no-op
 	if fake.calls != 2 {
 		t.Fatalf("identical config after successful Apply must not re-apply, got %d calls", fake.calls)
+	}
+	if len(fake.used) != 1 {
+		t.Fatalf("a successful Apply publishes the processor with the policy; got %d processor-only swaps", len(fake.used))
+	}
+}
+
+// TestReloadPublishesProcessorWhenPolicyUnchanged: a reload whose change is
+// processor-owned (resolver here) must reach the worker as a processor-only
+// generation — UseProcessor, never Apply, which would rebuild the prober.
+func TestReloadPublishesProcessorWhenPolicyUnchanged(t *testing.T) {
+	fake := &fakeApplier{}
+	r, holder, path := setupReloader(t, zerolog.Nop(), time.Now().Add(-time.Hour), fake)
+
+	before := holder.Load()
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
+	r.Reload(t.Context())
+
+	if fake.calls != 0 {
+		t.Fatalf("processor-only change must not re-apply the subscriptions config, got %d Apply calls", fake.calls)
+	}
+	if len(fake.used) != 1 {
+		t.Fatalf("processor-only change must publish the rebuilt processor once, got %d", len(fake.used))
+	}
+	if fake.used[0] != holder.Load() {
+		t.Fatal("the published processor must be the one the holder records")
+	}
+	if fake.used[0] == before {
+		t.Fatal("the published processor must be the rebuilt one, not the previous")
 	}
 }
 
