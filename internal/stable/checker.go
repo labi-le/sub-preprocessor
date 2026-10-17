@@ -44,6 +44,14 @@ type boundProber interface {
 	ProbeBound(ctx context.Context, entries []Entry) (map[string]ProbeResult, error)
 }
 
+// bindingReleaser is the other half of boundProber: ProbeBound leaves the
+// resolver binding installed because the egress stage reuses the adapters it
+// retained, and the checker restores it after the last consumer. A prober that
+// does not bind has nothing to release and does not implement it.
+type bindingReleaser interface {
+	ReleaseBindings()
+}
+
 // probedAdapterSource is the optional half of a Prober that keeps the adapter
 // objects its last successful Probe built alive past the call, so the egress
 // stage can consume them by label instead of converting and re-parsing the
@@ -235,9 +243,10 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	// below. Take them before any further exit; the deferred close pays
 	// exactly once whatever path the rest of the cycle takes — cancellation,
 	// zero survivors, an egress stage that never runs, or a normal
-	// publication.
+	// publication. ProbeBound keeps its resolver binding installed for those
+	// same adapters, so this defer is where it is released too.
 	probed := takeProbedAdapters(spec.Prober)
-	defer closeProxies(probed)
+	defer closeProbed(probed, spec.Prober)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled after probe; keeping previous stable list")
 		c.reportError()
@@ -855,6 +864,22 @@ func probeEntries(ctx context.Context, p Prober, entries []Entry) (map[string]Pr
 	return p.Probe(ctx, entriesPayload(entries))
 }
 
+// closeProbed closes the adapters the cycle took from the prober and restores
+// a bound prober's resolver table. The egress stage dials those adapters, so
+// the binding has to outlive ProbeBound and ends here with the last consumer.
+func closeProbed(proxies []mihomo.Proxy, p Prober) {
+	closeProxies(proxies)
+	releaseBindings(p)
+}
+
+// releaseBindings restores a bound prober's resolver table once the cycle is
+// done with its retained adapters. A prober without the capability is a no-op.
+func releaseBindings(p Prober) {
+	if r, ok := p.(bindingReleaser); ok {
+		r.ReleaseBindings()
+	}
+}
+
 // recordDead caches nodes whose probe proved them dead so later cycles skip
 // them.
 //
@@ -917,6 +942,13 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals
 			continue
 		}
 		if r.Successes == 0 {
+			// A bound probe says whether its URL test actually reached the
+			// entry's selected address. When it could not (conflicting
+			// selections for one hostname), the failure belongs to whatever
+			// address the resolver picked and must not condemn Entry.IP.
+			if r.Unbound {
+				continue
+			}
 			_ = c.dead.Block(e.Addr, e.IP)
 			blocked++
 		}

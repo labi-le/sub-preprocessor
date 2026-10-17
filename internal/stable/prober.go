@@ -74,6 +74,10 @@ type MihomoProber struct {
 	// that errors closes what it retained, and the next Probe closes anything
 	// a previous call left untaken.
 	probed []mihomo.Proxy
+	// bindings restores the resolver host table ProbeBound installed. It stays
+	// live past the call because the egress stage reuses the retained adapters,
+	// and is cleared by ReleaseBindings (or the next Probe, defensively).
+	bindings func()
 	// traceEndpoint overrides the cdn-cgi/trace URL for tests, which point it
 	// at an httptest server. It is a field rather than a config key because
 	// the answer is only parseable from Cloudflare (see cloudflareTraceURL);
@@ -151,31 +155,62 @@ func betterProbe(a, b ProbeResult) bool {
 // computes (see probeNodes), and at the measured condemned share most of those
 // adapters would be built only to be thrown away unread.
 func (m *MihomoProber) Probe(ctx context.Context, payload []byte) (map[string]ProbeResult, error) {
+	m.releaseBindings()
+
 	return m.probe(ctx, payload, nil)
 }
 
 // ProbeBound probes entries with every dial bound to the address the IP stage
-// selected for each one. The bindings go into mihomo's resolver host table for
-// the duration of the call, so the adapter still carries the original server
-// name — TLS SNI and transport Host headers derived from it stay intact — while
-// every lookup for that name returns the selected address.
+// selected for each one. The bindings go into mihomo's resolver host table and
+// stay there past the return: the checker's egress stage reuses the retained
+// adapters, so a URL test that succeeded under the binding must not be followed
+// by an API or trace check resolving the hostname normally. ReleaseBindings
+// restores the table once the last consumer is done; the next Probe releases it
+// defensively as well.
 //
 // Without the binding the pre-check and the URL test resolve the URI hostname
 // independently. A refusal or failed round from an address the IP stage did not
 // select is then recorded by recordDead under the selected address, which no
 // path tested, and a live node stays skipped for the whole dead-cache TTL.
+//
+// Two entries on one hostname can select different addresses — one global host
+// table cannot represent that. Such a hostname is left unpinned and its
+// URL-test results are marked Unbound, so their failures are never cached
+// against either entry's IP; the per-entry pre-check still dials the selected
+// address and can condemn it.
 func (m *MihomoProber) ProbeBound(ctx context.Context, entries []Entry) (map[string]ProbeResult, error) {
-	pins := selectedIPs(entries)
-	restore := pinHosts(pins)
-	defer restore()
+	m.releaseBindings()
+	b := newBinding(entries)
+	m.bindings = pinHosts(b.hosts)
+	res, err := m.probe(ctx, entriesPayload(entries), b)
+	if err != nil {
+		m.releaseBindings()
 
-	return m.probe(ctx, entriesPayload(entries), pins)
+		return nil, err
+	}
+
+	return res, nil
 }
 
-// probe is the shared implementation. pins is empty for an unbound call, which
+// ReleaseBindings restores mihomo's resolver host table after ProbeBound. The
+// checker calls it once its egress stage has finished with the retained
+// adapters; a prober that never bound has nothing to release.
+func (m *MihomoProber) ReleaseBindings() {
+	m.releaseBindings()
+}
+
+func (m *MihomoProber) releaseBindings() {
+	if m.bindings == nil {
+		return
+	}
+	m.bindings()
+	m.bindings = nil
+}
+
+// probe is the shared implementation. b is nil for an unbound call, which
 // leaves both the pre-check dial and mihomo's resolver at their normal
 // behaviour.
-func (m *MihomoProber) probe(ctx context.Context, payload []byte, pins map[string]netip.Addr) (map[string]ProbeResult, error) {
+func (m *MihomoProber) probe(ctx context.Context, payload []byte, b *binding) (map[string]ProbeResult, error) {
 	// Never last cycle's verdict: a Probe that fails before the pre-check must
 	// report PrecheckAbsent, not the previous pool's numbers. The parse-refusal
 	// account resets beside it: a stale one would attribute a cycle whose parse
@@ -187,7 +222,7 @@ func (m *MihomoProber) probe(ctx context.Context, payload []byte, pins map[strin
 	// so none of it can be in flight.
 	m.releaseProbed()
 	opLog := log.Op(m.logger, "stable.Probe")
-	nodes, live, condemned, err := m.probeSet(ctx, opLog, payload, pins)
+	nodes, live, condemned, err := m.probeSet(ctx, opLog, payload, b)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +322,7 @@ func foldProbeResults(nodes []probeNode, accs []delayAcc) map[string]ProbeResult
 			// prober without the account reads the absence as StageUnknown.
 			continue
 		}
-		r := ProbeResult{Successes: int(a.succ), Stage: a.stage}
+		r := ProbeResult{Successes: int(a.succ), Stage: a.stage, Unbound: !n.bound}
 		if a.succ > 0 {
 			r.MeanMs = int(a.sum / a.succ)
 		}
@@ -338,6 +373,15 @@ type probeNode struct {
 	addr      string
 	proxy     mihomo.Proxy
 	tcpServer bool
+	// bound reports whether this position's failure is attributable to the
+	// entry's selected address: a live position only when its hostname pin
+	// could be installed (or the server is a literal IP), a condemned position
+	// when the pre-check dialled the selected address. An unbound Probe sets
+	// it true so its results keep the pre-binding attribution.
+	bound bool
+	// precheckBound is what probeAddr proved: the pre-check dials the IP
+	// stage's address rather than the mapping's hostname.
+	precheckBound bool
 }
 
 // probeNodes reads the pre-check's whole input off the raw mappings, which is
@@ -353,10 +397,11 @@ type probeNode struct {
 // with every mapping TCP-typed, 601 -> 481 at a 20% hysteria2 share, 601 -> 301
 // at 50%.
 //
-// pins is non-empty only for a bound probe (see ProbeBound): then the address
-// this position would dial is the IP stage's selection, not the mapping's
-// hostname, so the pre-check and the URL test cannot disagree about the
-// endpoint.
+// b is non-nil only for a bound probe (see ProbeBound): then the address this
+// position would dial is the IP stage's selection, not the mapping's hostname,
+// so the pre-check and the URL test cannot disagree about the endpoint. Where
+// two entries on one hostname selected different addresses the URL test cannot
+// be pinned and the position is marked unbound (see binding).
 //
 // The label a position folds under is NOT derived here: the fold reads it only
 // where no adapter was built, which is exactly the pre-check's condemned set,
@@ -367,15 +412,19 @@ type probeNode struct {
 // result-map miss, is counted among the unconvertible refusals and is re-judged
 // next cycle, the one dial the dead-cache skip would have saved (recordDead no
 // longer caches an attributed miss, for the shadowing reasons its doc gives).
-func probeNodes(mappings []map[string]any, pins map[string]netip.Addr) []probeNode {
+func probeNodes(mappings []map[string]any, b *binding) []probeNode {
 	nodes := make([]probeNode, len(mappings))
 	for i, mapping := range mappings {
 		typ, _ := mapping["type"].(string)
 		_, named := mapping["name"].(string)
+		if named {
+			server, _ := mapping["server"].(string)
+			nodes[i].bound = b == nil || b.urlBound(server)
+		}
 		if !named || !dialsServerOverTCP(typ, mapping) {
 			continue
 		}
-		nodes[i].addr, nodes[i].tcpServer = probeAddr(mapping, pins)
+		nodes[i].addr, nodes[i].tcpServer, nodes[i].precheckBound = probeAddr(mapping, b)
 	}
 
 	return nodes
@@ -384,61 +433,159 @@ func probeNodes(mappings []map[string]any, pins map[string]netip.Addr) []probeNo
 // probeAddr answers what Addr() would for every type dialsServerOverTCP lists
 // (adapter/outbound/vless.go:452, vmess.go:379, trojan.go:249,
 // shadowsocks.go:280, shadowsocksr.go:116, socks5.go:193, http.go:172,
-// anytls.go:87), except that a pinned hostname answers the selected address:
-// the pre-check must dial the address the IP stage chose, not whatever the
-// resolver would pick now.
-func probeAddr(mapping map[string]any, pins map[string]netip.Addr) (string, bool) {
+// anytls.go:87), except that a selected entry answers the IP stage's address:
+// the pre-check must dial the address that was chosen, not whatever the
+// resolver would pick now. The third return reports whether that substitution
+// happened.
+func probeAddr(mapping map[string]any, b *binding) (addr string, addressable, bound bool) {
 	server, ok := mapping["server"].(string)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	port, ok := mappingPort(mapping["port"])
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	if ip, pinned := pins[pinKey(server)]; pinned {
-		server = ip.String()
-	}
+	addr, bound = b.precheckAddr(server, port)
 
-	return net.JoinHostPort(server, strconv.Itoa(port)), true
+	return addr, true, bound
 }
 
 // pinKey normalises the hostname both sides of the binding agree on: DNS names
-// are case-insensitive, and a trailing dot names the same absolute name but is
-// refused by mihomo's hosts trie, so leaving it on would pin the pre-check
-// while the URL test resolved normally.
+// are case-insensitive, and a trailing dot names the same absolute name.
 func pinKey(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
-// selectedIPs maps each entry's hostname to the address the IP stage selected
-// for it. Literal-IP servers are skipped: they already dial that address.
-//
-// Keyed by hostname because that is what a mapping server and a resolver
-// lookup both carry. Merge dedupes by server:port and the IP stage resolves per
-// server, so one hostname cannot carry two selected addresses in one cycle.
-func selectedIPs(entries []Entry) map[string]netip.Addr {
-	pins := make(map[string]netip.Addr, len(entries))
+// binding is the address selection one ProbeBound call carries. mihomo pins
+// resolution through one process-global hostname table, so only a hostname
+// whose entries agree on one address can be installed there; a hostname whose
+// entries disagree is marked unbound and its URL-test failures are not
+// attributed to any entry's IP (ProbeResult.Unbound).
+type binding struct {
+	// byAddr maps a normalised server:port to the IP stage's selection, which
+	// is what the per-entry pre-check dials.
+	byAddr map[string]netip.Addr
+	// hosts holds the hostnames one resolver pin can represent.
+	hosts map[string]netip.Addr
+	// unbound holds hostnames whose entries selected different addresses.
+	unbound map[string]struct{}
+	// addrUnbound holds server:port keys whose entries selected different
+	// addresses, so the pre-check cannot attribute a dial to either.
+	addrUnbound map[string]struct{}
+}
+
+func newBinding(entries []Entry) *binding {
+	b := &binding{
+		byAddr:      make(map[string]netip.Addr, len(entries)),
+		hosts:       make(map[string]netip.Addr, len(entries)),
+		unbound:     make(map[string]struct{}),
+		addrUnbound: make(map[string]struct{}),
+	}
 	for _, e := range entries {
-		host, _, err := net.SplitHostPort(e.Addr)
+		host, port, err := net.SplitHostPort(e.Addr)
 		if err != nil || !e.IP.IsValid() {
 			continue
+		}
+		key := pinKey(host)
+		addrKey := net.JoinHostPort(key, port)
+		if prev, ok := b.byAddr[addrKey]; ok {
+			if prev != e.IP {
+				delete(b.byAddr, addrKey)
+				b.addrUnbound[addrKey] = struct{}{}
+			}
+		} else if _, conflict := b.addrUnbound[addrKey]; !conflict {
+			b.byAddr[addrKey] = e.IP
 		}
 		if _, literal := netip.ParseAddr(host); literal == nil {
 			continue
 		}
-		pins[pinKey(host)] = e.IP
+		if prev, ok := b.hosts[key]; ok {
+			if prev != e.IP {
+				delete(b.hosts, key)
+				b.unbound[key] = struct{}{}
+			}
+
+			continue
+		}
+		if _, conflict := b.unbound[key]; !conflict {
+			b.hosts[key] = e.IP
+		}
 	}
 
-	return pins
+	return b
+}
+
+// precheckAddr answers the address the pre-check dials for one mapping: the
+// selected IP when the entry carries one (bound), otherwise the mapping's own
+// server:port.
+func (b *binding) precheckAddr(server string, port int) (addr string, bound bool) {
+	if b == nil {
+		return net.JoinHostPort(server, strconv.Itoa(port)), false
+	}
+	portStr := strconv.Itoa(port)
+	addrKey := net.JoinHostPort(pinKey(server), portStr)
+	if _, conflict := b.addrUnbound[addrKey]; conflict {
+		return net.JoinHostPort(server, portStr), false
+	}
+	if ip, ok := b.byAddr[addrKey]; ok {
+		return net.JoinHostPort(ip.String(), portStr), true
+	}
+
+	return net.JoinHostPort(server, portStr), false
+}
+
+// urlBound reports whether a URL test built from this mapping dials the entry's
+// selected address. Literal IPs always do; a hostname does only when its
+// entries agreed and the pin could be installed. A nil binding is an unbound
+// Probe, which keeps the historical attribution.
+func (b *binding) urlBound(server string) bool {
+	if b == nil {
+		return true
+	}
+	if _, literal := netip.ParseAddr(server); literal == nil {
+		return true
+	}
+	_, ok := b.hosts[pinKey(server)]
+
+	return ok
+}
+
+// normalisePinnedServers makes a trailing-dot server match the resolver host
+// table, which refuses a dotted name, while keeping the configured hostname in
+// the SNI fields mihomo derives from `server` when they are absent. Only
+// hostnames with an installable pin are touched: an unbound mapping is left
+// exactly as the converter built it.
+func normalisePinnedServers(mappings []map[string]any, b *binding) {
+	if b == nil || len(b.hosts) == 0 {
+		return
+	}
+	for _, mapping := range mappings {
+		server, ok := mapping["server"].(string)
+		if !ok || !strings.HasSuffix(server, ".") {
+			continue
+		}
+		if _, pinned := b.hosts[pinKey(server)]; !pinned {
+			continue
+		}
+		mapping["server"] = strings.TrimSuffix(server, ".")
+		if _, present := mapping["servername"]; !present {
+			mapping["servername"] = server
+		}
+		if _, present := mapping["sni"]; !present {
+			mapping["sni"] = server
+		}
+	}
 }
 
 // pinHosts installs pins into mihomo's resolver host table and returns the
 // restore function. That table is process-global and read concurrently by the
-// URL-test goroutines, so every write happens before they start and the restore
-// after they finish; cycles never overlap, so no other reader can observe an
-// intermediate table. A fresh tree replaces the old one because DomainTrie has
-// no removal; the previous table is put back on return.
+// URL-test goroutines and, after the probe, by the retained adapters the egress
+// stage dials; every write happens before those readers start and the restore
+// only after the last consumer (see ReleaseBindings). Cycles never overlap, so
+// no other reader can observe an intermediate table. A fresh tree replaces the
+// old one because DomainTrie has no removal; the previous table is put back on
+// return.
 func pinHosts(pins map[string]netip.Addr) (restore func()) {
 	if len(pins) == 0 {
 		return func() {}
@@ -496,14 +643,22 @@ func mappingPort(v any) (int, bool) {
 // production shape holding them across the rounds would pin megabytes of
 // decoded share links for the whole probe.
 func (m *MihomoProber) probeSet(
-	ctx context.Context, opLog zerolog.Logger, payload []byte, pins map[string]netip.Addr,
+	ctx context.Context, opLog zerolog.Logger, payload []byte, b *binding,
 ) (nodes []probeNode, live, condemned []int, err error) {
 	mappings, err := convert.ConvertsV2Ray(payload)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("convert payload: %w", err)
 	}
-	nodes = probeNodes(mappings, pins)
+	normalisePinnedServers(mappings, b)
+	nodes = probeNodes(mappings, b)
 	live, condemned = m.filterReachable(ctx, opLog, nodes)
+	if b != nil {
+		// A condemned position was judged by the pre-check's dial, which used
+		// the selected address even where the URL test could not be pinned.
+		for _, i := range condemned {
+			nodes[i].bound = nodes[i].precheckBound
+		}
+	}
 	// The fold reads a position's label only where no adapter exists, which is
 	// exactly the condemned set; derive it here while the mappings are in
 	// frame (they are gone by the fold). The parse below builds nothing for a

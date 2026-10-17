@@ -57,6 +57,14 @@ type ProbeResult struct {
 	Successes int
 	MeanMs    int
 	Stage     ProbeStage
+	// Unbound reports that this entry's URL test could not be dialled at the
+	// address the IP stage selected for it: two entries on one hostname carried
+	// different selections, and mihomo's resolver host table cannot hold both.
+	// A zero-success result then says nothing about Entry.IP, so recordDead
+	// must not write it (a pre-check condemnation is still bound; see
+	// probeNodes). Zero for a prober that does not bind at all, where the old
+	// attribution applies.
+	Unbound bool
 }
 
 // Survivor is an entry that passed selection, with its mean delay, whatever the

@@ -259,6 +259,51 @@ func BenchmarkProbeParseCondemned(b *testing.B) {
 	}
 }
 
+// BenchmarkProbeParseBound prices ProbeBound's binding preamble over
+// BenchmarkProbeParseCondemned: the hostname→address map and its conflict sets,
+// trailing-dot normalisation, the resolver-host trie, and the per-mapping
+// pre-check lookup. Servers are hostnames, so every position exercises the
+// lookup the nil-binding benchmark never does. The condemned set is taken by
+// stride, exactly as in the unbound benchmark.
+func BenchmarkProbeParseBound(b *testing.B) {
+	const n = 300
+	entries := make([]Entry, n)
+	for i := range n {
+		label := fmt.Sprintf("alpha-%03d", i)
+		host := fmt.Sprintf("h%03d.example", i)
+		entries[i] = Entry{
+			Label: label,
+			Raw:   benchVlessLine(host, "443", label),
+			Addr:  host + ":443",
+			IP:    netip.AddrFrom4([4]byte{203, 0, byte(i / 256), byte(i % 256)}),
+		}
+	}
+	payload := entriesPayload(entries)
+	prober := benchParseProber(b)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		mappings, err := convert.ConvertsV2Ray(payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+		bnd := newBinding(entries)
+		restore := pinHosts(bnd.hosts)
+		normalisePinnedServers(mappings, bnd)
+		nodes := probeNodes(mappings, bnd)
+		live := benchSpareEvery(len(nodes), benchCondemnedPercent)
+		live = prober.parseLive(mappings, nodes, live)
+		restore()
+		if len(live) == 0 {
+			b.Fatal("every spared position failed to parse")
+		}
+		benchProbeNodeSink = nodes
+		for _, i := range live {
+			_ = nodes[i].proxy.Close()
+		}
+	}
+}
+
 // benchCondemnedPercent is the NODE share the pre-check condemns on a healthy
 // egress: stable_probe_outcome_nodes{stage="condemned"} over
 // stable_probed_nodes. NOT precheckBreakerPercent's 58.9%, which is

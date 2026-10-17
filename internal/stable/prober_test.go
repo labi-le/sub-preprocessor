@@ -99,7 +99,7 @@ func deadTCPAddr(t *testing.T) string {
 func probeNodesOf(pxs []mihomo.Proxy) []probeNode {
 	nodes := make([]probeNode, len(pxs))
 	for i, px := range pxs {
-		nodes[i] = probeNode{proxy: px}
+		nodes[i] = probeNode{proxy: px, bound: true}
 	}
 
 	return nodes
@@ -411,7 +411,7 @@ func TestProbeAddrReadsAnIntPortLikeTheAdapter(t *testing.T) {
 		"name": "int-port", "type": "vmess", "server": "203.0.113.12",
 		"port": 8443, "uuid": benchUUID, "alterId": 0, "cipher": "auto",
 	}
-	addr, addressable := probeAddr(mapping, nil)
+	addr, addressable, _ := probeAddr(mapping, nil)
 	if !addressable {
 		t.Fatal("probeAddr refused a mapping the adapter reads")
 	}
@@ -445,11 +445,11 @@ func TestProbeNodesKeepPositionsAcrossAnUnparsableNode(t *testing.T) {
 	// No labels: probeNodes leaves them empty, the fold derives them from the
 	// adapter or from the raw mapping of a condemned position (see probeNodes).
 	want := []probeNode{
-		{addr: addr, tcpServer: true},
-		{addr: addr, tcpServer: true},
+		{addr: addr, tcpServer: true, bound: true},
+		{addr: addr, tcpServer: true, bound: true},
 		// No endpoint: the pre-check will not dial this position, so probeNodes
 		// never derives one.
-		{},
+		{bound: true},
 	}
 	if len(nodes) != len(want) {
 		t.Fatalf("converted %d mappings, want %d", len(nodes), len(want))
