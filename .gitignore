@@ -37,6 +37,8 @@ Thumbs.db
 # Private config (untracked)
 config/private.yaml
 config/.github-token
+# Compose interpolation (CRAWLER_UID/CRAWLER_GID): deployment-specific
+/.env
 
 # Runtime state (untracked)
 config/.crawler-state.json

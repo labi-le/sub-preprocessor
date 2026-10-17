@@ -400,3 +400,88 @@ func TestMergeVmessLabelsSurviveArenaBlockBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// vlessBatch renders n parseable vless lines whose server:port is unique
+// within the batch: <prefix>-NNNN.example:443.
+func vlessBatch(prefix string, n int) []string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("vless://b831381d-6324-4d53-ad4f-8cda48b30811@%s-%04d.example:443#node", prefix, i)
+	}
+
+	return lines
+}
+
+// TestMergeBoundsMirroredReservation: a mirrored corpus must not reserve the
+// summed node count. Merge used to size both the membership map and the Entry
+// array at len(sum of sources), so eight copies of the same 2000 nodes
+// allocated for 16000 entries and kept 2000 of them. The reservation is
+// bounded by the largest source here because the later copies add no keys at
+// all; cap(entries) above that is the defect the growth path exists to avoid.
+func TestMergeBoundsMirroredReservation(t *testing.T) {
+	t.Parallel()
+
+	const unique = 2000
+	body := strings.Join(vlessBatch("mirror", unique), "\n")
+	bodies := make([]stable.SourceBody, 8)
+	for i := range bodies {
+		bodies[i] = sourceBody(fmt.Sprintf("copy%d", i), body)
+	}
+
+	entries := stable.Merge(bodies)
+
+	if len(entries) != unique {
+		t.Fatalf("got %d entries, want %d", len(entries), unique)
+	}
+	if got := cap(entries); got > unique {
+		t.Fatalf("cap(entries) = %d for %d merged nodes from %d input nodes; the reservation must not scale with the duplicated corpus", got, unique, unique*len(bodies))
+	}
+	for i, e := range entries {
+		if want := fmt.Sprintf("mirror-%04d.example:443", i); e.Addr != want {
+			t.Fatalf("entry %d: Addr = %q, want %q", i, e.Addr, want)
+		}
+	}
+}
+
+// TestMergeGrowsWithoutLosingDedupe walks past the first growth of both
+// containers. Merge now starts small and grows when a later source adds keys;
+// the membership map is rebuilt at the projected size, so a rebuild that
+// dropped a key would re-admit that key from a later source. gamma therefore
+// repeats nodes alpha and beta already claimed, and every one of them must
+// still be rejected after both growths. The labels also pin first-source-wins
+// numbering: duplicates do not consume a number.
+func TestMergeGrowsWithoutLosingDedupe(t *testing.T) {
+	t.Parallel()
+
+	alpha := vlessBatch("a", 2000)
+	beta := append(append([]string{}, alpha[:1000]...), vlessBatch("b", 1000)...)
+	gamma := append(append([]string{}, alpha[:500]...),
+		append(vlessBatch("b", 500), vlessBatch("c", 1000)...)...)
+
+	entries := stable.Merge([]stable.SourceBody{
+		sourceBody("alpha", strings.Join(alpha, "\n")),
+		sourceBody("beta", strings.Join(beta, "\n")),
+		sourceBody("gamma", strings.Join(gamma, "\n")),
+	})
+
+	type want struct{ label, addr string }
+	wants := make([]want, 0, 4000)
+	for i := range 2000 {
+		wants = append(wants, want{fmt.Sprintf("alpha-%03d", i+1), fmt.Sprintf("a-%04d.example:443", i)})
+	}
+	for i := range 1000 {
+		wants = append(wants, want{fmt.Sprintf("beta-%03d", i+1), fmt.Sprintf("b-%04d.example:443", i)})
+	}
+	for i := range 1000 {
+		wants = append(wants, want{fmt.Sprintf("gamma-%03d", i+1), fmt.Sprintf("c-%04d.example:443", i)})
+	}
+
+	if len(entries) != len(wants) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(wants))
+	}
+	for i, w := range wants {
+		if entries[i].Label != w.label || entries[i].Addr != w.addr {
+			t.Fatalf("entry %d: got Label %q Addr %q, want %q %q", i, entries[i].Label, entries[i].Addr, w.label, w.addr)
+		}
+	}
+}

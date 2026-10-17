@@ -13,19 +13,34 @@ import (
 // Applier hands a validated config to the stable subscription worker.
 // Implemented by *stable.Controller.
 type Applier interface {
-	Apply(cfg config.Config) error
+	// Apply stages cfg on the running worker and reports whether the worker's
+	// policy now comes from it. A refused config (no subscription sources)
+	// returns false with a nil error: the worker keeps its previous generation,
+	// and the caller must neither commit the config nor publish its processor.
+	Apply(cfg config.Config) (bool, error)
+	// UseProcessor publishes p as the processor the worker's next cycle reads
+	// without rebuilding the worker policy, which is what a reload that
+	// changed only processor-owned settings needs. It takes the concrete
+	// processor because that is what the reloader rebuilt; stable.Filterer is
+	// the worker-side view of the same value.
+	UseProcessor(p *preprocess.Processor)
 }
 
 // Reloader rebuilds the processing pipeline from a config file on demand and
-// atomically swaps it into the Holder the stable worker reads. On any load,
-// validation, or build error it logs the failure and keeps the previously
-// applied settings (the holder is never mutated on a failed reload).
+// publishes the replacement to the stable worker as one generation: the
+// processor and, when the worker policy changed, the spec travel together
+// through ctl, while the Holder records the rebuilt processor the controller
+// resolves for Apply. On any load, validation, or build error it logs the
+// failure and keeps the previously applied settings (the holder is never
+// mutated on a failed reload).
 //
-// currentCfg and currentProc track the last successfully applied state;
-// currentProcCfg records the config that BUILT currentProc (they diverge when
-// ctl.Apply fails: the processor swap stays, the config commit does not). All
-// three are mutated only from the single watcher goroutine that drives Reload,
-// so they need no additional locking.
+// currentCfg records the config whose policy the worker actually runs: it is
+// committed only after Apply reports the policy staged, so a REFUSED config
+// (empty source list) or a failed Apply leaves it on the previous one and the
+// next reload diffs against what is really running. currentProcCfg records the
+// config that BUILT currentProc; the two diverge when Apply fails or refuses.
+// All three are mutated only from the single watcher goroutine that drives
+// Reload, so they need no additional locking.
 type Reloader struct {
 	path           string
 	holder         *Holder
@@ -93,13 +108,13 @@ func (r *Reloader) carryLoadedState(opts *preprocess.Options, newCfg config.Conf
 }
 
 // Reload loads the config from disk and, if it changed and is valid, builds a
-// new Processor and atomically swaps it into the holder. Geofeed state (the
-// lookup, its load time and the retry schedule in flight) is carried over when
-// geofeed.sources are unchanged, avoiding a re-download; dbip/registry state is
-// carried the same way when its config block is unchanged, as is the cidr
-// allow-list when its filter entry is unchanged, as are the DNS and ASN
-// resolvers (with their caches) when resolver.*/geo.asn.* are unchanged.
-// Any error keeps the previously applied settings.
+// new Processor and publishes it with the worker policy it was built from.
+// Geofeed state (the lookup, its load time and the retry schedule in flight)
+// is carried over when geofeed.sources are unchanged, avoiding a re-download;
+// dbip/registry state is carried the same way when its config block is
+// unchanged, as is the cidr allow-list when its filter entry is unchanged, as
+// are the DNS and ASN resolvers (with their caches) when resolver.*/geo.asn.*
+// are unchanged. Any error keeps the previously applied settings.
 func (r *Reloader) Reload(ctx context.Context) {
 	newCfg, err := config.Load(r.path)
 	if err != nil {
@@ -173,11 +188,28 @@ func (r *Reloader) Reload(ctx context.Context) {
 		config.ProberChanged(r.currentCfg, newCfg) ||
 		config.AnnotateChanged(r.currentCfg, newCfg)
 	applied := true
-	if r.ctl != nil && subsAffected {
-		if applyErr := r.ctl.Apply(newCfg); applyErr != nil {
+	if r.ctl != nil {
+		if !subsAffected {
+			// Policy unchanged: swap only the processor, still as one
+			// generation, so a cycle can never pair the old deny-set with the
+			// new lookup.
+			r.ctl.UseProcessor(newProc)
+		} else if staged, applyErr := r.ctl.Apply(newCfg); applyErr != nil {
 			applied = false
 			r.logger.Error().Err(applyErr).
 				Msg("applying subscriptions config failed; stable worker keeps previous settings")
+			// The worker policy is not committed, but the rebuilt processor
+			// still reaches the worker: retaining it across a failed Apply is
+			// the documented tradeoff (see the Reloader doc), and the retry
+			// republishes the pair.
+			r.ctl.UseProcessor(newProc)
+		} else if !staged {
+			// Refused (no subscription sources): the worker keeps its previous
+			// generation. Publishing this config's processor would pair it with
+			// the older policy, so neither half is published and the config is
+			// not committed -- the next reload diffs against the policy that is
+			// actually running and retries the Apply.
+			applied = false
 		} else {
 			// Apply only swaps the checker's spec and pokes it; Run starts a
 			// cycle on the ticker alone, so the new settings are live from the

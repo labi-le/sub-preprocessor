@@ -130,3 +130,49 @@ func TestTidalCheckThroughNode(t *testing.T) {
 		t.Fatalf("CDN 403 must classify as blocked, not as an unclassifiable keep: %+v", o)
 	}
 }
+
+// TestTidalCheckDoesNotWaitForBody pins the status-only contract at the
+// through-node path: a 2xx whose headers arrive immediately but whose body
+// never does must be accepted as soon as the headers are read, not when the
+// request deadline expires. Reading the body here would hold a worker for the
+// full configured timeout (15s shipped) with no verdict still to learn.
+func TestTidalCheckDoesNotWaitForBody(t *testing.T) {
+	t.Parallel()
+
+	const timeout = 2 * time.Second
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Announce bytes that never follow, then flush the status line and
+		// headers. The client has its verdict at that point; only a body read
+		// keeps it waiting.
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	px := adapter.NewProxy(outbound.NewDirect())
+	m := &MihomoProber{logger: zerolog.Nop(), geo: config.GeoBlockConfig{
+		Tidal: config.TidalConfig{Endpoint: srv.URL, Timeout: timeout, Concurrency: 1},
+	}}
+
+	start := time.Now()
+	o, ok := m.TidalCheck(context.Background(), []mihomo.Proxy{px})[px.Name()]
+	elapsed := time.Since(start)
+	if !ok {
+		t.Fatalf("no outcome for %q", px.Name())
+	}
+	if !o.Reachable || o.Blocked {
+		t.Fatalf("an answered probe must be kept: %+v", o)
+	}
+	if elapsed >= timeout/2 {
+		t.Fatalf("status-only check waited %v for a body it never reads (timeout %v)", elapsed, timeout)
+	}
+}

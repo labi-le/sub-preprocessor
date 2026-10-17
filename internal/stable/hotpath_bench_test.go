@@ -365,3 +365,51 @@ func BenchmarkFoldProbeResults(b *testing.B) {
 		benchProbeSink = foldProbeResults(nodes, accs)
 	}
 }
+
+// benchMergeCorpus builds 8 sources of 600 nodes each: mirrored repeats one
+// 600-node set in every source, unique gives each source its own 600. 4800
+// nodes clears Merge's one-shot reservation budget, so the pair prices both
+// sides of its growth path.
+func benchMergeCorpus(mirrored bool) []SourceBody {
+	const perSource, sources = 600, 8
+	bodies := make([]SourceBody, sources)
+	for si := range bodies {
+		nodes := make([]preprocess.NodeResult, perSource)
+		for i := range nodes {
+			h := i
+			if !mirrored {
+				h = si*perSource + i
+			}
+			nodes[i] = preprocess.NodeResult{
+				Raw: benchVlessLine(fmt.Sprintf("node-%d.example", h), "443", fmt.Sprintf("node %d", h)),
+				IP:  netip.AddrFrom4([4]byte{10, 2, byte(si), byte(i)}),
+			}
+		}
+		bodies[si] = SourceBody{Name: fmt.Sprintf("src%d", si), Nodes: nodes}
+	}
+
+	return bodies
+}
+
+// BenchmarkMergeMirrored is the duplicate-heavy corpus Merge now sizes for:
+// every source republishes the same nodes, so the merged set is one source's
+// worth and the reservation must stay there instead of scaling with the input.
+func BenchmarkMergeMirrored(b *testing.B) {
+	bodies := benchMergeCorpus(true)
+	b.ReportAllocs()
+	for b.Loop() {
+		benchEntriesSink = Merge(bodies)
+	}
+}
+
+// BenchmarkMergeUnique is the control for that reservation: eight disjoint
+// sources, so the merged set is the whole corpus. It is the arm that pays for
+// learning the corpus is not mirrored, and the one a removed hint or a bad
+// growth target shows up in.
+func BenchmarkMergeUnique(b *testing.B) {
+	bodies := benchMergeCorpus(false)
+	b.ReportAllocs()
+	for b.Loop() {
+		benchEntriesSink = Merge(bodies)
+	}
+}

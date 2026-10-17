@@ -101,6 +101,12 @@ type DeadCache interface {
 // reload can change. RunOnce reads it once per cycle, so a reload landing
 // mid-cycle configures the next cycle instead of rewriting the running one.
 type CheckerSpec struct {
+	// Filterer is the processor this policy was built with. It lives in the
+	// spec so a cycle reads the country deny-set (Denied), the filter chain and
+	// the lookup providers as ONE snapshot: publishing them separately let a
+	// cycle pair one generation's deny-set with another's processor and admit
+	// nodes both coherent generations reject.
+	Filterer      Filterer
 	Sources       []config.SubscriptionSource
 	Denied        filter.CountrySet
 	Interval      time.Duration
@@ -126,8 +132,7 @@ type Checker struct {
 	// reload wakes Run when Reconfigure lands between cycles, so an Interval
 	// change applies now instead of one full old period later. Capacity 1: a
 	// poke sent during a cycle is drained on the next loop and is then a no-op.
-	reload   chan struct{}
-	filterer func() Filterer
+	reload chan struct{}
 	// store is the same Blocklist the apiFilters write through. The checker
 	// holds it only to prune it once per cycle; it never writes to it.
 	store  Blocklist
@@ -153,13 +158,18 @@ func NewChecker(
 ) *Checker {
 	c := &Checker{
 		reload:       make(chan struct{}, 1),
-		filterer:     filterer,
 		store:        store,
 		dead:         dead,
 		holder:       holder,
 		snapshotPath: snapshotPath,
 		logger:       logger,
 		reporter:     reporter,
+	}
+	// The getter runs once, here: from now on the processor travels inside the
+	// spec snapshot, so a cycle never resolves it separately from the policy.
+	// Tests that drive a single stage directly pass nil.
+	if filterer != nil {
+		spec.Filterer = filterer()
 	}
 	c.spec.Store(&spec)
 
@@ -168,11 +178,29 @@ func NewChecker(
 
 // Reconfigure swaps the settings the next cycle will use. A cycle already in
 // flight keeps the spec it started with, so a reload never discards its work.
-func (c *Checker) Reconfigure(spec CheckerSpec) {
+// The processor is part of the spec, so the policy and the processor it was
+// built with are published as one generation.
+func (c *Checker) Reconfigure(spec CheckerSpec, f Filterer) {
+	spec.Filterer = f
 	c.spec.Store(&spec)
 	select {
 	case c.reload <- struct{}{}:
 	default: // a poke is already pending; Run will re-read the spec anyway
+	}
+}
+
+// UseFilterer swaps the processor the next cycle reads while keeping the
+// current policy, for a reload that changed only processor-owned settings
+// (geo sources, resolvers, the cidr allow-list). The copy carries the live
+// policy forward, so the next cycle still reads one generation.
+func (c *Checker) UseFilterer(f Filterer) {
+	for {
+		cur := c.spec.Load()
+		next := *cur
+		next.Filterer = f
+		if c.spec.CompareAndSwap(cur, &next) {
+			return
+		}
 	}
 }
 
@@ -202,16 +230,15 @@ func (c *Checker) Run(ctx context.Context) {
 
 // RunOnce executes a single check cycle. The spec is read once, up front: a
 // reload landing mid-cycle must not change the parameters this cycle is already
-// running under. On any failure the previously published snapshot is kept
+// running under, and the processor comes out of that same snapshot, so the
+// deny-set, the filter chain and the lookup providers always agree.
+// On any failure the previously published snapshot is kept
 // untouched; a probe error (including context cancellation) is returned and
 // aborts the cycle before any cache write.
 func (c *Checker) RunOnce(ctx context.Context) error {
 	start := time.Now()
 	spec := c.spec.Load()
-	// One processor for the whole cycle: the IP stage that judged an address
-	// and the annotator that describes it must be the same one, even if a
-	// reload swaps the snapshot mid-cycle.
-	svc := c.filterer()
+	svc := spec.Filterer
 	bodies, sourceReports := c.fetchSources(ctx, spec, svc)
 	fetchedAt := time.Now()
 

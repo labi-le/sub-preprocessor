@@ -165,12 +165,12 @@ func TestProbeBoundHoldsTheBindingForRetainedAdapters(t *testing.T) {
 		}
 	})
 
-	if reachable, status, _ := apiProbeOne(context.Background(), proxies[0], "http://example.invalid/", nil, 2*time.Second); !reachable || status != 204 {
+	if reachable, status, _ := apiProbeOne(context.Background(), proxies[0], "http://example.invalid/", nil, 2*time.Second, true); !reachable || status != 204 {
 		t.Fatalf("retained adapter after ProbeBound: reachable=%v status=%d, want true/204", reachable, status)
 	}
 
 	p.ReleaseBindings()
-	if reachable, _, _ := apiProbeOne(context.Background(), proxies[0], "http://example.invalid/", nil, 2*time.Second); reachable {
+	if reachable, _, _ := apiProbeOne(context.Background(), proxies[0], "http://example.invalid/", nil, 2*time.Second, true); reachable {
 		t.Fatal("the unpinned adapter still reached the listener; the binding was not what made the first dial work")
 	}
 }

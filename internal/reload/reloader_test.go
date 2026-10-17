@@ -439,19 +439,25 @@ func TestReloadSkipsApplyOnUnrelatedChange(t *testing.T) {
 }
 
 // fakeApplier implements reload.Applier: the first `failures` Apply calls
-// error, later ones succeed; calls counts every invocation.
+// error, later ones succeed unless refuse models an empty-source refusal; calls
+// counts every invocation, used records every processor published outside
+// Apply.
 type fakeApplier struct {
 	calls    int
 	failures int
+	refuse   bool
+	used     []*preprocess.Processor
 }
 
-func (f *fakeApplier) Apply(config.Config) error {
+func (f *fakeApplier) Apply(config.Config) (bool, error) {
 	f.calls++
 	if f.calls <= f.failures {
-		return errors.New("fake apply failure")
+		return false, errors.New("fake apply failure")
 	}
-	return nil
+	return !f.refuse, nil
 }
+
+func (f *fakeApplier) UseProcessor(p *preprocess.Processor) { f.used = append(f.used, p) }
 
 // TestReloadRetriesApplyAfterFailure: a failed ctl.Apply must not commit the
 // new config as current — re-saving the identical file must diff as changed
@@ -467,6 +473,9 @@ func TestReloadRetriesApplyAfterFailure(t *testing.T) {
 	if fake.calls != 1 {
 		t.Fatalf("first reload: expected 1 Apply call, got %d", fake.calls)
 	}
+	if len(fake.used) != 1 {
+		t.Fatalf("failed Apply must still publish the rebuilt processor once, got %d", len(fake.used))
+	}
 
 	r.Reload(t.Context()) // identical file re-saved after the failure
 	if fake.calls != 2 {
@@ -476,6 +485,77 @@ func TestReloadRetriesApplyAfterFailure(t *testing.T) {
 	r.Reload(t.Context()) // committed now; identical config is a no-op
 	if fake.calls != 2 {
 		t.Fatalf("identical config after successful Apply must not re-apply, got %d calls", fake.calls)
+	}
+	if len(fake.used) != 1 {
+		t.Fatalf("a successful Apply publishes the processor with the policy; got %d processor-only swaps", len(fake.used))
+	}
+}
+
+// TestReloadPublishesProcessorWhenPolicyUnchanged: a reload whose change is
+// processor-owned (resolver here) must reach the worker as a processor-only
+// generation — UseProcessor, never Apply, which would rebuild the prober.
+func TestReloadPublishesProcessorWhenPolicyUnchanged(t *testing.T) {
+	fake := &fakeApplier{}
+	r, holder, path := setupReloader(t, zerolog.Nop(), time.Now().Add(-time.Hour), fake)
+
+	before := holder.Load()
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n")
+	r.Reload(t.Context())
+
+	if fake.calls != 0 {
+		t.Fatalf("processor-only change must not re-apply the subscriptions config, got %d Apply calls", fake.calls)
+	}
+	if len(fake.used) != 1 {
+		t.Fatalf("processor-only change must publish the rebuilt processor once, got %d", len(fake.used))
+	}
+	if fake.used[0] != holder.Load() {
+		t.Fatal("the published processor must be the one the holder records")
+	}
+	if fake.used[0] == before {
+		t.Fatal("the published processor must be the rebuilt one, not the previous")
+	}
+}
+
+// TestReloadDoesNotCommitRefusedConfig: Apply reports the empty-source refusal
+// (false, nil), so the reloader must NOT commit that config. A later config
+// differing from the REFUSED one only in a processor-owned setting must
+// therefore still go through Apply -- and be refused again -- instead of taking
+// UseProcessor, which would pair the refused config's processor with the older
+// policy the worker is still running.
+func TestReloadDoesNotCommitRefusedConfig(t *testing.T) {
+	fake := &fakeApplier{refuse: true}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeConfig(t, path, subsYAML)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+	opts := reload.OptionsFromConfig(cfg)
+	opts.PreloadedGeofeed = preprocess.GeoState{Lookup: stubLookup{}, LoadedAt: time.Now().Add(-time.Hour)}
+	proc, err := preprocess.NewProcessor(t.Context(), zerolog.Nop(), opts)
+	if err != nil {
+		t.Fatalf("initial processor: %v", err)
+	}
+	r := reload.NewReloader(path, reload.NewHolder(proc), zerolog.Nop(), cfg, proc, fake, nil)
+
+	writeConfig(t, path, baseGeofeedYAML) // B: no sources -> refused
+	r.Reload(t.Context())
+	if fake.calls != 1 {
+		t.Fatalf("the refused config must reach Apply once, got %d", fake.calls)
+	}
+	if len(fake.used) != 0 {
+		t.Fatalf("a refused config's processor must not be published, got %d", len(fake.used))
+	}
+
+	writeConfig(t, path, baseGeofeedYAML+"resolver:\n  timeout: 10s\n") // C: differs from B only in the resolver
+	r.Reload(t.Context())
+	if fake.calls != 2 {
+		t.Fatalf("a config differing from the REFUSED one must retry Apply, got %d calls", fake.calls)
+	}
+	if len(fake.used) != 0 {
+		t.Fatalf("a config built on a refused one must not publish a processor-only swap, got %d", len(fake.used))
 	}
 }
 
