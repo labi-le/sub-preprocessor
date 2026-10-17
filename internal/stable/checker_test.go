@@ -253,7 +253,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 	)
 
 	disabled := config.Config{}
-	if err := ctl.Apply(disabled); err != nil {
+	if _, err := ctl.Apply(disabled); err != nil {
 		t.Fatalf("Apply(disabled): %v", err)
 	}
 	ctl.Stop()
@@ -280,7 +280,7 @@ func TestControllerApplyAndStop(t *testing.T) {
 			Sources: []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example/sub"}},
 		},
 	}
-	if err := ctl.Apply(enabled); err != nil {
+	if _, err := ctl.Apply(enabled); err != nil {
 		t.Fatalf("Apply(enabled): %v", err)
 	}
 	ctl.Stop()
@@ -315,7 +315,7 @@ func TestControllerApplyRejectsBadExpectedStatus(t *testing.T) {
 			Sources: []config.SubscriptionSource{{Name: "alpha", URL: "https://alpha.example/sub"}},
 		},
 	}
-	if err := ctl.Apply(cfg); err == nil {
+	if _, err := ctl.Apply(cfg); err == nil {
 		ctl.Stop()
 		t.Fatal("expected error for bad expected_status")
 	}

@@ -96,7 +96,7 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha")); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	first := ctl.checker
@@ -104,7 +104,7 @@ func TestApplyReconfiguresRunningWorker(t *testing.T) {
 		t.Fatal("first Apply must start a worker")
 	}
 
-	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	if ctl.checker != first {
@@ -128,7 +128,7 @@ func TestApplyPublishesProcessorWithPolicy(t *testing.T) {
 		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha")); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	if got := ctl.checker.spec.Load().Filterer; got != proc {
@@ -137,7 +137,7 @@ func TestApplyPublishesProcessorWithPolicy(t *testing.T) {
 
 	next := stubFilterer{tag: "second"}
 	proc = next
-	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	spec := ctl.checker.spec.Load()
@@ -160,7 +160,7 @@ func TestUseFiltererKeepsPolicy(t *testing.T) {
 		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha", "beta")); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	before := ctl.checker.spec.Load()
@@ -196,13 +196,13 @@ func TestApplyCarriesCloudflareTimeoutToRunningWorker(t *testing.T) {
 
 	cfg := testControllerConfig("alpha")
 	cfg.Geo.Cloudflare = config.CloudflareConfig{Timeout: 15 * time.Second, Concurrency: 8}
-	if err := ctl.Apply(cfg); err != nil {
+	if _, err := ctl.Apply(cfg); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	running := ctl.checker
 
 	cfg.Geo.Cloudflare.Timeout = 30 * time.Second
-	if err := ctl.Apply(cfg); err != nil {
+	if _, err := ctl.Apply(cfg); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	if ctl.checker != running {
@@ -238,7 +238,7 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 		func() Filterer { return emptyFilterer{} },
 		nil, nil, "", zerolog.Nop(), nil)
 	defer ctl.Stop()
-	err := ctl.Apply(armed())
+	_, err := ctl.Apply(armed())
 	if err == nil {
 		t.Fatal("an armed gemini filter with no key must fail Apply")
 	}
@@ -252,7 +252,7 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 	// Armed with a key_file that does not exist: error names the path tried.
 	cfg := armed()
 	cfg.GeoBlock.Gemini.KeyFile = filepath.Join(t.TempDir(), "missing-env")
-	err = ctl.Apply(cfg)
+	_, err = ctl.Apply(cfg)
 	if err == nil {
 		t.Fatal("an armed gemini filter with an unreadable key_file must fail Apply")
 	}
@@ -268,7 +268,7 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 	}
 	cfg = armed()
 	cfg.GeoBlock.Gemini.KeyFile = keyFile
-	err = ctl.Apply(cfg)
+	_, err = ctl.Apply(cfg)
 	if err == nil {
 		t.Fatal("an armed gemini filter whose key_file lacks key_var must fail Apply")
 	}
@@ -283,7 +283,7 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 		t.Fatal(writeErr)
 	}
 	cfg.GeoBlock.Gemini.KeyFile = goodFile
-	if applyErr := ctl.Apply(cfg); applyErr != nil {
+	if _, applyErr := ctl.Apply(cfg); applyErr != nil {
 		t.Fatalf("an armed gemini filter with a resolvable key must apply: %v", applyErr)
 	}
 	if prober, ok := ctl.checker.spec.Load().Prober.(*MihomoProber); !ok || !prober.GeminiEnabled() {
@@ -296,7 +296,7 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 		func() Filterer { return emptyFilterer{} },
 		nil, nil, "", zerolog.Nop(), nil)
 	defer idle.Stop()
-	if applyErr := idle.Apply(testControllerConfig("alpha")); applyErr != nil {
+	if _, applyErr := idle.Apply(testControllerConfig("alpha")); applyErr != nil {
 		t.Fatalf("a config with no gemini filter must boot keyless: %v", applyErr)
 	}
 	if prober, ok := idle.checker.spec.Load().Prober.(*MihomoProber); !ok || prober.GeminiEnabled() {
@@ -319,7 +319,7 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 		nil, nil, "", zerolog.New(&logBuf), nil)
 	defer ctl.Stop()
 
-	if err := ctl.Apply(testControllerConfig("alpha")); err != nil {
+	if _, err := ctl.Apply(testControllerConfig("alpha")); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	running := ctl.checker
@@ -327,8 +327,10 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 		t.Fatal("worker should be running")
 	}
 
-	if err := ctl.Apply(config.Config{}); err != nil {
+	if applied, err := ctl.Apply(config.Config{}); err != nil {
 		t.Fatalf("Apply with no sources: %v", err)
+	} else if applied {
+		t.Fatal("an empty source list is refused; Apply must report false")
 	}
 	if ctl.checker != running {
 		t.Fatal("an empty source list must leave the running worker in place")
@@ -343,8 +345,10 @@ func TestApplyKeepsWorkerWhenSourcesGone(t *testing.T) {
 	idle := NewController(t.Context(), holder,
 		func() Filterer { return emptyFilterer{} },
 		nil, nil, "", zerolog.Nop(), nil)
-	if err := idle.Apply(config.Config{}); err != nil {
+	if applied, err := idle.Apply(config.Config{}); err != nil {
 		t.Fatalf("Apply with no sources and no worker: %v", err)
+	} else if applied {
+		t.Fatal("a zero-source config is never applied")
 	}
 	if idle.checker != nil {
 		t.Fatal("a zero-source config must not start a worker")

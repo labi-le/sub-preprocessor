@@ -54,14 +54,15 @@ func NewController(
 	}
 }
 
-// Apply hands cfg to the running checker, or starts one when none is running.
-// The prober and node filters are built first, so a failed construction leaves
-// the previous configuration in place. A reload NEVER restarts a live worker:
-// it swaps the spec the next cycle reads, letting the cycle in flight run to
-// publication instead of being cancelled and losing its whole probe pass. The
-// processor the filterer getter resolves at this point becomes part of that
-// spec, so the policy and the processor built from the same config are
-// published as one generation.
+// Apply hands cfg to the running checker, or starts one when none is running,
+// and reports whether the worker's policy now comes from cfg. The prober and
+// node filters are built first, so a failed construction leaves the previous
+// configuration in place and returns false with the error. A reload NEVER
+// restarts a live worker: it swaps the spec the next cycle reads, letting the
+// cycle in flight run to publication instead of being cancelled and losing its
+// whole probe pass. The processor the filterer getter resolves at this point
+// becomes part of that spec, so the policy and the processor built from the
+// same config are published as one generation.
 //
 // An empty merged source list is refused rather than obeyed once a worker runs.
 // Every source of this deployment comes from an overlay, so an empty list is
@@ -72,13 +73,17 @@ func NewController(
 // older policy -- costs a stale source list until the config is fixed, and a
 // deliberate disable is a restart (or an explicitly empty list at startup,
 // which never starts one).
-func (c *Controller) Apply(cfg config.Config) error {
+//
+// A refusal is reported as false with a nil error, never as an error: the
+// caller must not commit the config, and must not publish this config's
+// processor either, or the worker would pair it with the older policy.
+func (c *Controller) Apply(cfg config.Config) (bool, error) {
 	if !cfg.SubscriptionsEnabled() {
 		if c.checker != nil {
 			c.logger.Warn().Msg("reloaded config has no subscription sources; keeping the running worker on its previous sources (check the sources.yaml/private.yaml overlays)")
 		}
 
-		return nil
+		return false, nil
 	}
 
 	subs := cfg.Subscriptions
@@ -113,11 +118,11 @@ func (c *Controller) Apply(cfg config.Config) error {
 	// off (see resolveGeminiKey); the unarmed base is left unread.
 	geminiKey, err := resolveGeminiKey(geo.Gemini, geminiArmed)
 	if err != nil {
-		return err
+		return false, err
 	}
 	prober, err := NewMihomoProber(subs.Check, bandwidth, geo, cfg.Geo.Cloudflare, geminiKey, c.logger)
 	if err != nil {
-		return fmt.Errorf("create prober: %w", err)
+		return false, fmt.Errorf("create prober: %w", err)
 	}
 	filters := buildNodeFilters(names, prober, c.store, c.logger)
 
@@ -139,7 +144,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 		c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).
 			Msg("subscription checker reconfigured; the new settings apply from its next scheduled cycle")
 
-		return nil
+		return true, nil
 	}
 
 	checker := NewChecker(spec, c.filterer, c.store, c.dead, c.holder, c.snapshotPath, c.logger, c.reporter)
@@ -154,7 +159,7 @@ func (c *Controller) Apply(cfg config.Config) error {
 	}()
 	c.logger.Info().Int("sources", len(subs.Sources)).Dur("interval", subs.Interval).Msg("subscription checker started")
 
-	return nil
+	return true, nil
 }
 
 // UseProcessor publishes p for the next cycle without rebuilding the worker
