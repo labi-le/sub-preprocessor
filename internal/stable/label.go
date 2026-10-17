@@ -13,7 +13,10 @@ func entryLabel(px mihomo.Proxy) string {
 }
 
 // proxyHost is the server half of a proxy's address, for outcome fields that
-// name the probed endpoint.
+// name the probed endpoint. This is the adapter's DIAL spelling: a pinned
+// trailing-dot server was stripped for resolver lookup, so this may be the
+// undotted form while the raw entry keeps the dot. Identity consumers (the
+// geoblock store) fold the trailing dot so both spellings are one host.
 func proxyHost(px mihomo.Proxy) string {
 	host, _, err := net.SplitHostPort(px.Addr())
 	if err != nil {

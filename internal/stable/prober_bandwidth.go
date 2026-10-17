@@ -224,7 +224,7 @@ func hostPort(target string) (string, bool) {
 	}
 	port := u.Port()
 	if port == "" {
-		if u.Scheme == "http" {
+		if u.Scheme == schemeHTTP {
 			port = "80"
 		} else {
 			port = "443"

@@ -34,6 +34,24 @@ type traceChecker interface {
 	TraceCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]TraceResult
 }
 
+// boundProber is the optional half of a Prober that binds every dial to the
+// address the IP stage selected for the entry. The binding is what makes a
+// zero-success verdict attributable to Entry.IP: an unbound prober resolves the
+// URI hostname independently in the pre-check and in the adapter, so a verdict
+// reached at one DNS answer can be cached against a different selected address
+// (issue #5). A Prober without the capability keeps the raw-payload contract.
+type boundProber interface {
+	ProbeBound(ctx context.Context, entries []Entry) (map[string]ProbeResult, error)
+}
+
+// bindingReleaser is the other half of boundProber: ProbeBound leaves the
+// resolver binding installed because the egress stage reuses the adapters it
+// retained, and the checker restores it after the last consumer. A prober that
+// does not bind has nothing to release and does not implement it.
+type bindingReleaser interface {
+	ReleaseBindings()
+}
+
 // probedAdapterSource is the optional half of a Prober that keeps the adapter
 // objects its last successful Probe built alive past the call, so the egress
 // stage can consume them by label instead of converting and re-parsing the
@@ -241,7 +259,7 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 
 	c.logger.Info().Int("nodes", len(probe)).Int("dead_skipped", skipped).
 		Int("rounds", spec.Rounds).Msg("probing merged nodes")
-	res, err := spec.Prober.Probe(ctx, entriesPayload(probe))
+	res, err := probeEntries(ctx, spec.Prober, probe)
 	probedAt := time.Now()
 	if err != nil {
 		c.logger.Warn().Err(err).Msg("probe failed; keeping previous stable list")
@@ -252,9 +270,10 @@ func (c *Checker) RunOnce(ctx context.Context) error {
 	// below. Take them before any further exit; the deferred close pays
 	// exactly once whatever path the rest of the cycle takes — cancellation,
 	// zero survivors, an egress stage that never runs, or a normal
-	// publication.
+	// publication. ProbeBound keeps its resolver binding installed for those
+	// same adapters, so this defer is where it is released too.
 	probed := takeProbedAdapters(spec.Prober)
-	defer closeProxies(probed)
+	defer closeProbed(probed, spec.Prober)
 	if err = ctx.Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("cycle cancelled after probe; keeping previous stable list")
 		c.reportError()
@@ -857,6 +876,37 @@ func (c *Checker) filterDead(entries []Entry) (probe []Entry, deadSkipped int, o
 	return probe, deadSkipped, true
 }
 
+// probeEntries hands entries to a Prober that can bind its dials to the
+// IP-stage address, and falls back to the raw payload for one that cannot. The
+// fallback preserves the interface for other Prober implementations; such a
+// prober resolves each hostname independently, so its verdicts carry the
+// pre-binding attribution limitation.
+func probeEntries(ctx context.Context, p Prober, entries []Entry) (map[string]ProbeResult, error) {
+	if binder, ok := p.(boundProber); ok {
+		//nolint:wrapcheck // RunOnce wraps probe errors with the "probe:" context
+		return binder.ProbeBound(ctx, entries)
+	}
+
+	//nolint:wrapcheck // RunOnce wraps probe errors with the "probe:" context
+	return p.Probe(ctx, entriesPayload(entries))
+}
+
+// closeProbed closes the adapters the cycle took from the prober and restores
+// a bound prober's resolver table. The egress stage dials those adapters, so
+// the binding has to outlive ProbeBound and ends here with the last consumer.
+func closeProbed(proxies []mihomo.Proxy, p Prober) {
+	closeProxies(proxies)
+	releaseBindings(p)
+}
+
+// releaseBindings restores a bound prober's resolver table once the cycle is
+// done with its retained adapters. A prober without the capability is a no-op.
+func releaseBindings(p Prober) {
+	if r, ok := p.(bindingReleaser); ok {
+		r.ReleaseBindings()
+	}
+}
+
 // recordDead caches nodes whose probe proved them dead so later cycles skip
 // them.
 //
@@ -919,6 +969,13 @@ func (c *Checker) recordDead(probe []Entry, res map[string]ProbeResult, refusals
 			continue
 		}
 		if r.Successes == 0 {
+			// A bound probe says whether its URL test actually reached the
+			// entry's selected address. When it could not (conflicting
+			// selections for one hostname), the failure belongs to whatever
+			// address the resolver picked and must not condemn Entry.IP.
+			if r.Unbound {
+				continue
+			}
 			_ = c.dead.Block(e.Addr, e.IP)
 			blocked++
 		}

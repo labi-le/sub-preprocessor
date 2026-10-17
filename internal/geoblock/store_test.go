@@ -215,3 +215,48 @@ func TestOpenSwitchesFileToWALMode(t *testing.T) {
 		t.Fatalf("geoblock db must run in WAL mode, got %q", mode)
 	}
 }
+
+// TestHostIdentityFoldsTrailingDot pins the identity contract the prober relies
+// on: it strips a trailing dot from a pinned server for resolver lookup, so the
+// adapter's dial spelling is undotted while the raw entry keeps the dotted
+// spelling. Both must address one store entry, in either direction and across a
+// reopen (load folds legacy dotted rows too).
+func TestHostIdentityFoldsTrailingDot(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "gb.db")
+	s, err := geoblock.Open(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockErr := s.Block("Origin.Example."); blockErr != nil {
+		t.Fatal(blockErr)
+	}
+	if !s.Blocked("origin.example") {
+		t.Fatal("a dotted write must block the undotted lookup")
+	}
+	if !s.Blocked("ORIGIN.EXAMPLE.") {
+		t.Fatal("a dotted write must block the same dotted lookup")
+	}
+	if blockErr := s.Block("other.example"); blockErr != nil {
+		t.Fatal(blockErr)
+	}
+	if !s.Blocked("other.example.") {
+		t.Fatal("an undotted write must block the dotted lookup")
+	}
+	if s.Blocked("unrelated.example") {
+		t.Fatal("a different host must stay unblocked")
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	reopened, err := geoblock.Open(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if !reopened.Blocked("origin.example.") || !reopened.Blocked("other.example") {
+		t.Fatal("normalised keys must survive a reopen")
+	}
+}

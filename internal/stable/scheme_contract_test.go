@@ -395,7 +395,7 @@ func TestSchemeContractProbeNodesMatchTheAdapter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConvertsV2Ray(%q): %v", e.Raw, err)
 			}
-			nodes := probeNodes(mappings)
+			nodes := probeNodes(mappings, nil)
 			if len(nodes) != len(c.addrs) {
 				t.Fatalf("converted %d mappings, want %d", len(nodes), len(c.addrs))
 			}
