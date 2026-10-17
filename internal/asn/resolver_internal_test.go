@@ -444,8 +444,8 @@ func TestResolve_LocalDNSEndToEnd(t *testing.T) {
 	<-started
 	t.Cleanup(func() {
 		_ = server.Shutdown()
-		if err := <-done; err != nil {
-			t.Error(err)
+		if serveErr := <-done; serveErr != nil {
+			t.Error(serveErr)
 		}
 	})
 
@@ -459,9 +459,9 @@ func TestResolve_LocalDNSEndToEnd(t *testing.T) {
 	for pass := range 2 {
 		for i := range count {
 			ip := netip.AddrFrom4([4]byte{198, 18, 0, byte(i)})
-			got, err := r.Resolve(context.Background(), ip)
-			if err != nil {
-				t.Fatalf("pass=%d ip=%s: %v", pass, ip, err)
+			got, resolveErr := r.Resolve(context.Background(), ip)
+			if resolveErr != nil {
+				t.Fatalf("pass=%d ip=%s: %v", pass, ip, resolveErr)
 			}
 			if got != want {
 				t.Fatalf("pass=%d ip=%s result = %+v, want %+v", pass, ip, got, want)
