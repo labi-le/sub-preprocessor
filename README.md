@@ -760,6 +760,60 @@ docker compose up -d --build   # or: make dc-up
   hence `stop_grace_period: 30s`, which the 15 s + 2×5 s worst case fits
   under. Expiring that budget is logged as a warning, not a failed exit.
 
+### Config ownership
+
+Both containers write into `./config`, so it must be writable by the uid:gid
+each runs as. The service runs as `1000:1000`; the crawler defaults to the same
+ids and takes `CRAWLER_UID`/`CRAWLER_GID` from the environment (or a `.env` file
+beside `docker-compose.yaml`) for any other deployment.
+
+The crawler's identity is not cosmetic. It publishes `private.yaml` by writing a
+same-directory temp file and renaming it over the destination
+(`internal/crawl/crawl.go`), so the new file's owner is the writing process, not
+the file's previous owner. A root crawler therefore restores a root-owned `0644
+private.yaml` on every changed-source cycle, and the operator cannot edit it in
+place; the same applies to the `0600` state and census files.
+
+**Fresh install.** Clone as the account that will own the deployment. The
+shipped `1000:1000` works when that account is uid 1000; otherwise set
+`CRAWLER_UID`/`CRAWLER_GID` to `id -u`/`id -g` and change the service's
+`user:` to the same pair — it writes `.geoblock.db` and `.stable-snapshot.json`
+there, and its agenix secret must remain readable by the uid it runs as. Create
+`config/.github-token` as that owner, mode `0600`.
+
+**Migration from the root-owned layout.** Stop the crawler first: an in-flight
+cycle could publish over the files after they are fixed. Re-own only the
+crawler-managed artifacts, keeping their modes, and drop temp files left by a
+killed cycle:
+
+```bash
+docker compose stop tg-sub-crawler
+
+owner="$(stat -c '%u:%g' config)"
+for f in config/private.yaml config/.crawler-state.json config/.crawler-census.bin; do
+  [ -e "$f" ] && sudo chown "$owner" "$f"
+done
+sudo rm -f config/private.yaml.tmp config/.crawler-state.json.tmp config/.crawler-census.bin.tmp*
+# only when the token was created by root; do not widen its mode
+[ -e config/.github-token ] && sudo chown "$owner" config/.github-token
+
+docker compose up -d tg-sub-crawler   # recreates it: its user changed
+```
+
+`private.yaml` is written as `0644`, so the service can read it even when the
+crawler runs under a different uid; the state and census stay `0600`, and the
+token stays owner-only. Do not recursively chown `config/` or relax modes to
+`777`.
+
+Skipping the re-own does not crash a non-root crawler, which is why it can go
+unnoticed: unreadable state is logged and left untouched, an unusable census is
+rebuilt, and an unreadable token switches GitHub discovery off.
+
+After the next cycle, `docker inspect tg-sub-crawler --format '{{.Config.User}}'`
+shows the configured ids, `stat -c '%u:%g %A %n' config/private.yaml` shows the
+config owner, and the log has neither `read crawler state failed` nor
+`github token file unreadable`.
+
 ## Package map
 
 See [`routes.md`](./routes.md) for a per-package reference (types, functions,

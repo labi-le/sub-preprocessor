@@ -23,7 +23,14 @@ services:
     image: sub-preprocessor:latest
     container_name: tg-sub-crawler
     command: ["crawl"]
-    user: "0:0"
+    # Non-root, and the same ids the service uses by default. private.yaml is
+    # published atomically (same-directory temp + rename), so the file's owner
+    # is whatever uid this process runs as: as root every changed-source cycle
+    # recreates a root-owned 0644 file the host operator cannot edit in place.
+    # Must be able to write ./config; the supported layout is running as its
+    # owner. Override CRAWLER_UID/CRAWLER_GID when the deployment's user:group
+    # differs from 1000:1000 (see README, Config ownership).
+    user: "${CRAWLER_UID:-1000}:${CRAWLER_GID:-1000}"
     depends_on:
       - sub-preprocessor # no build: section here, so that service is what produces the image
     volumes:
