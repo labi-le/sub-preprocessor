@@ -93,7 +93,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 		wg.Go(func() {
 			defer func() { <-sem }()
 
-			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout)
+			reachable, status, body := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout, true)
 			res, ok := parseTrace(body)
 			host := proxyHost(px)
 			n := prog.step()

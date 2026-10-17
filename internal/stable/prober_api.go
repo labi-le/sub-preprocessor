@@ -82,8 +82,11 @@ func fanoutSem(concurrency int) chan struct{} {
 // apiCheck fans a through-node API GET out over proxies (bounded by
 // concurrency) and classifies each response with blocked, which sees both the
 // status and the body: a service can refuse an egress with either (a marker in
-// the body, or a bare CDN 403). Every node logs a debug outcome and the
-// progress logger reports each completed 10% decade.
+// the body, or a bare CDN 403). A status-only check passes readBody false: the
+// probe then returns as soon as the headers arrive and closes the body unread,
+// which is what keeps a stalled body from occupying a worker until the request
+// deadline. Every node logs a debug outcome and the progress logger reports
+// each completed 10% decade.
 //
 // pace is the minimum interval between request STARTS; 0 disables pacing. A
 // paced check owns one ticker for the whole fan-out and every worker waits on
@@ -107,6 +110,7 @@ func (m *MihomoProber) apiCheck(
 	timeout time.Duration,
 	concurrency int,
 	pace time.Duration,
+	readBody bool,
 	blocked func(status int, body string) bool,
 ) map[string]APIOutcome {
 	opLog := log.Op(m.logger, op)
@@ -133,7 +137,7 @@ func (m *MihomoProber) apiCheck(
 				}
 			}
 
-			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout)
+			reachable, status, body := apiProbeOne(ctx, px, target, header, timeout, readBody)
 			host := proxyHost(px)
 			o := APIOutcome{Server: host, Reachable: reachable, Blocked: reachable && blocked(status, body)}
 			n := prog.step()
@@ -162,13 +166,17 @@ func markerBlocked(body, marker string) bool {
 // apiProbeOne dials target through px, issues a GET with header, and returns
 // whether a response came back, its status, and its (capped) body. Mirrors
 // mihomo's URLTest transport (a fixed pre-dialed conn) but reads the status and
-// body, neither of which a HEAD-only URLTest exposes to a classifier.
+// body, neither of which a HEAD-only URLTest exposes to a classifier. With
+// readBody false it returns at the headers and the body is closed unread: that
+// is the whole contract of a status-only gate, and waiting for bytes it will
+// never classify only burns the caller's deadline.
 func apiProbeOne(
 	ctx context.Context,
 	px mihomo.Proxy,
 	target string,
 	header http.Header,
 	timeout time.Duration,
+	readBody bool,
 ) (reachable bool, status int, body string) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -220,6 +228,9 @@ func apiProbeOne(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if !readBody {
+		return true, resp.StatusCode, ""
+	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBody))
 	return true, resp.StatusCode, string(b)
 }
