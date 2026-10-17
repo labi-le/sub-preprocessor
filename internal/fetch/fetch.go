@@ -55,6 +55,13 @@ const (
 	defaultHTTPTimeout = 30 * time.Second
 	maxRedirects       = 10
 	defaultDialTimeout = 30 * time.Second
+	// maxIdleConns and idleConnTimeout bound the transport's idle pool. Both
+	// zero values mean unlimited: one retained socket per distinct origin, held
+	// until the peer closes it, which crawler link-following accumulates across
+	// many origins. Values match http.DefaultTransport; MaxIdleConnsPerHost is
+	// left at its default of 2 so hot origins keep their existing reuse.
+	maxIdleConns       = 100
+	idleConnTimeout    = 90 * time.Second
 	errNonPublicTarget = "non-public target is not allowed"
 	errOnlyHTTPS       = "only https URLs are allowed"
 	errURLHostRequired = "url host is required"
@@ -518,11 +525,20 @@ func NewSafeHTTPClient() *http.Client { return newHTTPClient(true) }
 func NewUnrestrictedHTTPClient() *http.Client { return newHTTPClient(false) }
 
 func newHTTPClient(guardIPs bool) *http.Client {
+	return newHTTPClientWithIdleTimeout(guardIPs, idleConnTimeout)
+}
+
+// newHTTPClientWithIdleTimeout is the test seam for idle expiry: the 90s
+// production bound is too slow to observe in a test. Everything else about the
+// client is identical to newHTTPClient.
+func newHTTPClientWithIdleTimeout(guardIPs bool, idleTimeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: defaultDialTimeout}
 
 	transport := &http.Transport{
 		DisableCompression: true,
 		Proxy:              nil,
+		MaxIdleConns:       maxIdleConns,
+		IdleConnTimeout:    idleTimeout,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if !guardIPs {
 				return dialer.DialContext(ctx, network, addr)
