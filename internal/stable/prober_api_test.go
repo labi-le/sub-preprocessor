@@ -46,7 +46,7 @@ func TestAPIProbeOneDialsSchemeDefaultPort(t *testing.T) {
 			t.Parallel()
 
 			px := &dialRecorder{}
-			reachable, status, body := apiProbeOne(context.Background(), px, tc.target, nil, time.Second)
+			reachable, status, body := apiProbeOne(context.Background(), px, tc.target, nil, time.Second, true)
 			if reachable || status != 0 || body != "" {
 				t.Fatalf("a refused dial must yield no outcome, got (%v, %d, %q)", reachable, status, body)
 			}
@@ -64,7 +64,7 @@ func TestAPIProbeOneRejectsUnparsableTarget(t *testing.T) {
 	t.Parallel()
 
 	px := &dialRecorder{}
-	if reachable, _, _ := apiProbeOne(context.Background(), px, "://nonsense", nil, time.Second); reachable {
+	if reachable, _, _ := apiProbeOne(context.Background(), px, "://nonsense", nil, time.Second, true); reachable {
 		t.Fatal("an unparsable endpoint must not be reported reachable")
 	}
 	if px.dialed {
