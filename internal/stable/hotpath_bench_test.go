@@ -289,9 +289,9 @@ func BenchmarkProbeParseBound(b *testing.B) {
 		}
 		bnd := newBinding(entries)
 		restore := pinHosts(bnd.hosts)
-		normalisePinnedServers(mappings, bnd)
 		nodes := probeNodes(mappings, bnd)
 		live := benchSpareEvery(len(nodes), benchCondemnedPercent)
+		normalisePinnedServers(mappings, live, bnd)
 		live = prober.parseLive(mappings, nodes, live)
 		restore()
 		if len(live) == 0 {

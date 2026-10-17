@@ -33,6 +33,10 @@ const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 // scheme this package inspects (prober_bandwidth).
 const schemeHTTP = "http"
 
+// typeVMess is the mihomo dispatch string for the VMess adapter, whose WS Host
+// default differs from VLESS's.
+const typeVMess = "vmess"
+
 // Prober measures reachability of the proxy nodes in a subscription payload.
 //
 // The label-keyed map is the carrier, and it stays one: RunOnce joins it three
@@ -561,12 +565,15 @@ func (b *binding) urlBound(server string) bool {
 // The dial spelling changes; the identity and the wire strings do not.
 //
 // Only hostnames with an installable pin are touched: an unbound mapping is
-// left exactly as the converter built it.
-func normalisePinnedServers(mappings []map[string]any, b *binding) {
+// left exactly as the converter built it. live is the positions the pre-check
+// spared; a condemned mapping never reaches an adapter, so normalising it would
+// allocate preservation carriers nothing consumes.
+func normalisePinnedServers(mappings []map[string]any, live []int, b *binding) {
 	if b == nil || len(b.hosts) == 0 {
 		return
 	}
-	for _, mapping := range mappings {
+	for _, i := range live {
+		mapping := mappings[i]
 		server, ok := mapping["server"].(string)
 		if !ok || !strings.HasSuffix(server, ".") {
 			continue
@@ -581,14 +588,17 @@ func normalisePinnedServers(mappings []map[string]any, b *binding) {
 
 // preserveDerivedHost keeps the pre-normalisation SNI and transport Host for a
 // mapping whose server lost its trailing dot. mihomo's derivations differ by
-// transport, and injecting servername blindly changes the precedence:
+// transport and adapter, and injecting servername blindly changes the
+// precedence:
 //
-//   - VLESS/VMess ws/httpupgrade: TLS SNI is servername, else the WS Host
-//     header, else the server. An explicit WS Host therefore wins, and leaving
-//     servername absent preserves it. With no Host, both the SNI and the
-//     default Host derive from the server, so pinning the Host to the original
-//     spelling preserves both. Without TLS the default Host is randomised, so
-//     it must be left alone.
+//   - VLESS ws/httpupgrade: TLS SNI is servername, else the WS Host header,
+//     else the server; without TLS an empty Host is replaced with a RANDOM
+//     camouflage name. An explicit WS Host wins and is left alone; with no Host
+//     the original spelling is pinned only under TLS, where it also carries the
+//     SNI.
+//   - VMess ws/httpupgrade: the same SNI precedence, but its non-TLS default
+//     Host is the server (vmess.go:104-148), not a random name. So the Host is
+//     pinned whenever it is not explicit, TLS or not.
 //   - VLESS/VMess http transport: the default Host is the server, so it is
 //     pinned explicitly; SNI still comes from servername/else-server below.
 //   - Everything else: SNI is servername (VLESS/VMess) or sni
@@ -598,10 +608,13 @@ func normalisePinnedServers(mappings []map[string]any, b *binding) {
 func preserveDerivedHost(mapping map[string]any, original string) {
 	typ, _ := mapping["type"].(string)
 	network, _ := mapping["network"].(string)
-	if typ == "vless" || typ == "vmess" {
+	if typ == "vless" || typ == typeVMess {
 		switch network {
 		case "ws", "httpupgrade":
-			if _, explicit := wsHeaderHost(mapping); !explicit && mappingHasTLS(mapping) {
+			if _, explicit := wsHeaderHost(mapping); explicit {
+				return
+			}
+			if typ == typeVMess || mappingHasTLS(mapping) {
 				setWSHeaderHost(mapping, original)
 			}
 
@@ -765,7 +778,6 @@ func (m *MihomoProber) probeSet(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("convert payload: %w", err)
 	}
-	normalisePinnedServers(mappings, b)
 	nodes = probeNodes(mappings, b)
 	live, condemned = m.filterReachable(ctx, opLog, nodes)
 	if b != nil {
@@ -785,6 +797,7 @@ func (m *MihomoProber) probeSet(
 		name, _ := mappings[i]["name"].(string)
 		nodes[i].label = mappingLabel(name, typ)
 	}
+	normalisePinnedServers(mappings, live, b)
 	live = m.parseLive(mappings, nodes, live)
 	if len(live) == 0 && len(condemned) == 0 {
 		// A failed Probe reports no pre-check whatever phase it failed in: the
@@ -962,7 +975,7 @@ func (m *MihomoProber) PrecheckReport() PrecheckReport {
 // 29-200), read off the mapping so the verdict costs no adapter object.
 func dialsServerOverTCP(typ string, mapping map[string]any) bool {
 	switch typ {
-	case "vless", "vmess", "trojan", "ss", "ssr", "socks5", "http", "anytls":
+	case "vless", typeVMess, "trojan", "ss", "ssr", "socks5", "http", "anytls":
 		return !dialsServerOverQUIC(mapping)
 	default:
 		return false

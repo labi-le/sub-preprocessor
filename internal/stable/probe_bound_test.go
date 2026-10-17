@@ -8,9 +8,12 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -394,7 +397,7 @@ func TestProbeBoundPreservesDottedSNIAndHost(t *testing.T) {
 			if convErr != nil {
 				t.Fatal(convErr)
 			}
-			normalisePinnedServers(mappings, b)
+			normalisePinnedServers(mappings, allPositions(len(mappings)), b)
 			if got := mappings[0]["server"]; got != "localhost" {
 				t.Fatalf("mapping server = %v, want localhost", got)
 			}
@@ -421,6 +424,149 @@ func TestProbeBoundPreservesDottedSNIAndHost(t *testing.T) {
 				t.Errorf("WS Host = %q, want %q", got.host, tc.wantHost)
 			}
 		})
+	}
+}
+
+// capturePlainWS reports the Host the WS upgrade request carries, over a
+// plaintext pipe. It is the non-TLS counterpart of captureVlessWS.
+func capturePlainWS(t *testing.T, streamer interface {
+	StreamConnContext(context.Context, net.Conn, *mihomo.Metadata) (net.Conn, error)
+}) string {
+	t.Helper()
+
+	client, server := net.Pipe()
+	result := make(chan string, 1)
+	go func() {
+		defer server.Close()
+		req, readErr := http.ReadRequest(bufio.NewReader(server))
+		if readErr != nil {
+			result <- ""
+
+			return
+		}
+		result <- req.Host
+	}()
+
+	var meta mihomo.Metadata
+	if metaErr := meta.SetRemoteAddress("example.com:80"); metaErr != nil {
+		t.Fatal(metaErr)
+	}
+	_, _ = streamer.StreamConnContext(context.Background(), client, &meta)
+	_ = client.Close()
+
+	select {
+	case host := <-result:
+		return host
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the plaintext WS request")
+	}
+
+	return ""
+}
+
+// TestProbeBoundPreservesPlainVMessWSHost covers the VMess difference the VLESS
+// path does not have: without TLS, mihomo's VMess WS keeps the server-derived
+// Host (vmess.go:104-148), while VLESS replaces an empty Host with a random
+// camouflage name. Stripping the dot must therefore pin the Host for VMess even
+// without TLS.
+func TestProbeBoundPreservesPlainVMessWSHost(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hostQ    string
+		wantHost string
+	}{
+		{name: "default host keeps the dotted server", wantHost: "localhost."},
+		{name: "explicit host is unchanged", hostQ: "front.example", wantHost: "front.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			px := vmessWSAdapter(t, tc.hostQ)
+			if got := capturePlainWS(t, px); got != tc.wantHost {
+				t.Errorf("plaintext VMess WS Host = %q, want %q", got, tc.wantHost)
+			}
+		})
+	}
+}
+
+// vmessWSAdapter converts, normalises and parses one dotted plaintext VMess WS
+// mapping, the shape the wire test drives.
+func vmessWSAdapter(t *testing.T, hostQ string) *outbound.Vmess {
+	t.Helper()
+
+	node := map[string]any{
+		"v": "2", "ps": "wire", "add": "localhost.", "port": "443",
+		"id": "b831381d-6324-4d53-ad4f-8cda48b30811", "aid": "0",
+		"net": "ws", "type": "none", "tls": "", "path": "/", "scy": "auto",
+	}
+	if hostQ != "" {
+		node["host"] = hostQ
+	}
+	body, err := json.Marshal(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []Entry{{
+		Label: "vmess",
+		Raw:   "vmess://" + base64.StdEncoding.EncodeToString(body),
+		Addr:  "localhost.:443",
+		IP:    netip.MustParseAddr("127.0.0.2"),
+	}}
+	b := newBinding(entries)
+	mappings, err := convert.ConvertsV2Ray(entriesPayload(entries))
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalisePinnedServers(mappings, allPositions(len(mappings)), b)
+	if got := mappings[0]["server"]; got != "localhost" {
+		t.Fatalf("mapping server = %v, want localhost", got)
+	}
+	decoder := structure.NewDecoder(structure.Option{
+		TagName: "proxy", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer,
+	})
+	var opt outbound.VmessOption
+	if err = decoder.Decode(mappings[0], &opt); err != nil {
+		t.Fatal(err)
+	}
+	px, err := outbound.NewVmess(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = px.Close() })
+
+	return px
+}
+
+// TestNormaliseSkipsCondemnedMappings pins the allocation gate: the pre-check
+// runs before normalisation, so a mapping it condemns must keep its original
+// spelling and allocate no transport-preservation carrier.
+func TestNormaliseSkipsCondemnedMappings(t *testing.T) {
+	raw := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@localhost.:443" +
+		"?encryption=none&security=none&type=tcp&headerType=http#condemned"
+	entries := []Entry{{
+		Label: "condemned",
+		Raw:   raw,
+		Addr:  "localhost.:443",
+		IP:    netip.MustParseAddr("127.0.0.2"),
+	}}
+	b := newBinding(entries)
+	mappings, convErr := convert.ConvertsV2Ray(entriesPayload(entries))
+	if convErr != nil {
+		t.Fatal(convErr)
+	}
+
+	normalisePinnedServers(mappings, nil, b)
+	if got := mappings[0]["server"]; got != "localhost." {
+		t.Errorf("condemned server = %v, want the untouched localhost.", got)
+	}
+	if httpHeaderHostPresent(mappings[0]) {
+		t.Error("condemned mapping allocated an http Host carrier")
+	}
+
+	normalisePinnedServers(mappings, []int{0}, b)
+	if got := mappings[0]["server"]; got != "localhost" {
+		t.Errorf("live server = %v, want localhost", got)
+	}
+	if !httpHeaderHostPresent(mappings[0]) {
+		t.Error("live mapping is missing the preserved http Host")
 	}
 }
 
@@ -467,7 +613,7 @@ func TestProbeBoundMatchesATrailingDotHostname(t *testing.T) {
 	if convErr != nil {
 		t.Fatal(convErr)
 	}
-	normalisePinnedServers(mappings, b)
+	normalisePinnedServers(mappings, allPositions(len(mappings)), b)
 	if got := mappings[0]["server"]; got != "localhost" {
 		t.Errorf("mapping server = %v, want localhost", got)
 	}
