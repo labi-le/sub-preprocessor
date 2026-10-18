@@ -658,9 +658,9 @@ vendor the dashboard into the nixos repo.
 
 ## Visual conventions
 
-- The overview guide (text panel 151) explains last-published-cycle context, missing versus
-  zero, older legend samples and the rolling-hour crawler charts. Table headers name the
-  four stages; panel descriptions explain ranking. Short titles avoid clipping on mobile.
+- Panel descriptions explain last-published-cycle context, missing values, retained legend
+  samples and rolling-hour crawler counts. Table headers name the four stages; table
+  descriptions explain ranking. Short titles avoid clipping on mobile.
 - Source tables use full-width rows, medium-height cells, wrapped headers, pagination and
   110px numeric columns. Source/feed identifiers remain verbatim in flexible, wrapped,
   inspectable text columns. On narrow screens, scroll horizontally to reach all columns;
