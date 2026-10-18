@@ -58,7 +58,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Kept nodes (last cycle)",
+      "title": "Published nodes",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -76,12 +76,16 @@
           "calcs": [
             "lastNotNull"
           ]
+        },
+        "text": {
+          "titleSize": 16,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "noValue": "NO KEPT-NODE COUNT",
+          "noValue": "No data",
           "color": {
             "mode": "thresholds"
           },
@@ -100,7 +104,19 @@
                 "value": 100
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "No data",
+                  "color": "text"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -115,12 +131,12 @@
           "instant": true
         }
       ],
-      "description": "Nodes on /stable.txt after the last PUBLISHED cycle - the list a client actually receives. A cycle that fails leaves the previous value standing, so read it against 'Last publish age': a healthy number with a stale age is last hour's list."
+      "description": "Nodes on /stable.txt after the last PUBLISHED cycle - the list a client actually receives. A cycle that fails leaves the previous value standing, so read it against 'Publish age': a healthy number with a stale age is last hour's list."
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "Sources OK / total",
+      "title": "Sources",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -139,7 +155,11 @@
             "lastNotNull"
           ]
         },
-        "textMode": "value_and_name"
+        "textMode": "value_and_name",
+        "text": {
+          "titleSize": 16,
+          "valueSize": 32
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -159,7 +179,19 @@
               }
             ]
           },
-          "noValue": "NO SOURCE COUNTS"
+          "noValue": "No data",
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "No data",
+                  "color": "text"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -185,12 +217,12 @@
           "instant": true
         }
       ],
-      "description": "Sources that returned a usable body against sources configured, published once per cycle, so both trail a config edit by a cycle and ok below total means fetch failures that cycle. Instant read: with nothing exported right now the tile is red no-data, which is also every restart before the first published cycle."
+      "description": "Sources that returned a usable body against sources configured, published once per cycle, so both trail a config edit by a cycle and ok below total means fetch failures that cycle. Instant read: with nothing exported right now the tile shows neutral No data, which is also every restart before the first published cycle."
     },
     {
       "id": 4,
       "type": "stat",
-      "title": "Last publish age",
+      "title": "Publish age",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -208,6 +240,10 @@
           "calcs": [
             "lastNotNull"
           ]
+        },
+        "text": {
+          "titleSize": 16,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -236,7 +272,19 @@
               }
             ]
           },
-          "noValue": "NO PUBLISH TIMESTAMP"
+          "noValue": "No data",
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "No data",
+                  "color": "text"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -251,7 +299,22 @@
           "instant": true
         }
       ],
-      "description": "Seconds since the last cycle that PUBLISHED a list, rendered as an age: a cycle that runs and fails does not reset it, so this is how stale the list is, not when the worker last ran. Read as an instant query \u2014 nothing exported now reads red whatever the time range, and cannot tell a restart from a dead scrape."
+      "description": "Seconds since the last cycle that PUBLISHED a list, rendered as an age: a cycle that runs and fails does not reset it, so this is how stale the list is, not when the worker last ran. Read as an instant query \u2014 nothing exported now reads No data whatever the time range, and cannot tell a restart from a dead scrape."
+    },
+    {
+      "id": 151,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Tables show the last published cycle. Check Publish age.\n\nMissing is not zero. Legends may retain older samples; crawler charts show counts/hour."
+      }
     },
     {
       "id": 5,
@@ -265,15 +328,16 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 5
+        "y": 11
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -330,7 +394,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Cycle duration, rate & failures",
+      "title": "Cycle health",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -339,13 +403,14 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 5
+        "y": 11
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           },
           "unit": "s"
         },
@@ -434,7 +499,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 19
       }
     },
     {
@@ -447,17 +512,18 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -521,17 +587,17 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "IP-stage drops by reason",
-      "description": "Nodes the per-node IP-stage filters dropped in preprocess, summed over every source and split by reason. unsupported is not a filter drop \u2014 it counts unparseable input lines, which never entered the fetched total \u2014 and a flat zero on geo, asn or cidr may mean the selected job's instance configures no such filter.",
+      "title": "IP-stage drops",
+      "description": "Nodes the per-node IP-stage filters dropped in preprocess, summed over every source and split by reason. unsupported is not a filter drop \u2014 it counts unparseable input lines, which never entered the fetched total \u2014 and a flat zero on geo, asn or cidr may mean the selected job's instance configures no such filter. Legend values are the last non-null samples in the selected range; a stopped series can retain its last value here. A gap is not zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -541,7 +607,8 @@
             "fillOpacity": 60,
             "stacking": {
               "mode": "normal"
-            }
+            },
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -549,9 +616,9 @@
       "options": {
         "legend": {
           "displayMode": "table",
-          "placement": "right",
+          "placement": "bottom",
           "calcs": [
-            "last"
+            "lastNotNull"
           ]
         },
         "tooltip": {
@@ -573,29 +640,128 @@
     {
       "id": 20,
       "type": "table",
-      "title": "Feeds (both owners): top 25 (last cycle)",
+      "title": "Feeds: top 25",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 12,
+        "w": 24,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "options": {
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "valid",
+            "displayName": "IP passed",
             "desc": true
           }
-        ]
+        ],
+        "cellHeight": "md",
+        "enablePagination": true
       },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "custom": {
+            "minWidth": 80,
+            "wrapHeaderText": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fetched"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probe passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Published"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "feed"
+            },
+            "properties": [
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "owner"
+            },
+            "properties": [
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -673,10 +839,10 @@
           "options": {
             "excludeByName": {},
             "renameByName": {
-              "Value #A": "yielded",
-              "Value #B": "valid",
-              "Value #C": "kept",
-              "Value #D": "filtered"
+              "Value #A": "Fetched",
+              "Value #B": "IP passed",
+              "Value #C": "Probe passed",
+              "Value #D": "Published"
             },
             "indexByName": {
               "feed": 0,
@@ -689,34 +855,125 @@
           }
         }
       ],
-      "description": "Per-source counts summed by feed and owner, top 25 ranked on valid. A feed is the channel an entry was minted from, or the entry's own name where none was recorded (metrics.go sourceFeed), so a row folds into one every source the channel it records minted, while an entry that records no channel is its own row -- every curated entry on either instance today, and on the crawler side the inline aggregate and any bare-hash mint. Read this table for the channel view; read it for one entry's total only after checking that entry sets feed. Columns: feed, owner (crawler or curated), then yielded, valid, kept, filtered from nodes_total, valid_nodes, tested_nodes, published_nodes. Both labels come from the exporter, so no name is parsed here."
+      "description": "Top 25 (feed, owner) pairs ranked by IP passed in the last published cycle. Counts sum the sources in each pair. A feed is the recorded channel, or the source name when none is recorded; owner is crawler or curated. Fetched / IP passed / Probe passed / Published map to nodes_total / valid_nodes / tested_nodes / published_nodes. Names are unchanged. IP passed is pre-merge and can count shared nodes more than once; Published is attribution after deduplication."
     },
     {
       "id": 21,
       "type": "table",
-      "title": "Ownership split: crawler vs curated (last cycle)",
+      "title": "Source ownership",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 22
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 42
       },
       "options": {
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "valid",
+            "displayName": "IP passed",
             "desc": true
           }
-        ]
+        ],
+        "cellHeight": "md",
+        "enablePagination": true
       },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "custom": {
+            "minWidth": 80,
+            "wrapHeaderText": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sources"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fetched"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probe passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Published"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "owner"
+            },
+            "properties": [
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 180
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -808,10 +1065,10 @@
             },
             "renameByName": {
               "Value #A": "sources",
-              "Value #B": "yielded",
-              "Value #C": "valid",
-              "Value #D": "kept",
-              "Value #E": "filtered"
+              "Value #B": "Fetched",
+              "Value #C": "IP passed",
+              "Value #D": "Probe passed",
+              "Value #E": "Published"
             },
             "indexByName": {
               "owner": 0,
@@ -824,34 +1081,113 @@
           }
         }
       ],
-      "description": "Both owner sides summed into two rows \u2014 the exporter's owner label, crawler vs curated \u2014 with the tables' columns plus a count of sources that reported last cycle. filtered is ATTRIBUTION, not contribution: the curated overlay merges first and Merge is first-wins, so a shared node is credited to the curated row."
+      "description": "Last published cycle, summed by owner (crawler or curated) and sorted by IP passed. sources counts sources that reported, not all configured sources. Fetched / IP passed / Probe passed / Published map to nodes_total / valid_nodes / tested_nodes / published_nodes. Published is attribution, not contribution: curated sources merge first and claim shared nodes."
     },
     {
       "id": 8,
       "type": "table",
-      "title": "Crawler sources: top 25 (last cycle)",
+      "title": "Crawler sources",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 12,
+        "w": 24,
         "x": 0,
-        "y": 30
+        "y": 47
       },
       "options": {
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "valid",
+            "displayName": "IP passed",
             "desc": true
           }
-        ]
+        ],
+        "cellHeight": "md",
+        "enablePagination": true
       },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "custom": {
+            "minWidth": 80,
+            "wrapHeaderText": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fetched"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probe passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Published"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source"
+            },
+            "properties": [
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 180
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -932,10 +1268,10 @@
               "owner": true
             },
             "renameByName": {
-              "Value #A": "yielded",
-              "Value #B": "valid",
-              "Value #C": "kept",
-              "Value #D": "filtered"
+              "Value #A": "Fetched",
+              "Value #B": "IP passed",
+              "Value #C": "Probe passed",
+              "Value #D": "Published"
             },
             "indexByName": {
               "source": 0,
@@ -947,34 +1283,113 @@
           }
         }
       ],
-      "description": "Top 25 crawler-managed sources (owner=\"crawler\") ranked on valid, names verbatim: yielded/valid/kept/filtered are nodes_total/valid_nodes/tested_nodes/published_nodes. valid is pre-merge and kept post-merge, so dedup shrinks kept \u2014 and this table is not comparable row-for-row with the curated one beside it."
+      "description": "Top 25 crawler-managed sources ranked by IP passed in the last published cycle; source identifiers are unchanged. Fetched / IP passed / Probe passed / Published map to nodes_total / valid_nodes / tested_nodes / published_nodes. IP passed is pre-merge; deduplication, dead-cache skips and probe failures all reduce Probe passed. Do not compare rows directly with curated sources, which claim shared nodes first."
     },
     {
       "id": 22,
       "type": "table",
-      "title": "Curated sources: top 25 (last cycle)",
+      "title": "Curated sources",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 30
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 59
       },
       "options": {
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "valid",
+            "displayName": "IP passed",
             "desc": true
           }
-        ]
+        ],
+        "cellHeight": "md",
+        "enablePagination": true
       },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "custom": {
+            "minWidth": 80,
+            "wrapHeaderText": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fetched"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probe passed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Published"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source"
+            },
+            "properties": [
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 180
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -1055,10 +1470,10 @@
               "owner": true
             },
             "renameByName": {
-              "Value #A": "yielded",
-              "Value #B": "valid",
-              "Value #C": "kept",
-              "Value #D": "filtered"
+              "Value #A": "Fetched",
+              "Value #B": "IP passed",
+              "Value #C": "Probe passed",
+              "Value #D": "Published"
             },
             "indexByName": {
               "source": 0,
@@ -1070,7 +1485,7 @@
           }
         }
       ],
-      "description": "Top 25 hand-curated sources (owner=\"curated\") ranked on valid, names verbatim, same columns as the crawler table. Not comparable row-for-row with it: the curated overlay merges first and Merge is first-wins, so kept and filtered here are inflated against it."
+      "description": "Top 25 hand-curated sources ranked by IP passed in the last published cycle; source identifiers are unchanged. Fetched / IP passed / Probe passed / Published map to nodes_total / valid_nodes / tested_nodes / published_nodes. Curated sources merge first and claim shared nodes, so Probe passed and Published are attribution, not a direct quality comparison with crawler sources."
     },
     {
       "id": 120,
@@ -1082,13 +1497,13 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 71
       }
     },
     {
       "id": 19,
       "type": "timeseries",
-      "title": "TCP pre-check (reachability)",
+      "title": "TCP reachability",
       "description": "What the probe phase's TCP reachability pre-check did, in distinct server:port endpoints \u2014 never the condemned NODE count on the probe-outcome panel. trusted = 1: refused endpoints were condemned unprobed and dead-cached; trusted = 0: the breaker rejected the verdict and every node was probed; unresolved fails open.",
       "datasource": {
         "type": "prometheus",
@@ -1098,7 +1513,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 72
       },
       "fieldConfig": {
         "defaults": {
@@ -1106,7 +1521,8 @@
           "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -1187,7 +1603,7 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "Probe outcome by stage",
+      "title": "Probe outcomes",
       "description": "Where the probe ended for each node probed, stacked to close over probed: condemned (the TCP pre-check refused the server, no URL test spent), connect, fetch, passed, unknown (no result at all \u2014 its mapping did not parse and its endpoint was never condemned). A condemned node is also dead-cached for hours, so it leaves the next few cycles' probed count.",
       "datasource": {
         "type": "prometheus",
@@ -1197,7 +1613,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 72
       },
       "fieldConfig": {
         "defaults": {
@@ -1209,7 +1625,8 @@
             "stacking": {
               "mode": "normal",
               "group": "stage"
-            }
+            },
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -1317,7 +1734,7 @@
     {
       "id": 34,
       "type": "timeseries",
-      "title": "Probe refusals by reason",
+      "title": "Probe refusals",
       "description": "Probed nodes no URL test could be built for, split by who refused them: unconvertible = the share-link converter emitted no mapping for the scheme, unparsable = it did and mihomo refused the mapping. With stable_probe_outcome_nodes these partition stable_probed_nodes, so a gap between the two panels and \"probed\" is a prober without the refusal account.",
       "datasource": {
         "type": "prometheus",
@@ -1329,7 +1746,8 @@
           "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -1358,7 +1776,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 80
       }
     },
     {
@@ -1374,7 +1792,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -1386,7 +1804,8 @@
             "stacking": {
               "mode": "normal",
               "group": "phase"
-            }
+            },
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -1462,37 +1881,272 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 88
       }
     },
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Through-node filters: in, kept, coverage",
+      "title": "Filter coverage",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 12,
+        "w": 24,
         "x": 0,
-        "y": 56
+        "y": 89
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bandwidth in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E0B400"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bandwidth kept"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E0B400"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "solid"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "chatgpt in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "chatgpt kept"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "solid"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "claude in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "claude kept"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "solid"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gemini in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gemini kept"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "solid"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tidal in"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B877D9"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tidal kept"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B877D9"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "solid"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "displayMode": "list",
-          "placement": "bottom"
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi"
@@ -1536,22 +2190,22 @@
           "legendFormat": "{{filter}} unverified"
         }
       ],
-      "description": "Nodes entering, leaving and actually classified by each through-node gate, in chain order: every gate's 'in' is the previous gate's 'kept', so the ladder is the egress funnel. 'verified' counts entries whose check reached a conclusive verdict - a clean pass or a refusal - and 'unverified' those that answered without the evidence the classifier reads; both count entry labels of the last published cycle. An entry that never answered appears in neither: a believed batch drops it as unreachable, while a tripped batch keeps it and zeroes that drop (verdict trusted 0 on the panel beside this one). A gate that ran and verified nothing draws verified 0 rather than disappearing, while a gate that never ran - or the bandwidth filter, which has no API verdict account - draws no coverage line. stable_filter_trusted on the panel beside this one separates a believed drop policy from a tripped breaker."
+      "description": "Nodes entering, leaving and actually classified by each through-node gate, in chain order: every gate's 'in' is the previous gate's 'kept', so the ladder is the egress funnel. 'verified' counts entries whose check reached a conclusive verdict - a clean pass or a refusal - and 'unverified' those that answered without the evidence the classifier reads; both count entry labels of the last published cycle. An entry that never answered appears in neither: a believed batch drops it as unreachable, while a tripped batch keeps it and zeroes that drop (verdict trusted 0 on the panel beside this one). A gate that ran and verified nothing draws verified 0 rather than disappearing, while a gate that never ran - or the bandwidth filter, which has no API verdict account - draws no coverage line. stable_filter_trusted on the panel beside this one separates a believed drop policy from a tripped breaker. Each filter's in/kept pair shares one fixed color: dashed in, solid kept. This color pairing does not apply to verified/unverified lines. Legend values are the last non-null samples in the selected range, not necessarily current values."
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Through-node filter drops by reason",
-      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody \u2014 but not necessarily a clean pass: a gate whose whole survivor batch was condemned had the verdict disbelieved by the plausibility breaker, kept every survivor, and booked the same present zeros, warning instead. Each gate's \"verdict trusted\" line (stable_filter_trusted, right axis) tells the two apart: 1 = the verdict was believed and its drops were enacted last cycle, 0 = the breaker rejected it and nothing was dropped, no line = the gate reached no verdict \u2014 unconfigured, no usable key, or cancelled.",
+      "title": "Filter drops & trust",
+      "description": "Nodes each through-node gate dropped, by reason: blocked (service answered, refused this egress), unreachable (never completed through the node), slow (under the bandwidth minimum). A zero line means the gate ran and dropped nobody \u2014 but not necessarily a clean pass: a gate whose whole survivor batch was condemned had the verdict disbelieved by the plausibility breaker, kept every survivor, and booked the same present zeros, warning instead. Each gate's \"verdict trusted\" line (stable_filter_trusted, right axis) tells the two apart: 1 = the verdict was believed and its drops were enacted last cycle, 0 = the breaker rejected it and nothing was dropped, no line = the gate reached no verdict \u2014 unconfigured, no usable key, or cancelled. Legend values are the last non-null samples in the selected range; a stopped series can retain its last value here. A gap is not zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 101
       },
       "fieldConfig": {
         "defaults": {
@@ -1561,7 +2215,8 @@
             "fillOpacity": 60,
             "stacking": {
               "mode": "normal"
-            }
+            },
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -1605,10 +2260,10 @@
       },
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "right",
+          "displayMode": "list",
+          "placement": "bottom",
           "calcs": [
-            "last"
+            "lastNotNull"
           ]
         },
         "tooltip": {
@@ -1639,8 +2294,8 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Cloudflare egress trace",
-      "description": "Published nodes split by whether Cloudflare's cdn-cgi/trace answered, plus moved \u2014 answered nodes whose measured egress country differs from the one the offline chain assigned. Nothing here drops a node, and moved is counted over answered nodes only, so a large unanswered share makes it less representative.",
+      "title": "Cloudflare trace",
+      "description": "Published nodes split by whether Cloudflare's cdn-cgi/trace answered, plus moved \u2014 answered nodes whose measured egress country differs from the one the offline chain assigned. Nothing here drops a node, and moved is counted over answered nodes only, so a large unanswered share makes it less representative. Legend values are the last non-null samples in the selected range; a stopped series can retain its last value here. A gap is not zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1649,7 +2304,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 113
       },
       "fieldConfig": {
         "defaults": {
@@ -1659,7 +2314,8 @@
             "fillOpacity": 60,
             "stacking": {
               "mode": "none"
-            }
+            },
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -1667,9 +2323,9 @@
       "options": {
         "legend": {
           "displayMode": "table",
-          "placement": "right",
+          "placement": "bottom",
           "calcs": [
-            "last"
+            "lastNotNull"
           ]
         },
         "tooltip": {
@@ -1716,7 +2372,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 121
       }
     },
     {
@@ -1732,14 +2388,15 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 122
       },
       "fieldConfig": {
         "defaults": {
           "unit": "Mbits",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -1805,14 +2462,15 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 73
+        "y": 122
       },
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -1868,7 +2526,7 @@
     {
       "id": 26,
       "type": "stat",
-      "title": "Kept-node speed min (last cycle)",
+      "title": "Minimum speed",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1877,7 +2535,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 130
       },
       "options": {
         "colorMode": "value",
@@ -1886,12 +2544,16 @@
           "calcs": [
             "lastNotNull"
           ]
+        },
+        "text": {
+          "titleSize": 16,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "Mbits",
-          "noValue": "NO SPEED SAMPLE",
+          "noValue": "No data",
           "color": {
             "mode": "thresholds"
           },
@@ -1910,7 +2572,19 @@
                 "value": 100
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "No data",
+                  "color": "text"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -1930,7 +2604,7 @@
     {
       "id": 27,
       "type": "stat",
-      "title": "Kept-node latency min (last cycle)",
+      "title": "Minimum latency",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1939,7 +2613,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 130
       },
       "options": {
         "colorMode": "value",
@@ -1948,12 +2622,16 @@
           "calcs": [
             "lastNotNull"
           ]
+        },
+        "text": {
+          "titleSize": 16,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
-          "noValue": "NO KEPT NODES",
+          "noValue": "No data",
           "color": {
             "mode": "thresholds"
           },
@@ -1968,7 +2646,19 @@
                 "value": 0
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "No data",
+                  "color": "text"
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -1988,21 +2678,21 @@
     {
       "id": 12,
       "type": "bargauge",
-      "title": "Top countries in published list (last cycle)",
+      "title": "Published countries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 0,
-        "y": 85
+        "y": 134
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "noValue": "NO COUNTRY COUNTS",
+          "noValue": "No data",
           "min": 0,
           "color": {
             "mode": "continuous-BlPu"
@@ -2039,23 +2729,24 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Unresolved GEO tags in published list",
+      "title": "Unresolved GEO tags",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 10,
         "w": 12,
         "x": 12,
-        "y": 85
+        "y": 134
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": [
@@ -2118,7 +2809,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 93
+        "y": 144
       }
     },
     {
@@ -2136,7 +2827,8 @@
           "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2183,7 +2875,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 94
+        "y": 145
       }
     },
     {
@@ -2201,7 +2893,8 @@
           "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10
+            "fillOpacity": 5,
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2239,7 +2932,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 94
+        "y": 145
       }
     },
     {
@@ -2248,7 +2941,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 102
+        "y": 153
       },
       "id": 28,
       "panels": [],
@@ -2258,7 +2951,7 @@
     {
       "id": 29,
       "type": "timeseries",
-      "title": "GitHub candidate funnel",
+      "title": "GitHub candidates",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2267,15 +2960,16 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 154
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2323,7 +3017,7 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "GitHub novel endpoints",
+      "title": "GitHub new endpoints",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2332,15 +3026,16 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 154
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2370,7 +3065,7 @@
     {
       "id": 31,
       "type": "timeseries",
-      "title": "GitHub searches, repos and skips",
+      "title": "GitHub search funnel",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2379,15 +3074,16 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 111
+        "y": 162
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2435,7 +3131,7 @@
     {
       "id": 32,
       "type": "timeseries",
-      "title": "GitHub rate-limit sleeps & errors",
+      "title": "GitHub limits & errors",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2444,15 +3140,16 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 111
+        "y": 162
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []
@@ -2500,15 +3197,16 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 119
+        "y": 170
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "auto"
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineWidth": 2
           }
         },
         "overrides": []

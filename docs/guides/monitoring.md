@@ -159,22 +159,21 @@ vendor the dashboard into the nixos repo.
   so the standing refusal population re-enters the probe every cycle — visible in
   `stable_probed_nodes` and `stable_probe_refused_nodes` — instead of inflating
   `dead_skipped` after its first refusal (see the dead-cache bullet below).
-  The per-name source tables — panel 8 (`Crawler sources: top 25 (last cycle)`) and
-  panel 22 (`Curated sources: top 25 (last cycle)`) beside it — rename the four columns
-  `yielded`/`valid`/`kept`/`filtered`, so their `kept` column is `stable_source_tested_nodes` and
-  their `filtered` column is `stable_source_published_nodes`, while the GLOBAL `stable_kept_nodes`
-  means PUBLISHED. That collision is known and left standing: the global name is a wire format
-  that panels and alerts already read, and renaming it to tidy a column label is a bigger break
-  than the ambiguity.
+  The per-name source tables — panel 8 (`Crawler sources`) and panel 22 (`Curated sources`) —
+  label the four stages `Fetched` / `IP passed` / `Probe passed` / `Published`.
+  These are `nodes_total` / `valid_nodes` / `tested_nodes` / `published_nodes`, respectively;
+  the global `stable_kept_nodes` still means PUBLISHED. Display labels remove the ambiguity
+  without renaming any metric or changing the per-source funnel.
   The same word carries a UNIT trap one metric over: `stable_kept_latency_ms` observes one value
   per survivor, and that value is the node's MEAN over its rounds rather than a single probe
   sample (`keptLatencies`, `internal/stable/checker.go:384-390`; the `Survivor.MeanMs` it reads is the
   exact quantity `SelectSurvivors` admits on, `internal/stable/select.go:84-87`) — so
   its p90 is a percentile over per-node means, which compress the tail.
-- **The per-name tables are a PAIR split by owner, and the split is not an invitation to read
-  them side by side.** Panel 8 (left) takes `{owner="crawler"}`, panel 22 (right) takes
-  `{owner="curated"}`, and each ranks `topk(25, ...)` on `valid` WITHIN its own set; panel 21
-  sums both sides into two rows, beside the feed table at the top of the Sources row. `owner` is an EXPORTER label, and behind it a
+- **The per-name tables are a PAIR split by owner, not a row-for-row quality comparison.**
+  Panel 8 takes `{owner="crawler"}`, panel 22 takes `{owner="curated"}`, and each ranks
+  `topk(25, ...)` on `IP passed` WITHIN its own set. All four source tables are full-width:
+  feeds, ownership totals, crawler sources, then curated sources. Panel 21 sums both owners
+  into two rows. `owner` is an EXPORTER label, and behind it a
   FIELD rather than a regex over the name: the four per-source counters carry `feed` and `owner`
   beside `source` (`writeSources`, `internal/metrics/metrics.go:366`), read once per source off
   `SourceReport.Managed` (`:375`) and `.Feed` (`:378`, via `sourceFeed` at `:437`) — the
@@ -208,7 +207,7 @@ vendor the dashboard into the nixos repo.
   crawler-managed against 45 hand-curated,
   so panel 8's 25 rows are a 5.7% window on its side while panel 22's 25 cover 55.6% of its own.
   The crawler side grows hourly — the same count read 327 a day earlier — so take the live
-  denominator from panel 3 (Sources OK / total), not a stamp here.
+  denominator from panel 3 (`Sources`, with ok and total values), not a stamp here.
   **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
   `config.Load` merges the curated `config/sources.yaml` overlay at
   `internal/config/config.go:1098` (inside `mergeSourcesOverlay`, `:1166`) but appends the
@@ -217,7 +216,7 @@ vendor the dashboard into the nixos repo.
   Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
   (`internal/stable/checker.go:720`, `:723`) and reassembles them `for i, r := range results`
   (:733), so config order survives into `Merge` intact. Every curated source therefore claims
-  each shared node BEFORE any quality judgement, and panel 22's `kept` and `filtered` are
+  each shared node BEFORE any quality judgement, and panel 22's `Probe passed` and `Published` are
   inflated against panel 8's. Measured floor on the cycle behind those numbers (prod
   `config/.stable-snapshot.json`, `updated_at` 2026-08-16 09:16:16Z, whose 83/231 published split
   matches Prometheus exactly): decoding the inline harvest's body (500 node URIs; that source was
@@ -232,7 +231,7 @@ vendor the dashboard into the nixos repo.
   (`bahemmat-481` at `165.140.216.142:443`, on both sides). A FLOOR, not the total: only 1 of the
   447 `private.yaml` entries carries an inline body (file at 2026-08-16 12:15 +03:00), the other
   446 being URLs the measurement did not fetch.
-- **The feed breakdown (panel 20, "Feeds (both owners): top 25 (last cycle)") is two exporter LABELS, both of
+- **The feed breakdown (panel 20, "Feeds: top 25") is two exporter LABELS, both of
   them fields, and its rows are still MIXED.** `feed` and `owner` ride the four per-source
   counters, so panel 20 is `sum by (feed, owner) (<metric>{job="$job"})` and nothing is derived at
   query time: `label_values(..., feed)` answers, and an alert that means a feed writes that same
@@ -264,7 +263,7 @@ vendor the dashboard into the nixos repo.
   by (feed, owner) (stable_source_valid_nodes{job="$job"}))`, so the table draws 25 rows out of
   however many `(feed, owner)` pairs reported. Measured on `:3020`, host clock 2026-08-18 00:58
   +0300, 501 reporting sources landed on 110 buckets: 66 crawler feeds and 44 curated names.
-  The columns are `feed | owner | yielded | valid | kept | filtered`, and the four targets are
+  The columns are `feed | owner | Fetched | IP passed | Probe passed | Published`, and the four targets are
   stitched by `filterFieldsByName` → `merge` → `organize` — `labelsToFields` sits ahead of them
   and does nothing here either — NOT by the `joinByField` panels 8, 22 and 21 use: that
   transformation takes a SINGLE key (`byField`) and so cannot join on a pair, whereas `merge` keys
@@ -280,7 +279,7 @@ vendor the dashboard into the nixos repo.
   are configured, read `stable_sources_total` — panel 3, top of the same dashboard — rather than
   counting a config file; it is published per cycle, so it trails a config edit by a cycle.
 - **The crawler-managed vs hand-curated split is an exporter LABEL over a FIELD, and its
-  `published` column measures ATTRIBUTION, not contribution.** The discriminator is
+  `Published` column measures ATTRIBUTION, not contribution.** The discriminator is
   `owner="crawler"` / `owner="curated"`, rendered once per source rather than matched per query
   (see the panel 8 / 22 bullet above). Underneath it is
   `SubscriptionSource.Managed` (`internal/config/config.go:639`), whose comment fixes the axis as
@@ -333,14 +332,13 @@ vendor the dashboard into the nixos repo.
   The measured case was the second instance: 52 hand-curated sources, no `private.yaml` and
   no crawler writing into its directory, panel 8 "No data" on all four targets for its whole
   life (retired 2026-08-26).
-  And never divide the two columns into a survival rate: `valid` is counted per source
-  BEFORE `Merge` and double-counts a node two sources both yield, whereas `published` is
-  post-attribution. Panel 21 (Ownership split: crawler vs curated (last cycle)) sits
-  full-width at the row below panels 8 and 22, summarising the pair it follows, and renders as a
-  table because its five numeric columns spanned 45 to 263500 at that instant and a shared axis
-  would flatten `filtered` to zero. It quotes no digits of its own, aggregates `sum by (owner)`
-  over one target per column (`count by (owner)` for the sources column), and keeps panels 8, 22
-  and 20's column vocabulary, in which `filtered` IS `stable_source_published_nodes`.
+  And never divide the two columns into a survival rate: `IP passed` is counted per source
+  BEFORE `Merge` and double-counts a node two sources both yield, whereas `Published` is
+  post-attribution. Panel 21 (`Source ownership`) sits full-width after the feed table and
+  before the two per-name tables. It renders as a table because its five numeric columns
+  spanned 45 to 263500 at that instant and a shared axis would flatten `Published` to zero.
+  It quotes no digits of its own, aggregates `sum by (owner)` over one target per column
+  (`count by (owner)` for sources), and uses the same four stage labels as panels 8, 22 and 20.
 - `flake.nix` output `nixosModules.monitoring` (`deploy/monitoring.nix`) adds
   the `sub-preprocessor` Prometheus scrape job and the Grafana dashboard
   provider (`deploy/grafana/sub-preprocessor.json`). It assumes the host
@@ -367,7 +365,7 @@ vendor the dashboard into the nixos repo.
   IP-stage chain runs for: every `stable_source_*` series comes out of the cycle report
   (`internal/metrics/metrics.go:144`), so a cycle that never completes — cancelled at shutdown,
   or still in flight — contributes no sample at all, not a zero.
-- **The through-node drops panel (panel 7, `Through-node filter drops by reason`) has three
+- **The through-node drops panel (panel 7, `Filter drops & trust`) has three
   states, not two — and the batch breaker is a fourth that the drop series cannot show: it
   reads on its own family, `stable_filter_trusted{filter}`, which panel 7 draws per gate as
   a "verdict trusted" line.** `apiFilter.apply` and `bandwidthFilter.apply` each
@@ -380,8 +378,9 @@ vendor the dashboard into the nixos repo.
   iterates only the keys present (`internal/metrics/metrics.go:221`), so an inert gate writes NO
   drop series though its `filter_in`/`filter_kept` still land. Third: a gate dropped from
   `filters:` adds nothing, yet its old rows stop rather than vanish, so a long range still draws
-  lines ending at that sample; the legend reduces with `last`, not `lastNotNull`, so its cell
-  reads empty rather than frozen.
+  lines ending at that sample. The bottom legend uses `lastNotNull`, so it retains the last
+  available sample in the selected range; inspect the line ending rather than treating that
+  legend value as a current reading. Missing samples remain gaps, not zeros.
   The whole-batch breaker is the round's fourth state, and it is the one the drop series CANNOT
   carry: a gate whose batch verdict tripped `breakerTrips` keeps every survivor and
   writes `Dropped[blocked]=0`/`Dropped[unreachable]=0` (`nodefilter.go:163-164`, bandwidth at
@@ -397,11 +396,11 @@ vendor the dashboard into the nixos repo.
   longer render alike — the drop series stays identical and only this gauge moves, and it
   moves ON THE DASHBOARD, not just in a query: panel 7 draws one right-axis "verdict
   trusted" line per gate (legendFormat `{{filter}} verdict trusted`), whose legend cell reads
-  0 or 1 under the panel's `last` calc, so a tripped gate shows as its line stepping from 1
+  0 or 1 under the panel's `lastNotNull` calc, so a tripped gate shows as its line stepping from 1
   to 0 while its drop rows stay at zero — visible without opening Prometheus. The gate's WARN
   log ("gate refused every survivor; treating the batch verdict as the endpoint's or our
   egress's ... and keeping all survivors") still fires alongside the 0. Coverage is a third
-  axis, on panel 6: `stable_filter_{verified,unverified}_nodes` renders one line per gate beside
+  axis, on panel 6 (`Filter coverage`): `stable_filter_{verified,unverified}_nodes` renders one line per gate beside
   in/kept, so a gate that ran and verified nothing reads `verified 0` while an absent/cancelled
   gate and the bandwidth filter draw no coverage line at all. What IS
   distinguishable on the drop series themselves: a gate that genuinely ran (drop series
@@ -487,8 +486,8 @@ vendor the dashboard into the nixos repo.
   learns its scheme or cipher) and a steady value as the corpus's standing share of lines
   this worker's mihomo cannot dial — all four claims are in the `RefusalReport` doc cited
   above and in the family's HELP text (`metrics.go:302-303`). The family has drawn on panel 34
-  (`Probe refusals by reason`, the Probe row) since 2026-09-14; before that it was read by
-  query alone. Its neighbours split the same probed set: panel 18 (`Probe outcome by stage`)
+  (`Probe refusals`, the Probe row) since 2026-09-14; before that it was read by
+  query alone. Its neighbours split the same probed set: panel 18 (`Probe outcomes`)
   reads `stable_probe_outcome_nodes` and panel 5 (`Pipeline funnel`) draws
   `stable_dead_skipped_nodes`, so stages plus refusals closing on `stable_probed_nodes` is
   something the two panels can now be read against each other for.
@@ -528,13 +527,11 @@ vendor the dashboard into the nixos repo.
   `stable_kept_country_nodes` as well, because `Annotate` returns the lead tag's country and
   `BuildPayload` writes that into `Survivor.Country` (annotator.go's `tookLead`;
   `internal/stable/select.go:99-131`).
-- **A panel declaring no colour is not neutral: Grafana merges in green-base/red-from-80, so an
-  ABSENT series paints green.** A no-value takes the BASE threshold step's colour, which is why
-  the stat tiles declare an explicit red base. A continuous palette fails the other way: it
-  interpolates on percent alone, ignoring value and thresholds, so the merged default is inert
-  and a no-value's percent 0 is the FIRST palette colour. Panel 12 therefore uses
-  `continuous-BlPu`, whose low end asserts nothing; a green-yellow-red palette would paint an
-  empty panel green.
+- **Missing data is not a numeric health verdict.** Stat tiles explicitly map null to neutral
+  `No data` in the theme's text colour, with `noValue` carrying the same short text. Their
+  existing numeric thresholds remain unchanged: zero is still a real measured value and
+  is not mapped to missing. Panel 12 retains the `continuous-BlPu` country-count palette;
+  its colours encode relative counts, not health.
 - **The speed ladder is fixed, and only its average survives a cycle that measured nothing.**
   `speedBuckets` is nine bounds, 5 to 500 Mbps (`internal/metrics/metrics.go:30`), so a quantile
   at the top bound means faster than 500, not a plateau. One of them, 15, exists because the
@@ -547,24 +544,24 @@ vendor the dashboard into the nixos repo.
   `writeHistogram` still emits a zero `_sum` and `_count` (`internal/metrics/metrics.go:139`,
   :482-483): the avg target's `clamp_min(...,1)` evaluates 0/1 into a FLAT ZERO, while p50/p90 go
   NaN over all-zero buckets and the guarded max (:142) vanishes. `stable_kept_speed_min_mbps` is
-  exported (:141) and since the 2026-09 round has its own tile — panel 26, "Kept-node speed min
-  (last cycle)" — whose no-data means nothing was measured that cycle, exactly like the max line;
+  exported (:141) and since the 2026-09 round has its own tile — panel 26, `Minimum speed` —
+  whose no-data means nothing was measured that cycle, exactly like the max line;
   the raw `stable_kept_speed_mbps_bucket{le="5"}` histogram line itself stays unplotted, the tile
   answering the floor question directly. `keptLatencies` keeps every survivor
   (`internal/stable/checker.go:384`), so `stable_kept_latency_ms_count` always equals
-  `stable_kept_nodes` and that panel has no such trap; its min twin sits in panel 27, "Kept-node
-  latency min (last cycle)", where no-data means no published nodes yet rather than a missing
+  `stable_kept_nodes` and that panel has no such trap; its min twin sits in panel 27,
+  `Minimum latency`, where no-data means no published nodes yet rather than a missing
   measurement.
-- **A source you cannot find in a `top 25` table is under the cutoff, and a feed's `valid` is an
+- **A source you cannot find in a top-25 table is under the cutoff, and a feed's `IP passed` is an
   upper bound.** On the 2026-08-18 +0300 reading above (110 buckets, 25 drawn), 85 buckets went
   undrawn. Skew, not fan-out, decides placement — individually small URLs place no per-URL row
-  yet rank high summed. Summing `valid` over a feed's own URLs double-counts every node several
-  carry: the inflation above applies WITHIN a feed too. `filtered` does not, `Merge`
+  yet rank high summed. Summing `IP passed` over a feed's own URLs double-counts every node several
+  carry: the inflation above applies WITHIN a feed too. `Published` does not, `Merge`
   giving each node exactly one `<source>-NNN` label (`internal/stable/merge.go:88-97`) and
   `countSourceStages` crediting one source per published node (`internal/stable/checker.go:625`),
   so `sum(stable_source_published_nodes)` equals `stable_kept_nodes` unless `countSourceStages`
-  logged unattributed survivors (`checker.go:651-654`) — the one way it can undercount. `filtered` 0
-  beside a large `valid` says only that nothing reached the payload under that name: dedupe,
+  logged unattributed survivors (`checker.go:651-654`) — the one way it can undercount. `Published` 0
+  beside a large `IP passed` says only that nothing reached the payload under that name: dedupe,
   dead-cache skip, probe failure and a gate read alike.
 - **One deployment, one scrape JOB — a second DEPLOYMENT gets its OWN job, never a second target
   in the first; the crawler sidecar is the one sanctioned second target.** `deploy/monitoring.nix`
@@ -658,6 +655,24 @@ vendor the dashboard into the nixos repo.
   against the intake: a rise means the withdrawal path is working, and a rise to the size
   of the intake means the phase is paying nothing — mining and withdrawing at the same
   pace, which points at the mint's gates rather than the probe.
+
+## Visual conventions
+
+- The overview guide (text panel 151) explains last-published-cycle context, missing versus
+  zero, older legend samples and the rolling-hour crawler charts. Table headers name the
+  four stages; panel descriptions explain ranking. Short titles avoid clipping on mobile.
+- Source tables use full-width rows, medium-height cells, wrapped headers, pagination and
+  110px numeric columns. Source/feed identifiers remain verbatim in flexible, wrapped,
+  inspectable text columns. On narrow screens, scroll horizontally to reach all columns;
+  do not shrink six columns into the viewport. The default sort is descending `IP passed`.
+- Dense filter charts have full-width, taller panels and wrapping list legends below plots.
+  Their legends show the last non-null sample in the selected range, not necessarily now.
+  In `Filter coverage`, each configured filter's in/kept pair shares one fixed colour,
+  with dashed input and solid kept lines; verified/unverified lines do not share these
+  overrides. New filter names need matching display overrides, not new targets.
+- Time-series strokes are 2px, with light fill on unstacked line charts. Composition
+  stacks and all units, queries, numeric thresholds and stat reductions are unchanged.
+  Stat labels use 16px text and values 32px; missing values use neutral `No data`.
 
 **Editing the dashboard** — source of truth is `deploy/grafana/sub-preprocessor.json`
 (provisioned `editable: false`; validate with `jq`, ideally render against a throwaway
