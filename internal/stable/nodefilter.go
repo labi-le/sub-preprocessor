@@ -10,8 +10,8 @@ import (
 // NodeFilter is a through-node check the worker runs on latency-probe
 // survivors: unlike the preprocess IP-filters it routes traffic THROUGH each
 // proxy node, so it lives here and only affects /stable.txt. The through-node
-// entries of the unified filters list (gemini/claude/chatgpt/tidal/bandwidth)
-// select which run.
+// entries of the unified filters list (gemini/claude/chatgpt/tidal/deepl/
+// bandwidth) select which run.
 type NodeFilter interface {
 	// apply narrows survivors using the shared, pre-parsed proxies grouped by
 	// node label. One label can hold several proxies — mihomo expands a
@@ -49,6 +49,11 @@ type tidalChecker interface {
 	TidalCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
+// deeplChecker is the through-node DeepL capability of a Prober.
+type deeplChecker interface {
+	DeeplCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+}
+
 // bandwidthChecker is the through-node download-speed capability of a Prober.
 type bandwidthChecker interface {
 	BandwidthCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]BandwidthOutcome
@@ -61,6 +66,7 @@ const (
 	claudeFilterName    = "claude"
 	chatgptFilterName   = "chatgpt"
 	tidalFilterName     = "tidal"
+	deeplFilterName     = "deepl"
 	bandwidthFilterName = "bandwidth"
 )
 
@@ -80,9 +86,9 @@ const (
 // preprocess, before they are ever merged. A nil store (see the tidal filter)
 // skips that persistence, so its drop costs this cycle only. What counts as
 // blocked is the check's own verdict: a geo-block marker in the body for
-// gemini/claude/chatgpt, a refused request for tidal. A nil enabled func means
-// the check is always active (e.g. Anthropic geo-blocks before authentication,
-// so its check is keyless).
+// gemini/claude/chatgpt, a refused request for tidal, a 451 or the region
+// marker for deepl. A nil enabled func means the check is always active (e.g.
+// Anthropic geo-blocks before authentication, so its check is keyless).
 //
 // A response the check could not read to its end -- a read error, a timeout
 // after the headers, or a body past maxAPIBody -- is NOT a pass for a
@@ -308,10 +314,10 @@ func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mih
 
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key); the claude, chatgpt and tidal filters are
-// keyless (the first two geo-block before authentication, tidal's /v1/country
-// needs no credential); the bandwidth filter needs a prober with bandwidth
-// support.
+// support (a resolved API key); the claude, chatgpt, tidal and deepl filters
+// are keyless (the first two geo-block before authentication, tidal's
+// /v1/country needs no credential, and DeepL renders its region verdict before
+// authentication); the bandwidth filter needs a prober with bandwidth support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -377,6 +383,22 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 			})
 		case bandwidthFilterName:
 			filters = appendBandwidthFilter(filters, prober, logger)
+		case deeplFilterName:
+			dl, ok := prober.(deeplChecker)
+			if !ok {
+				logger.Warn().Msg("deepl filter requested but prober lacks DeepL support; skipping")
+				continue
+			}
+			// Store-fed, unlike tidal: DeepL's refusal is an explicit region
+			// page behind a 451, as attributable to the egress as the AI
+			// gates' markers and as stable, not a bare status a CDN hiccup
+			// could produce.
+			filters = append(filters, &apiFilter{
+				filterName: deeplFilterName,
+				check:      dl.DeeplCheck,
+				store:      store,
+				logger:     logger,
+			})
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")
 		}

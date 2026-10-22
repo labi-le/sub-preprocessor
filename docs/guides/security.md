@@ -11,7 +11,7 @@
   those. A URL harvested from a stranger's repository is attacker-chosen in every way a query
   parameter was, so the SSRF gates stay fully enforced and MUST NOT be relaxed on the argument
   that the input is now "configured": `fetch.ValidatePublicHTTPSURL` runs on config load
-  (`internal/config/config.go:1431`, `:1669`), on every crawler mint and recheck
+  (`internal/config/config.go:1523`, `:1764`), on every crawler mint and recheck
   (`internal/crawl/crawl.go:734`, `:1623`) and again inside the fetch itself
   (`internal/fetch/fetch.go:158`), and the guarded dialer below is unchanged.
 - Fetching uses a safe HTTP client:

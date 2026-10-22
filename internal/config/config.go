@@ -73,6 +73,15 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
+	// Unlike its siblings this endpoint carries the whole probe path: DeepL's
+	// keyless verdict is on one API route, and the site's page is 333 KB, past
+	// maxAPIBody, so probing it would leave every accepted node unverified.
+	defaultDeeplEndpoint = "https://api-free.deepl.com/v2/usage"
+	// What DeepL's region page answers from a refused egress (measured
+	// 2026-10-22: HTTP 451, 572-byte body, `server: cloudflare`).
+	defaultDeeplMarker      = "unavailable in your region"
+	defaultDeeplTimeout     = 15 * time.Second
+	defaultDeeplConcurrency = 8
 	// The cdn-cgi/trace probe behind the cloudflare annotate provider. Only
 	// these two are configurable: the endpoint is a compile-time constant in
 	// internal/stable, for the reason recorded there. Concurrency matches the
@@ -88,9 +97,9 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn/cidr, run per-node in
-// preprocess) and through-node filters (gemini/claude/chatgpt/tidal/bandwidth,
-// run post-probe in stable); which physical stage a type lands in is an
-// implementation detail, not config.
+// preprocess) and through-node filters (gemini/claude/chatgpt/tidal/deepl/
+// bandwidth, run post-probe in stable); which physical stage a type lands in
+// is an implementation detail, not config.
 const (
 	FilterCountry   = "country"
 	FilterASN       = "asn"
@@ -99,11 +108,12 @@ const (
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
 	FilterTidal     = "tidal"
+	FilterDeepl     = "deepl"
 	FilterBandwidth = "bandwidth"
 
 	// numThroughNodeFilterTypes is how many singleton through-node filter
 	// types exist, so the seen-map in validateFilters can pre-size itself.
-	numThroughNodeFilterTypes = 5
+	numThroughNodeFilterTypes = 6
 
 	// ProviderCloudflare answers from Cloudflare's own geo-IP database, read
 	// through cdn-cgi/trace from the node itself (the stable worker runs it
@@ -249,13 +259,14 @@ func (g *GeoConfig) applyDefaults() {
 //   - asn:     DenyPatterns
 //   - cidr:    URLs, FileType, RefreshInterval
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/claude/chatgpt/tidal: selectors; prober params come from
-//     geoblock.{gemini,claude,chatgpt,tidal} and may be overridden
+//   - gemini/claude/chatgpt/tidal/deepl: selectors; prober params come from
+//     geoblock.{gemini,claude,chatgpt,tidal,deepl} and may be overridden
 //     per-entry (Marker/Model/Endpoint/Key*/Timeout/Concurrency/RateLimit for
 //     gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
-//     Endpoint/Timeout/Concurrency for tidal).
+//     Endpoint/Timeout/Concurrency for tidal;
+//     Marker/Endpoint/Timeout/Concurrency for deepl).
 //
 // A field a type's merge does not read is silently ignored for that type: a
 // tidal entry honours only Endpoint/Timeout/Concurrency, so a Marker or Model
@@ -287,7 +298,7 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude/chatgpt/tidal overrides (fall back to the geoblock
+	// gemini/claude/chatgpt/tidal/deepl overrides (fall back to the geoblock
 	// sub-block).
 	Marker    string `yaml:"marker"`
 	Model     string `yaml:"model"`
@@ -358,6 +369,7 @@ type NodeFilterSpec struct {
 	Claude    ClaudeConfig
 	ChatGPT   ChatGPTConfig
 	Tidal     TidalConfig
+	Deepl     DeeplConfig
 }
 
 // IPFilterSpecs returns the IP-stage filters (country/asn/cidr) in config
@@ -429,7 +441,7 @@ func (cfg *Config) AnnotateUsesProvider(name string) bool {
 }
 
 // NodeFilterSpecs returns the through-node filters (gemini/claude/chatgpt/
-// tidal/bandwidth) in config order.
+// tidal/deepl/bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
 	for _, f := range cfg.Filters {
@@ -442,6 +454,8 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 			specs = append(specs, NodeFilterSpec{Type: FilterChatGPT, ChatGPT: f.mergedChatGPT(cfg.GeoBlock.ChatGPT)})
 		case FilterTidal:
 			specs = append(specs, NodeFilterSpec{Type: FilterTidal, Tidal: f.mergedTidal(cfg.GeoBlock.Tidal)})
+		case FilterDeepl:
+			specs = append(specs, NodeFilterSpec{Type: FilterDeepl, Deepl: f.mergedDeepl(cfg.GeoBlock.Deepl)})
 		case FilterBandwidth:
 			specs = append(specs, NodeFilterSpec{Type: FilterBandwidth, Bandwidth: f.bandwidthConfig()})
 		}
@@ -528,6 +542,22 @@ func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
 	return base
 }
 
+func (f FilterConfig) mergedDeepl(base DeeplConfig) DeeplConfig {
+	if f.Endpoint != "" {
+		base.Endpoint = f.Endpoint
+	}
+	if f.Marker != "" {
+		base.Marker = f.Marker
+	}
+	if f.Timeout != 0 {
+		base.Timeout = f.Timeout
+	}
+	if f.Concurrency != 0 {
+		base.Concurrency = f.Concurrency
+	}
+	return base
+}
+
 func (f FilterConfig) bandwidthConfig() BandwidthConfig {
 	return BandwidthConfig{
 		TestURL:     f.TestURL,
@@ -560,7 +590,7 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the probe params. The through-node filters
-// (gemini/claude/chatgpt/tidal/bandwidth) and their params live in the
+// (gemini/claude/chatgpt/tidal/deepl/bandwidth) and their params live in the
 // top-level filters list, not here. Mostly URL-test params, with one
 // exception: Timeout also sets the reachability pre-check's dial budget
 // (halved per attempt), so lowering it widens the condemned set.
@@ -807,14 +837,16 @@ func (c *CloudflareConfig) validate() error {
 
 // GeoBlockConfig configures the per-node geo-block list -- a SQLite TTL store of
 // node hosts that failed a through-node API reachability check (Gemini, Claude,
-// ChatGPT) -- plus the base params of every through-node GATE. Tidal's
+// ChatGPT, DeepL) -- plus the base params of every through-node GATE. Tidal's
 // params live here for uniformity even though the tidal filter deliberately
 // never writes to the store: its verdict is a bare status code, a far weaker
 // signal than the explicit refusal markers the other checks match, so a
 // transient CDN error or rate-limit would otherwise evict the host from every
-// endpoint for the store's whole TTL. Every member here drops nodes; the
-// cdn-cgi/trace probe used to sit alongside them and does not, so it moved to
-// geo.cloudflare with the other geo databases.
+// endpoint for the store's whole TTL. DeepL writes to it: its refusal is an
+// explicit region page with a 451, as attributable to the egress as the AI
+// gates' markers. Every member here drops nodes; the cdn-cgi/trace probe used
+// to sit alongside them and does not, so it moved to geo.cloudflare with the
+// other geo databases.
 type GeoBlockConfig struct {
 	DBPath  string        `yaml:"db_path"`
 	TTL     time.Duration `yaml:"ttl"`
@@ -822,6 +854,7 @@ type GeoBlockConfig struct {
 	Claude  ClaudeConfig  `yaml:"claude"`
 	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
 	Tidal   TidalConfig   `yaml:"tidal"`
+	Deepl   DeeplConfig   `yaml:"deepl"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -911,11 +944,49 @@ type TidalConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
+// DeeplConfig configures the through-node DeepL reachability check. It needs no
+// API key: DeepL renders its region verdict before authentication, so a
+// keyless GET /v2/usage answers an egress it refuses with HTTP 451 and the
+// "unavailable in your region" page (measured 2026-10-22, `server:
+// cloudflare`, 572 bytes), and an accepted egress with an authentication error
+// instead.
+//
+// The endpoint carries the whole probe path, unlike the other gates' bases. The
+// obvious surface, https://www.deepl.com/en, answers the same 451 and the same
+// page, but its accepted page is 333 KB against maxAPIBody's 64 KiB: every
+// accepted node on that surface would be kept unverified instead of counted as
+// verified, while the API's body is one small JSON or the 572-byte page.
+//
+// The classifier fails OPEN on anything but a 451 or the marker: DeepL rate
+// limits and its CDN answer 5xx, and neither should drop a healthy node. The
+// accepted cost is the one prober_chatgpt.go documents for OpenAI's /v1/models:
+// if DeepL ever moves the region check behind authentication, the gate reads
+// every answer as accepted. The symptom is stable_filter_dropped_nodes
+// {filter="deepl",reason="blocked"} at 0 while the other gates drop, paired
+// with the gate's coverage reading every survivor verified.
+type DeeplConfig struct {
+	Endpoint    string        `yaml:"endpoint"`
+	Marker      string        `yaml:"marker"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Concurrency int           `yaml:"concurrency"`
+}
+
 func (g *GeoBlockConfig) applyDefaults() {
 	if g.TTL == 0 {
 		g.TTL = defaultGeoBlockTTL
 	}
-	gm := &g.Gemini
+	applyGeminiDefaults(&g.Gemini)
+	applyClaudeDefaults(&g.Claude)
+	applyChatGPTDefaults(&g.ChatGPT)
+	applyTidalDefaults(&g.Tidal)
+	applyDeeplDefaults(&g.Deepl)
+}
+
+// The per-block defaulting below is split by type rather than shared: the
+// blocks carry different knob sets, and a single function walking all five
+// reads as one long branch ladder whose complexity grows with every gate.
+
+func applyGeminiDefaults(gm *GeminiConfig) {
 	if gm.Endpoint == "" {
 		gm.Endpoint = defaultGeminiEndpoint
 	}
@@ -937,7 +1008,9 @@ func (g *GeoBlockConfig) applyDefaults() {
 	if gm.RateLimit == 0 {
 		gm.RateLimit = defaultGeminiRateLimit
 	}
-	cl := &g.Claude
+}
+
+func applyClaudeDefaults(cl *ClaudeConfig) {
 	if cl.Endpoint == "" {
 		cl.Endpoint = defaultClaudeEndpoint
 	}
@@ -953,7 +1026,9 @@ func (g *GeoBlockConfig) applyDefaults() {
 	if cl.Concurrency == 0 {
 		cl.Concurrency = defaultClaudeConcurrency
 	}
-	cg := &g.ChatGPT
+}
+
+func applyChatGPTDefaults(cg *ChatGPTConfig) {
 	if cg.Endpoint == "" {
 		cg.Endpoint = defaultChatGPTEndpoint
 	}
@@ -966,7 +1041,9 @@ func (g *GeoBlockConfig) applyDefaults() {
 	if cg.Concurrency == 0 {
 		cg.Concurrency = defaultChatGPTConcurrency
 	}
-	td := &g.Tidal
+}
+
+func applyTidalDefaults(td *TidalConfig) {
 	if td.Endpoint == "" {
 		td.Endpoint = defaultTidalEndpoint
 	}
@@ -975,6 +1052,21 @@ func (g *GeoBlockConfig) applyDefaults() {
 	}
 	if td.Concurrency == 0 {
 		td.Concurrency = defaultTidalConcurrency
+	}
+}
+
+func applyDeeplDefaults(dl *DeeplConfig) {
+	if dl.Endpoint == "" {
+		dl.Endpoint = defaultDeeplEndpoint
+	}
+	if dl.Marker == "" {
+		dl.Marker = defaultDeeplMarker
+	}
+	if dl.Timeout == 0 {
+		dl.Timeout = defaultDeeplTimeout
+	}
+	if dl.Concurrency == 0 {
+		dl.Concurrency = defaultDeeplConcurrency
 	}
 }
 
@@ -1347,7 +1439,7 @@ func (cfg *Config) validateFilters() error {
 			seenCIDR = true
 		}
 		switch f.Type {
-		case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterBandwidth:
+		case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl, FilterBandwidth:
 			if seenThroughNode[f.Type] {
 				return fmt.Errorf("filters[%d]: only one %s filter is supported", i, f.Type)
 			}
@@ -1386,7 +1478,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 			return fmt.Errorf("filters[%d] (type gemini): the gate needs a key -- set api_key, or key_file + key_var, on the entry or on geoblock.gemini; without one every geo-block claim it makes is vacuous", i)
 		}
 		return nil
-	case FilterClaude, FilterChatGPT, FilterTidal:
+	case FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl:
 		return validateAPIFilter(i, f)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
@@ -1394,7 +1486,7 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
 			strings.Join([]string{
 				FilterCountry, FilterASN, FilterCIDR, FilterGemini,
-				FilterClaude, FilterChatGPT, FilterTidal, FilterBandwidth,
+				FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl, FilterBandwidth,
 			}, ", "))
 	}
 }
@@ -1550,6 +1642,9 @@ func (g *GeoBlockConfig) validate() error {
 		rejectNegativeDur("geoblock.tidal.timeout", &g.Tidal.Timeout),
 		rejectNegativeInt("geoblock.tidal.concurrency", &g.Tidal.Concurrency),
 		endpoint("geoblock.tidal.endpoint", g.Tidal.Endpoint),
+		rejectNegativeDur("geoblock.deepl.timeout", &g.Deepl.Timeout),
+		rejectNegativeInt("geoblock.deepl.concurrency", &g.Deepl.Concurrency),
+		endpoint("geoblock.deepl.endpoint", g.Deepl.Endpoint),
 	)
 }
 
@@ -1787,8 +1882,8 @@ func cidrSpecs(cfg *Config) []IPFilterSpec {
 }
 
 // ProberChanged reports whether the through-node prober settings
-// (gemini/claude/chatgpt/tidal/cloudflare) differ; the stable worker must be
-// re-applied when they do. The store-only geoblock fields (db_path, ttl) are
+// (gemini/claude/chatgpt/tidal/deepl/cloudflare) differ; the stable worker must
+// be re-applied when they do. The store-only geoblock fields (db_path, ttl) are
 // covered by StoresChanged instead.
 //
 // geo.cloudflare is the one member not under geoblock, and it is here because
@@ -1804,6 +1899,7 @@ func ProberChanged(old, newCfg Config) bool {
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
 		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
 		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal) ||
+		!reflect.DeepEqual(old.GeoBlock.Deepl, newCfg.GeoBlock.Deepl) ||
 		!reflect.DeepEqual(old.Geo.Cloudflare, newCfg.Geo.Cloudflare)
 }
 

@@ -67,9 +67,9 @@ func TestBuildNodeFilters(t *testing.T) {
 	}
 
 	store := &stubBlocklist{}
-	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "bandwidth", "bogus"}, prober, store, zerolog.Nop())
-	if len(fs) != 5 {
-		t.Fatalf("gemini + claude + chatgpt + tidal + bandwidth + unknown -> 5 filters, got %d", len(fs))
+	fs := buildNodeFilters([]string{"gemini", "claude", "chatgpt", "tidal", "deepl", "bandwidth", "bogus"}, prober, store, zerolog.Nop())
+	if len(fs) != 6 {
+		t.Fatalf("gemini + claude + chatgpt + tidal + deepl + bandwidth + unknown -> 6 filters, got %d", len(fs))
 	}
 	// The gemini gate is the only one with an enabled() hook: a keyless check
 	// would pass every node silently, and buildNodeFilters wiring it without
@@ -97,8 +97,11 @@ func TestBuildNodeFilters(t *testing.T) {
 	if got := builtFilterName(fs[3]); got != "tidal" {
 		t.Fatalf("expected tidal filter fourth, got %q", got)
 	}
-	if got := builtFilterName(fs[4]); got != "bandwidth" {
-		t.Fatalf("expected bandwidth filter fifth, got %q", got)
+	if dl, isAPI := fs[4].(*apiFilter); !isAPI || dl.filterName != deeplFilterName || dl.store != store {
+		t.Fatalf("deepl filter must be a keyless *apiFilter fed the store, got %T", fs[4])
+	}
+	if got := builtFilterName(fs[5]); got != "bandwidth" {
+		t.Fatalf("expected bandwidth filter sixth, got %q", got)
 	}
 }
 
@@ -175,6 +178,52 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	}
 	if rep.State != FilterRan {
 		t.Fatalf("a believed partial verdict must report FilterRan: %+v", rep)
+	}
+}
+
+// TestDeeplFilterWritesTheStore locks the persistence half of the deepl gate,
+// the asymmetry with tidal: a 451 region refusal is an explicit legal block on
+// the node's egress, so it outlives the cycle. The store is the only effect
+// that does, and a filter built without one still drops exactly as expected.
+func TestDeeplFilterWritesTheStore(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingBlocklist{}
+	fs := buildNodeFilters([]string{"deepl"}, testProber(t), store, zerolog.Nop())
+	if len(fs) != 1 {
+		t.Fatalf("deepl -> 1 filter, got %d", len(fs))
+	}
+	dl, ok := fs[0].(*apiFilter)
+	if !ok {
+		t.Fatalf("deepl filter has type %T, want *apiFilter", fs[0])
+	}
+	if dl.store != store {
+		t.Fatal("deepl must feed the shared geoblock store")
+	}
+
+	// A believed partial verdict: one refused, one verified pass, one
+	// unverified-but-kept survivor. The breaker keeps a whole-batch refusal.
+	dl.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
+			"s-002": {Server: "h2", Reachable: true, Verified: true},
+			"s-003": {Server: "h3", Reachable: true},
+		}
+	}
+	kept, rep := dl.apply(context.Background(),
+		[]Survivor{
+			{Entry: Entry{Label: "s-001", Addr: "h1:443"}},
+			{Entry: Entry{Label: "s-002", Addr: "h2:443"}},
+			{Entry: Entry{Label: "s-003", Addr: "h3:443"}},
+		}, nil)
+	if len(kept) != 2 || kept[0].Label != "s-002" || kept[1].Label != "s-003" {
+		t.Fatalf("blocked survivor must drop, unverified must be kept: kept=%+v", kept)
+	}
+	if rep.Dropped["blocked"] != 1 || rep.Coverage.Unverified != 1 {
+		t.Fatalf("report = %+v, want 1 blocked drop and 1 unverified survivor", rep)
+	}
+	if len(store.blocked) != 1 || store.blocked[0] != "h1" {
+		t.Fatalf("blocked host must be persisted, store holds %v", store.blocked)
 	}
 }
 
