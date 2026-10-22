@@ -35,8 +35,8 @@ resolver:
   cache_ttl: 1h
   cache_negative_ttl: 10m
 # Unified, ordered filter list. IP-stage filters (country/asn/cidr) run per-node
-# in preprocess; through-node filters (gemini/claude/chatgpt/tidal/bandwidth) run
-# post-probe in the stable worker. Order is honoured within each stage, and it
+# in preprocess; through-node filters (gemini/claude/chatgpt/tidal/deepl/bandwidth)
+# run post-probe in the stable worker. Order is honoured within each stage, and it
 # is not cosmetic: a cheap local gate belongs ahead of one that makes a network
 # call per IP, so a cidr allow-list goes before asn, never after it.
 filters:
@@ -60,7 +60,8 @@ filters:
   #   operator's whitelist, so where nothing excludes a country an egress-geo
   #   gate answers a question nobody asked, and every gate dropped is a round
   #   trip saved per survivor. It does not indict the gates below --
-  #   claude/chatgpt/tidal test geo-BLOCKING per node, not country membership.
+  #   claude/chatgpt/tidal/deepl test geo-BLOCKING per node, not country
+  #   membership.
   #
   #   DO NOT add ipwhitelist.txt, the pre-CIDR format the same repo publishes.
   #   Measured 2026-08-09 (same instance) it is the ".1" of every /24 in the
@@ -84,6 +85,7 @@ filters:
   - type: claude
   - type: chatgpt # keyless: OpenAI's compliance endpoint 403s an egress it refuses, regardless of the node's IP country
   - type: tidal # keyless reachability, status only: keep a node if api.tidal.com/v1/country answered 2xx. A refused egress (e.g. RU) dies at CloudFront with a 403, so there is no refusal marker to match. The body is not read at all -- the country it reports gates where a subscription can be bought, not where an existing one plays
+  - type: deepl # keyless: DeepL renders its region verdict before authentication. Measured 2026-10-22 -- from a Russian egress both www.deepl.com/en and api-free.deepl.com/v2/usage answer 451 with the 572-byte "Unavailable in your region" page, while a Finnish egress gets 403 "Missing Authorization header" from the API. Probes the API, not the site: the accepted site page is 333 KB, past the 64 KiB marker scan, so on that surface every accepted node would be kept unverified. Fail-open on everything but the 451 or the marker -- DeepL rate limits and CDN 5xx must not drop healthy nodes -- and it feeds the geoblock store, since a 451 region page is a legal block on the egress, not a bare status
   - type: bandwidth # drop nodes slower than min_mbps (last GATE: runs on the fewest nodes)
     test_url: "https://speed.cloudflare.com/__down?bytes=5000000" # Cloudflare speed generator; egresses through the node. 5 MB, not the 2 MB default: at the 15 Mbps floor 2 MB transfers in 1.07s, short enough that TCP slow start alone decides the verdict, where 5 MB spends 2.67s and the ramp is a tenth of it
     min_mbps: 15 # drop nodes below this; 0 = no floor (annotate only). The value's history is in docs/guides/config.md

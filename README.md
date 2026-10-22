@@ -88,10 +88,10 @@ Every `subscriptions.interval` it:
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
 8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `bandwidth`) on the survivors, all of them gates; a
-   `gemini`/`claude`/`chatgpt` geo-block writes the node's host to the geoblock
-   store, so step 2 drops it on every later cycle. Every other drop lasts this
-   cycle only,
+   `chatgpt` / `tidal` / `deepl` / `bandwidth`) on the survivors, all of them
+   gates; a `gemini`/`claude`/`chatgpt`/`deepl` geo-block writes the node's host
+   to the geoblock store, so step 2 drops it on every later cycle. Every other
+   drop lasts this cycle only,
 9. asks the final survivor set where its traffic actually leaves from
    (Cloudflare's `/cdn-cgi/trace`), but only when the `annotate` chain names
    the `cloudflare` provider — nothing is dropped here,
@@ -266,6 +266,18 @@ published list. The gates:
   **not** feed the geoblock store: a bare status code is a weaker signal than
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
+- `deepl` — keyless too: DeepL renders its region verdict before
+  authentication. From a refused egress both `www.deepl.com/en` and
+  `api-free.deepl.com/v2/usage` answer HTTP 451 with an
+  `unavailable in your region` page (measured 2026-10-22); from an accepted one
+  the API answers an authentication error and only the credential is wrong.
+  The gate probes the API, not the site: the accepted site page is 333 KB,
+  past the 64 KiB marker scan, so every accepted node on that surface would be
+  kept unverified. Unlike `tidal` it fails **open** on everything but the 451
+  or the marker — DeepL rate limits and its CDN answer 5xx, and neither says
+  anything about the egress — and it feeds the geoblock store, because the 451
+  region page is an explicit legal block on the node's egress rather than a
+  bare status.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (code default 5, shipped config 15) are dropped; an explicit
   `0` removes the speed
@@ -277,17 +289,19 @@ published list. The gates:
   rendered later, with every other tag, at publication.
   Results are never cached — measured fresh each cycle.
 
-A marker gate (`gemini`, `claude`, `chatgpt`) never certifies a body it did not
-finish reading **unless the bytes it did receive already carry the service's
-refusal marker**: an observed marker is a real refusal, so the node is dropped
-and its host persisted as usual. A read error, a timeout after the headers, or
-a body past the 64 KiB scan cap with no observed marker leaves the response
-**unverified**: the node is kept (the same fail-open as an inconclusive Gemini
-answer) and a per-cycle WARN carries the count, but the check is not credited
-as a pass and the host is not written to the geoblock store. `tidal` is the
-exception by design: it passes `readBody=false`, so the probe returns as soon
-as the headers arrive and the body is closed unread — the status is the whole
-verdict, and a truncated body cannot change it.
+A marker gate (`gemini`, `claude`, `chatgpt`, `deepl`) never certifies a body it
+did not finish reading **unless the bytes it did receive already carry the
+service's refusal marker**: an observed marker is a real refusal, so the node is
+dropped and its host persisted as usual. A read error, a timeout after the
+headers, or a body past the 64 KiB scan cap with no observed marker leaves the
+response **unverified**: the node is kept (the same fail-open as an inconclusive
+Gemini answer) and a per-cycle WARN carries the count, but the check is not
+credited as a pass and the host is not written to the geoblock store. `deepl`
+adds its status to that rule: a 451 is a refusal whatever the body did, since
+the verdict arrives in the status line. `tidal` is the exception by design: it
+passes `readBody=false`, so the probe returns as soon as the headers arrive and
+the body is closed unread — the status is the whole verdict, and a truncated
+body cannot change it.
 
 Filter order is honoured, and it is load-bearing rather than cosmetic in both
 stages. The chain stops at the first filter that leaves a node with no
@@ -415,7 +429,7 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT — `tidal` deliberately does not feed it); dropped pre-DNS, before the IP stage runs. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT/DeepL — `tidal` deliberately does not feed it); dropped pre-DNS, before the IP stage runs. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds, keyed together with the address the IP stage resolved for them at verdict time — a hostname re-pointed to a new address is re-probed, not skipped on the old verdict; skipped before probing |
 | stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup — only while subscriptions are enabled; with an empty `subscriptions.sources` it is deliberately not restored (see the stable-worker section above) — so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
@@ -633,10 +647,10 @@ Key sections:
   entry and takes a `providers:` chain. The retired singular `provider:` key is
   rejected as an unknown key by the strict decode instead of being silently
   dropped.
-- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*` and
-  `tidal.*` base params (endpoint, model, marker, key, timeout, concurrency;
-  gemini also takes `rate_limit`) for the through-node filters. Every tenant
-  here is a gate; the
+- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*`,
+  `tidal.*` and `deepl.*` base params (endpoint, model, marker, key, timeout,
+  concurrency; gemini also takes `rate_limit`) for the through-node filters.
+  Every tenant here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` — the worker's fail-fast per-source fetch
   deadline, the only budget a subscription fetch ever runs on.

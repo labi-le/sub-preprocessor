@@ -85,8 +85,8 @@ func TestDeniedCountries(t *testing.T) {
 }
 
 // TestNodeFilterSpecsSplit proves the through-node types (gemini/claude/
-// chatgpt/tidal/bandwidth) split out in order, with the API configs merged over
-// the geoblock defaults and bandwidth carrying its entry params.
+// chatgpt/tidal/deepl/bandwidth) split out in order, with the API configs
+// merged over the geoblock defaults and bandwidth carrying its entry params.
 func TestNodeFilterSpecsSplit(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +100,7 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 15 * time.Second, Concurrency: 8},
+			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.base/v2/usage", Marker: "base-deepl", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
 			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
@@ -108,22 +109,28 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 			{Type: config.FilterGemini, Model: "override-model", APIKey: "entry-key", KeyFile: "/run/entry-key", KeyVar: "ENTRY_KEY"},
 			{Type: config.FilterChatGPT, Concurrency: 3},
 			{Type: config.FilterTidal, Timeout: 30 * time.Second},
+			{Type: config.FilterDeepl, Concurrency: 2},
 		},
 	}
 
 	got := cfg.NodeFilterSpecs()
-	if len(got) != 5 {
-		t.Fatalf("NodeFilterSpecs() len=%d, want 5", len(got))
+	if len(got) != 6 {
+		t.Fatalf("NodeFilterSpecs() len=%d, want 6", len(got))
 	}
-	if got[0].Type != config.FilterClaude || got[1].Type != config.FilterBandwidth ||
-		got[2].Type != config.FilterGemini || got[3].Type != config.FilterChatGPT ||
-		got[4].Type != config.FilterTidal {
-		t.Fatalf("order = %s,%s,%s,%s,%s", got[0].Type, got[1].Type, got[2].Type, got[3].Type, got[4].Type)
+	for i, want := range []string{
+		config.FilterClaude, config.FilterBandwidth, config.FilterGemini,
+		config.FilterChatGPT, config.FilterTidal, config.FilterDeepl,
+	} {
+		if got[i].Type != want {
+			t.Fatalf("spec %d type = %s, want %s", i, got[i].Type, want)
+		}
 	}
 
+	// Each assertion compares the WHOLE merged config, so a field the merge
+	// drops shows up as a difference instead of passing unobserved.
 	// claude: overridden marker and version, endpoint inherited from the base.
-	if got[0].Claude.Marker != "override-claude" || got[0].Claude.Endpoint != "https://claude.base" || got[0].Claude.Version != "2024-01-01" {
-		t.Fatalf("claude merge wrong: %+v", got[0].Claude)
+	if want := (config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "override-claude", Version: "2024-01-01", Timeout: 15 * time.Second, Concurrency: 8}); got[0].Claude != want {
+		t.Fatalf("claude merge = %+v, want %+v", got[0].Claude, want)
 	}
 	// bandwidth: params come entirely from the entry.
 	bw := got[1].Bandwidth
@@ -132,19 +139,20 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	}
 	// gemini: overridden model plus the three key spellings (api_key/key_file/
 	// key_var) beat the base's own values; endpoint/marker/rate_limit inherit.
-	if got[2].Gemini.Model != "override-model" || got[2].Gemini.Endpoint != "https://gemini.base" ||
-		got[2].Gemini.Marker != "base-marker" || got[2].Gemini.RateLimit != 120 ||
-		got[2].Gemini.APIKey != "entry-key" || got[2].Gemini.KeyFile != "/run/entry-key" || got[2].Gemini.KeyVar != "ENTRY_KEY" {
-		t.Fatalf("gemini merge wrong: %+v", got[2].Gemini)
+	if want := (config.GeminiConfig{Endpoint: "https://gemini.base", Marker: "base-marker", Model: "override-model", APIKey: "entry-key", KeyFile: "/run/entry-key", KeyVar: "ENTRY_KEY", Timeout: 15 * time.Second, Concurrency: 8, RateLimit: 120}); got[2].Gemini != want {
+		t.Fatalf("gemini merge = %+v, want %+v", got[2].Gemini, want)
 	}
 	// chatgpt: overridden concurrency, endpoint/marker inherited from the base.
-	if got[3].ChatGPT.Concurrency != 3 || got[3].ChatGPT.Endpoint != "https://chatgpt.base" || got[3].ChatGPT.Marker != "base-chatgpt" {
-		t.Fatalf("chatgpt merge wrong: %+v", got[3].ChatGPT)
+	if want := (config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 3}); got[3].ChatGPT != want {
+		t.Fatalf("chatgpt merge = %+v, want %+v", got[3].ChatGPT, want)
 	}
 	// tidal: the overridden timeout applies, endpoint and the rest are inherited.
-	if got[4].Tidal.Timeout != 30*time.Second ||
-		got[4].Tidal.Endpoint != "https://tidal.base" || got[4].Tidal.Concurrency != 8 {
-		t.Fatalf("tidal merge wrong: %+v", got[4].Tidal)
+	if want := (config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 30 * time.Second, Concurrency: 8}); got[4].Tidal != want {
+		t.Fatalf("tidal merge = %+v, want %+v", got[4].Tidal, want)
+	}
+	// deepl: overridden concurrency, endpoint/marker/timeout inherited.
+	if want := (config.DeeplConfig{Endpoint: "https://deepl.base/v2/usage", Marker: "base-deepl", Timeout: 15 * time.Second, Concurrency: 2}); got[5].Deepl != want {
+		t.Fatalf("deepl merge = %+v, want %+v", got[5].Deepl, want)
 	}
 }
 
@@ -372,6 +380,8 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"bandwidth bad url":     {geoBase + "filters:\n  - type: bandwidth\n    test_url: ftp://x/y\n", "test_url"},
 		"tidal neg concurrency": {geoBase + "filters:\n  - type: tidal\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
 		"tidal neg timeout":     {geoBase + "filters:\n  - type: tidal\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
+		"deepl neg concurrency": {geoBase + "filters:\n  - type: deepl\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
+		"deepl neg timeout":     {geoBase + "filters:\n  - type: deepl\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
 		"unknown type list":     {geoBase + "filters:\n  - type: bogus\n", "country, asn, cidr, gemini"},
 		"cidr no urls":          {geoBase + cidrFilters("  - type: cidr\n"), "filters[0].urls must contain at least one url"},
 		"cidr http url":         {geoBase + cidrFilters(cidrItem("http://example.com/w.txt")), `filters[0].urls "http://example.com/w.txt": only https`},
@@ -386,6 +396,7 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"two claude filters":    {geoBase + "filters:\n  - type: claude\n  - type: claude\n", "filters[1]: only one claude filter is supported"},
 		"two chatgpt filters":   {geoBase + "filters:\n  - type: chatgpt\n  - type: chatgpt\n", "filters[1]: only one chatgpt filter is supported"},
 		"two tidal filters":     {geoBase + "filters:\n  - type: tidal\n  - type: tidal\n", "filters[1]: only one tidal filter is supported"},
+		"two deepl filters":     {geoBase + "filters:\n  - type: deepl\n  - type: deepl\n", "filters[1]: only one deepl filter is supported"},
 		"two bandwidth filters": {geoBase + "filters:\n  - type: bandwidth\n  - type: bandwidth\n", "filters[1]: only one bandwidth filter is supported"},
 		"duplicate mid-list":    {geoBase + "filters:\n  - type: claude\n  - type: gemini\n    api_key: a\n  - type: gemini\n", "filters[2]: only one gemini filter is supported"},
 	}
@@ -441,10 +452,12 @@ func TestLoadRejectsBadAPIEndpoints(t *testing.T) {
 		"claude geoblock missing host":        {geoBase + "geoblock:\n  claude:\n    endpoint: https:///v1\n", "geoblock.claude.endpoint: must be an absolute http(s) URL"},
 		"chatgpt geoblock hostless":           {geoBase + "geoblock:\n  chatgpt:\n    endpoint: openai.example.com\n", "geoblock.chatgpt.endpoint: must be an absolute http(s) URL"},
 		"tidal geoblock unparsable":           {geoBase + "geoblock:\n  tidal:\n    endpoint: \"not a url\"\n", "geoblock.tidal.endpoint"},
+		"deepl geoblock bad scheme":           {geoBase + "geoblock:\n  deepl:\n    endpoint: ftp://deepl.example/v2/usage\n", "geoblock.deepl.endpoint: must be an absolute http(s) URL"},
 		"gemini entry override":               {geoBase + "filters:\n  - type: gemini\n    endpoint: httpx://nope.example\n", "filters[0].endpoint: must be an absolute http(s) URL"},
 		"claude entry override":               {geoBase + "filters:\n  - type: claude\n    endpoint: anthropic.example.com\n", "filters[0].endpoint: must be an absolute http(s) URL"},
 		"chatgpt entry override missing host": {geoBase + "filters:\n  - type: chatgpt\n    endpoint: https:///v1\n", "filters[0].endpoint: must be an absolute http(s) URL"},
 		"tidal entry override":                {geoBase + "filters:\n  - type: tidal\n    endpoint: ftp://x.example\n", "filters[0].endpoint: must be an absolute http(s) URL"},
+		"deepl entry override":                {geoBase + "filters:\n  - type: deepl\n    endpoint: \"https://\"\n", "filters[0].endpoint: must be an absolute http(s) URL"},
 		"entry override blank inherited":      {geoBase + "filters:\n  - type: gemini\n    api_key: a\n", ""},
 	}
 	for name, tc := range cases {
@@ -486,6 +499,53 @@ func TestLoadTidalFilterInheritsDefaults(t *testing.T) {
 	}
 	if specs[0].Tidal.Endpoint == "" {
 		t.Fatalf("tidal spec must be usable unconfigured: %+v", specs[0].Tidal)
+	}
+}
+
+// TestLoadDeeplFilterInheritsDefaults proves a bare `{type: deepl}` entry
+// resolves to a usable keyless spec with no per-entry config: the API endpoint,
+// the region marker, the timeout and the concurrency all come from
+// geoblock.deepl. Every knob the gate reads is also overridable per entry, so a
+// second assertion loads a base whose values all differ and checks that the
+// entry's win.
+func TestLoadDeeplFilterInheritsDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+"filters:\n  - type: deepl\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := cfg.NodeFilterSpecs()
+	if len(specs) != 1 || specs[0].Type != config.FilterDeepl {
+		t.Fatalf("NodeFilterSpecs() = %+v, want one deepl spec", specs)
+	}
+	if !reflect.DeepEqual(specs[0].Deepl, cfg.GeoBlock.Deepl) {
+		t.Fatalf("bare entry must inherit geoblock.deepl: %+v vs %+v", specs[0].Deepl, cfg.GeoBlock.Deepl)
+	}
+	want := config.DeeplConfig{
+		Endpoint:    "https://api-free.deepl.com/v2/usage",
+		Marker:      "unavailable in your region",
+		Timeout:     15 * time.Second,
+		Concurrency: 8,
+	}
+	if specs[0].Deepl != want {
+		t.Fatalf("deepl defaults = %+v, want %+v", specs[0].Deepl, want)
+	}
+
+	over, err := loadYAML(t, geoBase+
+		"geoblock:\n  deepl:\n    endpoint: https://api.deepl.com/v2/usage\n    marker: base-marker\n    timeout: 20s\n    concurrency: 4\n"+
+		"filters:\n  - type: deepl\n    endpoint: https://api-free.deepl.com/v3/usage\n    marker: entry-marker\n    timeout: 5s\n    concurrency: 2\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = config.DeeplConfig{
+		Endpoint:    "https://api-free.deepl.com/v3/usage",
+		Marker:      "entry-marker",
+		Timeout:     5 * time.Second,
+		Concurrency: 2,
+	}
+	if got := over.NodeFilterSpecs()[0].Deepl; got != want {
+		t.Fatalf("per-entry overrides = %+v, want %+v", got, want)
 	}
 }
 

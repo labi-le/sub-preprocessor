@@ -342,20 +342,20 @@ above; `docs/guides/github.md` names the mint conventions).
 The name is now a LABEL and nothing more. Everything a reader or the exporter needs to know
 about an entry sits beside it as data: `managed: true` says the crawler owns it and
 `feed: <slug>` says which channel it came from (`SubscriptionSource.Managed` and `.Feed`,
-`internal/config/config.go:639,644`). The crawler writes `managed: true` on every entry it mints.
+`internal/config/config.go:653,658`). The crawler writes `managed: true` on every entry it mints.
 `feed:` it writes as the channel slug whenever the name is NEW and the origin named a channel; an
 entry whose name it keeps verbatim keeps the `feed:` it already had, and a mint that saw no usable
 slug records none (`mintSource`, `internal/crawl/crawl.go:746-753`). And `feed:` is not the
 crawler's alone: unlike `managed` it grants nothing and only groups, so a curated entry may set it
-too (`config.go:644`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
+too (`config.go:658`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
 and prune, so an operator who forgets the field is safe by default. `managed: true` in a
 git-tracked file is REFUSED twice,
-and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1166`) refuses it in
-`config/sources.yaml` before appending it (`:1184`), so that overlay stays policed wherever
-it is merged, and `validateSources` (`:1661`) refuses it again over the merged list
-(`:1666`), which is what covers `config.yaml`'s own entries. Both raise one wording,
-`errManagedInCuratedFile` (`:1162`). Only the pass after the `private.yaml` merge allows the
-mark (`:1119`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
+and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1242`) refuses it in
+`config/sources.yaml` before appending it (`:1260`), so that overlay stays policed wherever
+it is merged, and `validateSources` (`:1742`) refuses it again over the merged list
+(`:1752`), which is what covers `config.yaml`'s own entries. Both raise one wording,
+`errManagedInCuratedFile` (`:1238`). Only the pass after the `private.yaml` merge allows the
+mark (`:1195`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
 carries a URL of one post that did not take the bare stem, N counting from 2 because that stem
 was offered to the post's FIRST URL first. `<slug>-N` carries a known slug whose origin post is
 not, N counting from 1 instead, that family having no bare stem to be offered at all. In both, N is
@@ -390,7 +390,7 @@ still invisible to it — both reads happen, but the mint never consults its tak
 fixed constant and the deny funnel never sees a `body:` entry with no `url:` (`crawl.go:1393`), so
 `inline` escapes both. It cannot see the collision, appends `inline` to `private.yaml` as usual,
 and the MERGED list then carries the name twice — which
-`validateSources("")` refuses (`config.go:1119,1672`) and `config.Load` turns into
+`validateSources("")` refuses (`config.go:1195,1758`) and `config.Load` turns into
 `private config: subscriptions.sources: duplicate name "inline"`, so the service does not start
 until one of the two entries goes. Reserving the literal name in config validation was weighed and
 refused: it would fail files that load today, and it would put authority back into a string, which
@@ -406,7 +406,7 @@ of it never becomes a second, managed entry over the same URL: the mirror the mi
 carries no `hwid` of its own, so over an operator entry that carries one it is a header-less
 fetch — the placeholder, on a device-limited panel — and over a hwid-less entry it is
 byte-identical work, a list the write validator refuses under the identity rule it mirrors from
-config (same url AND hwid, `config.go:1697-1703`), freezing the file until the pair is untangled
+config (same url AND hwid, `config.go:1776-1783`), freezing the file until the pair is untangled
 (`mergeManaged`, `crawl.go:659-682`). `used` does not stop at
 `private.yaml`: the crawler reads every `CRAWL_CURATED` path and seeds THEIR names FIRST
 (`curatedNames`, `crawl.go:1349`, from `Options.CuratedPaths` — a comma-separated list defaulting
@@ -487,7 +487,7 @@ is not changing, which is why the ambiguity is written down here instead of desi
   post id. `feed` is the `feed:` field, or the name when the field is absent — `sourceFeed` tests
   `Feed != ""` and nothing else (`internal/metrics/metrics.go:410-418`), so ownership does not
   enter it. The origin-less `<sha10>` form and any entry that set no `feed:` therefore name
-  themselves, while a curated entry that DID set one keeps it (`config.go:644`, asserted by
+  themselves, while a curated entry that DID set one keeps it (`config.go:658`, asserted by
   `config_test.go:1331-1340` and rendered as `owner="curated"` beside a divergent feed at
   `internal/metrics/testdata/exposition.golden:119`). Every URL of one channel shares
   one `feed` (`seyedng`) whatever tail its own name carries. `owner` is `crawler` when the
@@ -530,7 +530,7 @@ is not changing, which is why the ambiguity is written down here instead of desi
   in that slot would hand every private or paid panel link to everyone who fetches the
   list. The second reason is merely mechanical and would not save it on its own: the
   config source-name alphabet is `^[a-z0-9-]+$` (`sourceNameRe`,
-  `internal/config/config.go:124`, mirrored for the crawler's own write-back by its own
+  `internal/config/config.go:134`, mirrored for the crawler's own write-back by its own
   `sourceNameRe` at `internal/crawl/crawl.go:1537`), and `:` `/` `.` `?` all fall outside it.
 - **The collision form exists because neither a channel nor a post is a source.** One
   channel routinely publishes several distinct subscription URLs, so the slug alone is not
@@ -621,7 +621,7 @@ is not changing, which is why the ambiguity is written down here instead of desi
   minimum of three digits, not to a width, so the index can be longer). Then grep both
   overlays rather than reasoning about which file owns the name: `private.yaml` holds the
   managed ones AND any hand-added entry such as `commsub`, `config/sources.yaml` the curated
-  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1672`).
+  rest. Names are unique across both (`validateSources`, `internal/config/config.go:1758`).
 - **`<10 hex>` is the other managed shape and carries no channel at all.** It is not
   merely historical: `unattributedNameRe` matches it and the fallback mint still EMITS it — but only
   ever for a URL the crawler has never named, since an entry that already carries a name gets it

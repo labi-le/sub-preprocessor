@@ -868,6 +868,11 @@ func TestProberChanged(t *testing.T) {
 	if !config.ProberChanged(a, td) {
 		t.Fatal("tidal sub-config change must be detected")
 	}
+	dl := a
+	dl.GeoBlock.Deepl.Marker = "changed"
+	if !config.ProberChanged(a, dl) {
+		t.Fatal("deepl sub-config change must be detected")
+	}
 	c := a
 	c.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"changed"}}}
 	if config.ProberChanged(a, c) {

@@ -89,9 +89,9 @@ func (c *Controller) Apply(cfg config.Config) (bool, error) {
 	subs := cfg.Subscriptions
 	denied := cfg.DeniedCountries()
 
-	// The gemini/claude/chatgpt/tidal prober params default to the geoblock and
-	// are overridden per-entry by the merged NodeFilterSpec; bandwidth params come
-	// entirely from its filter entry.
+	// The gemini/claude/chatgpt/tidal/deepl prober params default to the
+	// geoblock and are overridden per-entry by the merged NodeFilterSpec;
+	// bandwidth params come entirely from its filter entry.
 	nodeSpecs := cfg.NodeFilterSpecs()
 	geo := cfg.GeoBlock
 	var bandwidth config.BandwidthConfig
@@ -109,6 +109,8 @@ func (c *Controller) Apply(cfg config.Config) (bool, error) {
 			geo.ChatGPT = spec.ChatGPT
 		case config.FilterTidal:
 			geo.Tidal = spec.Tidal
+		case config.FilterDeepl:
+			geo.Deepl = spec.Deepl
 		case config.FilterBandwidth:
 			bandwidth = spec.Bandwidth
 		}
