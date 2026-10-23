@@ -869,7 +869,7 @@ func TestProberChanged(t *testing.T) {
 		t.Fatal("tidal sub-config change must be detected")
 	}
 	dl := a
-	dl.GeoBlock.Deepl.Marker = "changed"
+	dl.GeoBlock.Deepl.Endpoint = "https://changed.example.com/translator"
 	if !config.ProberChanged(a, dl) {
 		t.Fatal("deepl sub-config change must be detected")
 	}

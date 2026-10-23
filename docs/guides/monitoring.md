@@ -215,7 +215,7 @@ vendor the dashboard into the nixos repo.
   denominator from panel 3 (`Sources`, with ok and total values), not a stamp here.
   **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
   `config.Load` merges the curated `config/sources.yaml` overlay at
-  `internal/config/config.go:1175` (inside `mergeSourcesOverlay`, `:1242`) but appends the
+  `internal/config/config.go:1164` (inside `mergeSourcesOverlay`, `:1242`) but appends the
   crawler's `private.yaml` only at :1191, and
   `Merge` dedupes FIRST-WINS on lowercased `server:port` (`internal/stable/merge.go:81-88`).
   Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
@@ -242,7 +242,7 @@ vendor the dashboard into the nixos repo.
   query time: `label_values(..., feed)` answers, and an alert that means a feed writes that same
   `sum by (feed, owner)` instead of carrying a `label_replace` pair of its own. Neither label is
   computed: `owner` is `SubscriptionSource.Managed` and `feed` is `SubscriptionSource.Feed`
-  (`internal/config/config.go:653,658`), which the crawler writes at mint, so every URL of one
+  (`internal/config/config.go:649,654`), which the crawler writes at mint, so every URL of one
   channel shares that channel's row and a curated entry, which normally sets no `feed`, falls back
   to naming itself (`sourceFeed`, `metrics.go:437`). Group by the PAIR, never `by
   (feed)` alone: a curated name equal to some channel's slug would otherwise merge two
@@ -287,16 +287,16 @@ vendor the dashboard into the nixos repo.
   `Published` column measures ATTRIBUTION, not contribution.** The discriminator is
   `owner="crawler"` / `owner="curated"`, rendered once per source rather than matched per query
   (see the panel 8 / 22 bullet above). Underneath it is
-  `SubscriptionSource.Managed` (`internal/config/config.go:653`), whose comment fixes the axis as
+  `SubscriptionSource.Managed` (`internal/config/config.go:649`), whose comment fixes the axis as
   OWNERSHIP rather than provenance: it "marks an entry the crawler minted and may therefore
   prune. Absent means hand-added, so forgetting the field shelters a source instead of exposing
   it." The crawler sets that field on every entry it mints and tests it on every entry it may
   touch, so the label cannot drift from the write rule it reports. Absent-means-sheltered is the
   direction that matters, and the mark is refused on a git-tracked entry by a per-file gate so a
   curated file cannot claim it by accident: Load's pre-merge pass refuses it in config.yaml's own
-  list naming the file (`config.go:1169`), `mergeSourcesOverlay` (`config.go:1242`) refuses it in
+  list naming the file (`config.go:1158`), `mergeSourcesOverlay` (`config.go:1231`) refuses it in
   `sources.yaml`'s entries as it loads them (the check at `:1259-1261`), and `validateSources`
-  (`config.go:1742`) over the merged list stays as the second gate for any other statement order —
+  (`config.go:1731`) over the merged list stays as the second gate for any other statement order —
   which is what also covers `config.yaml`.
   So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:1155`) is
   crawler-managed but is harvested raw node URIs rather than a channel, and a bare-hash name
@@ -359,7 +359,7 @@ vendor the dashboard into the nixos repo.
   middle three is ambiguous — no filter, nothing to exclude, or broken — and each gate differs:
   `geo` a `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:44-47`
   no-ops on the worker's full allow set) or an `asn` entry whose ASN-resolved country the policy
-  rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:283`, copied
+  rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:282`, copied
   only under `case FilterASN` at :376-380), `cidr` a `cidr` entry (`:381-388`). The other four
   ignore `filters:` —
   `geoblock` the separate `geoblock:` block (`internal/preprocess/processor.go:822-824`), `ipv6`

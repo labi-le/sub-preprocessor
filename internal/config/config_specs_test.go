@@ -100,7 +100,7 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.base", Marker: "base-claude", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://chatgpt.base", Marker: "base-chatgpt", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 15 * time.Second, Concurrency: 8},
-			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.base/v2/usage", Marker: "base-deepl", Timeout: 15 * time.Second, Concurrency: 8},
+			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.base/ru/translator", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		Filters: []config.FilterConfig{
 			{Type: config.FilterCountry, Provider: config.ProviderGeofeed},
@@ -150,8 +150,8 @@ func TestNodeFilterSpecsSplit(t *testing.T) {
 	if want := (config.TidalConfig{Endpoint: "https://tidal.base", Timeout: 30 * time.Second, Concurrency: 8}); got[4].Tidal != want {
 		t.Fatalf("tidal merge = %+v, want %+v", got[4].Tidal, want)
 	}
-	// deepl: overridden concurrency, endpoint/marker/timeout inherited.
-	if want := (config.DeeplConfig{Endpoint: "https://deepl.base/v2/usage", Marker: "base-deepl", Timeout: 15 * time.Second, Concurrency: 2}); got[5].Deepl != want {
+	// deepl: overridden concurrency, endpoint and timeout inherited.
+	if want := (config.DeeplConfig{Endpoint: "https://deepl.base/ru/translator", Timeout: 15 * time.Second, Concurrency: 2}); got[5].Deepl != want {
 		t.Fatalf("deepl merge = %+v, want %+v", got[5].Deepl, want)
 	}
 }
@@ -503,11 +503,10 @@ func TestLoadTidalFilterInheritsDefaults(t *testing.T) {
 }
 
 // TestLoadDeeplFilterInheritsDefaults proves a bare `{type: deepl}` entry
-// resolves to a usable keyless spec with no per-entry config: the API endpoint,
-// the region marker, the timeout and the concurrency all come from
-// geoblock.deepl. Every knob the gate reads is also overridable per entry, so a
-// second assertion loads a base whose values all differ and checks that the
-// entry's win.
+// resolves to a usable keyless spec with no per-entry config: the translator
+// page, the timeout and the concurrency all come from geoblock.deepl. Every
+// knob the gate reads is also overridable per entry, so a second assertion
+// loads a base whose values all differ and checks that the entry's win.
 func TestLoadDeeplFilterInheritsDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -523,8 +522,7 @@ func TestLoadDeeplFilterInheritsDefaults(t *testing.T) {
 		t.Fatalf("bare entry must inherit geoblock.deepl: %+v vs %+v", specs[0].Deepl, cfg.GeoBlock.Deepl)
 	}
 	want := config.DeeplConfig{
-		Endpoint:    "https://api-free.deepl.com/v2/usage",
-		Marker:      "unavailable in your region",
+		Endpoint:    "https://www.deepl.com/ru/translator",
 		Timeout:     15 * time.Second,
 		Concurrency: 8,
 	}
@@ -533,14 +531,13 @@ func TestLoadDeeplFilterInheritsDefaults(t *testing.T) {
 	}
 
 	over, err := loadYAML(t, geoBase+
-		"geoblock:\n  deepl:\n    endpoint: https://api.deepl.com/v2/usage\n    marker: base-marker\n    timeout: 20s\n    concurrency: 4\n"+
-		"filters:\n  - type: deepl\n    endpoint: https://api-free.deepl.com/v3/usage\n    marker: entry-marker\n    timeout: 5s\n    concurrency: 2\n")
+		"geoblock:\n  deepl:\n    endpoint: https://api.deepl.com/v2/usage\n    timeout: 20s\n    concurrency: 4\n"+
+		"filters:\n  - type: deepl\n    endpoint: https://api-free.deepl.com/v3/usage\n    timeout: 5s\n    concurrency: 2\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want = config.DeeplConfig{
 		Endpoint:    "https://api-free.deepl.com/v3/usage",
-		Marker:      "entry-marker",
 		Timeout:     5 * time.Second,
 		Concurrency: 2,
 	}

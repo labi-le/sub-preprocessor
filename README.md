@@ -266,18 +266,16 @@ published list. The gates:
   **not** feed the geoblock store: a bare status code is a weaker signal than
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
-- `deepl` — keyless too: DeepL renders its region verdict before
-  authentication. From a refused egress both `www.deepl.com/en` and
-  `api-free.deepl.com/v2/usage` answer HTTP 451 with an
-  `unavailable in your region` page (measured 2026-10-22); from an accepted one
-  the API answers an authentication error and only the credential is wrong.
-  The gate probes the API, not the site: the accepted site page is 333 KB,
-  past the 64 KiB marker scan, so every accepted node on that surface would be
-  kept unverified. Unlike `tidal` it fails **open** on everything but the 451
-  or the marker — DeepL rate limits and its CDN answer 5xx, and neither says
-  anything about the egress — and it feeds the geoblock store, because the 451
-  region page is an explicit legal block on the node's egress rather than a
-  bare status.
+- `deepl` — keyless status-only: DeepL decides the region **server-side** on the
+  translator page (`www.deepl.com/ru/translator`). A refused egress gets HTTP
+  451 with the `unavailable in your region` page, without JavaScript and with
+  any session cookies (measured 2026-10-23); an accepted one gets 200 and the
+  373 KB page. The gate probes the page, not the API route, and reads no body:
+  the verdict is the status line, so the page size never meets a scan cap.
+  Unlike `tidal` it fails **open** on everything but the 451 — DeepL rate
+  limits and its CDN answer statuses of their own, and neither says anything
+  about the egress — and it feeds the geoblock store, because the 451 is an
+  explicit legal block on the node's egress rather than a bare status.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (code default 5, shipped config 15) are dropped; an explicit
   `0` removes the speed
@@ -289,19 +287,19 @@ published list. The gates:
   rendered later, with every other tag, at publication.
   Results are never cached — measured fresh each cycle.
 
-A marker gate (`gemini`, `claude`, `chatgpt`, `deepl`) never certifies a body it
+A marker gate (`gemini`, `claude`, `chatgpt`) never certifies a body it
 did not finish reading **unless the bytes it did receive already carry the
 service's refusal marker**: an observed marker is a real refusal, so the node is
 dropped and its host persisted as usual. A read error, a timeout after the
 headers, or a body past the 64 KiB scan cap with no observed marker leaves the
 response **unverified**: the node is kept (the same fail-open as an inconclusive
 Gemini answer) and a per-cycle WARN carries the count, but the check is not
-credited as a pass and the host is not written to the geoblock store. `deepl`
-adds its status to that rule: a 451 is a refusal whatever the body did, since
-the verdict arrives in the status line. `tidal` is the exception by design: it
-passes `readBody=false`, so the probe returns as soon as the headers arrive and
-the body is closed unread — the status is the whole verdict, and a truncated
-body cannot change it.
+credited as a pass and the host is not written to the geoblock store. `tidal`
+and `deepl` are the exceptions by design: both pass `readBody=false`, so the
+probe returns as soon as the headers arrive and the body is closed unread — the
+status is the whole verdict, and a truncated body cannot change it. They differ
+in the rule: `tidal` keeps a node only on `2xx` (fail-closed), `deepl` drops
+only on the 451 (fail-open).
 
 Filter order is honoured, and it is load-bearing rather than cosmetic in both
 stages. The chain stops at the first filter that leaves a node with no
@@ -648,8 +646,9 @@ Key sections:
   rejected as an unknown key by the strict decode instead of being silently
   dropped.
 - `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*`,
-  `tidal.*` and `deepl.*` base params (endpoint, model, marker, key, timeout,
-  concurrency; gemini also takes `rate_limit`) for the through-node filters.
+  `tidal.*` and `deepl.*` base params (endpoint, timeout and concurrency;
+  `marker` on the marker gates, gemini's model/key/`rate_limit`, and claude's
+  `version`) for the through-node filters.
   Every tenant here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` — the worker's fail-fast per-source fetch

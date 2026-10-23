@@ -86,9 +86,9 @@ const (
 // preprocess, before they are ever merged. A nil store (see the tidal filter)
 // skips that persistence, so its drop costs this cycle only. What counts as
 // blocked is the check's own verdict: a geo-block marker in the body for
-// gemini/claude/chatgpt, a refused request for tidal, a 451 or the region
-// marker for deepl. A nil enabled func means the check is always active (e.g.
-// Anthropic geo-blocks before authentication, so its check is keyless).
+// gemini/claude/chatgpt, a non-2xx for tidal, a 451 for deepl. A nil enabled
+// func means the check is always active (e.g. Anthropic geo-blocks before
+// authentication, so its check is keyless).
 //
 // A response the check could not read to its end -- a read error, a timeout
 // after the headers, or a body past maxAPIBody -- is NOT a pass for a
@@ -96,8 +96,9 @@ const (
 // observed marker is a refusal, so it stays Blocked/Verified and can drop the
 // node and write the store. Without one, and for a Gemini answer that carries
 // no location verdict (geminiInconclusive), APIOutcome.Verified stays false and
-// the node is kept unverified (fail-open) with no store write. Tidal's
-// status-only check is unaffected: the status is already the whole verdict.
+// the node is kept unverified (fail-open) with no store write. The status-only
+// checks (tidal, deepl) are unaffected: the status is already the whole
+// verdict.
 //
 // The report's Coverage counts those outcomes per SURVIVOR label, not per
 // proxy port, and is measured on every completing path including the breaker's
@@ -316,8 +317,9 @@ func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mih
 // names are warned and skipped; the gemini filter needs a prober with Gemini
 // support (a resolved API key); the claude, chatgpt, tidal and deepl filters
 // are keyless (the first two geo-block before authentication, tidal's
-// /v1/country needs no credential, and DeepL renders its region verdict before
-// authentication); the bandwidth filter needs a prober with bandwidth support.
+// /v1/country needs no credential, and DeepL answers 451 from the translator
+// page a browser loads); the bandwidth filter needs a prober with bandwidth
+// support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -389,10 +391,10 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				logger.Warn().Msg("deepl filter requested but prober lacks DeepL support; skipping")
 				continue
 			}
-			// Store-fed, unlike tidal: DeepL's refusal is an explicit region
-			// page behind a 451, as attributable to the egress as the AI
-			// gates' markers and as stable, not a bare status a CDN hiccup
-			// could produce.
+			// Store-fed, unlike tidal: only a 451 is a refusal here, and a 451
+			// is the server's own legal block for this egress, not a bare CDN
+			// status. Rate limits and CDN faults are accepted, so they cannot
+			// reach the store.
 			filters = append(filters, &apiFilter{
 				filterName: deeplFilterName,
 				check:      dl.DeeplCheck,

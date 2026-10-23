@@ -73,13 +73,12 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
-	// Unlike its siblings this endpoint carries the whole probe path: DeepL's
-	// keyless verdict is on one API route, and the site's page is 333 KB, past
-	// maxAPIBody, so probing it would leave every accepted node unverified.
-	defaultDeeplEndpoint = "https://api-free.deepl.com/v2/usage"
-	// What DeepL's region page answers from a refused egress (measured
-	// 2026-10-22: HTTP 451, 572-byte body, `server: cloudflare`).
-	defaultDeeplMarker      = "unavailable in your region"
+	// Unlike its siblings this endpoint carries the whole probe path. The
+	// translator page is the surface a browser loads, and the region verdict is
+	// in the status: a refused egress gets 451, an accepted one 200 with a
+	// 373 KB page (measured 2026-10-23). The gate reads no body, so that size
+	// never enters the classification.
+	defaultDeeplEndpoint    = "https://www.deepl.com/ru/translator"
 	defaultDeeplTimeout     = 15 * time.Second
 	defaultDeeplConcurrency = 8
 	// The cdn-cgi/trace probe behind the cloudflare annotate provider. Only
@@ -266,7 +265,7 @@ func (g *GeoConfig) applyDefaults() {
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
 //     Endpoint/Timeout/Concurrency for tidal;
-//     Marker/Endpoint/Timeout/Concurrency for deepl).
+//     Endpoint/Timeout/Concurrency for deepl).
 //
 // A field a type's merge does not read is silently ignored for that type: a
 // tidal entry honours only Endpoint/Timeout/Concurrency, so a Marker or Model
@@ -545,9 +544,6 @@ func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
 func (f FilterConfig) mergedDeepl(base DeeplConfig) DeeplConfig {
 	if f.Endpoint != "" {
 		base.Endpoint = f.Endpoint
-	}
-	if f.Marker != "" {
-		base.Marker = f.Marker
 	}
 	if f.Timeout != 0 {
 		base.Timeout = f.Timeout
@@ -945,28 +941,24 @@ type TidalConfig struct {
 }
 
 // DeeplConfig configures the through-node DeepL reachability check. It needs no
-// API key: DeepL renders its region verdict before authentication, so a
-// keyless GET /v2/usage answers an egress it refuses with HTTP 451 and the
-// "unavailable in your region" page (measured 2026-10-22, `server:
-// cloudflare`, 572 bytes), and an accepted egress with an authentication error
-// instead.
+// API key: DeepL decides the region server-side on the translator page the
+// browser loads. A refused egress gets HTTP 451 on that page, without
+// JavaScript and whatever session cookies are sent (measured 2026-10-23 from a
+// Russian egress); an accepted one gets 200 and the page (373398 B, measured
+// from an accepted egress the same day).
 //
 // The endpoint carries the whole probe path, unlike the other gates' bases. The
-// obvious surface, https://www.deepl.com/en, answers the same 451 and the same
-// page, but its accepted page is 333 KB against maxAPIBody's 64 KiB: every
-// accepted node on that surface would be kept unverified instead of counted as
-// verified, while the API's body is one small JSON or the 572-byte page.
-//
-// The classifier fails OPEN on anything but a 451 or the marker: DeepL rate
-// limits and its CDN answer 5xx, and neither should drop a healthy node. The
-// accepted cost is the one prober_chatgpt.go documents for OpenAI's /v1/models:
-// if DeepL ever moves the region check behind authentication, the gate reads
-// every answer as accepted. The symptom is stable_filter_dropped_nodes
-// {filter="deepl",reason="blocked"} at 0 while the other gates drop, paired
-// with the gate's coverage reading every survivor verified.
+// check is status-only: the verdict is in the status line, so the body is
+// closed unread and the page's size never meets a scan cap. The classifier
+// fails OPEN on everything but the 451: DeepL rate limits and its CDN answer
+// statuses of their own, and neither says anything about the egress. The
+// accepted cost is the one prober_chatgpt.go documents for OpenAI's
+// /v1/models: a status the egress did not earn reads as accepted. The symptom
+// is stable_filter_dropped_nodes{filter="deepl",reason="blocked"} at 0 while
+// the other gates drop, paired with the gate's coverage reading every survivor
+// verified.
 type DeeplConfig struct {
 	Endpoint    string        `yaml:"endpoint"`
-	Marker      string        `yaml:"marker"`
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 }
@@ -1058,9 +1050,6 @@ func applyTidalDefaults(td *TidalConfig) {
 func applyDeeplDefaults(dl *DeeplConfig) {
 	if dl.Endpoint == "" {
 		dl.Endpoint = defaultDeeplEndpoint
-	}
-	if dl.Marker == "" {
-		dl.Marker = defaultDeeplMarker
 	}
 	if dl.Timeout == 0 {
 		dl.Timeout = defaultDeeplTimeout

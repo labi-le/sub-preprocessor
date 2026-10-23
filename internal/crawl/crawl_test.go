@@ -4239,7 +4239,7 @@ func mergeWithCurated(t *testing.T, curatedPaths []string, o origin) ([]source, 
 
 // TestMergeAvoidsCuratedName pins the hazard the curated seeding exists for:
 // the overlay already holds names in the mint's own shape, and one duplicate
-// refuses the WHOLE merged config (config.go:1013), not the offending entry.
+// refuses the WHOLE merged config (config.go:1005), not the offending entry.
 // The stray `enabled` key is part of the test — the crawler reads names and
 // holds no opinion about the keys config.Load owns.
 func TestMergeAvoidsCuratedName(t *testing.T) {
