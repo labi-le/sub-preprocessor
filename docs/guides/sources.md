@@ -351,11 +351,11 @@ too (`config.go:654`). An entry WITHOUT `managed` is hand-added and sheltered fr
 and prune, so an operator who forgets the field is safe by default. `managed: true` in a
 git-tracked file is REFUSED twice,
 and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1231`) refuses it in
-`config/sources.yaml` before appending it (`:1260`), so that overlay stays policed wherever
-it is merged, and `validateSources` (`:1742`) refuses it again over the merged list
-(`:1752`), which is what covers `config.yaml`'s own entries. Both raise one wording,
-`errManagedInCuratedFile` (`:1238`). Only the pass after the `private.yaml` merge allows the
-mark (`:1195`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
+`config/sources.yaml` before appending it (`:1249`), so that overlay stays policed wherever
+it is merged, and `validateSources` (`:1731`) refuses it again over the merged list
+(`:1741`), which is what covers `config.yaml`'s own entries. Both raise one wording,
+`errManagedInCuratedFile` (`:1227`). Only the pass after the `private.yaml` merge allows the
+mark (`:1184`), where it is the whole point. Three narrower name forms exist. `<slug>-<postid>-N`
 carries a URL of one post that did not take the bare stem, N counting from 2 because that stem
 was offered to the post's FIRST URL first. `<slug>-N` carries a known slug whose origin post is
 not, N counting from 1 instead, that family having no bare stem to be offered at all. In both, N is

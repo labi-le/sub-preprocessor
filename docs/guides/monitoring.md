@@ -215,8 +215,8 @@ vendor the dashboard into the nixos repo.
   denominator from panel 3 (`Sources`, with ok and total values), not a stamp here.
   **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
   `config.Load` merges the curated `config/sources.yaml` overlay at
-  `internal/config/config.go:1164` (inside `mergeSourcesOverlay`, `:1242`) but appends the
-  crawler's `private.yaml` only at :1191, and
+  `internal/config/config.go:1164` (inside `mergeSourcesOverlay`, `:1231`) but appends the
+  crawler's `private.yaml` only at :1180, and
   `Merge` dedupes FIRST-WINS on lowercased `server:port` (`internal/stable/merge.go:81-88`).
   Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
   (`internal/stable/checker.go:720`, `:723`) and reassembles them `for i, r := range results`
@@ -295,7 +295,7 @@ vendor the dashboard into the nixos repo.
   direction that matters, and the mark is refused on a git-tracked entry by a per-file gate so a
   curated file cannot claim it by accident: Load's pre-merge pass refuses it in config.yaml's own
   list naming the file (`config.go:1158`), `mergeSourcesOverlay` (`config.go:1231`) refuses it in
-  `sources.yaml`'s entries as it loads them (the check at `:1259-1261`), and `validateSources`
+  `sources.yaml`'s entries as it loads them (the check at `:1248-1250`), and `validateSources`
   (`config.go:1731`) over the merged list stays as the second gate for any other statement order —
   which is what also covers `config.yaml`.
   So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:1155`) is
@@ -360,7 +360,7 @@ vendor the dashboard into the nixos repo.
   `geo` a `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:44-47`
   no-ops on the worker's full allow set) or an `asn` entry whose ASN-resolved country the policy
   rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:282`, copied
-  only under `case FilterASN` at :376-380), `cidr` a `cidr` entry (`:381-388`). The other four
+  only under `case FilterASN` at :385-390), `cidr` a `cidr` entry (`:390-397`). The other four
   ignore `filters:` —
   `geoblock` the separate `geoblock:` block (`internal/preprocess/processor.go:822-824`), `ipv6`
   and `dns` to `resolveNode` in `processNode` (`:829`, `:833`), `unsupported` the parser — so
