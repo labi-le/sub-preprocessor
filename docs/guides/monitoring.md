@@ -360,7 +360,7 @@ vendor the dashboard into the nixos repo.
   `geo` a `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:44-47`
   no-ops on the worker's full allow set) or an `asn` entry whose ASN-resolved country the policy
   rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:282`, copied
-  only under `case FilterASN` at :385-390), `cidr` a `cidr` entry (`:390-397`). The other four
+  only under `case FilterASN` at :385-390), `cidr` a `cidr` entry (`:391-397`). The other four
   ignore `filters:` —
   `geoblock` the separate `geoblock:` block (`internal/preprocess/processor.go:822-824`), `ipv6`
   and `dns` to `resolveNode` in `processNode` (`:829`, `:833`), `unsupported` the parser — so
