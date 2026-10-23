@@ -17,47 +17,40 @@ import (
 )
 
 const (
-	// deeplRegionBody is the refusal DeepL renders before authentication on the
-	// API as well as on the site (measured 2026-10-22 from a Russian egress:
-	// HTTP 451, 572 bytes, `server: cloudflare`).
+	// deeplRegionBody is the refusal DeepL renders server-side on the
+	// translator page (measured 2026-10-23 from a Russian egress: HTTP 451,
+	// 572 bytes, no JavaScript, unchanged by any session cookie).
 	deeplRegionBody = `<title>Unavailable in your region</title><p>This service is unavailable in your region.</p>`
-	// deeplAuthBody is what the same keyless request answers from an accepted
-	// egress: the request reached the API and only the credential is wrong.
-	deeplAuthBody = `{"message":"Authentication failed, provided API key is invalid."}`
+	// deeplAcceptedBody is the accepted page's head; the live page is 373398 B
+	// (measured 2026-10-23 from an accepted egress) and is never read.
+	deeplAcceptedBody = `<title>DeepL Переводчик | Самый точный переводчик в мире</title><link rel="canonical" href="https://www.deepl.com/ru/translator"/>`
 )
 
-// TestDeeplVerdict pins the classifier the gate's fail-open shape rests on: a
-// 451 or the region marker is a refusal, every other complete answer is an
-// acceptance (a rate limit or CDN fault says nothing about the egress), and a
-// body the check could not read whole without the marker is unverified.
+// TestDeeplVerdict pins the status-only classifier: 451 is the refusal, every
+// other answer reached DeepL and is an acceptance. Body and completeness are
+// absent on purpose -- they carry no evidence on this surface, so a page that
+// grows, shrinks or loses its marker cannot change the verdict.
 func TestDeeplVerdict(t *testing.T) {
 	t.Parallel()
 
-	const marker = "unavailable in your region"
 	cases := map[string]struct {
-		status   int
-		body     string
-		complete bool
-		want     apiVerdict
+		status int
+		want   apiVerdict
 	}{
-		"451 with the region page":           {http.StatusUnavailableForLegalReasons, deeplRegionBody, true, apiBlocked},
-		"451 with an empty body":             {http.StatusUnavailableForLegalReasons, "", true, apiBlocked},
-		"451 in a partial body":              {http.StatusUnavailableForLegalReasons, "prefix", false, apiBlocked},
-		"region marker on another status":    {http.StatusOK, deeplRegionBody, true, apiBlocked},
-		"region marker in a partial body":    {http.StatusForbidden, "prefix unavailable in your region", false, apiBlocked},
-		"auth error reaches the API":         {http.StatusForbidden, deeplAuthBody, true, apiAccepted},
-		"missing auth header":                {http.StatusForbidden, `{"message":"Missing Authorization header"}`, true, apiAccepted},
-		"rate limit is not a refusal":        {http.StatusTooManyRequests, "", true, apiAccepted},
-		"cdn fault is not a refusal":         {http.StatusBadGateway, "<html>bad gateway</html>", true, apiAccepted},
-		"empty accepted answer":              {http.StatusOK, "", true, apiAccepted},
-		"unreadable body without the marker": {http.StatusForbidden, "partial auth", false, apiUnverified},
-		"unreadable empty body":              {http.StatusOK, "", false, apiUnverified},
+		"451 with the region page":       {http.StatusUnavailableForLegalReasons, apiBlocked},
+		"451 with an empty body":         {http.StatusUnavailableForLegalReasons, apiBlocked},
+		"200 translator page":            {http.StatusOK, apiAccepted},
+		"206 partial page":               {http.StatusPartialContent, apiAccepted},
+		"403 auth error reaches the API": {http.StatusForbidden, apiAccepted},
+		"rate limit is not a refusal":    {http.StatusTooManyRequests, apiAccepted},
+		"cdn fault is not a refusal":     {http.StatusBadGateway, apiAccepted},
+		"unfollowed redirect":            {http.StatusFound, apiAccepted},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := deeplVerdict(tc.status, tc.body, marker, tc.complete); got != tc.want {
-				t.Fatalf("deeplVerdict(%d, %q, complete=%v) = %v, want %v", tc.status, tc.body, tc.complete, got, tc.want)
+			if got := deeplVerdict(tc.status); got != tc.want {
+				t.Fatalf("deeplVerdict(%d) = %v, want %v", tc.status, got, tc.want)
 			}
 		})
 	}
@@ -69,23 +62,55 @@ func TestDeeplURLCarriesTheWholePath(t *testing.T) {
 	t.Parallel()
 
 	m := &MihomoProber{geo: config.GeoBlockConfig{
-		Deepl: config.DeeplConfig{Endpoint: "https://api-free.deepl.com/v2/usage/"},
+		Deepl: config.DeeplConfig{Endpoint: "https://www.deepl.com/ru/translator/"},
 	}}
-	if got, want := m.deeplURL(), "https://api-free.deepl.com/v2/usage"; got != want {
+	if got, want := m.deeplURL(), "https://www.deepl.com/ru/translator"; got != want {
 		t.Fatalf("deeplURL() = %q, want %q", got, want)
 	}
 }
 
-// TestDeeplCheckThroughNode drives the whole through-node path — URL build,
-// apiCheck fan-out, apiProbeOne dial, status and body classification — against
-// a local server via mihomo's DIRECT outbound, so the verdict is proven to
-// reach the filter rather than assumed.
+// TestDeeplCheckReadsNoBody pins the readBody=false half of the gate: the
+// server sends headers and then stalls, so a probe that waited for the body
+// would hold the worker until the request deadline while this one must return
+// at the headers.
+func TestDeeplCheckReadsNoBody(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	px := adapter.NewProxy(outbound.NewDirect())
+	m := &MihomoProber{logger: zerolog.Nop(), geo: config.GeoBlockConfig{
+		Deepl: config.DeeplConfig{Endpoint: srv.URL, Timeout: 5 * time.Second, Concurrency: 1},
+	}}
+
+	start := time.Now()
+	o, ok := m.DeeplCheck(context.Background(), []mihomo.Proxy{px})[px.Name()]
+	elapsed := time.Since(start)
+	if !ok || !o.Reachable || o.Blocked || !o.Verified {
+		t.Fatalf("a headers-only 200 must be a verified acceptance: ok=%v %+v", ok, o)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("probe waited %v for a body it must not read (request timeout 5s)", elapsed)
+	}
+}
+
+// TestDeeplCheckThroughNode drives the whole through-node path -- URL build,
+// apiCheck fan-out, apiProbeOne dial, status classification -- against a local
+// server via mihomo's DIRECT outbound, so the verdict is proven to reach the
+// filter rather than assumed.
 func TestDeeplCheckThroughNode(t *testing.T) {
 	t.Parallel()
 
 	var (
-		status  = http.StatusForbidden
-		payload = deeplAuthBody
+		status  = http.StatusOK
+		payload = deeplAcceptedBody
 		gotPath string
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +125,7 @@ func TestDeeplCheckThroughNode(t *testing.T) {
 		t.Helper()
 		m := &MihomoProber{logger: zerolog.Nop(), geo: config.GeoBlockConfig{
 			Deepl: config.DeeplConfig{
-				Endpoint:    srv.URL + "/v2/usage",
-				Marker:      "unavailable in your region",
+				Endpoint:    srv.URL + "/ru/translator",
 				Timeout:     5 * time.Second,
 				Concurrency: 1,
 			},
@@ -113,12 +137,19 @@ func TestDeeplCheckThroughNode(t *testing.T) {
 		return o
 	}
 
-	// The accepted shape: the API answered, and only the credential is wrong.
+	// The accepted shape: 200 with the translator page.
 	if o := check(); !o.Reachable || o.Blocked || !o.Verified {
-		t.Fatalf("an auth error must classify as a verified acceptance: %+v", o)
+		t.Fatalf("a 200 page must classify as a verified acceptance: %+v", o)
 	}
-	if gotPath != "/v2/usage" {
-		t.Fatalf("probed path = %q, want /v2/usage", gotPath)
+	if gotPath != "/ru/translator" {
+		t.Fatalf("probed path = %q, want /ru/translator", gotPath)
+	}
+
+	// An accepted page past the old body cap: the body is never read, so the
+	// 373 KB page (and anything larger) still classifies on the status alone.
+	status, payload = http.StatusOK, deeplAcceptedBody+strings.Repeat("x", maxAPIBody)
+	if o := check(); !o.Reachable || o.Blocked || !o.Verified {
+		t.Fatalf("an oversized accepted page must stay a verified acceptance: %+v", o)
 	}
 
 	// The refusal shape: 451 with the region page.
@@ -127,16 +158,16 @@ func TestDeeplCheckThroughNode(t *testing.T) {
 		t.Fatalf("a 451 region page must classify as a verified refusal: %+v", o)
 	}
 
-	// A marker in a body past maxAPIBody: the read is incomplete, but the bytes
-	// received already carry the refusal, which stays conclusive.
-	status, payload = http.StatusForbidden, deeplRegionBody+strings.Repeat("x", maxAPIBody)
-	if o := check(); !o.Blocked || !o.Verified {
-		t.Fatalf("an observed marker in a truncated body must stay a verified refusal: %+v", o)
+	// A refusal page larger than any marker scan: still the status line.
+	status, payload = http.StatusUnavailableForLegalReasons, deeplRegionBody+strings.Repeat("x", maxAPIBody)
+	if o := check(); !o.Reachable || !o.Blocked || !o.Verified {
+		t.Fatalf("an oversized 451 must stay a verified refusal: %+v", o)
 	}
 
-	// A truncated body with no marker supports no verdict: kept unverified.
-	status, payload = http.StatusForbidden, strings.Repeat("x", maxAPIBody+1)
-	if o := check(); !o.Reachable || o.Blocked || o.Verified {
-		t.Fatalf("a truncated body without the marker must stay unverified: %+v", o)
+	// A 200 that happens to carry the refusal text is an acceptance: the body
+	// is not read, so a reworded or grown page has no vote.
+	status, payload = http.StatusOK, deeplRegionBody
+	if o := check(); !o.Reachable || o.Blocked || !o.Verified {
+		t.Fatalf("a 200 must classify as accepted whatever its body: %+v", o)
 	}
 }

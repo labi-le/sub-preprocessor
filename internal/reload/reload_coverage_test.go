@@ -156,7 +156,6 @@ var reloadClassification = map[string]string{
 	"geoblock.tidal.timeout":       liveWorker,
 	"geoblock.tidal.concurrency":   liveWorker,
 	"geoblock.deepl.endpoint":      liveWorker,
-	"geoblock.deepl.marker":        liveWorker,
 	"geoblock.deepl.timeout":       liveWorker,
 	"geoblock.deepl.concurrency":   liveWorker,
 
@@ -231,7 +230,7 @@ func coverageBase() config.Config {
 			Claude:  config.ClaudeConfig{Endpoint: "https://claude.example.com", Marker: "m", Version: "2023-06-01", Timeout: 15 * time.Second, Concurrency: 8},
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://openai.example.com", Marker: "m", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.example.com", Timeout: 15 * time.Second, Concurrency: 8},
-			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.example.com/v2/usage", Marker: "m", Timeout: 15 * time.Second, Concurrency: 8},
+			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.example.com/ru/translator", Timeout: 15 * time.Second, Concurrency: 8},
 		},
 		DeadCache: config.DeadCacheConfig{TTL: new(2 * time.Hour)},
 		Fetch:     config.FetchConfig{Timeout: 3 * time.Second},
@@ -364,7 +363,6 @@ var keyMutators = map[string]func(*config.Config){
 	"geoblock.tidal.timeout":       func(c *config.Config) { c.GeoBlock.Tidal.Timeout = 30 * time.Second },
 	"geoblock.tidal.concurrency":   func(c *config.Config) { c.GeoBlock.Tidal.Concurrency = 4 },
 	"geoblock.deepl.endpoint":      func(c *config.Config) { c.GeoBlock.Deepl.Endpoint = "https://other.example.com/v2/usage" },
-	"geoblock.deepl.marker":        func(c *config.Config) { c.GeoBlock.Deepl.Marker = "other" },
 	"geoblock.deepl.timeout":       func(c *config.Config) { c.GeoBlock.Deepl.Timeout = 30 * time.Second },
 	"geoblock.deepl.concurrency":   func(c *config.Config) { c.GeoBlock.Deepl.Concurrency = 4 },
 
