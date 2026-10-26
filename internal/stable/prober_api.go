@@ -33,8 +33,8 @@ type APIOutcome struct {
 	// classifier needs. A marker check needs the whole body, so a body cut
 	// short by a read error or by maxAPIBody leaves the node reachable but
 	// unverified unless the marker was already in the bytes read: the marker
-	// may sit in the bytes that never arrived. A status-only check (tidal) is
-	// verified whenever a response came back.
+	// may sit in the bytes that never arrived. Tidal classifies every response;
+	// DeepL needs either an explicit refusal or acceptance on both transports.
 	Verified bool
 }
 

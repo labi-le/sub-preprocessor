@@ -86,7 +86,7 @@ stable_cycle_phase_duration_seconds{phase="publish"} 1.5
 # HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
 # TYPE stable_last_success_timestamp_seconds gauge
 stable_last_success_timestamp_seconds 1.755474123e+09
-# HELP stable_filter_trusted 1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.
+# HELP stable_filter_trusted 1 when the through-node filter's batch verdict was believed last published cycle, 0 when its breaker suppressed persistence. Non-strict gates also keep a tripped batch without drops; strict DeepL still drops entries lacking dual-transport acceptance. No sample when the filter reached no verdict. Cancelled or empty final cycles do not replace published-cycle samples.
 # TYPE stable_filter_trusted gauge
 stable_filter_trusted{filter="geoblock"} 1
 stable_filter_trusted{filter="bandwidth"} 1
@@ -101,11 +101,11 @@ stable_filter_in_nodes{filter="gemini"} 700
 stable_filter_kept_nodes{filter="geoblock"} 850
 stable_filter_kept_nodes{filter="bandwidth"} 700
 stable_filter_kept_nodes{filter="gemini"} 700
-# HELP stable_filter_verified_nodes Survivors entering each through-node filter whose check reached a conclusive verdict last published cycle -- a clean pass or a refusal, so a refusal is counted here even when the batch breaker discards its drop. One survivor (entry label) counts once after the per-port outcome fold, never once per proxy port; this is a gauge of the last published cycle, not a cumulative count. An entry that never answered is in neither coverage series: a believed batch drops it as reason="unreachable", while a tripped batch discards that drop and keeps it (trusted=0). Absent when the filter reached no verdict (skipped or cancelled) or does not classify API responses (bandwidth).
+# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. Entries with no response are in neither coverage series. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
 # TYPE stable_filter_verified_nodes gauge
 stable_filter_verified_nodes{filter="geoblock"} 900
 stable_filter_verified_nodes{filter="gemini"} 640
-# HELP stable_filter_unverified_nodes Survivors entering each through-node filter that answered without the evidence the classifier reads, so they were kept and published unverified; same survivor/entry-label unit, per-port fold, and last-published-cycle lifetime as stable_filter_verified_nodes. Zero is an answer: the check ran and every answer carried a verdict. An entry that never answered is in neither coverage series. Absent when the filter reached no verdict or does not classify API responses (bandwidth).
+# HELP stable_filter_unverified_nodes Entries that answered without the evidence their through-node classifier requires, counted per survivor label after the port fold in the last published cycle. Marker gates keep these entries unverified; strict DeepL drops them. Entries with no response are in neither coverage series. Zero means no answered entry was inconclusive. Absent without a measured API coverage account.
 # TYPE stable_filter_unverified_nodes gauge
 stable_filter_unverified_nodes{filter="geoblock"} 0
 stable_filter_unverified_nodes{filter="gemini"} 60
@@ -320,15 +320,15 @@ stable_cycle_phase_duration_seconds{phase="publish"} 0
 # HELP stable_last_success_timestamp_seconds Unix time of the last published cycle.
 # TYPE stable_last_success_timestamp_seconds gauge
 stable_last_success_timestamp_seconds 1.755474123e+09
-# HELP stable_filter_trusted 1 when the through-node filter's verdict was believed last cycle and its drops were enacted, 0 when its breaker rejected it: blocked plus unreachable was the whole survivor set (at least 95% of 100 or more, or every survivor of any size), so the verdict was DISCARDED as the endpoint's or our egress's story, every survivor was kept, and stable_filter_kept_nodes reads In exactly as it does for a filter that verified everyone clean. No sample when the filter reached no verdict -- skipped or cancelled -- where filter_in/filter_kept alone read like a clean pass.
+# HELP stable_filter_trusted 1 when the through-node filter's batch verdict was believed last published cycle, 0 when its breaker suppressed persistence. Non-strict gates also keep a tripped batch without drops; strict DeepL still drops entries lacking dual-transport acceptance. No sample when the filter reached no verdict. Cancelled or empty final cycles do not replace published-cycle samples.
 # TYPE stable_filter_trusted gauge
 # HELP stable_filter_in_nodes Survivors entering each through-node filter.
 # TYPE stable_filter_in_nodes gauge
 # HELP stable_filter_kept_nodes Survivors kept by each through-node filter.
 # TYPE stable_filter_kept_nodes gauge
-# HELP stable_filter_verified_nodes Survivors entering each through-node filter whose check reached a conclusive verdict last published cycle -- a clean pass or a refusal, so a refusal is counted here even when the batch breaker discards its drop. One survivor (entry label) counts once after the per-port outcome fold, never once per proxy port; this is a gauge of the last published cycle, not a cumulative count. An entry that never answered is in neither coverage series: a believed batch drops it as reason="unreachable", while a tripped batch discards that drop and keeps it (trusted=0). Absent when the filter reached no verdict (skipped or cancelled) or does not classify API responses (bandwidth).
+# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. Entries with no response are in neither coverage series. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
 # TYPE stable_filter_verified_nodes gauge
-# HELP stable_filter_unverified_nodes Survivors entering each through-node filter that answered without the evidence the classifier reads, so they were kept and published unverified; same survivor/entry-label unit, per-port fold, and last-published-cycle lifetime as stable_filter_verified_nodes. Zero is an answer: the check ran and every answer carried a verdict. An entry that never answered is in neither coverage series. Absent when the filter reached no verdict or does not classify API responses (bandwidth).
+# HELP stable_filter_unverified_nodes Entries that answered without the evidence their through-node classifier requires, counted per survivor label after the port fold in the last published cycle. Marker gates keep these entries unverified; strict DeepL drops them. Entries with no response are in neither coverage series. Zero means no answered entry was inconclusive. Absent without a measured API coverage account.
 # TYPE stable_filter_unverified_nodes gauge
 # HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
 # TYPE stable_filter_dropped_nodes gauge

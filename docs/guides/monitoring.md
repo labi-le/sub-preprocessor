@@ -112,8 +112,9 @@ vendor the dashboard into the nixos repo.
   refusal, so a refusal appears there even when the breaker discards its drop — and `unverified`
   counts survivors that answered without the evidence the classifier reads. Both count entry
   labels after the port fold and both describe the last published cycle. An unreachable entry is
-  in neither: a believed batch drops it, while a tripped batch keeps it and zeroes that drop
-  (`trusted=0`). They render ONLY for a measured account, so a ran-but-blind
+  in neither. A tripped batch normally keeps it and zeroes the drop (`trusted=0`);
+  DeepL instead drops failed entries even with `trusted=0`, suppressing only persistence.
+  Coverage renders only for a measured account, so a ran-but-blind
   gate reads `verified 0` / `unverified N`; an absent/cancelled gate and the bandwidth filter
   render no coverage sample at all. The old cross-panel inference — `reason="blocked"` at 0 while
   the other API gates drop nodes (production 2026-09-09: gemini blocked 0, claude 2, with 223 of
@@ -124,9 +125,9 @@ vendor the dashboard into the nixos repo.
   body past `maxAPIBody`) is kept the same way and warned about by `apiFilter.apply`'s per-cycle
   WARN **when the bytes received carried no marker**; an observed marker is still a refusal and
   books `reason="blocked"` like any complete one. Every Gemini answer `geminiInconclusive` flags
-  rides the same unverified count. Nothing here adds a reason to
-  `stable_filter_dropped_nodes`: the kept-unverified count lives on
-  `stable_filter_unverified_nodes`, and there is still no `unverified` reason in the drop family.
+  rides the same unverified count. DeepL is strict: a response without dual-transport
+  acceptance is dropped with `reason="unverified"` (unless a `451` makes it `blocked`).
+  That reason is emitted only for DeepL; marker gates still keep unverified entries.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
@@ -374,37 +375,26 @@ vendor the dashboard into the nixos repo.
   states, not two — and the batch breaker is a fourth that the drop series cannot show: it
   reads on its own family, `stable_filter_trusted{filter}`, which panel 7 draws per gate as
   a "verdict trusted" line.** `apiFilter.apply` and `bandwidthFilter.apply` each
-  assign a full `Dropped` map on the completing path — `{blocked, unreachable}` at
-  `internal/stable/nodefilter.go:214`, `{slow, unreachable}` at :292, both keys either way — so a
-  gate that ran clean emits a PRESENT ZERO. The early returns keep the empty map created at
-  :120/:235 (`apiFilter` disabled-for-no-key at :121-124 and cancelled context at :128-133;
-  `bandwidthFilter` cancelled at :238-241; the old `outcomes == nil` guard is gone — it was
-  unreachable and untested, so an empty outcome map is no longer a skip), and `writeFilters`
-  iterates only the keys present (`internal/metrics/metrics.go:221`), so an inert gate writes NO
+  assign a full `Dropped` map on the completing path: `{blocked, unreachable}` for
+  API gates, plus `unverified` for strict DeepL; bandwidth uses `{slow, unreachable}`.
+  Every key is present even at zero. DeepL's tripped breaker preserves actual drops;
+  `trusted=0` there means persistence is suppressed, not that nodes were accepted.
+  Disabled or cancelled non-strict checks keep an empty drop map. `writeFilters`
+  iterates only present keys, so an inert gate writes no
   drop series though its `filter_in`/`filter_kept` still land. Third: a gate dropped from
   `filters:` adds nothing, yet its old rows stop rather than vanish, so a long range still draws
   lines ending at that sample. The bottom legend uses `lastNotNull`, so it retains the last
   available sample in the selected range; inspect the line ending rather than treating that
   legend value as a current reading. Missing samples remain gaps, not zeros.
-  The whole-batch breaker is the round's fourth state, and it is the one the drop series CANNOT
-  carry: a gate whose batch verdict tripped `breakerTrips` keeps every survivor and
-  writes `Dropped[blocked]=0`/`Dropped[unreachable]=0` (`nodefilter.go:169-170`, bandwidth at
-  `:264-265`) — byte-identical to the ran-clean present-zero case above. The disbelief rides
-  the report instead: both filters mark `FilterReport.State` (`FilterTripped` on that path,
-  `FilterRan` on the believed one), and `writeFilters` renders it per filter on the pre-check's
-  pattern —
-  `stable_filter_trusted{filter="..."}` 1 = the verdict was believed and its drops enacted
-  last cycle, 0 = the breaker rejected the batch verdict so every survivor was kept and is
-  re-checked next cycle, and no sample = the filter reached no verdict (the keyless gemini
-  skip; a cancelled check never publishes), where `filter_in`/`filter_kept` alone would read
-  like a clean pass. "Ran and dropped everything" and "ran and dropped nothing" therefore no
-  longer render alike — the drop series stays identical and only this gauge moves, and it
-  moves ON THE DASHBOARD, not just in a query: panel 7 draws one right-axis "verdict
-  trusted" line per gate (legendFormat `{{filter}} verdict trusted`), whose legend cell reads
-  0 or 1 under the panel's `lastNotNull` calc, so a tripped gate shows as its line stepping from 1
-  to 0 while its drop rows stay at zero — visible without opening Prometheus. The gate's WARN
-  log ("gate refused every survivor; treating the batch verdict as the endpoint's or our
-  egress's ... and keeping all survivors") still fires alongside the 0. Coverage is a third
+  The breaker state is carried separately by `FilterReport.State`: `FilterRan`
+  renders `stable_filter_trusted{filter="..."}=1`, `FilterTripped` renders 0,
+  and an absent gate has no trust sample. Non-strict gates spare a tripped batch
+  and emit present zero drops. DeepL still drops failed entries; its zero trust
+  means host-store persistence was suppressed, not that all entries passed.
+  Panel 7 draws trust on the right axis. Logs report strict drops separately
+  from the non-strict "keeping all survivors" warning. Cancelled or empty final
+  cycles do not publish, so neither their new drop counts nor trust replace
+  the previous published-cycle samples. Coverage is a third
   axis, on panel 6 (`Filter coverage`): `stable_filter_{verified,unverified}_nodes` renders one line per gate beside
   in/kept, so a gate that ran and verified nothing reads `verified 0` while an absent/cancelled
   gate and the bandwidth filter draw no coverage line at all. What IS

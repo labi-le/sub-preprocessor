@@ -222,13 +222,12 @@ are dropped outright, before DNS even runs.
 probe, routing real requests *through* each surviving node. Every entry is a
 gate that drops what it condemns. A verdict that condemns the whole survivor
 batch at once — or all but a handful, via the same 95%-share plausibility
-breaker the pre-check and the dead-cache write use — is disbelieved before any
-drop or geoblock write:
-every node dials the same endpoint or test URL, so a wholesale refusal is the
-endpoint's or our egress's story, not the nodes' — the batch is kept (and, for
-the bandwidth gate, left untagged) and re-checked next cycle. That breaker is
-what keeps a vendor 5xx outage or a dead test endpoint from emptying the
-published list. The gates:
+breaker the pre-check and the dead-cache write use — normally suppresses drops
+and geoblock writes. DeepL is the strict exception: its breaker suppresses only
+persistence, never the drop of a node that did not pass both transports. Other
+gates keep the batch (bandwidth leaves it untagged) and retry next cycle. If no
+nodes survive the full chain, the worker skips publication and retains its
+previous snapshot; this gate does not clear an existing snapshot. The gates:
 
 - `gemini` — GET the Gemini API through the node and inspect the response
   body for the location-block marker (a check a HEAD-only URL test cannot
@@ -255,7 +254,7 @@ published list. The gates:
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
   `unsupported_country` for an egress it refuses. Also feeds the geoblock
   store.
-- `tidal` — keyless as well, and the only **fail-closed** gate: a node is kept
+- `tidal` — keyless and **fail-closed** within a trusted batch: a node is kept
   only when `GET api.tidal.com/v1/country` came back `2xx`. Where Tidal refuses
   an egress the request never reaches the API, so there is no refusal marker to
   match and the status is the whole verdict (redirects are not followed, so a
@@ -266,16 +265,24 @@ published list. The gates:
   **not** feed the geoblock store: a bare status code is a weaker signal than
   the other checks' refusal markers, and the store is host-keyed for its whole
   TTL, so one CDN hiccup would evict the node from every endpoint.
-- `deepl` — keyless status-only: DeepL decides the region **server-side** on the
-  translator page (`www.deepl.com/ru/translator`). A refused egress gets HTTP
-  451 with the `unavailable in your region` page, without JavaScript and with
-  any session cookies (measured 2026-10-23); an accepted one gets 200 and the
-  373 KB page. The gate probes the page, not the API route, and reads no body:
-  the verdict is the status line, so the page size never meets a scan cap.
-  Unlike `tidal` it fails **open** on everything but the 451 — DeepL rate
-  limits and its CDN answer statuses of their own, and neither says anything
-  about the egress — and it feeds the geoblock store, because the 451 is an
-  explicit legal block on the node's egress rather than a bare status.
+- `deepl` — keyless, strict status-only verification of the actual translator
+  page (`https://www.deepl.com/ru/translator`), over both TCP and HTTP/3 through
+  the same proxy adapter. Both must return `2xx`; no UDP support, timeouts,
+  redirects, rate limits and CDN failures cannot pass. Bodies are closed unread.
+  TCP and UDP can leave through different egresses, so a TCP-only success says
+  nothing about a browser using HTTP/3. Ports of a multi-port node are combined
+  only after each adapter's two transport verdicts: passes on different ports
+  never combine into one acceptance. Only an explicit `451` can persist the
+  host in the geoblock store, and batch-wide failures suppress persistence.
+  All other failures drop the node for this cycle only. The configured timeout
+  bounds the two sequential requests together; concurrency bounds adapters.
+  A TCP `451` short-circuits HTTP/3 because the refusal is already conclusive.
+  Proxy UDP resolves the target before forwarding it, so system DNS must return
+  routable addresses rather than a router's fake-IP pool. The Compose service
+  explicitly uses `1.1.1.1` for this; the crawler and router are unchanged.
+  Native deployments need equivalent real-address DNS. This is distinct from
+  `resolver.address`, which configures the preprocessing resolver, not mihomo's
+  UDP target lookup. No endpoint IP or DNS fallback is hardcoded in the prober.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
   below `min_mbps` (code default 5, shipped config 15) are dropped; an explicit
   `0` removes the speed
@@ -295,11 +302,9 @@ headers, or a body past the 64 KiB scan cap with no observed marker leaves the
 response **unverified**: the node is kept (the same fail-open as an inconclusive
 Gemini answer) and a per-cycle WARN carries the count, but the check is not
 credited as a pass and the host is not written to the geoblock store. `tidal`
-and `deepl` are the exceptions by design: both pass `readBody=false`, so the
-probe returns as soon as the headers arrive and the body is closed unread — the
-status is the whole verdict, and a truncated body cannot change it. They differ
-in the rule: `tidal` keeps a node only on `2xx` (fail-closed), `deepl` drops
-only on the 451 (fail-open).
+and `deepl` instead close bodies unread: their evidence is in the headers.
+Tidal needs one `2xx`; DeepL needs `2xx` on both TCP and HTTP/3, and classifies
+other non-451 responses as unverified cycle-local drops, not geoblocks.
 
 Filter order is honoured, and it is load-bearing rather than cosmetic in both
 stages. The chain stops at the first filter that leaves a node with no

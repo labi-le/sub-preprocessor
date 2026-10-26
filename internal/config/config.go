@@ -940,23 +940,8 @@ type TidalConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
-// DeeplConfig configures the through-node DeepL reachability check. It needs no
-// API key: DeepL decides the region server-side on the translator page the
-// browser loads. A refused egress gets HTTP 451 on that page, without
-// JavaScript and whatever session cookies are sent (measured 2026-10-23 from a
-// Russian egress); an accepted one gets 200 and the page (373398 B, measured
-// from an accepted egress the same day).
-//
-// The endpoint carries the whole probe path, unlike the other gates' bases. The
-// check is status-only: the verdict is in the status line, so the body is
-// closed unread and the page's size never meets a scan cap. The classifier
-// fails OPEN on everything but the 451: DeepL rate limits and its CDN answer
-// statuses of their own, and neither says anything about the egress. The
-// accepted cost is the one prober_chatgpt.go documents for OpenAI's
-// /v1/models: a status the egress did not earn reads as accepted. The symptom
-// is stable_filter_dropped_nodes{filter="deepl",reason="blocked"} at 0 while
-// the other gates drop, paired with the gate's coverage reading every survivor
-// verified.
+// DeeplConfig carries the full translator URL, unlike the other gates' bases.
+// Its timeout covers TCP and HTTP/3 together; both must return 2xx on one adapter.
 type DeeplConfig struct {
 	Endpoint    string        `yaml:"endpoint"`
 	Timeout     time.Duration `yaml:"timeout"`

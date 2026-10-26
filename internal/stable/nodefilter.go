@@ -96,25 +96,20 @@ const (
 // observed marker is a refusal, so it stays Blocked/Verified and can drop the
 // node and write the store. Without one, and for a Gemini answer that carries
 // no location verdict (geminiInconclusive), APIOutcome.Verified stays false and
-// the node is kept unverified (fail-open) with no store write. The status-only
-// checks (tidal, deepl) are unaffected: the status is already the whole
-// verdict.
+// the node is kept unverified (fail-open) with no store write. DeepL instead
+// requires verified dual-transport acceptance and drops unverified responses.
 //
 // The report's Coverage counts those outcomes per SURVIVOR label, not per
-// proxy port, and is measured on every completing path including the breaker's
-// (the check ran; the breaker only discards its drops). It changes nothing
-// about retention: an unverified node is kept exactly as before.
-//
-// A verdict that condemns the whole survivor batch is disbelieved before any
-// drop or store write, like the pre-check's (breakerTrips, in apply): every
-// node dials the SAME endpoint, so a wholesale refusal is the endpoint's or
-// our egress's story, not the nodes'.
+// proxy port, and is measured on every completing path including the breaker's.
+// DeepL still drops failed nodes when the breaker suppresses persistence;
+// other gates keep the batch when its verdict is disbelieved.
 type apiFilter struct {
-	filterName string
-	enabled    func() bool
-	check      func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
-	store      Blocklist
-	logger     zerolog.Logger
+	filterName      string
+	requireVerified bool
+	enabled         func() bool
+	check           func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+	store           Blocklist
+	logger          zerolog.Logger
 }
 
 func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
@@ -126,21 +121,14 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 
 	subset := filterSubset(survivors, proxies)
 	outcomes := f.check(ctx, subset)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && !f.requireVerified {
 		// A cancelled check yields partial outcomes; don't record blocks or
 		// drop survivors based on them.
 		f.logger.Warn().Str("filter", f.filterName).Msg("filter cancelled; keeping survivors unchanged")
 		return survivors, rep
 	}
 
-	// Count the batch verdict first, and believe it only below the
-	// whole-batch share (breakerTrips, shared with recordDead and
-	// filterReachable): every node dials the same endpoint, so a wholesale
-	// unreachable/blocked verdict is the endpoint's or our egress's story, not
-	// the nodes'. Dropping on it empties the survivor set for the outage, and
-	// persisting it would evict every survivor host from the geoblock store --
-	// so the count precedes the drops and the store writes, and a disbelieved
-	// batch is kept, warned about and re-checked next cycle.
+	// Count before persisting: a batch-wide outage must not poison the host store.
 	blocked, unreachable, unverified, verified := 0, 0, 0, 0
 	for _, s := range survivors {
 		switch o := outcomes[s.Label]; {
@@ -155,14 +143,14 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 			unverified++
 		}
 	}
-	// Unverified is counted but not part of the breaker: those nodes answered,
-	// and an unread body is neither a refusal nor a death. They are kept and
-	// warned about below. Verified counts refusals too -- a block is conclusive
-	// evidence about the egress -- and an unreachable entry is in neither
-	// coverage count. Coverage is measured from here on: the check ran, so a
-	// zero is an answer, unlike the absent/cancelled returns above.
+	// Refusals are conclusive evidence too; unanswered requests carry no coverage.
 	rep.Coverage = FilterCoverage{Verified: verified, Unverified: unverified, Measured: true}
-	if breakerTrips(blocked+unreachable, len(survivors)) {
+	failed := blocked + unreachable
+	if f.requireVerified {
+		failed += unverified
+	}
+	tripped := breakerTrips(failed, len(survivors))
+	if tripped && !f.requireVerified {
 		f.logger.Warn().Str("filter", f.filterName).Int("survivors", len(survivors)).
 			Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).
 			Int("threshold_pct", precheckBreakerPercent).
@@ -173,39 +161,8 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		return survivors, rep
 	}
 
-	kept := make([]Survivor, 0, len(survivors))
-	for _, s := range survivors {
-		o := outcomes[s.Label]
-		switch {
-		case o.Blocked:
-			// Persisted only when this check is trusted enough to act on the
-			// verdict beyond this cycle, which is exactly what a non-nil store
-			// means. Blast radius of one write: the store is keyed by the bare
-			// host (no port, no service), so this node's refusal evicts every
-			// node sharing its hostname -- other ports, sources, endpoints --
-			// in preprocess for the whole store TTL. tidal never pays it (no
-			// store, see buildNodeFilters): its verdict is a bare status code.
-			if f.store != nil {
-				if err := f.store.Block(o.Server); err != nil {
-					f.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
-				}
-			}
-		case !o.Reachable:
-			// Never persisted: a node that answered the latency probe but not
-			// this endpoint is as likely to be a transient path failure as a
-			// standing one, and the next cycle is cheap enough to find out.
-		default:
-			// Covers a verified pass and an unverified response alike. The
-			// latter is kept, not credited: the check reached the node but
-			// never obtained the evidence it reads (a body cut short by a read
-			// error or by maxAPIBody, or a Gemini answer with no location
-			// verdict), so absence of a marker supports no verdict. Keeping is
-			// the same fail-open as geminiInconclusive, and the count rides the
-			// WARN below -- never Dropped, whose series means "thrown away".
-			kept = append(kept, s)
-		}
-	}
-	if unverified > 0 {
+	kept := f.keepOutcomes(ctx, survivors, outcomes, !tripped)
+	if unverified > 0 && !f.requireVerified {
 		f.logger.Warn().Str("filter", f.filterName).Int("unverified", unverified).Int("survivors", len(survivors)).
 			Msg("API checks reached these survivors without a conclusive verdict; their nodes are kept unverified")
 	}
@@ -214,7 +171,35 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	rep.Kept = len(kept)
 	rep.Dropped = map[string]int{dropBlocked: blocked, dropUnreachable: unreachable}
 	rep.State = FilterRan
+	if f.requireVerified {
+		rep.Dropped["unverified"] = unverified
+		if tripped {
+			rep.State = FilterTripped
+			f.logger.Warn().Str("filter", f.filterName).Int("failed", failed).
+				Msg("strict gate dropped failed survivors; batch breaker suppresses persistence, not drops")
+		}
+	}
 	return kept, rep
+}
+
+func (f *apiFilter) keepOutcomes(ctx context.Context, survivors []Survivor, outcomes map[string]APIOutcome, trusted bool) []Survivor {
+	kept := make([]Survivor, 0, len(survivors))
+	for _, s := range survivors {
+		o := outcomes[s.Label]
+		if o.Blocked {
+			// Host-wide persistence must not turn an endpoint outage into a month-long ban.
+			if f.store != nil && trusted && ctx.Err() == nil {
+				if err := f.store.Block(o.Server); err != nil {
+					f.logger.Warn().Err(err).Str("host", o.Server).Msg("geoblock write failed")
+				}
+			}
+			continue
+		}
+		if o.Reachable && (o.Verified || !f.requireVerified) {
+			kept = append(kept, s)
+		}
+	}
+	return kept
 }
 
 // bandwidthFilter keeps only survivors whose measured through-node download
@@ -391,15 +376,13 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				logger.Warn().Msg("deepl filter requested but prober lacks DeepL support; skipping")
 				continue
 			}
-			// Store-fed, unlike tidal: only a 451 is a refusal here, and a 451
-			// is the server's own legal block for this egress, not a bare CDN
-			// status. Rate limits and CDN faults are accepted, so they cannot
-			// reach the store.
+			// A non-451 failure costs this cycle only; both transports must pass.
 			filters = append(filters, &apiFilter{
-				filterName: deeplFilterName,
-				check:      dl.DeeplCheck,
-				store:      store,
-				logger:     logger,
+				filterName:      deeplFilterName,
+				requireVerified: true,
+				check:           dl.DeeplCheck,
+				store:           store,
+				logger:          logger,
 			})
 		default:
 			logger.Warn().Str("filter", n).Msg("unknown node filter; skipping")

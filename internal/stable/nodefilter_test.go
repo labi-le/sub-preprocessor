@@ -201,8 +201,7 @@ func TestDeeplFilterWritesTheStore(t *testing.T) {
 		t.Fatal("deepl must feed the shared geoblock store")
 	}
 
-	// A believed partial verdict: one refused, one verified pass, one
-	// unverified-but-kept survivor. The breaker keeps a whole-batch refusal.
+	// Only explicit refusals persist; incomplete verification is a cycle-local drop.
 	dl.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
 		return map[string]APIOutcome{
 			"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
@@ -216,11 +215,11 @@ func TestDeeplFilterWritesTheStore(t *testing.T) {
 			{Entry: Entry{Label: "s-002", Addr: "h2:443"}},
 			{Entry: Entry{Label: "s-003", Addr: "h3:443"}},
 		}, nil)
-	if len(kept) != 2 || kept[0].Label != "s-002" || kept[1].Label != "s-003" {
-		t.Fatalf("blocked survivor must drop, unverified must be kept: kept=%+v", kept)
+	if len(kept) != 1 || kept[0].Label != "s-002" {
+		t.Fatalf("only verified acceptance may survive: kept=%+v", kept)
 	}
-	if rep.Dropped["blocked"] != 1 || rep.Coverage.Unverified != 1 {
-		t.Fatalf("report = %+v, want 1 blocked drop and 1 unverified survivor", rep)
+	if rep.Dropped["blocked"] != 1 || rep.Dropped["unverified"] != 1 || rep.Coverage.Unverified != 1 {
+		t.Fatalf("report = %+v, want blocked and unverified drops", rep)
 	}
 	if len(store.blocked) != 1 || store.blocked[0] != "h1" {
 		t.Fatalf("blocked host must be persisted, store holds %v", store.blocked)

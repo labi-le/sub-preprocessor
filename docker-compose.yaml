@@ -6,6 +6,8 @@ services:
     image: sub-preprocessor:latest
     container_name: sub-preprocessor
     user: "1000:1000" # config owner: read the 0400 agenix secret + write /config/.geoblock.db
+    # Remote proxy UDP needs routable destination IPs, not the router's fake-IP answers.
+    dns: [1.1.1.1]
     ports:
       - "7008:8080"
       # internal Prometheus metrics; loopback-only so the host Prometheus can scrape it but it is not public

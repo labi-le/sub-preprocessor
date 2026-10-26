@@ -279,12 +279,8 @@ const (
 	// its check ran or cancelled with partial outcomes, so its In==Kept and
 	// empty Dropped map say nothing about the nodes.
 	FilterAbsent FilterState = iota
-	// FilterTripped means the batch breaker disbelieved the verdict: blocked
-	// plus unreachable was the whole survivor set (or >=95% of >=100,
-	// breakerTrips), so it read as the endpoint's or our egress's story and
-	// every survivor was KEPT. In==Kept with zero drops renders exactly like a
-	// filter that verified everyone clean — the case this state exists to tell
-	// apart, on the pre-check's and gemini gate's precedent.
+	// FilterTripped suppresses batch persistence. Non-strict gates also spare
+	// the batch; strict DeepL still drops entries lacking dual-transport acceptance.
 	FilterTripped
 	// FilterRan means the verdict was believed and its drops enacted, however
 	// few.
@@ -298,9 +294,7 @@ const (
 // reached a verdict on -- a clean pass or a refusal, so a dropped blocked node
 // is covered too even when the batch breaker later discards the drop;
 // Unverified counts entries whose check answered without the evidence the
-// classifier reads. An entry that never answered is in NEITHER: a believed
-// batch drops it as unreachable, while a tripped batch discards that drop and
-// keeps it.
+// classifier reads. An entry that never answered is in neither count.
 //
 // Measured separates a measured zero (the check ran and every answer was
 // inconclusive) from a filter that has no coverage account this cycle: one

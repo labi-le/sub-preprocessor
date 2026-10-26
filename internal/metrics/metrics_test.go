@@ -35,8 +35,10 @@ func TestMetricsObserveRender(t *testing.T) {
 			{Name: "mifa", Total: 133, Valid: 20, Tested: 14, Filtered: 9, DNSDrop: 5, GeoDrop: 71, CIDRDrop: 33, GeoBlockDrop: 4},
 		},
 		Filters: []stable.FilterReport{
-			{Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}, State: stable.FilterRan,
-				Coverage: stable.FilterCoverage{Measured: true, Verified: 380, Unverified: 14}},
+			{
+				Name: "claude", In: 474, Kept: 387, Dropped: map[string]int{"blocked": 7, "unreachable": 80}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 380, Unverified: 14},
+			},
 			{Name: "bandwidth", In: 387, Kept: 165, Dropped: map[string]int{"slow": 49, "unreachable": 173}, State: stable.FilterRan},
 		},
 		Trace:         stable.TraceReport{State: stable.TraceRan, Answered: 157, Unanswered: 8, Moved: 47},
@@ -184,7 +186,7 @@ func TestMetricsSourceOwnerLabels(t *testing.T) {
 func TestMetricsPrecheckStatesRenderApart(t *testing.T) {
 	t.Parallel()
 
-	rendered := map[stable.PrecheckState]string{}
+	rendered := make(map[stable.PrecheckState]string)
 	for _, tc := range []struct {
 		name string
 		rep  stable.PrecheckReport
@@ -277,7 +279,7 @@ func precheckLines(out string) string {
 func TestMetricsFilterStatesRenderApart(t *testing.T) {
 	t.Parallel()
 
-	rendered := map[stable.FilterState]string{}
+	rendered := make(map[stable.FilterState]string)
 	for _, tc := range []struct {
 		name  string
 		state stable.FilterState
@@ -344,15 +346,21 @@ func TestMetricsFilterCoverageKeepsAbsentApartFromMeasuredZero(t *testing.T) {
 	m := metrics.New()
 	m.Observe(stable.CycleReport{
 		Filters: []stable.FilterReport{
-			{Name: "claude", In: 3, Kept: 3, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
-				Coverage: stable.FilterCoverage{Measured: true, Verified: 3}},
-			{Name: "gemini", In: 700, Kept: 700, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
-				Coverage: stable.FilterCoverage{Measured: true, Unverified: 700}},
+			{
+				Name: "claude", In: 3, Kept: 3, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 3},
+			},
+			{
+				Name: "gemini", In: 700, Kept: 700, Dropped: map[string]int{"blocked": 0, "unreachable": 0}, State: stable.FilterRan,
+				Coverage: stable.FilterCoverage{Measured: true, Unverified: 700},
+			},
 			{Name: "bandwidth", In: 700, Kept: 700, Dropped: map[string]int{"slow": 0, "unreachable": 0}, State: stable.FilterRan},
 			// Absent wins even over a stray Measured flag: the state is what
 			// says the check never ran.
-			{Name: "tidal", In: 0, Kept: 0, Dropped: map[string]int{}, State: stable.FilterAbsent,
-				Coverage: stable.FilterCoverage{Measured: true, Verified: 9}},
+			{
+				Name: "tidal", In: 0, Kept: 0, Dropped: map[string]int{}, State: stable.FilterAbsent,
+				Coverage: stable.FilterCoverage{Measured: true, Verified: 9},
+			},
 		},
 	})
 
@@ -500,7 +508,7 @@ func traceLines(out string) string {
 func TestMetricsRefusalStatesRenderApart(t *testing.T) {
 	t.Parallel()
 
-	rendered := map[stable.RefusalState]string{}
+	rendered := make(map[stable.RefusalState]string)
 	for _, tc := range []struct {
 		name     string
 		probed   int
