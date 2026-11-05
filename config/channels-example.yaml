@@ -1,0 +1,6 @@
+# Example: copy to config/channels.yaml (gitignored) and list seed channels.
+# Accepted forms: <slug>, @<handle>, <slug>/<topic>, https://t.me/<slug>.
+# A group has no t.me/s preview, and a topic is one embed window with no cursor.
+channels:
+  # - examplechannel
+  # - examplegroup/1234

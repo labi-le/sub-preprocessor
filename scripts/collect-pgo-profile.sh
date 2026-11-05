@@ -13,7 +13,8 @@ set -euo pipefail
 # IP-stage half; pass a longer duration to weight the probe half instead.
 #
 # Prerequisites: the server must be startable on :8080 and pprof on :6060.
-#   - config.yaml must be present (default location), with sources configured:
+#   - config/config.yaml must be present (copy it from the tracked
+#     config/config-example.yaml), with sources configured:
 #     an empty source list is the deliberate disable and profiles nothing
 #   - Geofeed sources and the configured subscriptions should be reachable
 

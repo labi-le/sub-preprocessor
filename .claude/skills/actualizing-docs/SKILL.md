@@ -18,7 +18,7 @@ to a file:line you read in this session.
 | `README.md` | user-facing behavior, endpoints, config overview, deploy | any behavior/config/endpoint change |
 | `routes.md` | per-package LLM map (types, functions, dep graph) | package added/removed/restructured; public API changed |
 | `AGENTS.md` | agent conventions + "Current config shape" | config schema or workflow rule changed |
-| `config/config.yaml` comments | per-key semantics and defaults | key semantics changed |
+| `config/config-example.yaml` comments | per-key semantics and defaults | key semantics changed |
 | `deploy/grafana/sub-preprocessor.json` | Grafana dashboard | ANY metric added/renamed in `internal/metrics` — same commit |
 
 ## Ground truth map — claim area → verify against
@@ -26,7 +26,7 @@ to a file:line you read in this session.
 | Claim area | Source |
 |---|---|
 | Endpoints, query params, headers, status codes | `internal/server/server.go` |
-| Config keys, defaults, validation, overlays | `internal/config/config.go` (+ `config/config.yaml`) |
+| Config keys, defaults, validation, overlays | `internal/config/config.go` (+ `config/config-example.yaml`) |
 | Hot-reload, watched files, restart-required keys | `internal/reload/{watcher,reloader}.go`, `internal/app/app.go` |
 | Stable cycle order and failure semantics | `internal/stable/checker.go`, `controller.go` |
 | Filters: IP-stage vs through-node | `internal/preprocess/filters.go`, `internal/stable/nodefilter.go`, `prober_*.go` |

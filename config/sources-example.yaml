@@ -1,0 +1,7 @@
+# Example: copy to config/sources.yaml (gitignored) and fill in real sources.
+# Merged into the config's subscriptions.sources on load, and read by the
+# crawler as curated names/URLs it must not mirror. Rules: docs/guides/sources.md.
+subscriptions:
+  sources:
+    # - name: example-source
+    #   url: https://example.com/subscription

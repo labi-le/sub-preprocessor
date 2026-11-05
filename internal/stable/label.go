@@ -65,7 +65,7 @@ func foldMieruName(name string, mieru bool) string {
 
 // sourceOfLabel maps an Entry.Label back onto the source that produced it.
 // Merge builds every label as "<source>-NNN", so the split is at the LAST '-': a
-// source name may contain '-' (config.yaml ships "file-vpn-2") while the pad-3
+// source name may contain '-' (a source such as "file-vpn-2") while the pad-3
 // counter tail cannot.
 //
 // It returns a substring, never a copy, because countSourceStages calls it from

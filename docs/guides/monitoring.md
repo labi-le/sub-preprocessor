@@ -50,8 +50,8 @@ vendor the dashboard into the nixos repo.
   collector on: over the real 163-source corpus the fetch/parse phase allocated 40.69 MB before
   the wave and 24.57 MB after.
 - **`check.concurrency` is per-deployment; nothing may pin one value.**
-  `config/config.yaml` ships 16 against its own `max_avg_ms: 800`
-  (`config/config.yaml:263`, `:264`), with the measured rationale in its comment. The
+  `config/config-example.yaml` ships 16 against its own `max_avg_ms: 800`
+  (`config/config-example.yaml:265`, `:266`), with the measured rationale in its comment. The
   second compose instance, retired 2026-08-26, shipped 32 against `max_avg_ms: 4000`
   and `check.timeout: 5000ms`: 16 was the knee measured against an 800ms gate, where
   the +107ms that conc=64 adds is 13% of the budget and only 2.7% of a 4000ms one.
@@ -60,11 +60,11 @@ vendor the dashboard into the nixos repo.
   replaced, 500ms, was 8x tighter than the retired instance's gate and deleted nodes
   that instance was tuned to keep, and nothing stops the next deployment from shipping
   that gate again. What the retirement did change is that the derivation is now harder
-  to SEE than to keep: the shipped `check.timeout: 1000ms` (`config/config.yaml:261`)
+  to SEE than to keep: the shipped `check.timeout: 1000ms` (`config/config-example.yaml:263`)
   over `precheckAttempts` 2 is exactly the 500ms constant. So the test that still tells
   derived from hardcoded is `TestPrecheckBudgetTracksTheDefaultTimeout`
-  (`internal/stable/prober_test.go:774`), which strips that one line before loading,
-  while `TestPrecheckBudgetCoversShippedLatencyGates` (`:753`) reads the shipped config
+  (`internal/stable/prober_test.go`), which strips that one line before loading,
+  while `TestPrecheckBudgetCoversShippedLatencyGates` reads the shipped example
   as it stands.
 - **A histogram bound that marks a gate is a CONTRACT with the config, not a default.**
   `latencyBuckets` MUST carry a bound equal to every `check.max_avg_ms` that any shipped
@@ -81,8 +81,8 @@ vendor the dashboard into the nixos repo.
   retired second instance's gate and now rides the tail that every bound past the live
   gate is already in, so keeping it costs nothing and re-adding it would cost a commit.
   All three halves are enforced rather than merely written here:
-  `TestLatencyBucketsCoverShippedGates` reads the shipped config through `config.Load`
-  (`shippedConfigDirs`, `internal/metrics/ladder_test.go:52`),
+  `TestLatencyBucketsCoverShippedGates` reads the shipped example through `config.Load`
+  (`shippedConfigSource`, `internal/metrics/ladder_test.go`),
   `TestLatencyBucketsCoverTheDefaultGate` covers the gate it does not exercise by
   loading it with the key stripped, and
   `TestLatencyBucketsAreStrictlyIncreasing` catches the duplicate.
@@ -293,7 +293,7 @@ vendor the dashboard into the nixos repo.
   prune. Absent means hand-added, so forgetting the field shelters a source instead of exposing
   it." The crawler sets that field on every entry it mints and tests it on every entry it may
   touch, so the label cannot drift from the write rule it reports. Absent-means-sheltered is the
-  direction that matters, and the mark is refused on a git-tracked entry by a per-file gate so a
+  direction that matters, and the mark is refused on a curated entry by a per-file gate so a
   curated file cannot claim it by accident: Load's pre-merge pass refuses it in config.yaml's own
   list naming the file (`config.go:1158`), `mergeSourcesOverlay` (`config.go:1231`) refuses it in
   `sources.yaml`'s entries as it loads them (the check at `:1248-1250`), and `validateSources`
@@ -433,9 +433,9 @@ vendor the dashboard into the nixos repo.
   DeadSet is in-memory, the deploy restart emptied it and the misfire kept it empty, so
   `stable_dead_skipped_nodes` read 0 for two days and the probe phase carried the whole
   ~66k pool instead of ~15k. The two quantities are not interchangeable, and this is what
-  that cost. The shipped config sets
-  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config.yaml:174` and
-  `:227`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
+  that cost. The shipped example sets
+  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config-example.yaml:174` and
+  `:231`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
   it by a uniform [1, 1.5)
   so the graveyard does not expire as one batch (`internal/stable/deadset.go:69-74`): [3h, 4.5h),
   three to four cycles. Stages (`internal/stable/select.go:22-52`): `passed` = a round answered,

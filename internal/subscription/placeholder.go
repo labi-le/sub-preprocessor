@@ -103,8 +103,8 @@ func nilCredential(raw string) bool {
 // unspecified address (0.0.0.0, ::) or a loopback one. Such a node can never
 // carry traffic, however good its credential, and it is worse than a dial
 // failure: connect(0.0.0.0:p) lands on the loopback at p, so a node on the
-// service's own listener port (both shipped configs listen on :8080) passes the
-// worker's TCP precheck and spends a URLTest round dialling the worker.
+// service's own listener port (default :8080) passes the worker's TCP
+// precheck and spends a URLTest round dialling the worker.
 //
 // The whole loopback /8 is in scope, not just its first address, because the
 // kernel routes all of it to the loopback interface (RFC 1122 host

@@ -763,9 +763,9 @@ func TestMetricsEmptyRender(t *testing.T) {
 // TestMetricsKeptLatencyRender pins the whole ladder, not just the samples, so
 // that dropping a bound is caught here. The threshold half of the invariant --
 // that every shipped max_avg_ms has a bound -- is enforced by
-// TestLatencyBucketsCoverShippedGates, which reads the config files this test
-// never touches. The 5700 sample exercises the tail; no shipped config sets a
-// gate that high, so a survivor cannot carry it in production.
+// TestLatencyBucketsCoverShippedGates, which reads the shipped config example
+// this test never touches. The 5700 sample exercises the tail; no shipped
+// example sets a gate that high, so a survivor cannot carry it in production.
 func TestMetricsKeptLatencyRender(t *testing.T) {
 	t.Parallel()
 

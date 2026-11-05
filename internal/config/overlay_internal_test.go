@@ -9,7 +9,7 @@ import (
 
 // TestMergeSourcesOverlayRefusesTheMarkItLoads pins the curated-ownership rule to
 // the file rather than to Load's statement order. The list handed in already
-// holds a legitimate managed entry -- the shape a git-tracked overlay merged
+// holds a legitimate managed entry -- the shape a curated overlay merged
 // AFTER private.yaml would see, where the merged-list pass runs with the mark
 // allowed and would let the overlay's own mark through. The refusal must come
 // from the merge itself, must name the overlay and the offending entry, must not

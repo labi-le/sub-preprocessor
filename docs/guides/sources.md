@@ -15,8 +15,9 @@ What follows is the part that outlives the file, and it applies to `config/sourc
 just as well — 17 of those 52 were salvaged into it on 2026-08-26 for carrying endpoints no
 already-configured source did when the 52 were measured against the live 737-source corpus
 (152165 endpoints): +6935 between them, while the other 35 added nothing and died with the
-directory. Thirteen of those 17 were dropped 2026-09-10, leaving the four at
-`config/sources.yaml:96-103` — endpoint novelty at salvage time did not survive to the
+directory. Thirteen of those 17 were dropped 2026-09-10, leaving four, recorded in the
+last tracked revision of `config/sources.yaml` (the live file is a gitignored local
+copy) — endpoint novelty at salvage time did not survive to the
 published list, which is the only place it pays, the reading the GitHub phase already acts on
 (`docs/guides/github.md`, probation — off `stable_source_tested_nodes`, the probe survivors;
 this cut read `stable_source_published_nodes`, what reached the list).
@@ -166,7 +167,7 @@ deployment, whitelist-gated or not.
 ## What the Telegram crawler may harvest
 
 Measured 2026-08-12. Pass rates below are at this instance's own gate
-(`config/config.yaml` `subscriptions.check`: `rounds: 2`, `timeout: 1000ms`, `max_avg_ms: 800`);
+(`config/config-example.yaml` `subscriptions.check`: `rounds: 2`, `timeout: 1000ms`, `max_avg_ms: 800`);
 the decay fit is on reachability at the looser 8000 ms gate, which is the arm large enough to fit.
 
 - **A harvested `server:port` is a frozen snapshot; a harvested subscription URL is an
@@ -349,7 +350,7 @@ slug records none (`mintSource`, `internal/crawl/crawl.go:746-753`). And `feed:`
 crawler's alone: unlike `managed` it grants nothing and only groups, so a curated entry may set it
 too (`config.go:654`). An entry WITHOUT `managed` is hand-added and sheltered from rewrite
 and prune, so an operator who forgets the field is safe by default. `managed: true` in a
-git-tracked file is REFUSED twice,
+curated file is REFUSED twice,
 and deliberately not by statement order: `mergeSourcesOverlay` (`config.go:1231`) refuses it in
 `config/sources.yaml` before appending it (`:1249`), so that overlay stays policed wherever
 it is merged, and `validateSources` (`:1731`) refuses it again over the merged list
@@ -378,7 +379,7 @@ inline aggregate's name; skipping the inline harvest rather than writing a dupli
 cycle changes — sources still merge, prune and get written — but that cycle's inline harvest is
 discarded, and every later cycle's too for as long as the name is held. The crawler does not rename
 your entry to take its name back, because a hand-added entry is never renamed; only deleting the
-entry by hand returns the name. The same name in a GIT-TRACKED file costs more and earns no
+entry by hand returns the name. The same name in a CURATED file costs more and earns no
 warning, because the yield cannot reach it: the crawler reads `private.yaml`, `channels.yaml`, its
 own state file, and the names AND URLs on every `CRAWL_CURATED` path (`loadPrivate`,
 `channels.go:31`, `state.go:419`, `curatedNames`, `curatedURLs`) — reads that feed the MINT's
@@ -510,7 +511,7 @@ is not changing, which is why the ambiguity is written down here instead of desi
   and `-041` collapsing onto one `kort0881-vless` row no channel produced, `kreemchek-26`
   onto `kreemchek`, `plsn1337-filtered-vless-keys-2` onto `plsn1337-filtered-vless-keys`,
   `goida26-1` onto `goida26` — and all five were removed 2026-09-10 for never publishing, so
-  the shipped overlay wears it on NONE of its 47 names and the fold this bullet warns about
+  the curated overlay wears it on NONE of its 47 names and the fold this bullet warns about
   now has only crawler-minted names in `private.yaml` to be wrong on. The first four were
   salvaged that day from the retired second instance, where six of its 52 names did the same
   (counted 2026-08-18 across both

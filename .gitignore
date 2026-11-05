@@ -37,6 +37,10 @@ Thumbs.db
 # Private config (untracked)
 config/private.yaml
 config/.github-token
+# Local deployment config: the repo ships only the *-example.yaml templates
+config/config.yaml
+config/channels.yaml
+config/sources.yaml
 # Compose interpolation (CRAWLER_UID/CRAWLER_GID): deployment-specific
 /.env
 

@@ -85,34 +85,47 @@ func exposedSpeedBounds(t *testing.T) []float64 {
 func TestSpeedBucketsCoverShippedGates(t *testing.T) {
 	t.Parallel()
 
-	for _, dir := range shippedConfigDirs {
-		t.Run(dir, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join("..", "..", dir, "config.yaml")
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatalf("load %s: %v", path, err)
-			}
-			for _, spec := range cfg.NodeFilterSpecs() {
-				if spec.Type != config.FilterBandwidth || spec.Bandwidth.MinMbps == nil {
-					continue
-				}
-				gate := float64(*spec.Bandwidth.MinMbps)
-				if gate == 0 {
-					continue // no floor configured: nothing to mark
-				}
-				if bounds := exposedSpeedBounds(t); !slices.Contains(bounds, gate) {
-					t.Errorf("%s: bandwidth min_mbps = %v has no equal bound in the ladder %v", path, gate, bounds)
-				}
-			}
-		})
+	path := writeConfig(t, shippedConfigSource(t))
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	for _, spec := range cfg.NodeFilterSpecs() {
+		if spec.Type != config.FilterBandwidth || spec.Bandwidth.MinMbps == nil {
+			continue
+		}
+		gate := float64(*spec.Bandwidth.MinMbps)
+		if gate == 0 {
+			continue // no floor configured: nothing to mark
+		}
+		if bounds := exposedSpeedBounds(t); !slices.Contains(bounds, gate) {
+			t.Errorf("%s: bandwidth min_mbps = %v has no equal bound in the ladder %v", path, gate, bounds)
+		}
 	}
 }
 
-// shippedConfigDirs are the config directories the repo ships. The invariant is
-// about what ships, so the test reads those files, not fixtures.
-var shippedConfigDirs = []string{"config"}
+// shippedConfigSource returns the tracked example config. Callers write it to
+// their own temp dir as config.yaml, because Load merges sibling overlays and
+// the repo's config/ directory may hold an operator's untracked ones.
+func shippedConfigSource(t *testing.T) []byte {
+	t.Helper()
+
+	src, err := os.ReadFile(filepath.Join("..", "..", "config", "config-example.yaml"))
+	if err != nil {
+		t.Fatalf("read shipped config example: %v", err)
+	}
+	return src
+}
+
+func writeConfig(t *testing.T, src []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, src, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
 
 // TestLatencyBucketsCoverShippedGates enforces the latencyBuckets invariant
 // against the configs themselves, so moving a max_avg_ms off the ladder fails
@@ -120,21 +133,15 @@ var shippedConfigDirs = []string{"config"}
 func TestLatencyBucketsCoverShippedGates(t *testing.T) {
 	t.Parallel()
 
-	for _, dir := range shippedConfigDirs {
-		t.Run(dir, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join("..", "..", dir, "config.yaml")
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatalf("load %s: %v", path, err)
-			}
-			gate := float64(cfg.Subscriptions.Check.MaxAvgMs)
-			if bounds := exposedLatencyBounds(t); !slices.Contains(bounds, gate) {
-				t.Errorf("%s: subscriptions.check.max_avg_ms = %v has no equal bound in the ladder %v",
-					path, gate, bounds)
-			}
-		})
+	path := writeConfig(t, shippedConfigSource(t))
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	gate := float64(cfg.Subscriptions.Check.MaxAvgMs)
+	if bounds := exposedLatencyBounds(t); !slices.Contains(bounds, gate) {
+		t.Errorf("%s: subscriptions.check.max_avg_ms = %v has no equal bound in the ladder %v",
+			path, gate, bounds)
 	}
 }
 
@@ -148,10 +155,7 @@ func TestLatencyBucketsCoverTheDefaultGate(t *testing.T) {
 	t.Parallel()
 	// A shipped config with exactly one line removed, so the fixture stays
 	// valid under every other validator and differs only in the key at issue.
-	src, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
-	if err != nil {
-		t.Fatalf("read shipped config: %v", err)
-	}
+	src := shippedConfigSource(t)
 	var kept []string
 	for line := range strings.SplitSeq(string(src), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "max_avg_ms:") {
@@ -159,11 +163,7 @@ func TestLatencyBucketsCoverTheDefaultGate(t *testing.T) {
 		}
 		kept = append(kept, line)
 	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if writeErr := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600); writeErr != nil {
-		t.Fatalf("write fixture: %v", writeErr)
-	}
+	path := writeConfig(t, []byte(strings.Join(kept, "\n")))
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("load fixture: %v", err)

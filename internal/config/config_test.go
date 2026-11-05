@@ -480,7 +480,7 @@ func TestLoadRejectsBadSubscriptions(t *testing.T) {
 // TestLoadRejectsOutOfRangeResolverPort: SplitHostPort does not range-check
 // the port, and resolver.New dials the address verbatim for every DNS query --
 // so 1.1.1.1:99999 used to boot clean and produce the same total DNS outage
-// the portless rejection was added to kill. The shipped config carries no
+// the portless rejection was added to kill. The shipped example carries no
 // resolver.address (system resolver), so this rule never touches it.
 func TestLoadRejectsOutOfRangeResolverPort(t *testing.T) {
 	t.Parallel()
@@ -1331,13 +1331,13 @@ func TestLoadOverlayStrictness(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsManagedInGitTrackedSources: managed is the crawler's write
-// authority over an entry -- it makes it prune-eligible -- so a git-tracked file
+// TestLoadRejectsManagedInCuratedSources: managed is the crawler's write
+// authority over an entry -- it makes it prune-eligible -- so a curated file
 // may not claim it. Accepting it there would let one cycle delete a hand-added
 // source, and the error has to name the file that must be edited. feed is the
 // counterexample that keeps the rule about authority and not about crawler
 // vocabulary: it only groups, so a curated entry may carry one.
-func TestLoadRejectsManagedInGitTrackedSources(t *testing.T) {
+func TestLoadRejectsManagedInCuratedSources(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -1360,7 +1360,7 @@ func TestLoadRejectsManagedInGitTrackedSources(t *testing.T) {
 
 		_, err := config.Load(path)
 		if err == nil {
-			t.Fatalf("%s: managed: true must be rejected in a git-tracked file", file)
+			t.Fatalf("%s: managed: true must be rejected in a curated file", file)
 		}
 		// The blame must land on the file the entry was actually written in:
 		// config.yaml's own list is refused by Load's pre-merge pass (naming

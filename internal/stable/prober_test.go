@@ -753,6 +753,29 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 	}
 }
 
+// exampleConfigSource returns the tracked example config. Callers write it to
+// their own temp dir as config.yaml, because Load merges sibling overlays and
+// the repo's config/ directory may hold an operator's untracked ones.
+func exampleConfigSource(t *testing.T) []byte {
+	t.Helper()
+
+	src, err := os.ReadFile(filepath.Join("..", "..", "config", "config-example.yaml"))
+	if err != nil {
+		t.Fatalf("read shipped config example: %v", err)
+	}
+	return src
+}
+
+func writeExampleConfig(t *testing.T, src []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, src, 0o600); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	return path
+}
+
 // TestPrecheckBudgetCoversShippedLatencyGates pins the coupling that a constant
 // broke: an endpoint's whole pre-check budget must be no tighter than the gate
 // the instance publishes against, or the pre-check deletes nodes the instance is
@@ -764,7 +787,7 @@ func TestFilterReachableBreakerDisbelievesAnImplausibleVerdict(t *testing.T) {
 func TestPrecheckBudgetCoversShippedLatencyGates(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "config", "config.yaml")
+	path := writeExampleConfig(t, exampleConfigSource(t))
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("load %s: %v", path, err)
@@ -785,10 +808,7 @@ func TestPrecheckBudgetCoversShippedLatencyGates(t *testing.T) {
 func TestPrecheckBudgetTracksTheDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
-	if err != nil {
-		t.Fatalf("read shipped config: %v", err)
-	}
+	src := exampleConfigSource(t)
 	var kept []string
 	for line := range strings.SplitSeq(string(src), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "timeout: 1000ms") {
@@ -804,11 +824,7 @@ func TestPrecheckBudgetTracksTheDefaultTimeout(t *testing.T) {
 	if removed := len(strings.Split(string(src), "\n")) - len(kept); removed != 1 {
 		t.Fatalf("fixture strip removed %d lines, want exactly check.timeout", removed)
 	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if writeErr := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600); writeErr != nil {
-		t.Fatalf("write fixture: %v", writeErr)
-	}
+	path := writeExampleConfig(t, []byte(strings.Join(kept, "\n")))
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("load fixture: %v", err)

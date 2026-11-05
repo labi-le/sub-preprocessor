@@ -57,11 +57,11 @@
 # internal/ by size; excluding them lets a test-only commit reuse the cached compile.
 # Gotcha if that changes: `go test ./...` against this context reports "no test files"
 # for all 21 packages and PASSES (exit 0), so a builder test step needs BOTH this line
-# deleted and `!config/config.yaml` added -- internal/config/config_specs_test.go:532
-# and internal/preprocess/processor_internal_test.go:1178 read ../../config/config.yaml
+# deleted and `!config/config-example.yaml` added -- internal/config/config_specs_test.go:839
+# and internal/preprocess/processor_internal_test.go:1767 read ../../config/config-example.yaml
 # and t.Fatal on error. Measured: deleting this line alone fails TestShippedConfigLoads,
 # TestShippedConfigDropsASNButKeepsTheCapability and TestASNFilterFormsStillBuild with
-# "open ../../config/config.yaml: no such file or directory"; with both changes
+# "open ../../config/config-example.yaml: no such file or directory"; with both changes
 # `go test ./internal/config/ ./internal/preprocess/` passes. One residue is not this
 # file's problem: the builder stage runs as root, so the 0500-directory assertion in
 # TestSaveSnapshotFailureKeepsPreviousFile cannot fail as designed and `go test ./...`

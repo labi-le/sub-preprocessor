@@ -41,7 +41,7 @@ a second config directory was retired 2026-08-26. The `cidr` allow-list on the
 ENTRY address that had given it its purpose, holding
 `hxehex/russia-mobile-internet-whitelist`, was disabled 2026-08-14 after it
 published 1 node per cycle for 43 cycles; the filter type is still a feature and
-that verdict now sits with it, commented out, in `config/config.yaml`.
+that verdict now sits with it, commented out, in `config/config-example.yaml`.
 The shipped `country` entry carries no `exclude_*`, so it drops nothing today
 (`GeofeedFilter` early-returns on a full allow set with an empty deny set). It
 is kept because it is the ONLY hook a country exclusion has: `Config.DeniedCountries`

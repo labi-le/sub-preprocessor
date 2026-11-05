@@ -1694,7 +1694,7 @@ func TestCountryChainOrderDerivation(t *testing.T) {
 // annotate TAG must not have moved: whether the Cymru resolver is built is
 // decided by opts.IPFilters and by the PROVIDER chains in opts.Annotate, and
 // never by a tag name. Both sources stand alone — an operator who filters by
-// AS name annotates nothing, and the shipped config annotates through asn with
+// AS name annotates nothing, and a config annotating through asn with
 // no asn filter configured — so a rule that read the tag would have silently
 // dropped one of them.
 func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
@@ -1755,16 +1755,16 @@ func TestProviderNeedsASNHasTwoIndependentSources(t *testing.T) {
 	}
 }
 
-// shippedConfigOffline loads the repository's own config/config.yaml (copied
+// shippedConfigOffline loads the repository's shipped config example (copied
 // into a temp dir, because config.Load merges the sibling overlays and these
-// tests are about config.yaml alone) and returns Options wired for an offline
+// tests are about the example alone) and returns Options wired for an offline
 // run. The shipped chain names dbip and registry, so both geoDBs are built;
 // preloading them keeps the callers off the network. Nothing preloads the ASN
 // resolver -- whether it is constructed at all is what the callers ask.
 func shippedConfigOffline(t *testing.T) (shipped []byte, dir string, cfg config.Config, opts Options) {
 	t.Helper()
 
-	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config-example.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1790,9 +1790,9 @@ func shippedConfigOffline(t *testing.T) (shipped []byte, dir string, cfg config.
 	}
 }
 
-// TestShippedConfigDropsASNButKeepsTheCapability reads the repository's own
-// config/config.yaml rather than a fixture. Two halves, and the second is the
-// point: the shipped GEO chain no longer names asn, so the running service
+// TestShippedConfigDropsASNButKeepsTheCapability reads the repository's
+// shipped config example rather than a fixture. Two halves, and the second is
+// the point: the shipped GEO chain no longer names asn, so the running service
 // builds no Cymru resolver -- measured, the provider contributed zero hits
 // behind dbip+registry -- but the provider is NOT retired, and a config that
 // asks for it must still load and still build it. What a config that asks for

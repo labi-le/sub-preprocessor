@@ -270,7 +270,7 @@ func BenchmarkProcessBodySlice_MixedSchemes(b *testing.B) {
 // junk line inflates it exactly as a surviving one does.
 //
 // The drop stage is the cidr allow-list at both shapes, so the two differ ONLY
-// in the survival ratio. The shipped config configures no cidr filter and loses
+// in the survival ratio. The shipped example configures no cidr filter and loses
 // its 3.9% to DNS failures instead, which the sink cannot distinguish: a node
 // dropped at any IP stage never reaches emit. Servers are bare IPv4 throughout,
 // so no DNS and no network is touched.

@@ -37,7 +37,7 @@ var speedBuckets = []float64{5, 10, 15, 25, 30, 50, 100, 250, 500}
 // Instances share a Prometheus and differ only by job, so a gate that falls
 // between two bounds is invisible on the panel — which is the one question
 // the metric exists to answer; TestLatencyBucketsCoverShippedGates checks it
-// against the shipped config files. 1000 is defaultCheckMaxAvgMs, the gate a
+// against the shipped config example. 1000 is defaultCheckMaxAvgMs, the gate a
 // config omitting the key runs on. The tail runs past every gate only so that
 // raising a max_avg_ms into it stays a one-file edit -- SelectSurvivors drops
 // everything above the gate, so those bounds always equal +Inf.

@@ -129,7 +129,7 @@ func TestEntryLabelFoldsRealMieruProxies(t *testing.T) {
 }
 
 // sourceOfLabelCases are the shapes attribution has to survive: source names
-// carrying '-' (the shipped config's own "file-vpn-2"), a name whose own tail
+// carrying '-' (e.g. the curated "file-vpn-2"), a name whose own tail
 // is digits, a counter past 999, and the malformed labels Merge cannot emit
 // today. The ':' in "weird:src-1-002" is out-of-grammar — no configured source
 // name may contain one — and survives only as split hardening.

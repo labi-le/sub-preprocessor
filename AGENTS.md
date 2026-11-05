@@ -78,7 +78,7 @@ load when its trigger fires. Each guide states its own trigger at the top.
 |---|---|
 | [`docs/guides/workflow.md`](./docs/guides/workflow.md) | before your FIRST edit to production code, a contract, or a doc agents act on |
 | [`docs/guides/design.md`](./docs/guides/design.md) | changing pipeline behaviour, adding a scheme or decoder, touching probe/filter order, or asking "why is it built this way"; also what the endpoints guarantee |
-| [`docs/guides/config.md`](./docs/guides/config.md) | adding, renaming or retuning a config key, or editing either shipped `config.yaml` |
+| [`docs/guides/config.md`](./docs/guides/config.md) | adding, renaming or retuning a config key, or editing the shipped `config-example.yaml` |
 | [`docs/guides/monitoring.md`](./docs/guides/monitoring.md) | adding, renaming or rendering a metric, or editing `deploy/grafana/sub-preprocessor.json` |
 | [`docs/guides/benchmarks.md`](./docs/guides/benchmarks.md) | quoting a performance figure, or taking one |
 | [`docs/guides/sources.md`](./docs/guides/sources.md) | adding, removing or auditing a subscription source, or touching `internal/crawl` |

@@ -200,7 +200,7 @@ resolution, before any probing:
   figure that means anything is a measured node count.
 
   No shipped config enables a `cidr` filter today: the entry that gated on it
-  is kept commented out in `config/config.yaml`, with the measurement that
+  is kept commented out in `config/config-example.yaml`, with the measurement that
   disabled it and the argument against adding `ipwhitelist.txt` beside the
   CIDR file — read both before re-enabling it. That gate ran on a second
   compose instance, retired 2026-08-26, over a source list selected against
@@ -284,7 +284,7 @@ previous snapshot; this gate does not clear an existing snapshot. The gates:
   `resolver.address`, which configures the preprocessing resolver, not mihomo's
   UDP target lookup. No endpoint IP or DNS fallback is hardcoded in the prober.
 - `bandwidth` — download `test_url` through the node and measure Mbps. Nodes
-  below `min_mbps` (code default 5, shipped config 15) are dropped; an explicit
+  below `min_mbps` (code default 5, example 15) are dropped; an explicit
   `0` removes the speed
   *threshold* — a slow-but-reachable node is then kept — but it is not
   "annotate only": a node whose download failed outright (dial error, refused
@@ -612,7 +612,20 @@ since an empty list is nearly always a missing overlay file.
 The repo ships **one** config directory, `config/`, bind-mounted at `/config`
 inside the container, so everything below is relative to it and the
 strict-decode, overlay and hot-reload rules above are the rules that govern it.
-Curating what goes into its `sources.yaml` is a separate problem with its own
+Only its examples are tracked — `config-example.yaml`, `channels-example.yaml`,
+`sources-example.yaml`, `private-example.yaml` — while the live `config.yaml`,
+`channels.yaml`, `sources.yaml` and `private.yaml` are gitignored: deployment
+tuning and the crawler's corpus stay out of git. A fresh checkout copies the
+templates once:
+
+```bash
+cd config
+for f in config channels sources private; do cp "$f-example.yaml" "$f.yaml"; done
+```
+
+(`private.yaml` is the crawler's overlay and may equally be left absent — a
+missing one is normal.) Curating what goes into `sources.yaml` is a separate
+problem with its own
 rules: `docs/guides/sources.md` carries the three gates a candidate source has
 to pass — the repo is FRESH, the body is FETCHABLE inside `fetch.timeout` AND
 fits under the worker's 10 MiB body cap, and its contribution is MARGINAL,
@@ -814,7 +827,9 @@ the file's previous owner. A root crawler therefore restores a root-owned `0644
 private.yaml` on every changed-source cycle, and the operator cannot edit it in
 place; the same applies to the `0600` state and census files.
 
-**Fresh install.** Clone as the account that will own the deployment. The
+**Fresh install.** Clone as the account that will own the deployment and copy
+the config examples as that account (see **Configuration**): the boot reads
+`config/config.yaml` from that directory. The
 shipped `1000:1000` works when that account is uid 1000; otherwise set
 `CRAWLER_UID`/`CRAWLER_GID` to `id -u`/`id -g` and change the service's
 `user:` to the same pair — it writes `.geoblock.db` and `.stable-snapshot.json`

@@ -60,7 +60,7 @@
   The one deliberate increase is in `countryChainOrder`: a config splitting
   one `GEO` chain across several entries now pays a per-`FilterNodes` `chainLookup` it did not
   before (0 -> 56 B/op, 2 allocs), which is exactly what the equivalent single-entry chain
-  already cost. The shipped config is unmoved, and the alternative was the wrong filter
+  already cost. The shipped example is unmoved, and the alternative was the wrong filter
   verdict - see `Processor.countryChain`.
 - **Per-link median tables, per-session interquartile ranges and A/B/C/D build enumerations
   do not belong in this section.** They were measured in `/tmp` export trees that no longer

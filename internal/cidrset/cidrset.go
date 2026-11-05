@@ -81,7 +81,7 @@ func Load(
 		logger.Info().Str("url", url).Int("ranges", len(part)).Int("skipped_lines", skipped).
 			Msg("cidr source loaded")
 		if ranges == nil {
-			// The shipped config lists one url; adopting its slice skips a
+			// The shipped example lists one url; adopting its slice skips a
 			// full-size copy newSet would immediately sort in place anyway.
 			ranges = part
 			continue

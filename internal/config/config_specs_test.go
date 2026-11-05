@@ -829,14 +829,14 @@ func TestGeoTraceRenamedToCloudflare(t *testing.T) {
 	}
 }
 
-// TestShippedConfigLoads decodes the repository's own config/config.yaml with
+// TestShippedConfigLoads decodes the repository's shipped config example with
 // the strict decoder, so a key the schema stopped accepting cannot ship. It is
 // copied into a temp dir on purpose: Load merges sibling overlays, and this
-// test is about config.yaml alone.
+// test is about the example alone.
 func TestShippedConfigLoads(t *testing.T) {
 	t.Parallel()
 
-	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "config-example.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ const (
 	defaultGeminiTimeout     = 15 * time.Second
 	defaultGeminiConcurrency = 8
 	// 75% of the 200/min model_requests ceiling measured 2026-09-03, so an
-	// unpaced gate cannot 429 a whole cycle; numbers in config/config.yaml.
+	// unpaced gate cannot 429 a whole cycle; numbers in config/config-example.yaml.
 	defaultGeminiRateLimit   = 150
 	defaultClaudeEndpoint    = "https://api.anthropic.com"
 	defaultClaudeMarker      = "Request not allowed"
@@ -1144,7 +1144,7 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
-	// Merge the tracked sources.yaml overlay BEFORE validation so the appended
+	// Merge the curated sources.yaml overlay BEFORE validation so the appended
 	// sources are validated together with the rest of the config.
 	if err := mergeSourcesOverlay(filepath.Dir(path), &cfg); err != nil {
 		return Config{}, err
@@ -1164,7 +1164,7 @@ func Load(path string) (Config, error) {
 		}
 		cfg.Subscriptions.Sources = append(cfg.Subscriptions.Sources, priv.Subscriptions.Sources...)
 		// This is the only merge whose entries may carry the mark; each
-		// git-tracked file refuses it as it loads, so position is not what
+		// curated file refuses it as it loads, so position is not what
 		// separates them.
 		if validateErr := cfg.Subscriptions.validateSources(""); validateErr != nil {
 			return Config{}, fmt.Errorf("private config: %w", validateErr)
@@ -1190,7 +1190,7 @@ func readOverlay(dir, name string) ([]byte, bool, error) {
 
 // OverlayFiles names the overlay files Load merges beside a config.yaml, in
 // watcher-relevant order: the crawler's private overlay first, then the
-// git-tracked curated one.
+// curated one.
 func OverlayFiles() []string {
 	return []string{privateOverlayFile, sourcesOverlayFile}
 }
@@ -1200,7 +1200,7 @@ func OverlayFiles() []string {
 // exported because no reader outside this package needs the single name.
 const privateOverlayFile = "private.yaml"
 
-// sourcesOverlayFile is the git-tracked curated overlay, named in the error
+// sourcesOverlayFile is the curated sources overlay, named in the error
 // that refuses a crawler mark in it.
 const sourcesOverlayFile = "sources.yaml"
 

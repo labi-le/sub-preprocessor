@@ -880,7 +880,7 @@ const (
 	// Bounded by the ROUTER's conntrack table, which is the binding cost here.
 	// Measurement independence is real but secondary: this dial yields no bit
 	// any gate reads, so check.concurrency — 16 against max_avg_ms 800 in the
-	// shipped config, 32 against 4000 on the second instance (retired
+	// shipped example, 32 against 4000 on the second instance (retired
 	// 2026-08-26), each pinned by its own latency measurement — has no claim
 	// on it.
 	//
