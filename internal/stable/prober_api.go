@@ -137,7 +137,7 @@ func (m *MihomoProber) apiCheck(
 	concurrency int,
 	pace time.Duration,
 	readBody bool,
-	classify func(status int, body string, complete bool) apiVerdict,
+	classify func(status int, body []byte, complete bool) apiVerdict,
 ) map[string]APIOutcome {
 	opLog := log.Op(m.logger, op)
 	prog := newProgress(opLog, msg+" progress", len(proxies))
@@ -231,7 +231,7 @@ func apiProbeOne(
 	header http.Header,
 	timeout time.Duration,
 	readBody bool,
-) (reachable bool, status int, body string, complete bool) {
+) (reachable bool, status int, body []byte, complete bool) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -241,15 +241,15 @@ func apiProbeOne(
 	// refuses a target with no host, which must never reach the node.
 	addr, ok := hostPort(target)
 	if !ok {
-		return false, 0, "", false
+		return false, 0, nil, false
 	}
 	var meta mihomo.Metadata
 	if addrErr := meta.SetRemoteAddress(addr); addrErr != nil {
-		return false, 0, "", false
+		return false, 0, nil, false
 	}
 	conn, err := px.DialContext(tctx, &meta)
 	if err != nil {
-		return false, 0, "", false
+		return false, 0, nil, false
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -268,7 +268,7 @@ func apiProbeOne(
 
 	req, err := http.NewRequestWithContext(tctx, http.MethodGet, target, nil)
 	if err != nil {
-		return false, 0, "", false
+		return false, 0, nil, false
 	}
 	req.Header.Set("User-Agent", browserUserAgent)
 	for k, vs := range header {
@@ -278,21 +278,21 @@ func apiProbeOne(
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, 0, "", false
+		return false, 0, nil, false
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if !readBody {
-		return true, resp.StatusCode, "", false
+		return true, resp.StatusCode, nil, false
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIBody+1))
 	if err != nil {
 		// The headers arrived, so the node answered; the bytes received are
 		// still scanned for a marker, but the response was not read whole.
-		return true, resp.StatusCode, string(b), false
+		return true, resp.StatusCode, b, false
 	}
 	if len(b) > maxAPIBody {
-		return true, resp.StatusCode, string(b), false
+		return true, resp.StatusCode, b, false
 	}
-	return true, resp.StatusCode, string(b), true
+	return true, resp.StatusCode, b, true
 }

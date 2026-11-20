@@ -102,6 +102,7 @@ var reloadClassification = map[string]string{
 	"filters[].key_file":          liveWorker,
 	"filters[].key_var":           liveWorker,
 	"filters[].version":           liveWorker,
+	"filters[].blocked_regions":   liveWorker,
 
 	"annotate[].tag":       liveBoth,
 	"annotate[].providers": liveBoth,
@@ -132,32 +133,35 @@ var reloadClassification = map[string]string{
 	// excludes it and config.StoresChanged warns instead.
 	"subscriptions.snapshot_path": restartWarned,
 
-	"geoblock.db_path":             restartWarned,
-	"geoblock.ttl":                 restartWarned,
-	"geoblock.gemini.endpoint":     liveWorker,
-	"geoblock.gemini.model":        liveWorker,
-	"geoblock.gemini.marker":       liveWorker,
-	"geoblock.gemini.api_key":      liveWorker,
-	"geoblock.gemini.key_file":     liveWorker,
-	"geoblock.gemini.key_var":      liveWorker,
-	"geoblock.gemini.timeout":      liveWorker,
-	"geoblock.gemini.concurrency":  liveWorker,
-	"geoblock.gemini.rate_limit":   liveWorker,
-	"geoblock.claude.endpoint":     liveWorker,
-	"geoblock.claude.marker":       liveWorker,
-	"geoblock.claude.version":      liveWorker,
-	"geoblock.claude.timeout":      liveWorker,
-	"geoblock.claude.concurrency":  liveWorker,
-	"geoblock.chatgpt.endpoint":    liveWorker,
-	"geoblock.chatgpt.marker":      liveWorker,
-	"geoblock.chatgpt.timeout":     liveWorker,
-	"geoblock.chatgpt.concurrency": liveWorker,
-	"geoblock.tidal.endpoint":      liveWorker,
-	"geoblock.tidal.timeout":       liveWorker,
-	"geoblock.tidal.concurrency":   liveWorker,
-	"geoblock.deepl.endpoint":      liveWorker,
-	"geoblock.deepl.timeout":       liveWorker,
-	"geoblock.deepl.concurrency":   liveWorker,
+	"geoblock.db_path":                    restartWarned,
+	"geoblock.ttl":                        restartWarned,
+	"geoblock.gemini.endpoint":            liveWorker,
+	"geoblock.gemini.model":               liveWorker,
+	"geoblock.gemini.marker":              liveWorker,
+	"geoblock.gemini.api_key":             liveWorker,
+	"geoblock.gemini.key_file":            liveWorker,
+	"geoblock.gemini.key_var":             liveWorker,
+	"geoblock.gemini.timeout":             liveWorker,
+	"geoblock.gemini.concurrency":         liveWorker,
+	"geoblock.gemini.rate_limit":          liveWorker,
+	"geoblock.claude.endpoint":            liveWorker,
+	"geoblock.claude.marker":              liveWorker,
+	"geoblock.claude.version":             liveWorker,
+	"geoblock.claude.timeout":             liveWorker,
+	"geoblock.claude.concurrency":         liveWorker,
+	"geoblock.chatgpt.endpoint":           liveWorker,
+	"geoblock.chatgpt.marker":             liveWorker,
+	"geoblock.chatgpt.timeout":            liveWorker,
+	"geoblock.chatgpt.concurrency":        liveWorker,
+	"geoblock.tidal.endpoint":             liveWorker,
+	"geoblock.tidal.timeout":              liveWorker,
+	"geoblock.tidal.concurrency":          liveWorker,
+	"geoblock.deepl.endpoint":             liveWorker,
+	"geoblock.deepl.timeout":              liveWorker,
+	"geoblock.deepl.concurrency":          liveWorker,
+	"geoblock.gemini_web.timeout":         liveWorker,
+	"geoblock.gemini_web.concurrency":     liveWorker,
+	"geoblock.gemini_web.blocked_regions": liveWorker,
 
 	"deadcache.ttl": restartWarned,
 
@@ -167,7 +171,8 @@ var reloadClassification = map[string]string{
 // coverageBase is the config every behavioural mutation starts from. Every field
 // a mutator touches holds a value the mutation actually changes, and the filters
 // list carries one entry per shape the keys address (country, asn, bandwidth,
-// gemini, claude, cidr) so a per-entry key can be mutated in isolation.
+// gemini, claude, cidr, gemini_web) so a per-entry key can be mutated in
+// isolation.
 func coverageBase() config.Config {
 	cfg := config.Config{
 		Log: config.LogConfig{Level: "info"},
@@ -210,6 +215,7 @@ func coverageBase() config.Config {
 				Type: config.FilterCIDR, FileType: "raw", RefreshInterval: new(24 * time.Hour),
 				URLs: []string{"https://whitelist.example.com/cidrwhitelist.txt"},
 			},
+			{Type: config.FilterGeminiWeb, BlockedRegions: []string{"RU"}, Timeout: 15 * time.Second},
 		},
 		Annotate: []config.AnnotateSpec{{Tag: config.TagGEO, Providers: []string{config.ProviderGeofeed}}},
 		Groups:   config.Groups{"blocked": {"RU"}},
@@ -231,6 +237,9 @@ func coverageBase() config.Config {
 			ChatGPT: config.ChatGPTConfig{Endpoint: "https://openai.example.com", Marker: "m", Timeout: 15 * time.Second, Concurrency: 8},
 			Tidal:   config.TidalConfig{Endpoint: "https://tidal.example.com", Timeout: 15 * time.Second, Concurrency: 8},
 			Deepl:   config.DeeplConfig{Endpoint: "https://deepl.example.com/ru/translator", Timeout: 15 * time.Second, Concurrency: 8},
+			GeminiWeb: config.GeminiWebConfig{
+				Timeout: 15 * time.Second, Concurrency: 8, BlockedRegions: []string{"RU"},
+			},
 		},
 		DeadCache: config.DeadCacheConfig{TTL: new(2 * time.Hour)},
 		Fetch:     config.FetchConfig{Timeout: 3 * time.Second},
@@ -247,7 +256,7 @@ func coverageBase() config.Config {
 
 // keyMutators changes exactly one yaml key per entry, so the reload path it
 // trips is attributable to that key alone. Filter indices follow coverageBase:
-// 0 country, 1 asn, 2 bandwidth, 3 gemini, 4 claude, 5 cidr.
+// 0 country, 1 asn, 2 bandwidth, 3 gemini, 4 claude, 5 cidr, 6 gemini_web.
 var keyMutators = map[string]func(*config.Config){
 	"log.level": func(c *config.Config) { c.Log.Level = "debug" },
 
@@ -301,6 +310,9 @@ var keyMutators = map[string]func(*config.Config){
 	},
 	"filters[].file_type":        func(c *config.Config) { c.Filters[5].FileType = "gzip" },
 	"filters[].refresh_interval": func(c *config.Config) { c.Filters[5].RefreshInterval = new(time.Hour) },
+	"filters[].blocked_regions": func(c *config.Config) {
+		c.Filters[6].BlockedRegions = []string{"CN"}
+	},
 
 	// GEO is the only tag validateAnnotate accepts, so no LOADABLE config
 	// differs in this field alone; the row still has to be exercised, and with
@@ -365,6 +377,13 @@ var keyMutators = map[string]func(*config.Config){
 	"geoblock.deepl.endpoint":      func(c *config.Config) { c.GeoBlock.Deepl.Endpoint = "https://other.example.com/v2/usage" },
 	"geoblock.deepl.timeout":       func(c *config.Config) { c.GeoBlock.Deepl.Timeout = 30 * time.Second },
 	"geoblock.deepl.concurrency":   func(c *config.Config) { c.GeoBlock.Deepl.Concurrency = 4 },
+	"geoblock.gemini_web.timeout":  func(c *config.Config) { c.GeoBlock.GeminiWeb.Timeout = 30 * time.Second },
+	"geoblock.gemini_web.concurrency": func(c *config.Config) {
+		c.GeoBlock.GeminiWeb.Concurrency = 4
+	},
+	"geoblock.gemini_web.blocked_regions": func(c *config.Config) {
+		c.GeoBlock.GeminiWeb.BlockedRegions = []string{"CN"}
+	},
 
 	"deadcache.ttl": func(c *config.Config) { c.DeadCache.TTL = new(time.Hour) },
 

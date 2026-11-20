@@ -58,7 +58,7 @@ func TestAPIProbeOneDialsSchemeDefaultPort(t *testing.T) {
 
 			px := &dialRecorder{}
 			reachable, status, body, complete := apiProbeOne(context.Background(), px, tc.target, nil, time.Second, true)
-			if reachable || status != 0 || body != "" || complete {
+			if reachable || status != 0 || len(body) != 0 || complete {
 				t.Fatalf("a refused dial must yield no outcome, got (%v, %d, %q, %v)", reachable, status, body, complete)
 			}
 			if px.addr != tc.want {
@@ -136,7 +136,7 @@ func TestAPIProbeOneMarksShortBodyIncomplete(t *testing.T) {
 			if complete {
 				t.Fatalf("a body stopped before its Content-Length must not read as complete (body=%q)", body)
 			}
-			if !strings.HasPrefix(body, `{"error":{`) {
+			if !strings.HasPrefix(string(body), `{"error":{`) {
 				t.Fatalf("the bytes that did arrive must be preserved for the marker scan, got %q", body)
 			}
 		})
@@ -234,9 +234,9 @@ func TestAPICheckMarksMarkerEvidenceByCompleteness(t *testing.T) {
 	}
 }
 
-func markerVerdictFor(marker string) func(int, string, bool) apiVerdict {
-	return func(status int, body string, complete bool) apiVerdict {
-		return markerVerdict(status, body, marker, complete)
+func markerVerdictFor(marker string) func(int, []byte, bool) apiVerdict {
+	return func(status int, body []byte, complete bool) apiVerdict {
+		return markerVerdict(status, string(body), marker, complete)
 	}
 }
 

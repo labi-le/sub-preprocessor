@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -706,6 +707,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative chatgpt timeout":        {base + "geoblock:\n  chatgpt:\n    timeout: -1s\n", "geoblock.chatgpt.timeout"},
 		"negative tidal concurrency":      {base + "geoblock:\n  tidal:\n    concurrency: -1\n", "geoblock.tidal.concurrency"},
 		"negative tidal timeout":          {base + "geoblock:\n  tidal:\n    timeout: -1s\n", "geoblock.tidal.timeout"},
+		"negative gemini_web concurrency": {base + "geoblock:\n  gemini_web:\n    concurrency: -1\n", "geoblock.gemini_web.concurrency"},
+		"negative gemini_web timeout":     {base + "geoblock:\n  gemini_web:\n    timeout: -1s\n", "geoblock.gemini_web.timeout"},
+		"bad gemini_web region":           {base + "geoblock:\n  gemini_web:\n    blocked_regions: [RUS]\n", "geoblock.gemini_web.blocked_regions: invalid country code"},
 		"negative cloudflare concurrency": {geoPreamble + "  cloudflare:\n    concurrency: -1\n", "geo.cloudflare.concurrency"},
 		"negative cloudflare timeout":     {geoPreamble + "  cloudflare:\n    timeout: -1s\n", "geo.cloudflare.timeout"},
 		"negative geoblock ttl":           {base + "geoblock:\n  ttl: -1h\n", "geoblock.ttl"},
@@ -794,6 +798,30 @@ func TestTidalDefaults(t *testing.T) {
 	}
 }
 
+// TestGeminiWebDefaults pins the shipped gemini_web defaults: the gate is
+// keyless and endpointless (the probe URL is a compile-time constant), and its
+// blocked set records the seven countries Google's availability page omits --
+// RU/BY/IR/KP/CU/SY/AF on 2026-11-21. CN (Workspace only), HK, MO and MM are
+// supported and stay out, since a region probe cannot see the account type. An
+// empty or unset set gets that default; only removing the filter entry disables
+// the gate.
+func TestGeminiWebDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadRaw(t, geoPreamble)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := cfg.GeoBlock.GeminiWeb
+	if gw.Timeout != 15*time.Second || gw.Concurrency != 8 {
+		t.Fatalf("gemini_web timeout/concurrency defaults: %+v", gw)
+	}
+	want := []string{"RU", "BY", "IR", "KP", "CU", "SY", "AF"}
+	if !reflect.DeepEqual(gw.BlockedRegions, want) {
+		t.Fatalf("gemini_web blocked_regions default = %v, want %v", gw.BlockedRegions, want)
+	}
+}
+
 func TestLoadMergesPrivateConfig(t *testing.T) {
 	t.Parallel()
 
@@ -872,6 +900,11 @@ func TestProberChanged(t *testing.T) {
 	dl.GeoBlock.Deepl.Endpoint = "https://changed.example.com/translator"
 	if !config.ProberChanged(a, dl) {
 		t.Fatal("deepl sub-config change must be detected")
+	}
+	gw := a
+	gw.GeoBlock.GeminiWeb.BlockedRegions = []string{"XX"}
+	if !config.ProberChanged(a, gw) {
+		t.Fatal("gemini_web sub-config change must be detected")
 	}
 	c := a
 	c.Filters = []config.FilterConfig{{Type: config.FilterASN, DenyPatterns: []string{"changed"}}}

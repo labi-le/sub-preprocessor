@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -301,6 +302,42 @@ func TestApplyGeminiKeyLoudFailure(t *testing.T) {
 	}
 	if prober, ok := idle.checker.spec.Load().Prober.(*MihomoProber); !ok || prober.GeminiEnabled() {
 		t.Fatal("a config with no gemini filter must not arm the gate")
+	}
+}
+
+// TestApplyCarriesGeminiWebToRunningWorker pins both halves of the new gate's
+// wiring: the per-entry merge lands in the prober the RUNNING worker reads, and
+// arming it resolves no key. The second half is proven by a gemini key_file
+// that does not exist -- if gemini_web armed the gemini gate's key resolution,
+// Apply would fail on it instead of applying.
+func TestApplyCarriesGeminiWebToRunningWorker(t *testing.T) {
+	t.Parallel()
+
+	ctl := NewController(t.Context(), NewHolder(),
+		func() Filterer { return emptyFilterer{} },
+		nil, nil, "", zerolog.Nop(), nil)
+	defer ctl.Stop()
+
+	cfg := testControllerConfig("alpha")
+	cfg.Filters = []config.FilterConfig{{
+		Type: config.FilterGeminiWeb, Timeout: 30 * time.Second, BlockedRegions: []string{"US"},
+	}}
+	cfg.GeoBlock.Gemini.KeyFile = filepath.Join(t.TempDir(), "missing-env")
+	cfg.GeoBlock.Gemini.KeyVar = "TEST_KEY"
+	if _, err := ctl.Apply(cfg); err != nil {
+		t.Fatalf("a gemini_web entry must apply keyless, got: %v", err)
+	}
+
+	prober, ok := ctl.checker.spec.Load().Prober.(*MihomoProber)
+	if !ok {
+		t.Fatalf("worker spec holds a %T, not the MihomoProber that runs the check", ctl.checker.spec.Load().Prober)
+	}
+	want := config.GeminiWebConfig{Timeout: 30 * time.Second, BlockedRegions: []string{"US"}}
+	if !reflect.DeepEqual(prober.geo.GeminiWeb, want) {
+		t.Fatalf("running worker checks with %+v, want %+v: the per-entry merge never reached its prober", prober.geo.GeminiWeb, want)
+	}
+	if prober.GeminiEnabled() {
+		t.Fatal("gemini_web must not arm the keyed gemini gate")
 	}
 }
 

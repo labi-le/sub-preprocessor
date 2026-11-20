@@ -294,7 +294,8 @@ const (
 // reached a verdict on -- a clean pass or a refusal, so a dropped blocked node
 // is covered too even when the batch breaker later discards the drop;
 // Unverified counts entries whose check answered without the evidence the
-// classifier reads. An entry that never answered is in neither count.
+// classifier reads. An entry that never answered is in neither count, except
+// for gemini_web, which counts it unverified (apiFilter.keepNoResponse).
 //
 // Measured separates a measured zero (the check ran and every answer was
 // inconclusive) from a filter that has no coverage account this cycle: one

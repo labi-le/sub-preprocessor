@@ -94,7 +94,7 @@ func (m *MihomoProber) TraceCheck(ctx context.Context, proxies []mihomo.Proxy) m
 			defer func() { <-sem }()
 
 			reachable, status, body, complete := apiProbeOne(ctx, px, m.traceURL(), nil, c.Timeout, true)
-			res, ok := parseTrace(body)
+			res, ok := parseTrace(string(body))
 			host := proxyHost(px)
 			n := prog.step()
 			ev := opLog.Debug().Str("node", px.Name()).Str("server", host).

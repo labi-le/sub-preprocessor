@@ -23,7 +23,7 @@ func (m *MihomoProber) ClaudeCheck(ctx context.Context, proxies []mihomo.Proxy) 
 	header := http.Header{"Anthropic-Version": []string{c.Version}}
 	return m.apiCheck(ctx, "stable.ClaudeCheck", "claude check", proxies,
 		m.claudeURL(), header, c.Timeout, c.Concurrency, 0, true,
-		func(status int, body string, complete bool) apiVerdict {
-			return markerVerdict(status, body, c.Marker, complete)
+		func(status int, body []byte, complete bool) apiVerdict {
+			return markerVerdict(status, string(body), c.Marker, complete)
 		})
 }

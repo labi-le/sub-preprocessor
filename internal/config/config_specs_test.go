@@ -84,8 +84,8 @@ func TestDeniedCountries(t *testing.T) {
 	}
 }
 
-// TestNodeFilterSpecsSplit proves the through-node types (gemini/claude/
-// chatgpt/tidal/deepl/bandwidth) split out in order, with the API configs
+// TestNodeFilterSpecsSplit proves the through-node types (gemini/gemini_web/
+// claude/chatgpt/tidal/deepl/bandwidth) split out in order, with the API configs
 // merged over the geoblock defaults and bandwidth carrying its entry params.
 func TestNodeFilterSpecsSplit(t *testing.T) {
 	t.Parallel()
@@ -380,22 +380,49 @@ func TestLoadRejectsBadFilters(t *testing.T) {
 		"bandwidth bad url":     {geoBase + "filters:\n  - type: bandwidth\n    test_url: ftp://x/y\n", "test_url"},
 		"tidal neg concurrency": {geoBase + "filters:\n  - type: tidal\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
 		"tidal neg timeout":     {geoBase + "filters:\n  - type: tidal\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
-		"deepl neg concurrency": {geoBase + "filters:\n  - type: deepl\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
-		"deepl neg timeout":     {geoBase + "filters:\n  - type: deepl\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
-		"unknown type list":     {geoBase + "filters:\n  - type: bogus\n", "country, asn, cidr, gemini"},
-		"cidr no urls":          {geoBase + cidrFilters("  - type: cidr\n"), "filters[0].urls must contain at least one url"},
-		"cidr http url":         {geoBase + cidrFilters(cidrItem("http://example.com/w.txt")), `filters[0].urls "http://example.com/w.txt": only https`},
-		"cidr private url":      {geoBase + cidrFilters(cidrItem("https://127.0.0.1/w.txt")), `filters[0].urls "https://127.0.0.1/w.txt": non-public target`},
-		"cidr bad file_type":    {geoBase + cidrFilters(cidrItem(cidrURL)+"    file_type: bzip2\n"), `filters[0].file_type: unsupported file type: "bzip2"`},
-		"cidr neg refresh":      {geoBase + cidrFilters(cidrItem(cidrURL)+"    refresh_interval: -1s\n"), "filters[0].refresh_interval must not be negative"},
-		"two cidr filters":      {geoBase + cidrFilters(cidrItem(cidrURL), cidrItem("https://example.com/x.txt")), "filters[1]: only one cidr filter is supported"},
+		"gemini_web neg concurrency": {
+			geoBase + "filters:\n  - type: gemini_web\n    concurrency: -1\n",
+			"filters[0].concurrency must not be negative",
+		},
+		"gemini_web neg timeout": {
+			geoBase + "filters:\n  - type: gemini_web\n    timeout: -1s\n",
+			"filters[0].timeout must not be negative",
+		},
+		// The blocked set is compared against a two-letter wire region, so a
+		// mistyped code is a gate that silently drops nothing.
+		"gemini_web bad region": {
+			geoBase + "filters:\n  - type: gemini_web\n    blocked_regions: [RUS]\n",
+			"filters[0].blocked_regions: invalid country code",
+		},
+		// The probe URL is a compile-time constant and mergedGeminiWeb has no
+		// endpoint arm, so an endpoint here would be validated and then shadowed
+		// by the constant: refuse it rather than accept a setting that does
+		// nothing.
+		"gemini_web endpoint": {
+			geoBase + "filters:\n  - type: gemini_web\n    endpoint: https://example.com/sw.js_data\n",
+			"filters[0].endpoint is not supported on gemini_web: the probe URL is a compile-time constant",
+		},
+		"deepl neg concurrency":         {geoBase + "filters:\n  - type: deepl\n    concurrency: -1\n", "filters[0].concurrency must not be negative"},
+		"deepl neg timeout":             {geoBase + "filters:\n  - type: deepl\n    timeout: -1s\n", "filters[0].timeout must not be negative"},
+		"unknown type list":             {geoBase + "filters:\n  - type: bogus\n", "country, asn, cidr, gemini"},
+		"unknown type names gemini_web": {geoBase + "filters:\n  - type: bogus\n", "gemini_web"},
+		"cidr no urls":                  {geoBase + cidrFilters("  - type: cidr\n"), "filters[0].urls must contain at least one url"},
+		"cidr http url":                 {geoBase + cidrFilters(cidrItem("http://example.com/w.txt")), `filters[0].urls "http://example.com/w.txt": only https`},
+		"cidr private url":              {geoBase + cidrFilters(cidrItem("https://127.0.0.1/w.txt")), `filters[0].urls "https://127.0.0.1/w.txt": non-public target`},
+		"cidr bad file_type":            {geoBase + cidrFilters(cidrItem(cidrURL)+"    file_type: bzip2\n"), `filters[0].file_type: unsupported file type: "bzip2"`},
+		"cidr neg refresh":              {geoBase + cidrFilters(cidrItem(cidrURL)+"    refresh_interval: -1s\n"), "filters[0].refresh_interval must not be negative"},
+		"two cidr filters":              {geoBase + cidrFilters(cidrItem(cidrURL), cidrItem("https://example.com/x.txt")), "filters[1]: only one cidr filter is supported"},
 		// One spec per through-node entry becomes one Prometheus series per
 		// entry, so a second entry of the same type would publish duplicate
-		// series in a single scrape; each of the five types is a singleton.
-		"two gemini filters":    {geoBase + "filters:\n  - type: gemini\n    api_key: a\n  - type: gemini\n    api_key: b\n", "filters[1]: only one gemini filter is supported"},
-		"two claude filters":    {geoBase + "filters:\n  - type: claude\n  - type: claude\n", "filters[1]: only one claude filter is supported"},
-		"two chatgpt filters":   {geoBase + "filters:\n  - type: chatgpt\n  - type: chatgpt\n", "filters[1]: only one chatgpt filter is supported"},
-		"two tidal filters":     {geoBase + "filters:\n  - type: tidal\n  - type: tidal\n", "filters[1]: only one tidal filter is supported"},
+		// series in a single scrape; each of the seven types is a singleton.
+		"two gemini filters":  {geoBase + "filters:\n  - type: gemini\n    api_key: a\n  - type: gemini\n    api_key: b\n", "filters[1]: only one gemini filter is supported"},
+		"two claude filters":  {geoBase + "filters:\n  - type: claude\n  - type: claude\n", "filters[1]: only one claude filter is supported"},
+		"two chatgpt filters": {geoBase + "filters:\n  - type: chatgpt\n  - type: chatgpt\n", "filters[1]: only one chatgpt filter is supported"},
+		"two tidal filters":   {geoBase + "filters:\n  - type: tidal\n  - type: tidal\n", "filters[1]: only one tidal filter is supported"},
+		"two gemini_web filters": {
+			geoBase + "filters:\n  - type: gemini_web\n  - type: gemini_web\n",
+			"filters[1]: only one gemini_web filter is supported",
+		},
 		"two deepl filters":     {geoBase + "filters:\n  - type: deepl\n  - type: deepl\n", "filters[1]: only one deepl filter is supported"},
 		"two bandwidth filters": {geoBase + "filters:\n  - type: bandwidth\n  - type: bandwidth\n", "filters[1]: only one bandwidth filter is supported"},
 		"duplicate mid-list":    {geoBase + "filters:\n  - type: claude\n  - type: gemini\n    api_key: a\n  - type: gemini\n", "filters[2]: only one gemini filter is supported"},
@@ -499,6 +526,71 @@ func TestLoadTidalFilterInheritsDefaults(t *testing.T) {
 	}
 	if specs[0].Tidal.Endpoint == "" {
 		t.Fatalf("tidal spec must be usable unconfigured: %+v", specs[0].Tidal)
+	}
+}
+
+// TestLoadGeminiWebFilterInheritsDefaults proves a bare `{type: gemini_web}`
+// entry is a working gate with no per-entry config and no credential: the
+// timeout, concurrency and blocked set all come from geoblock.gemini_web, whose
+// blocked set defaults to the seven countries Google's availability page omits.
+func TestLoadGeminiWebFilterInheritsDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+"filters:\n  - type: gemini_web\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := cfg.NodeFilterSpecs()
+	if len(specs) != 1 || specs[0].Type != config.FilterGeminiWeb {
+		t.Fatalf("NodeFilterSpecs() = %+v, want one gemini_web spec", specs)
+	}
+	if !reflect.DeepEqual(specs[0].GeminiWeb, cfg.GeoBlock.GeminiWeb) {
+		t.Fatalf("bare entry must inherit geoblock.gemini_web: %+v vs %+v", specs[0].GeminiWeb, cfg.GeoBlock.GeminiWeb)
+	}
+	if specs[0].GeminiWeb.Timeout == 0 || specs[0].GeminiWeb.Concurrency == 0 {
+		t.Fatalf("gemini_web spec must be usable unconfigured: %+v", specs[0].GeminiWeb)
+	}
+	if len(specs[0].GeminiWeb.BlockedRegions) == 0 {
+		t.Fatal("an empty blocked set would make the gate a no-op; the default must fill it")
+	}
+}
+
+// TestLoadGeminiWebBlockedRegionsOverride pins the two-level merge: a
+// non-empty per-entry blocked_regions replaces the base set, while an entry
+// that sets only the timeout keeps it.
+func TestLoadGeminiWebBlockedRegionsOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadYAML(t, geoBase+
+		"geoblock:\n  gemini_web:\n    blocked_regions: [IR, KP]\n"+
+		"filters:\n"+
+		"  - type: gemini_web\n    blocked_regions: [US, CA]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := cfg.NodeFilterSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("NodeFilterSpecs() = %+v, want one gemini_web spec", specs)
+	}
+	if want := []string{"US", "CA"}; !reflect.DeepEqual(specs[0].GeminiWeb.BlockedRegions, want) {
+		t.Fatalf("entry blocked_regions = %v, want the entry's %v", specs[0].GeminiWeb.BlockedRegions, want)
+	}
+	if want := []string{"IR", "KP"}; !reflect.DeepEqual(cfg.GeoBlock.GeminiWeb.BlockedRegions, want) {
+		t.Fatalf("base blocked_regions = %v, want %v", cfg.GeoBlock.GeminiWeb.BlockedRegions, want)
+	}
+
+	inherited, err := loadYAML(t, geoBase+
+		"geoblock:\n  gemini_web:\n    blocked_regions: [IR, KP]\n"+
+		"filters:\n  - type: gemini_web\n    timeout: 30s\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := inherited.NodeFilterSpecs()[0].GeminiWeb
+	if want := []string{"IR", "KP"}; !reflect.DeepEqual(spec.BlockedRegions, want) {
+		t.Fatalf("an entry without blocked_regions must inherit the base set, got %v", spec.BlockedRegions)
+	}
+	if spec.Timeout != 30*time.Second {
+		t.Fatalf("entry timeout override = %v, want 30s", spec.Timeout)
 	}
 }
 

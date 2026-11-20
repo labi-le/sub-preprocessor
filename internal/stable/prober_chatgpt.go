@@ -26,7 +26,7 @@ func (m *MihomoProber) ChatGPTCheck(ctx context.Context, proxies []mihomo.Proxy)
 	c := m.geo.ChatGPT
 	return m.apiCheck(ctx, "stable.ChatGPTCheck", "chatgpt check", proxies,
 		m.chatgptURL(), nil, c.Timeout, c.Concurrency, 0, true,
-		func(status int, body string, complete bool) apiVerdict {
-			return markerVerdict(status, body, c.Marker, complete)
+		func(status int, body []byte, complete bool) apiVerdict {
+			return markerVerdict(status, string(body), c.Marker, complete)
 		})
 }

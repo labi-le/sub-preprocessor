@@ -51,7 +51,7 @@ vendor the dashboard into the nixos repo.
   the wave and 24.57 MB after.
 - **`check.concurrency` is per-deployment; nothing may pin one value.**
   `config/config-example.yaml` ships 16 against its own `max_avg_ms: 800`
-  (`config/config-example.yaml:265`, `:266`), with the measured rationale in its comment. The
+  (`config/config-example.yaml:290`, `:291`), with the measured rationale in its comment. The
   second compose instance, retired 2026-08-26, shipped 32 against `max_avg_ms: 4000`
   and `check.timeout: 5000ms`: 16 was the knee measured against an 800ms gate, where
   the +107ms that conc=64 adds is 13% of the budget and only 2.7% of a 4000ms one.
@@ -60,7 +60,7 @@ vendor the dashboard into the nixos repo.
   replaced, 500ms, was 8x tighter than the retired instance's gate and deleted nodes
   that instance was tuned to keep, and nothing stops the next deployment from shipping
   that gate again. What the retirement did change is that the derivation is now harder
-  to SEE than to keep: the shipped `check.timeout: 1000ms` (`config/config-example.yaml:263`)
+  to SEE than to keep: the shipped `check.timeout: 1000ms` (`config/config-example.yaml:288`)
   over `precheckAttempts` 2 is exactly the 500ms constant. So the test that still tells
   derived from hardcoded is `TestPrecheckBudgetTracksTheDefaultTimeout`
   (`internal/stable/prober_test.go`), which strips that one line before loading,
@@ -112,7 +112,9 @@ vendor the dashboard into the nixos repo.
   refusal, so a refusal appears there even when the breaker discards its drop — and `unverified`
   counts survivors that answered without the evidence the classifier reads. Both count entry
   labels after the port fold and both describe the last published cycle. An unreachable entry is
-  in neither. A tripped batch normally keeps it and zeroes the drop (`trusted=0`);
+  in neither for the marker and strict gates; `gemini_web` alone counts it `unverified` and keeps
+  it, because a YouTube timeout says nothing about Gemini availability. A tripped batch normally
+  keeps it and zeroes the drop (`trusted=0`);
   DeepL instead drops failed entries even with `trusted=0`, suppressing only persistence.
   Coverage renders only for a measured account, so a ran-but-blind
   gate reads `verified 0` / `unverified N`; an absent/cancelled gate and the bandwidth filter
@@ -128,6 +130,15 @@ vendor the dashboard into the nixos repo.
   rides the same unverified count. DeepL is strict: a response without dual-transport
   acceptance is dropped with `reason="unverified"` (unless a `451` makes it `blocked`).
   That reason is emitted only for DeepL; marker gates still keep unverified entries.
+  `gemini_web` reads on those axes like a marker gate: a complete 2xx whose body yields a
+  valid region is `verified` (a refusal included, so `reason="blocked"` still books
+  `verified` even when the breaker discards the drop), while an answered body the parser
+  cannot read is `unverified` and the node is kept. A request that never answered (a timeout, a
+  dial failure, or a node whose proxies never parsed) is kept the same way and counted
+  `unverified`, never booked as `reason="unreachable"`, so this gate's drops are blocked-only. Its
+  unique shape is persistence: the verdict is a region-list guess rather than the service's own
+  refusal, so nothing is ever written to the geoblock store, and a tripped batch has only
+  `trusted=0` to report — there is no write for it to suppress.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:
@@ -216,8 +227,8 @@ vendor the dashboard into the nixos repo.
   denominator from panel 3 (`Sources`, with ok and total values), not a stamp here.
   **The comparison a reader reaches unaided is false, and it is false BY CONSTRUCTION.**
   `config.Load` merges the curated `config/sources.yaml` overlay at
-  `internal/config/config.go:1164` (inside `mergeSourcesOverlay`, `:1231`) but appends the
-  crawler's `private.yaml` only at :1180, and
+  `internal/config/config.go:1322` (inside `mergeSourcesOverlay`, `:1301`) but appends the
+  crawler's `private.yaml` only at :1250, and
   `Merge` dedupes FIRST-WINS on lowercased `server:port` (`internal/stable/merge.go:81-88`).
   Concurrency does not reshuffle that: `fetchSources` writes `results[i]` by index
   (`internal/stable/checker.go:720`, `:723`) and reassembles them `for i, r := range results`
@@ -243,7 +254,7 @@ vendor the dashboard into the nixos repo.
   query time: `label_values(..., feed)` answers, and an alert that means a feed writes that same
   `sum by (feed, owner)` instead of carrying a `label_replace` pair of its own. Neither label is
   computed: `owner` is `SubscriptionSource.Managed` and `feed` is `SubscriptionSource.Feed`
-  (`internal/config/config.go:649,654`), which the crawler writes at mint, so every URL of one
+  (`internal/config/config.go:696,701`), which the crawler writes at mint, so every URL of one
   channel shares that channel's row and a curated entry, which normally sets no `feed`, falls back
   to naming itself (`sourceFeed`, `metrics.go:437`). Group by the PAIR, never `by
   (feed)` alone: a curated name equal to some channel's slug would otherwise merge two
@@ -288,16 +299,16 @@ vendor the dashboard into the nixos repo.
   `Published` column measures ATTRIBUTION, not contribution.** The discriminator is
   `owner="crawler"` / `owner="curated"`, rendered once per source rather than matched per query
   (see the panel 8 / 22 bullet above). Underneath it is
-  `SubscriptionSource.Managed` (`internal/config/config.go:649`), whose comment fixes the axis as
+  `SubscriptionSource.Managed` (`internal/config/config.go:696`), whose comment fixes the axis as
   OWNERSHIP rather than provenance: it "marks an entry the crawler minted and may therefore
   prune. Absent means hand-added, so forgetting the field shelters a source instead of exposing
   it." The crawler sets that field on every entry it mints and tests it on every entry it may
   touch, so the label cannot drift from the write rule it reports. Absent-means-sheltered is the
   direction that matters, and the mark is refused on a curated entry by a per-file gate so a
   curated file cannot claim it by accident: Load's pre-merge pass refuses it in config.yaml's own
-  list naming the file (`config.go:1158`), `mergeSourcesOverlay` (`config.go:1231`) refuses it in
-  `sources.yaml`'s entries as it loads them (the check at `:1248-1250`), and `validateSources`
-  (`config.go:1731`) over the merged list stays as the second gate for any other statement order —
+  list naming the file (`config.go:1228`), `mergeSourcesOverlay` (`config.go:1301`) refuses it in
+  `sources.yaml`'s entries as it loads them (the check at `:1319`), and `validateSources`
+  (`config.go:1816`) over the merged list stays as the second gate for any other statement order —
   which is what also covers `config.yaml`.
   So do not read it as "telegram": the inline harvest (`inline`, `crawl.go:1155`) is
   crawler-managed but is harvested raw node URIs rather than a channel, and a bare-hash name
@@ -360,8 +371,8 @@ vendor the dashboard into the nixos repo.
   middle three is ambiguous — no filter, nothing to exclude, or broken — and each gate differs:
   `geo` a `country` entry with non-empty `exclude_*` (`internal/preprocess/filters.go:44-47`
   no-ops on the worker's full allow set) or an `asn` entry whose ASN-resolved country the policy
-  rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:282`, copied
-  only under `case FilterASN` at :385-390), `cidr` a `cidr` entry (`:391-397`). The other four
+  rejects, `asn` that same asn entry's `deny_patterns` (`internal/config/config.go:307`, copied
+  only under `case FilterASN` at :414-419), `cidr` a `cidr` entry (`:420-426`). The other four
   ignore `filters:` —
   `geoblock` the separate `geoblock:` block (`internal/preprocess/processor.go:822-824`), `ipv6`
   and `dns` to `resolveNode` in `processNode` (`:829`, `:833`), `unsupported` the parser — so
@@ -434,8 +445,8 @@ vendor the dashboard into the nixos repo.
   `stable_dead_skipped_nodes` read 0 for two days and the probe phase carried the whole
   ~66k pool instead of ~15k. The two quantities are not interchangeable, and this is what
   that cost. The shipped example sets
-  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config-example.yaml:174` and
-  `:231`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
+  `deadcache.ttl: 3h` against a 1h `subscriptions.interval` (`config/config-example.yaml:199` and
+  `:256`; the retired second instance shipped that same pair), and `jitteredTTL` stretches
   it by a uniform [1, 1.5)
   so the graveyard does not expire as one batch (`internal/stable/deadset.go:69-74`): [3h, 4.5h),
   three to four cycles. Stages (`internal/stable/select.go:22-52`): `passed` = a round answered,
@@ -463,7 +474,7 @@ vendor the dashboard into the nixos repo.
   field out of range (`RefusalReport`'s doc, `internal/stable/report.go:238-264`). The
   split is recorded, not guessed: `parseLive` files each refused mapping's label under the
   same mapping-name derivation the result map would have folded under
-  (`internal/stable/prober.go:428-448`, `recordParseRefusal` at :455-462), and the checker
+  (`internal/stable/prober.go:432-452`, `recordParseRefusal` at :455-462), and the checker
   attributes every miss by whether the set holds it (`attributeRefusals`,
   `checker.go:432-452`). Rendering is gated like the trace's: only a cycle whose probe
   ACCOUNTED its parse renders the family — production's `Probe` does on every successful
@@ -487,10 +498,10 @@ vendor the dashboard into the nixos repo.
   `stable_dead_skipped_nodes`, so stages plus refusals closing on `stable_probed_nodes` is
   something the two panels can now be read against each other for.
 - **The breaker trips on a share of what the pre-check JUDGED, over a floor — and a total
-  refusal trips at any sample size.** `filterReachable` (`internal/stable/prober.go:643`) dials
+  refusal trips at any sample size.** `filterReachable` (`internal/stable/prober.go:647`) dials
   each distinct `server:port` the payload NAMES — parsable or not, since the parse comes
   after — and a position whose adapter would reach its server over UDP — hysteria2, tuic, mieru,
-  vless xhttp-over-QUIC — is not dialled at all (`dialsServerOverTCP`, `prober.go:584`), which
+  vless xhttp-over-QUIC — is not dialled at all (`dialsServerOverTCP`, `prober.go:588`), which
   is why these counts are endpoints (see above). The percentage arm needs both halves to hold:
   at least 100 judged endpoints, at least 95% of them refused (`precheckBreakerMin` at :528,
   `precheckBreakerPercent` at :524, the decided call at :701); the total-refusal arm fires on
@@ -664,7 +675,9 @@ vendor the dashboard into the nixos repo.
   Their legends show the last non-null sample in the selected range, not necessarily now.
   In `Filter coverage`, each configured filter's in/kept pair shares one fixed colour,
   with dashed input and solid kept lines; verified/unverified lines do not share these
-  overrides. New filter names need matching display overrides, not new targets.
+  overrides. New filter names need matching display overrides, not new targets. The
+  colours taken so far: bandwidth `#E0B400`, chatgpt `#73BF69`, claude `#FF9830`,
+  deepl `#F2495C`, gemini `#5794F2`, gemini_web `#8AB8FF`, tidal `#B877D9`.
 - Time-series strokes are 2px, with light fill on unstacked line charts. Composition
   stacks and all units, queries, numeric thresholds and stat reductions are unchanged.
   Stat labels use 16px text and values 32px; missing values use neutral `No data`.

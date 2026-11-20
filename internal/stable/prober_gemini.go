@@ -66,7 +66,8 @@ func (m *MihomoProber) GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) 
 	var checks, inconclusive atomic.Int64
 	out := m.apiCheck(ctx, "stable.GeminiCheck", "gemini check", proxies,
 		m.geminiURL(), nil, g.Timeout, g.Concurrency, pace, true,
-		func(status int, body string, complete bool) apiVerdict {
+		func(status int, data []byte, complete bool) apiVerdict {
+			body := string(data)
 			checks.Add(1)
 			if geminiInconclusive(status, body, g.Marker) {
 				inconclusive.Add(1)
