@@ -22,7 +22,7 @@ func (m *MihomoProber) TidalCheck(ctx context.Context, proxies []mihomo.Proxy) m
 	c := m.geo.Tidal
 	return m.apiCheck(ctx, "stable.TidalCheck", "tidal check", proxies,
 		m.tidalURL(), nil, c.Timeout, c.Concurrency, 0, false,
-		func(status int, _ string, _ bool) apiVerdict {
+		func(status int, _ []byte, _ bool) apiVerdict {
 			if tidalBlocked(status, "") {
 				return apiBlocked
 			}

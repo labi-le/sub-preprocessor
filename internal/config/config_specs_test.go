@@ -532,8 +532,7 @@ func TestLoadTidalFilterInheritsDefaults(t *testing.T) {
 // TestLoadGeminiWebFilterInheritsDefaults proves a bare `{type: gemini_web}`
 // entry is a working gate with no per-entry config and no credential: the
 // timeout, concurrency and blocked set all come from geoblock.gemini_web, whose
-// blocked set defaults to the eleven codes recorded as absent from Google's
-// published availability.
+// blocked set defaults to the seven countries Google's availability page omits.
 func TestLoadGeminiWebFilterInheritsDefaults(t *testing.T) {
 	t.Parallel()
 

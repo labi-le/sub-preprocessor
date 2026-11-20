@@ -101,11 +101,11 @@ stable_filter_in_nodes{filter="gemini"} 700
 stable_filter_kept_nodes{filter="geoblock"} 850
 stable_filter_kept_nodes{filter="bandwidth"} 700
 stable_filter_kept_nodes{filter="gemini"} 700
-# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. Entries with no response are in neither coverage series. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
+# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. An entry that never answered is never verified. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
 # TYPE stable_filter_verified_nodes gauge
 stable_filter_verified_nodes{filter="geoblock"} 900
 stable_filter_verified_nodes{filter="gemini"} 640
-# HELP stable_filter_unverified_nodes Entries that answered without the evidence their through-node classifier requires, counted per survivor label after the port fold in the last published cycle. Marker gates keep these entries unverified; strict DeepL drops them. Entries with no response are in neither coverage series. Zero means no answered entry was inconclusive. Absent without a measured API coverage account.
+# HELP stable_filter_unverified_nodes Entries whose through-node check produced no evidence its classifier can read, counted per survivor label after the port fold in the last published cycle. Marker gates keep answered-but-inconclusive entries unverified; strict DeepL drops them. gemini_web also counts entries with no response here; the other gates leave those entries in neither coverage series. Zero means no counted entry was inconclusive. Absent without a measured API coverage account.
 # TYPE stable_filter_unverified_nodes gauge
 stable_filter_unverified_nodes{filter="geoblock"} 0
 stable_filter_unverified_nodes{filter="gemini"} 60
@@ -326,9 +326,9 @@ stable_last_success_timestamp_seconds 1.755474123e+09
 # TYPE stable_filter_in_nodes gauge
 # HELP stable_filter_kept_nodes Survivors kept by each through-node filter.
 # TYPE stable_filter_kept_nodes gauge
-# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. Entries with no response are in neither coverage series. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
+# HELP stable_filter_verified_nodes Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. An entry that never answered is never verified. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.
 # TYPE stable_filter_verified_nodes gauge
-# HELP stable_filter_unverified_nodes Entries that answered without the evidence their through-node classifier requires, counted per survivor label after the port fold in the last published cycle. Marker gates keep these entries unverified; strict DeepL drops them. Entries with no response are in neither coverage series. Zero means no answered entry was inconclusive. Absent without a measured API coverage account.
+# HELP stable_filter_unverified_nodes Entries whose through-node check produced no evidence its classifier can read, counted per survivor label after the port fold in the last published cycle. Marker gates keep answered-but-inconclusive entries unverified; strict DeepL drops them. gemini_web also counts entries with no response here; the other gates leave those entries in neither coverage series. Zero means no counted entry was inconclusive. Absent without a measured API coverage account.
 # TYPE stable_filter_unverified_nodes gauge
 # HELP stable_filter_dropped_nodes Survivors dropped by each through-node filter, by reason.
 # TYPE stable_filter_dropped_nodes gauge

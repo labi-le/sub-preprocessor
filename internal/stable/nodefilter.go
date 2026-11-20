@@ -105,18 +105,25 @@ const (
 // no location verdict (geminiInconclusive), APIOutcome.Verified stays false and
 // the node is kept unverified (fail-open) with no store write. DeepL instead
 // requires verified dual-transport acceptance and drops unverified responses.
+// gemini_web additionally keeps an unanswered request (keepNoResponse), so its
+// only drop is a blocked region.
 //
 // The report's Coverage counts those outcomes per SURVIVOR label, not per
 // proxy port, and is measured on every completing path including the breaker's.
-// DeepL still drops failed nodes when the breaker suppresses persistence;
-// other gates keep the batch when its verdict is disbelieved.
+// An unanswered entry is in neither count for the other API gates;
+// gemini_web counts it unverified. DeepL still drops failed nodes when the
+// breaker suppresses persistence; other gates keep the batch when its verdict
+// is disbelieved.
 type apiFilter struct {
 	filterName      string
 	requireVerified bool
-	enabled         func() bool
-	check           func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
-	store           Blocklist
-	logger          zerolog.Logger
+	// keepNoResponse keeps an unanswered check (timeout, dial failure, unparsed
+	// node) and counts it unverified instead of dropping it unreachable.
+	keepNoResponse bool
+	enabled        func() bool
+	check          func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+	store          Blocklist
+	logger         zerolog.Logger
 }
 
 func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
@@ -142,6 +149,8 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		case o.Blocked:
 			blocked++
 			verified++
+		case !o.Reachable && f.keepNoResponse:
+			unverified++
 		case !o.Reachable:
 			unreachable++
 		case o.Verified:
@@ -150,7 +159,8 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 			unverified++
 		}
 	}
-	// Refusals are conclusive evidence too; unanswered requests carry no coverage.
+	// Refusals are conclusive evidence too; an unanswered request carries no
+	// coverage unless this gate keeps it (keepNoResponse).
 	rep.Coverage = FilterCoverage{Verified: verified, Unverified: unverified, Measured: true}
 	failed := blocked + unreachable
 	if f.requireVerified {
@@ -171,7 +181,7 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 	kept := f.keepOutcomes(ctx, survivors, outcomes, !tripped)
 	if unverified > 0 && !f.requireVerified {
 		f.logger.Warn().Str("filter", f.filterName).Int("unverified", unverified).Int("survivors", len(survivors)).
-			Msg("API checks reached these survivors without a conclusive verdict; their nodes are kept unverified")
+			Msg("API checks produced no conclusive verdict for these survivors; their nodes are kept unverified")
 	}
 	f.logger.Info().Str("filter", f.filterName).Int("survivors", len(survivors)).Int("kept", len(kept)).
 		Int(dropBlocked, blocked).Int(dropUnreachable, unreachable).Int("unverified", unverified).Msg("node filter")
@@ -203,6 +213,10 @@ func (f *apiFilter) keepOutcomes(ctx context.Context, survivors []Survivor, outc
 			continue
 		}
 		if o.Reachable && (o.Verified || !f.requireVerified) {
+			kept = append(kept, s)
+			continue
+		}
+		if f.keepNoResponse && !o.Reachable {
 			kept = append(kept, s)
 		}
 	}
@@ -414,6 +428,9 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 // for a month. With no store the drop costs this cycle only, and the batch
 // breaker in apiFilter.apply keeps a whole batch this guess would condemn --
 // the shape a changed list would produce.
+//
+// It is also the only gate built with keepNoResponse: a YouTube timeout says
+// nothing about Gemini availability, so its drops stay blocked-only.
 func appendGeminiWebFilter(dst []NodeFilter, prober Prober, logger zerolog.Logger) []NodeFilter {
 	gw, ok := prober.(geminiWebChecker)
 	if !ok {
@@ -423,9 +440,10 @@ func appendGeminiWebFilter(dst []NodeFilter, prober Prober, logger zerolog.Logge
 	}
 
 	return append(dst, &apiFilter{
-		filterName: geminiWebFilterName,
-		check:      gw.GeminiWebCheck,
-		logger:     logger,
+		filterName:     geminiWebFilterName,
+		keepNoResponse: true,
+		check:          gw.GeminiWebCheck,
+		logger:         logger,
 	})
 }
 

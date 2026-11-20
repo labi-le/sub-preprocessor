@@ -194,19 +194,12 @@ var defaultRegistryURLs = []string{
 	"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
 }
 
-// defaultGeminiWebBlockedRegions is the egress-region set the `gemini_web`
-// gate treats as refused when its probe answers. It seeds the sanctioned-country
-// subset of the complement of the countries Google's own AI Studio page lists as
-// available, read on 2026-11-20 from
-// https://aistudio.google.com/docs/available-regions.md: the eleven codes below
-// are recorded as absent from it. The rest of that complement (GP/MQ/YT/PF/SJ/
-// TF/BV/MF/SX) is territory and is deliberately not seeded; add it per
-// deployment if it matters. The list is a SEED, not a contract — Google revises
-// the page, and a deployment whose own egress picture differs sets
-// geoblock.gemini_web.blocked_regions or a per-entry
-// filters[].blocked_regions instead.
+// defaultGeminiWebBlockedRegions seeds the gate from Google's Gemini apps
+// availability page (read 2026-11-21); CN/HK/MO/MM stay out because a region
+// probe cannot tell a Workspace account from a consumer one, and the list is a
+// SEED: deployments override it.
 var defaultGeminiWebBlockedRegions = []string{
-	"RU", "BY", "CN", "HK", "MO", "IR", "KP", "CU", "SY", "AF", "MM",
+	"RU", "BY", "IR", "KP", "CU", "SY", "AF",
 }
 
 type LogConfig struct {
@@ -982,10 +975,11 @@ type ChatGPTConfig struct {
 // There is no endpoint key: the probe URL is a compile-time constant in
 // internal/stable, because the parser is bound to this vendor's body (see
 // geminiWebDataURL there), and a non-empty `endpoint:` on a filters entry is
-// refused at load rather than ignored. BlockedRegions defaults to the eleven
-// codes recorded as absent from Google's published available-regions list,
-// the sanctioned-country subset of its complement; an explicit empty list is
-// that default too, so "block nothing" is spelled by removing the filter entry.
+// refused at load rather than ignored. BlockedRegions defaults to the seven
+// countries Google's Gemini apps availability page omits; CN/HK/MO/MM are
+// supported and stay out because the probe cannot see the account type. An
+// explicit empty list is that default too, so "block nothing" is spelled by
+// removing the filter entry.
 type GeminiWebConfig struct {
 	Timeout        time.Duration `yaml:"timeout"`
 	Concurrency    int           `yaml:"concurrency"`

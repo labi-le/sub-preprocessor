@@ -112,7 +112,9 @@ vendor the dashboard into the nixos repo.
   refusal, so a refusal appears there even when the breaker discards its drop — and `unverified`
   counts survivors that answered without the evidence the classifier reads. Both count entry
   labels after the port fold and both describe the last published cycle. An unreachable entry is
-  in neither. A tripped batch normally keeps it and zeroes the drop (`trusted=0`);
+  in neither for the marker and strict gates; `gemini_web` alone counts it `unverified` and keeps
+  it, because a YouTube timeout says nothing about Gemini availability. A tripped batch normally
+  keeps it and zeroes the drop (`trusted=0`);
   DeepL instead drops failed entries even with `trusted=0`, suppressing only persistence.
   Coverage renders only for a measured account, so a ran-but-blind
   gate reads `verified 0` / `unverified N`; an absent/cancelled gate and the bandwidth filter
@@ -131,10 +133,12 @@ vendor the dashboard into the nixos repo.
   `gemini_web` reads on those axes like a marker gate: a complete 2xx whose body yields a
   valid region is `verified` (a refusal included, so `reason="blocked"` still books
   `verified` even when the breaker discards the drop), while an answered body the parser
-  cannot read is `unverified` and the node is kept. Its unique shape is persistence: the
-  verdict is a region-list guess rather than the service's own refusal, so nothing is
-  ever written to the geoblock store, and a tripped batch has only `trusted=0` to report
-  — there is no write for it to suppress.
+  cannot read is `unverified` and the node is kept. A request that never answered (a timeout, a
+  dial failure, or a node whose proxies never parsed) is kept the same way and counted
+  `unverified`, never booked as `reason="unreachable"`, so this gate's drops are blocked-only. Its
+  unique shape is persistence: the verdict is a region-list guess rather than the service's own
+  refusal, so nothing is ever written to the geoblock store, and a tripped batch has only
+  `trusted=0` to report — there is no write for it to suppress.
 - **`kept` means two different things, one per scope, and the per-source funnel is where that
   bites.** Each source carries four falling counts —
   `stable_source_{nodes_total,valid_nodes,tested_nodes,published_nodes}{source,feed,owner}`:

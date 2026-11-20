@@ -52,7 +52,7 @@ func TestParseGeminiWebRegionFixtures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			region, egress, ok := parseGeminiWebRegion(readGeminiWebFixture(t, tc.fixture))
+			region, egress, ok := parseGeminiWebRegion([]byte(readGeminiWebFixture(t, tc.fixture)))
 			if !ok {
 				t.Fatalf("%s: a real answer must parse", tc.fixture)
 			}
@@ -113,44 +113,10 @@ func TestParseGeminiWebRegionRejects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			region, egress, ok := parseGeminiWebRegion(tc.body)
+			region, egress, ok := parseGeminiWebRegion([]byte(tc.body))
 			if ok != tc.wantOK || region != tc.wantRegion || egress != tc.wantEgress {
 				t.Fatalf("parse = (%q, %q, %v), want (%q, %q, %v)",
 					region, egress, ok, tc.wantRegion, tc.wantEgress, tc.wantOK)
-			}
-		})
-	}
-}
-
-// TestGeminiWebVerdict pins the classification: only a complete 2xx whose valid
-// region parses can be conclusive. A redirect is not followed by apiProbeOne,
-// so a 3xx reaches the classifier as a status and must stay unverified.
-func TestGeminiWebVerdict(t *testing.T) {
-	t.Parallel()
-
-	blocked := map[string]struct{}{"RU": {}}
-	cases := map[string]struct {
-		status   int
-		region   string
-		parsed   bool
-		complete bool
-		want     apiVerdict
-	}{
-		"blocked region":          {status: http.StatusOK, region: "RU", parsed: true, complete: true, want: apiBlocked},
-		"allowed region":          {status: http.StatusOK, region: "US", parsed: true, complete: true, want: apiAccepted},
-		"blocked, incomplete":     {status: http.StatusOK, region: "RU", parsed: true, want: apiUnverified},
-		"unparsed body":           {status: http.StatusOK, complete: true, want: apiUnverified},
-		"server error":            {status: http.StatusForbidden, region: "RU", parsed: true, complete: true, want: apiUnverified},
-		"unfollowed redirect":     {status: http.StatusFound, complete: true, want: apiUnverified},
-		"no content":              {status: http.StatusNoContent, complete: true, want: apiUnverified},
-		"blocked, region but 404": {status: http.StatusNotFound, region: "RU", parsed: true, complete: true, want: apiUnverified},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := geminiWebVerdict(tc.status, tc.region, tc.parsed, tc.complete, blocked); got != tc.want {
-				t.Fatalf("verdict = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -172,14 +138,18 @@ func TestGeminiWebCheckThroughNode(t *testing.T) {
 		wantBlock  bool
 		wantVerify bool
 	}{
-		"blocked egress":  {status: http.StatusOK, body: ruBody, wantBlock: true, wantVerify: true},
-		"allowed egress":  {status: http.StatusOK, body: usBody, wantVerify: true},
-		"refused request": {status: http.StatusForbidden, body: "blocked"},
+		"blocked egress":      {status: http.StatusOK, body: ruBody, wantBlock: true, wantVerify: true},
+		"allowed egress":      {status: http.StatusOK, body: usBody, wantVerify: true},
+		"refused request":     {status: http.StatusForbidden, body: ruBody},
+		"unfollowed redirect": {status: http.StatusFound, body: ruBody},
+		"no content":          {status: http.StatusNoContent},
 		// A promised body the server does not deliver is the read error
 		// apiProbeOne reports as incomplete: the region may already be in the
 		// bytes, and it still must not be credited.
-		"cut-short body":      {status: http.StatusOK, body: ruBody, truncate: true},
-		"body without prefix": {status: http.StatusOK, body: usBody[len(geminiWebJSONPPrefix):]},
+		"cut-short body":          {status: http.StatusOK, body: ruBody, truncate: true},
+		"body without prefix":     {status: http.StatusOK, body: usBody[len(geminiWebJSONPPrefix):]},
+		"missing closing bracket": {status: http.StatusOK, body: geminiWebJSONPPrefix + `[["yt.sw.adr",null,[[["en","RU",null,"1.2.3.4"]]]]`},
+		"second JSON value":       {status: http.StatusOK, body: usBody + `[]`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -266,19 +236,14 @@ func TestGeminiWebURL(t *testing.T) {
 	}
 }
 
-// BenchmarkParseGeminiWebRegion measures the parser on the real body. Reported
-// in the change along with the alternative's figures (see the parser comment):
-// a network probe per node dwarfs this, but the walk is what keeps the parse
-// off the 19 KB/op the nested-RawMessage shape costs.
 func BenchmarkParseGeminiWebRegion(b *testing.B) {
 	body, err := os.ReadFile("testdata/gemini_web/ru.jsonp")
 	if err != nil {
 		b.Fatal(err)
 	}
-	s := string(body)
 	b.ReportAllocs()
 	for range b.N {
-		region, _, ok := parseGeminiWebRegion(s)
+		region, _, ok := parseGeminiWebRegion(body)
 		if !ok || region != "RU" {
 			b.Fatalf("parse = (%q, %v)", region, ok)
 		}

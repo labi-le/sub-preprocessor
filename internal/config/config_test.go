@@ -800,10 +800,11 @@ func TestTidalDefaults(t *testing.T) {
 
 // TestGeminiWebDefaults pins the shipped gemini_web defaults: the gate is
 // keyless and endpointless (the probe URL is a compile-time constant), and its
-// blocked set records the eleven sanctioned countries absent from Google's
-// published availability list -- RU/BY/CN/HK/MO/IR/KP/CU/SY/AF/MM on 2026-11-20.
-// An empty or unset set gets that default; only removing the filter entry
-// disables the gate.
+// blocked set records the seven countries Google's availability page omits --
+// RU/BY/IR/KP/CU/SY/AF on 2026-11-21. CN (Workspace only), HK, MO and MM are
+// supported and stay out, since a region probe cannot see the account type. An
+// empty or unset set gets that default; only removing the filter entry disables
+// the gate.
 func TestGeminiWebDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -815,7 +816,7 @@ func TestGeminiWebDefaults(t *testing.T) {
 	if gw.Timeout != 15*time.Second || gw.Concurrency != 8 {
 		t.Fatalf("gemini_web timeout/concurrency defaults: %+v", gw)
 	}
-	want := []string{"RU", "BY", "CN", "HK", "MO", "IR", "KP", "CU", "SY", "AF", "MM"}
+	want := []string{"RU", "BY", "IR", "KP", "CU", "SY", "AF"}
 	if !reflect.DeepEqual(gw.BlockedRegions, want) {
 		t.Fatalf("gemini_web blocked_regions default = %v, want %v", gw.BlockedRegions, want)
 	}

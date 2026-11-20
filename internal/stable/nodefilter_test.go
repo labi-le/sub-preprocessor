@@ -218,11 +218,11 @@ func TestGeminiWebFilterKeepsNoStore(t *testing.T) {
 	}
 }
 
-// TestGeminiWebFilterVerdicts pins the three outcomes on the filter as built:
-// a blocked region drops for this cycle only, an accepted region is kept and
-// credited, and an answered-but-unreadable body is KEPT unverified -- never a
-// drop, because Dropped renders as nodes thrown away and this gate cannot
-// prove the node bad.
+// TestGeminiWebFilterVerdicts pins the outcomes on the filter as built: a
+// blocked region drops for this cycle only, an accepted region is kept and
+// credited, an answered-but-unreadable body is kept unverified, and a timed-out
+// node is kept unverified too -- never a drop, because Dropped renders as nodes
+// thrown away and this gate cannot prove the node bad.
 func TestGeminiWebFilterVerdicts(t *testing.T) {
 	t.Parallel()
 
@@ -233,20 +233,93 @@ func TestGeminiWebFilterVerdicts(t *testing.T) {
 			"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
 			"s-002": {Server: "h2", Reachable: true, Verified: true},
 			"s-003": {Server: "h3", Reachable: true},
+			// A YouTube timeout before the headers: the mixed batch that used to
+			// lose this node while the accepted one survived.
+			"s-004": {Server: "h4"},
 		}
 	}
-	kept, rep := gw.apply(context.Background(), threeSurvivors(), nil)
-	if len(kept) != 2 || kept[0].Label != "s-002" || kept[1].Label != "s-003" {
+	survivors := append(threeSurvivors(), Survivor{Entry: Entry{Label: "s-004", Addr: "h4:443"}})
+	kept, rep := gw.apply(context.Background(), survivors, nil)
+	if len(kept) != 3 || kept[0].Label != "s-002" || kept[1].Label != "s-003" || kept[2].Label != "s-004" {
 		t.Fatalf("only the blocked survivor may drop: %+v", kept)
 	}
 	if rep.Dropped[dropBlocked] != 1 || rep.Dropped[dropUnreachable] != 0 {
 		t.Fatalf("the blocked region must book one blocked drop: %+v", rep)
 	}
-	if got := rep.Coverage; !got.Measured || got.Verified != 2 || got.Unverified != 1 {
-		t.Fatalf("coverage = %+v, want the refusal and the pass verified and the silence unverified", got)
+	if got := rep.Coverage; !got.Measured || got.Verified != 2 || got.Unverified != 2 {
+		t.Fatalf("coverage = %+v, want the refusal and the pass verified and both silences unverified", got)
 	}
 	if rep.State != FilterRan {
 		t.Fatalf("a believed partial verdict must report FilterRan: %+v", rep)
+	}
+	if rep.Kept+rep.Dropped[dropBlocked]+rep.Dropped[dropUnreachable] != rep.In {
+		t.Fatalf("kept and dropped must account for every survivor: %+v", rep)
+	}
+}
+
+// TestGeminiWebFilterKeepsUnansweredBatch: with no HTTP response at all, the
+// gate keeps the batch unverified instead of dropping it as unreachable, and
+// the breaker has no blocked drop to disbelieve.
+func TestGeminiWebFilterKeepsUnansweredBatch(t *testing.T) {
+	t.Parallel()
+
+	f := &apiFilter{
+		filterName:     geminiWebFilterName,
+		keepNoResponse: true,
+		check: func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+			return map[string]APIOutcome{
+				"s-001": {Server: "h1"},
+				"s-002": {Server: "h2"},
+				"s-003": {Server: "h3"},
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+	kept, rep := f.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("an unanswered batch must be kept: kept %d", len(kept))
+	}
+	if rep.Dropped[dropBlocked] != 0 || rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("an unanswered request is not a drop: %+v", rep)
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 0 || got.Unverified != 3 {
+		t.Fatalf("coverage = %+v, want all three counted unverified", got)
+	}
+	if rep.State != FilterRan {
+		t.Fatalf("a gate that ran and kept everyone must report FilterRan: %+v", rep)
+	}
+	if rep.Kept != rep.In {
+		t.Fatalf("kept must equal input when nobody drops: %+v", rep)
+	}
+}
+
+// TestGeminiWebFilterCancelledCheckKeepsBatch: the no-response policy must not
+// override a cancelled cycle; partial outcomes are discarded, never counted or
+// acted on.
+func TestGeminiWebFilterCancelledCheckKeepsBatch(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f := &apiFilter{
+		filterName:     geminiWebFilterName,
+		keepNoResponse: true,
+		check: func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+			return map[string]APIOutcome{
+				"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
+			}
+		},
+		logger: zerolog.Nop(),
+	}
+	kept, rep := f.apply(ctx, threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a cancelled check keeps every survivor: kept %d", len(kept))
+	}
+	if rep.State != FilterAbsent || rep.Coverage.Measured {
+		t.Fatalf("a cancelled check reached no verdict: %+v", rep)
+	}
+	if rep.Dropped[dropBlocked] != 0 || rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("a cancelled check books no drop: %+v", rep)
 	}
 }
 

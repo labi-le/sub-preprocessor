@@ -184,7 +184,7 @@ func writeFilters(w *exposition, filters []stable.FilterReport) {
 	// while an absent/cancelled check and the bandwidth filter (no
 	// APIOutcome.Verified) stay absent, so neither reads as measured coverage.
 	help(w, "stable_filter_verified_nodes", "gauge",
-		"Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. Entries with no response are in neither coverage series. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.")
+		"Entries whose through-node check reached a conclusive pass or refusal in the last published cycle, counted once per survivor label after the port fold. Refusals count even when the batch breaker suppresses action. An entry that never answered is never verified. Strict DeepL requires both transports to pass or either to return an explicit refusal. Absent without a measured API coverage account.")
 	covered := func(f stable.FilterReport) bool {
 		return f.State != stable.FilterAbsent && f.Coverage.Measured
 	}
@@ -194,7 +194,7 @@ func writeFilters(w *exposition, filters []stable.FilterReport) {
 		}
 	}
 	help(w, "stable_filter_unverified_nodes", "gauge",
-		"Entries that answered without the evidence their through-node classifier requires, counted per survivor label after the port fold in the last published cycle. Marker gates keep these entries unverified; strict DeepL drops them. Entries with no response are in neither coverage series. Zero means no answered entry was inconclusive. Absent without a measured API coverage account.")
+		"Entries whose through-node check produced no evidence its classifier can read, counted per survivor label after the port fold in the last published cycle. Marker gates keep answered-but-inconclusive entries unverified; strict DeepL drops them. gemini_web also counts entries with no response here; the other gates leave those entries in neither coverage series. Zero means no counted entry was inconclusive. Absent without a measured API coverage account.")
 	for _, f := range filters {
 		if covered(f) {
 			sampleEsc(w, "stable_filter_unverified_nodes", labelFilter, f.Name, float64(f.Coverage.Unverified))

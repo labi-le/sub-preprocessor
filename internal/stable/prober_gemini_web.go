@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -74,38 +75,24 @@ func (m *MihomoProber) GeminiWebCheck(ctx context.Context, proxies []mihomo.Prox
 
 	return m.apiCheck(ctx, "stable.GeminiWebCheck", "gemini_web check", proxies,
 		m.geminiWebURL(), nil, c.Timeout, c.Concurrency, 0, true,
-		func(status int, body string, complete bool) apiVerdict {
+		func(status int, body []byte, complete bool) apiVerdict {
+			if !complete || status < http.StatusOK || status >= http.StatusMultipleChoices {
+				return apiUnverified
+			}
 			region, egress, parsed := parseGeminiWebRegion(body)
-			// The egress address is debug detail only: it is what the endpoint
-			// saw, useful when a verdict looks wrong for a node, and it is
-			// absent from some answers, so it never affects the verdict.
-			if parsed && egress != "" {
+			if !parsed {
+				return apiUnverified
+			}
+			if egress != "" {
 				opLog.Debug().Str("region", region).Str("egress", egress).Int("status", status).
 					Msg("gemini_web probe location")
 			}
 
-			return geminiWebVerdict(status, region, parsed, complete, blocked)
+			if _, refused := blocked[region]; refused {
+				return apiBlocked
+			}
+			return apiAccepted
 		})
-}
-
-// geminiWebVerdict classifies one response: a complete 2xx carrying a valid
-// region in the blocked set is a refusal, the same answer outside it a pass,
-// and anything that did not deliver that evidence is unverified. The incomplete
-// check comes before the region comparison on purpose -- a body can be cut
-// after the region (the fields follow it), and a truncated body is not proof
-// that the rest of the answer was well-formed.
-func geminiWebVerdict(status int, region string, parsed, complete bool, blocked map[string]struct{}) apiVerdict {
-	if status < http.StatusOK || status >= http.StatusMultipleChoices {
-		return apiUnverified
-	}
-	if !complete || !parsed {
-		return apiUnverified
-	}
-	if _, ok := blocked[region]; ok {
-		return apiBlocked
-	}
-
-	return apiAccepted
 }
 
 // parseGeminiWebRegion reads the egress region and, best effort, the egress
@@ -113,22 +100,16 @@ func geminiWebVerdict(status int, region string, parsed, complete bool, blocked 
 // whose [0][2][0][0] row is a positional record where [1] is the two-letter
 // region and [3] the address the endpoint saw the request arrive from.
 //
-// The decoder is driven with Token/Decode rather than json.Unmarshal into
-// nested []json.RawMessage. Each RawMessage level copies its whole subtree, so
-// the obvious shape measured 88 allocs/op and 19328 B/op on the real 2.6 KB
-// fixture, against 15 allocs/op and 689 B/op for this walk, which stops at the
-// row and never materializes the ~1 KB blob beside the two fields it needs
-// (medians of -count=3, 2026-11-20; the walk's one extra allocation over the
-// raw count is the validated egress address formatted for the debug log).
+// The token walk avoids copying nested subtrees just to extract two fields.
 //
 // ok means the region is valid; the egress address is NOT part of the verdict,
 // so an absent or malformed one returns "" and leaves ok alone.
-func parseGeminiWebRegion(body string) (region, egress string, ok bool) {
-	payload, found := strings.CutPrefix(body, geminiWebJSONPPrefix)
-	if !found {
+func parseGeminiWebRegion(body []byte) (region, egress string, ok bool) {
+	payload, found := bytes.CutPrefix(body, []byte(geminiWebJSONPPrefix))
+	if !found || !json.Valid(payload) {
 		return "", "", false
 	}
-	dec := json.NewDecoder(strings.NewReader(payload))
+	dec := json.NewDecoder(bytes.NewReader(payload))
 	// Descend [0][2][0][0]: top array, first element (the record), its third
 	// element, then the first element of each array below. Every step requires
 	// an array opener, so a body of another shape cannot reach the row.

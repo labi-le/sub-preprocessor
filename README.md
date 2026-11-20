@@ -257,12 +257,16 @@ previous snapshot; this gate does not clear an existing snapshot. The gates:
   Its verdict is a **region list guess, not Google's per-request refusal** — the
   gate says "this egress is in a country Google's published availability list
   omits", which is what the keyed `gemini` check cannot state without a
-  credential. The default set records the eleven sanctioned countries absent
-  from that list (`https://aistudio.google.com/docs/available-regions.md`, read
-  2026-11-20):
-  RU/BY/CN/HK/MO/IR/KP/CU/SY/AF/MM, and a `filters[]` entry may replace it with
-  its own non-empty `blocked_regions`. Only a 2xx whose body was read whole and
-  whose region parses is conclusive; a non-2xx, redirect, timeout, cut-short
+  credential. The default set records the seven countries absent from the
+  Gemini apps availability page
+  (`https://support.google.com/gemini/answer/13575153?hl=en`, read 2026-11-21):
+  RU/BY/IR/KP/CU/SY/AF. Mainland China is listed "Workspace only", and Hong
+  Kong, Macau and Myanmar are supported, so all four stay out: the probe reads
+  an egress region, which cannot tell a Workspace account from a consumer one.
+  A `filters[]` entry may replace the set with its own non-empty
+  `blocked_regions`. Only a 2xx whose body was read whole and
+  whose region parses is conclusive; a non-2xx, redirect, timeout or a probe
+  that never receives a response at all, a cut-short
   body, wrong prefix/shape, missing index, or a region that is not two
   uppercase letters or is one of the reserved codes ZZ/XX/EU is unverified
   (kept, not credited). `[0][2][0][0][3]` is the egress address; it is logged at
@@ -331,7 +335,8 @@ Gemini answer) and a per-cycle WARN carries the count, but the check is not
 credited as a pass and the host is not written to the geoblock store.
 `gemini_web` reads bodies but never matches a marker: a complete 2xx whose region
 parses is a verdict (in the configured set or out of it), and an unreadable body
-is kept unverified exactly like an inconclusive Gemini answer. `tidal` and
+— even a probe that never receives a response at all — is kept unverified
+exactly like an inconclusive Gemini answer. `tidal` and
 `deepl` instead close bodies unread: their evidence is in the headers.
 Tidal needs one `2xx`; DeepL needs `2xx` on both TCP and HTTP/3, and classifies
 other non-451 responses as unverified cycle-local drops, not geoblocks.
@@ -769,10 +774,11 @@ override, not a metric. The coverage pair is the direct read on whether
 the gate obtained a regional verdict at all. `verified` counts entries whose
 check was conclusive — a clean pass or a refusal, so a refusal is counted
 there even when the batch breaker discards its drop; `unverified` counts
-entries that answered without the evidence the classifier reads. Both count
+entries that reached the check without the evidence the classifier reads,
+including a `gemini_web` probe that never answered. Both count
 SURVIVORS (entry labels) after the per-port outcome fold, so a multi-port node
-is one node, and both are gauges of the last published cycle. A node that
-never answered is in neither count: a believed batch drops it as
+is one node, and both are gauges of the last published cycle. For the other API
+filters, a node that never answered is in neither count: a believed batch drops it as
 `reason="unreachable"`, while a tripped batch discards that drop and keeps it
 (`trusted=0`). The suspended/rotated-credential shape is
 therefore `verified=0` with `unverified=N` — the gate ran, every answer was
