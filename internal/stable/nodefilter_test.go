@@ -181,6 +181,106 @@ func TestTidalFilterKeepsNoStore(t *testing.T) {
 	}
 }
 
+// TestGeminiWebFilterKeepsNoStore locks the second deliberate no-store gate,
+// and a stronger case than tidal's: the verdict is a region read from YouTube
+// compared against a list derived from Google's published availability, not
+// Google's per-request refusal. The store is host-keyed for its whole TTL
+// (720h by default), so one revised list or one misfiled probe must not evict a
+// host from every endpoint for a month. The gate is keyless, so it also has no
+// enabled hook: unlike gemini, there is no credential that can go missing.
+func TestGeminiWebFilterKeepsNoStore(t *testing.T) {
+	t.Parallel()
+
+	fs := buildNodeFilters([]string{"gemini_web"}, testProber(t), stubBlocklist{}, zerolog.Nop())
+	if len(fs) != 1 {
+		t.Fatalf("gemini_web -> 1 filter, got %d", len(fs))
+	}
+	gw, ok := fs[0].(*apiFilter)
+	if !ok {
+		t.Fatalf("gemini_web filter has type %T, want *apiFilter", fs[0])
+	}
+	if gw.filterName != geminiWebFilterName {
+		t.Fatalf("filterName = %q, want %q", gw.filterName, geminiWebFilterName)
+	}
+	if gw.store != nil {
+		t.Fatal("gemini_web must not feed the shared geoblock store")
+	}
+	if gw.enabled != nil {
+		t.Fatal("gemini_web is keyless and must be built without an enabled() hook")
+	}
+	// The check must be the prober's, not nil: an empty fan-out answers an
+	// empty map, which is what a wired GeminiWebCheck does with no proxies.
+	if gw.check == nil {
+		t.Fatal("gemini_web filter built without its check")
+	}
+	if got := gw.check(context.Background(), nil); len(got) != 0 {
+		t.Fatalf("check with no proxies = %v, want an empty map", got)
+	}
+}
+
+// TestGeminiWebFilterVerdicts pins the three outcomes on the filter as built:
+// a blocked region drops for this cycle only, an accepted region is kept and
+// credited, and an answered-but-unreadable body is KEPT unverified -- never a
+// drop, because Dropped renders as nodes thrown away and this gate cannot
+// prove the node bad.
+func TestGeminiWebFilterVerdicts(t *testing.T) {
+	t.Parallel()
+
+	fs := buildNodeFilters([]string{"gemini_web"}, testProber(t), stubBlocklist{}, zerolog.Nop())
+	gw := fs[0].(*apiFilter)
+	gw.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
+			"s-002": {Server: "h2", Reachable: true, Verified: true},
+			"s-003": {Server: "h3", Reachable: true},
+		}
+	}
+	kept, rep := gw.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 2 || kept[0].Label != "s-002" || kept[1].Label != "s-003" {
+		t.Fatalf("only the blocked survivor may drop: %+v", kept)
+	}
+	if rep.Dropped[dropBlocked] != 1 || rep.Dropped[dropUnreachable] != 0 {
+		t.Fatalf("the blocked region must book one blocked drop: %+v", rep)
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 2 || got.Unverified != 1 {
+		t.Fatalf("coverage = %+v, want the refusal and the pass verified and the silence unverified", got)
+	}
+	if rep.State != FilterRan {
+		t.Fatalf("a believed partial verdict must report FilterRan: %+v", rep)
+	}
+}
+
+// TestGeminiWebFilterBatchBreakerKeepsAllBlocked is the breaker's arm for this
+// gate's most likely failure: a revised region list, or a probe answering from
+// something that is not YouTube, condemns every survivor at once. The batch
+// verdict is disbelieved and everyone is kept.
+func TestGeminiWebFilterBatchBreakerKeepsAllBlocked(t *testing.T) {
+	t.Parallel()
+
+	fs := buildNodeFilters([]string{"gemini_web"}, testProber(t), stubBlocklist{}, zerolog.Nop())
+	gw := fs[0].(*apiFilter)
+	gw.check = func(context.Context, []mihomo.Proxy) map[string]APIOutcome {
+		return map[string]APIOutcome{
+			"s-001": {Server: "h1", Reachable: true, Blocked: true, Verified: true},
+			"s-002": {Server: "h2", Reachable: true, Blocked: true, Verified: true},
+			"s-003": {Server: "h3", Reachable: true, Blocked: true, Verified: true},
+		}
+	}
+	kept, rep := gw.apply(context.Background(), threeSurvivors(), nil)
+	if len(kept) != 3 {
+		t.Fatalf("a disbelieved whole-batch blocked verdict keeps every survivor: kept %d", len(kept))
+	}
+	if rep.Dropped[dropBlocked] != 0 {
+		t.Fatalf("the report must say nobody was dropped: %+v", rep)
+	}
+	if rep.State != FilterTripped {
+		t.Fatalf("a disbelieved batch must not read as a clean pass: State = %v", rep.State)
+	}
+	if got := rep.Coverage; !got.Measured || got.Verified != 3 {
+		t.Fatalf("the breaker discards drops, not evidence: coverage = %+v", got)
+	}
+}
+
 // TestDeeplFilterWritesTheStore locks the persistence half of the deepl gate,
 // the asymmetry with tidal: a 451 region refusal is an explicit legal block on
 // the node's egress, so it outlives the cycle. The store is the only effect

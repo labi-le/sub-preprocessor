@@ -1,7 +1,7 @@
 %% sub-preprocessor - processing pipeline
 %% ONE ordered `filters:` list feeds two stages:
 %%   IP-stage      = cidr/country/asn, per node by IP, in the worker's preprocess
-%%   through-node  = gemini/claude/chatgpt/tidal/bandwidth, after the latency probe
+%%   through-node  = gemini/gemini_web/claude/chatgpt/tidal/deepl/bandwidth, after the latency probe
 flowchart TD
   %% ================= Crawler =================
   subgraph CRAWLER["tg-sub-crawler - CRAWL_INTERVAL (30m) or daily CRAWL_AT"]

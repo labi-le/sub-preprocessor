@@ -89,32 +89,9 @@ func (c *Controller) Apply(cfg config.Config) (bool, error) {
 	subs := cfg.Subscriptions
 	denied := cfg.DeniedCountries()
 
-	// The gemini/claude/chatgpt/tidal/deepl prober params default to the
-	// geoblock and are overridden per-entry by the merged NodeFilterSpec;
-	// bandwidth params come entirely from its filter entry.
 	nodeSpecs := cfg.NodeFilterSpecs()
 	geo := cfg.GeoBlock
-	var bandwidth config.BandwidthConfig
-	names := make([]string, 0, len(nodeSpecs))
-	geminiArmed := false
-	for _, spec := range nodeSpecs {
-		names = append(names, spec.Type)
-		switch spec.Type {
-		case config.FilterGemini:
-			geo.Gemini = spec.Gemini
-			geminiArmed = true
-		case config.FilterClaude:
-			geo.Claude = spec.Claude
-		case config.FilterChatGPT:
-			geo.ChatGPT = spec.ChatGPT
-		case config.FilterTidal:
-			geo.Tidal = spec.Tidal
-		case config.FilterDeepl:
-			geo.Deepl = spec.Deepl
-		case config.FilterBandwidth:
-			bandwidth = spec.Bandwidth
-		}
-	}
+	names, bandwidth, geminiArmed := foldNodeSpecs(nodeSpecs, &geo)
 
 	// A configured gemini gate with no usable key must fail, not boot silently
 	// off (see resolveGeminiKey); the unarmed base is left unread.
@@ -174,6 +151,41 @@ func (c *Controller) UseProcessor(p *preprocess.Processor) {
 		return
 	}
 	c.checker.UseFilterer(p)
+}
+
+// foldNodeSpecs folds each through-node spec's per-entry overrides back into
+// the geoblock copy the prober is built from, and reports the filter names in
+// config order, whether the keyed gemini gate is armed, and the bandwidth
+// params (which come entirely from their filter entry).
+//
+// The gemini/gemini_web/claude/chatgpt/tidal/deepl params default to the
+// geoblock block and are overridden per-entry by the merged NodeFilterSpec.
+func foldNodeSpecs(specs []config.NodeFilterSpec, geo *config.GeoBlockConfig) ([]string, config.BandwidthConfig, bool) {
+	names := make([]string, 0, len(specs))
+	var bandwidth config.BandwidthConfig
+	geminiArmed := false
+	for _, spec := range specs {
+		names = append(names, spec.Type)
+		switch spec.Type {
+		case config.FilterGemini:
+			geo.Gemini = spec.Gemini
+			geminiArmed = true
+		case config.FilterGeminiWeb:
+			geo.GeminiWeb = spec.GeminiWeb
+		case config.FilterClaude:
+			geo.Claude = spec.Claude
+		case config.FilterChatGPT:
+			geo.ChatGPT = spec.ChatGPT
+		case config.FilterTidal:
+			geo.Tidal = spec.Tidal
+		case config.FilterDeepl:
+			geo.Deepl = spec.Deepl
+		case config.FilterBandwidth:
+			bandwidth = spec.Bandwidth
+		}
+	}
+
+	return names, bandwidth, geminiArmed
 }
 
 // resolveGeminiKey returns the key an ARMED gemini gate will check with, or an

@@ -87,11 +87,12 @@ Every `subscriptions.interval` it:
    each node, `check.rounds` rounds, one shared concurrency semaphore),
 7. keeps nodes within `check.max_fail` / `check.max_avg_ms`, sorted by mean
    latency; nodes with zero successful rounds are recorded in the dead cache,
-8. runs the configured **through-node filters** (`gemini` / `claude` /
-   `chatgpt` / `tidal` / `deepl` / `bandwidth`) on the survivors, all of them
-   gates; a `gemini`/`claude`/`chatgpt`/`deepl` geo-block writes the node's host
-   to the geoblock store, so step 2 drops it on every later cycle. Every other
-   drop lasts this cycle only,
+8. runs the configured **through-node filters** (`gemini` / `gemini_web` /
+   `claude` / `chatgpt` / `tidal` / `deepl` / `bandwidth`) on the survivors, all
+   of them gates; a `gemini`/`claude`/`chatgpt`/`deepl` geo-block writes the
+   node's host to the geoblock store, so step 2 drops it on every later cycle.
+   Every other drop — `gemini_web` and `tidal` included — lasts this cycle
+   only,
 9. asks the final survivor set where its traffic actually leaves from
    (Cloudflare's `/cdn-cgi/trace`), but only when the `annotate` chain names
    the `cloudflare` provider — nothing is dropped here,
@@ -249,6 +250,32 @@ previous snapshot; this gate does not clear an existing snapshot. The gates:
   `geoblock.gemini.rate_limit` (default 150/min, 0 = default) paces request
   starts so one cycle's reads stay under that quota and every survivor gets a
   verdict.
+- `gemini_web` — the keyless way to ask the same vendor's question, at a
+  weaker evidence level: `GET https://www.youtube.com/sw.js_data` through the
+  node, then the region at `[0][2][0][0][1]` of the JSONP body (the `)]}'`
+  prefix is required) is compared against `geoblock.gemini_web.blocked_regions`.
+  Its verdict is a **region list guess, not Google's per-request refusal** — the
+  gate says "this egress is in a country Google's published availability list
+  omits", which is what the keyed `gemini` check cannot state without a
+  credential. The default set records the eleven sanctioned countries absent
+  from that list (`https://aistudio.google.com/docs/available-regions.md`, read
+  2026-11-20):
+  RU/BY/CN/HK/MO/IR/KP/CU/SY/AF/MM, and a `filters[]` entry may replace it with
+  its own non-empty `blocked_regions`. Only a 2xx whose body was read whole and
+  whose region parses is conclusive; a non-2xx, redirect, timeout, cut-short
+  body, wrong prefix/shape, missing index, or a region that is not two
+  uppercase letters or is one of the reserved codes ZZ/XX/EU is unverified
+  (kept, not credited). `[0][2][0][0][3]` is the egress address; it is logged at
+  debug level only and is not required for a verdict. It deliberately does
+  **not** feed the geoblock store: a region-list guess is weaker evidence than
+  an explicit refusal, and the store is host-keyed for its whole 720h TTL, so a
+  revised list would evict hosts from every endpoint for a month. The probe URL
+  has no config key — the parser is bound to YouTube's body, and a `filters[]`
+  entry that sets `endpoint` is refused at load — and it is YouTube
+  rather than AI Studio because sw.js_data is the only keyless endpoint whose
+  small body names the region the request arrived from (`aistudio.google.com`
+  answers a sign-in redirect and names no region; `accounts.google.com` is
+  ~1.4 MB).
 - `claude` — same idea, keyless: the Anthropic endpoint answers 403
   `Request not allowed` from blocked regions. Also feeds the geoblock store.
 - `chatgpt` — keyless too: OpenAI's compliance endpoint answers 403
@@ -301,8 +328,11 @@ dropped and its host persisted as usual. A read error, a timeout after the
 headers, or a body past the 64 KiB scan cap with no observed marker leaves the
 response **unverified**: the node is kept (the same fail-open as an inconclusive
 Gemini answer) and a per-cycle WARN carries the count, but the check is not
-credited as a pass and the host is not written to the geoblock store. `tidal`
-and `deepl` instead close bodies unread: their evidence is in the headers.
+credited as a pass and the host is not written to the geoblock store.
+`gemini_web` reads bodies but never matches a marker: a complete 2xx whose region
+parses is a verdict (in the configured set or out of it), and an unreadable body
+is kept unverified exactly like an inconclusive Gemini answer. `tidal` and
+`deepl` instead close bodies unread: their evidence is in the headers.
 Tidal needs one `2xx`; DeepL needs `2xx` on both TCP and HTTP/3, and classifies
 other non-451 responses as unverified cycle-local drops, not geoblocks.
 
@@ -432,7 +462,7 @@ attribution).
 
 | Store | Kind | Purpose |
 |---|---|---|
-| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT/DeepL — `tidal` deliberately does not feed it); dropped pre-DNS, before the IP stage runs. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
+| geoblock (`geoblock.db_path`, `geoblock.ttl`, default 720h) | SQLite (pure-Go driver, `CGO_ENABLED=0`-safe), reads served from an in-memory cache | hosts that failed a through-node API reachability check (Gemini/Claude/ChatGPT/DeepL — `tidal` and `gemini_web` deliberately do not feed it); dropped pre-DNS, before the IP stage runs. Keys are lowercased, so a source spelling a blocked host in different case does not slip past. Expired entries are swept once per worker cycle, not only at startup |
 | dead cache (`deadcache.ttl`, default 2h) | in-memory, not persisted | `server:port` of nodes with zero successful probe rounds, keyed together with the address the IP stage resolved for them at verdict time — a hostname re-pointed to a new address is re-probed, not skipped on the old verdict; skipped before probing |
 | stable snapshot (`subscriptions.snapshot_path`, empty disables) | one JSON file, rewritten atomically once per published cycle | the published `/stable.txt` list, reloaded at startup — only while subscriptions are enabled; with an empty `subscriptions.sources` it is deliberately not restored (see the stable-worker section above) — so a restart does not answer `503` for a whole cycle. No TTL. Shipped at `/config/.stable-snapshot.json` — inside the only writable host bind mount, so it outlives a redeploy and a host reboot alike, the same guarantee `.geoblock.db` beside it already has |
 | DNS cache (`resolver.cache_ttl` / `cache_negative_ttl`) | in-memory TTL map, capped | node hostname resolution across cycles |
@@ -663,10 +693,11 @@ Key sections:
   entry and takes a `providers:` chain. The retired singular `provider:` key is
   rejected as an unknown key by the strict decode instead of being silently
   dropped.
-- `geoblock` — store path/TTL plus `gemini.*`, `claude.*`, `chatgpt.*`,
-  `tidal.*` and `deepl.*` base params (endpoint, timeout and concurrency;
-  `marker` on the marker gates, gemini's model/key/`rate_limit`, and claude's
-  `version`) for the through-node filters.
+- `geoblock` — store path/TTL plus `gemini.*`, `gemini_web.*`, `claude.*`,
+  `chatgpt.*`, `tidal.*` and `deepl.*` base params (timeout and concurrency
+  everywhere, with no endpoint on `gemini_web`; `marker` on the marker gates,
+  gemini's model/key/`rate_limit`, claude's `version`, and `gemini_web`'s
+  `blocked_regions`) for the through-node filters.
   Every tenant here is a gate; the
   `/cdn-cgi/trace` probe is not one, and is configured under `geo.cloudflare`.
 - `deadcache.ttl`, `fetch.timeout` — the worker's fail-fast per-source fetch
@@ -728,10 +759,13 @@ so a new reason costs no metric name and no query change — only that panel's
 DESCRIPTION, which enumerates the reasons in prose.
 
 The gemini gate publishes no series of its own; every through-node gate reads
-through the same per-filter family: `stable_filter_{in,kept,dropped}_nodes{filter="gemini"}`,
+through the same per-filter family:
+`stable_filter_{in,kept,dropped}_nodes{filter="gemini"}`,
 `stable_filter_trusted{filter="gemini"}`, and the coverage pair
 `stable_filter_{verified,unverified}_nodes{filter="gemini"}`, on the
-"Through-node filters" panels. The coverage pair is the direct read on whether
+"Through-node filters" panels. `gemini_web` is no exception: it rides the same
+families under `filter="gemini_web"`, so a new gate costs a dashboard legend
+override, not a metric. The coverage pair is the direct read on whether
 the gate obtained a regional verdict at all. `verified` counts entries whose
 check was conclusive — a clean pass or a refusal, so a refusal is counted
 there even when the batch breaker discards its drop; `unverified` counts
