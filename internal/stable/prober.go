@@ -92,10 +92,6 @@ type MihomoProber struct {
 	// NewMihomoProber leaves it empty, so nothing an operator writes can move
 	// the probe.
 	traceEndpoint string
-	// geminiWebEndpoint is the same test seam for the gemini_web probe: empty
-	// in production, where geminiWebDataURL is the only endpoint the parser
-	// can read (see geminiWebDataURL).
-	geminiWebEndpoint string
 }
 
 // NewMihomoProber takes the whole geoblock block rather than one parameter per

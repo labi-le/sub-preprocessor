@@ -10,7 +10,7 @@ import (
 // NodeFilter is a through-node check the worker runs on latency-probe
 // survivors: unlike the preprocess IP-filters it routes traffic THROUGH each
 // proxy node, so it lives here and only affects /stable.txt. The through-node
-// entries of the unified filters list (gemini/gemini_web/claude/chatgpt/tidal/
+// entries of the unified filters list (gemini/claude/chatgpt/tidal/
 // deepl/bandwidth) select which run.
 type NodeFilter interface {
 	// apply narrows survivors using the shared, pre-parsed proxies grouped by
@@ -32,11 +32,6 @@ type NodeFilter interface {
 type geminiChecker interface {
 	GeminiEnabled() bool
 	GeminiCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
-}
-
-// geminiWebChecker is the through-node Gemini region capability of a Prober.
-type geminiWebChecker interface {
-	GeminiWebCheck(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
 }
 
 // claudeChecker is the through-node Anthropic capability of a Prober.
@@ -68,7 +63,6 @@ type bandwidthChecker interface {
 // Configuration names of the through-node API filters.
 const (
 	geminiFilterName    = "gemini"
-	geminiWebFilterName = "gemini_web"
 	claudeFilterName    = "claude"
 	chatgptFilterName   = "chatgpt"
 	tidalFilterName     = "tidal"
@@ -89,13 +83,12 @@ const (
 
 // apiFilter keeps only survivors that pass a through-node API check, and records
 // geo-blocked node hosts in the store (TTL) so later cycles drop them in
-// preprocess, before they are ever merged. A nil store (see the tidal and
-// gemini_web filters) skips that persistence, so its drop costs this cycle
-// only. What counts as blocked is the check's own verdict: a geo-block marker
-// in the body for gemini/claude/chatgpt, a non-2xx for tidal, a 451 for deepl,
-// and a region in the configured set for gemini_web. A nil enabled func means
-// the check is always active (e.g. Anthropic geo-blocks before authentication,
-// so its check is keyless).
+// preprocess, before they are ever merged. A nil store (see the tidal filter)
+// skips that persistence, so its drop costs this cycle only. What counts as
+// blocked is the check's own verdict: a geo-block marker in the body for
+// gemini/claude/chatgpt, a non-2xx for tidal, a 451 for deepl. A nil enabled
+// func means the check is always active (e.g. Anthropic geo-blocks before
+// authentication, so its check is keyless).
 //
 // A response the check could not read to its end -- a read error, a timeout
 // after the headers, or a body past maxAPIBody -- is NOT a pass for a
@@ -105,25 +98,19 @@ const (
 // no location verdict (geminiInconclusive), APIOutcome.Verified stays false and
 // the node is kept unverified (fail-open) with no store write. DeepL instead
 // requires verified dual-transport acceptance and drops unverified responses.
-// gemini_web additionally keeps an unanswered request (keepNoResponse), so its
-// only drop is a blocked region.
 //
 // The report's Coverage counts those outcomes per SURVIVOR label, not per
 // proxy port, and is measured on every completing path including the breaker's.
-// An unanswered entry is in neither count for the other API gates;
-// gemini_web counts it unverified. DeepL still drops failed nodes when the
-// breaker suppresses persistence; other gates keep the batch when its verdict
+// An unanswered entry is in neither count. DeepL still drops failed nodes when
+// the breaker suppresses persistence; other gates keep the batch when its verdict
 // is disbelieved.
 type apiFilter struct {
 	filterName      string
 	requireVerified bool
-	// keepNoResponse keeps an unanswered check (timeout, dial failure, unparsed
-	// node) and counts it unverified instead of dropping it unreachable.
-	keepNoResponse bool
-	enabled        func() bool
-	check          func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
-	store          Blocklist
-	logger         zerolog.Logger
+	enabled         func() bool
+	check           func(ctx context.Context, proxies []mihomo.Proxy) map[string]APIOutcome
+	store           Blocklist
+	logger          zerolog.Logger
 }
 
 func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map[string][]mihomo.Proxy) ([]Survivor, FilterReport) {
@@ -149,8 +136,6 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		case o.Blocked:
 			blocked++
 			verified++
-		case !o.Reachable && f.keepNoResponse:
-			unverified++
 		case !o.Reachable:
 			unreachable++
 		case o.Verified:
@@ -160,7 +145,7 @@ func (f *apiFilter) apply(ctx context.Context, survivors []Survivor, proxies map
 		}
 	}
 	// Refusals are conclusive evidence too; an unanswered request carries no
-	// coverage unless this gate keeps it (keepNoResponse).
+	// coverage.
 	rep.Coverage = FilterCoverage{Verified: verified, Unverified: unverified, Measured: true}
 	failed := blocked + unreachable
 	if f.requireVerified {
@@ -215,9 +200,6 @@ func (f *apiFilter) keepOutcomes(ctx context.Context, survivors []Survivor, outc
 		if o.Reachable && (o.Verified || !f.requireVerified) {
 			kept = append(kept, s)
 			continue
-		}
-		if f.keepNoResponse && !o.Reachable {
-			kept = append(kept, s)
 		}
 	}
 	return kept
@@ -321,11 +303,10 @@ func filterSubset(survivors []Survivor, proxies map[string][]mihomo.Proxy) []mih
 
 // buildNodeFilters constructs the configured Layer-2 filters in order. Unknown
 // names are warned and skipped; the gemini filter needs a prober with Gemini
-// support (a resolved API key); gemini_web, claude, chatgpt, tidal and deepl
-// are keyless (gemini_web reads a region out of a keyless YouTube body, claude
-// and chatgpt geo-block before authentication, tidal's /v1/country needs no
-// credential, and DeepL answers 451 from the translator page a browser loads);
-// the bandwidth filter needs a prober with bandwidth support.
+// support (a resolved API key); claude, chatgpt, tidal and deepl are keyless
+// (claude and chatgpt geo-block before authentication, tidal's /v1/country
+// needs no credential, and DeepL answers 451 from the translator page a browser
+// loads); the bandwidth filter needs a prober with bandwidth support.
 func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zerolog.Logger) []NodeFilter {
 	var filters []NodeFilter
 	for _, n := range names {
@@ -346,8 +327,6 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 				store:      store,
 				logger:     logger,
 			})
-		case geminiWebFilterName:
-			filters = appendGeminiWebFilter(filters, prober, logger)
 		case claudeFilterName:
 			cc, ok := prober.(claudeChecker)
 			if !ok {
@@ -412,39 +391,6 @@ func buildNodeFilters(names []string, prober Prober, store Blocklist, logger zer
 		}
 	}
 	return filters
-}
-
-// appendGeminiWebFilter adds the keyless region gate when the prober supports
-// it. It takes and returns the slice for the same reason as
-// appendBandwidthFilter: the capability check and its rationale stay out of the
-// switch, which is already at its complexity budget.
-//
-// The filter gets NO store, and for a stronger reason than tidal's: this gate's
-// verdict is a REGION LIST GUESS (a region read from YouTube compared against a
-// list derived from Google's published availability), not Google's per-request
-// refusal. The store is keyed by host with no service dimension and lives for
-// its whole TTL (720h by default), so one revision of Google's list, one stale
-// region answer or one misfiled probe would evict the host from every endpoint
-// for a month. With no store the drop costs this cycle only, and the batch
-// breaker in apiFilter.apply keeps a whole batch this guess would condemn --
-// the shape a changed list would produce.
-//
-// It is also the only gate built with keepNoResponse: a YouTube timeout says
-// nothing about Gemini availability, so its drops stay blocked-only.
-func appendGeminiWebFilter(dst []NodeFilter, prober Prober, logger zerolog.Logger) []NodeFilter {
-	gw, ok := prober.(geminiWebChecker)
-	if !ok {
-		logger.Warn().Msg("gemini_web filter requested but prober lacks Gemini web support; skipping")
-
-		return dst
-	}
-
-	return append(dst, &apiFilter{
-		filterName:     geminiWebFilterName,
-		keepNoResponse: true,
-		check:          gw.GeminiWebCheck,
-		logger:         logger,
-	})
 }
 
 // appendBandwidthFilter adds the speed filter when the prober can measure. It

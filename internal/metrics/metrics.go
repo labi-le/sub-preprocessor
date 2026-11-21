@@ -194,7 +194,7 @@ func writeFilters(w *exposition, filters []stable.FilterReport) {
 		}
 	}
 	help(w, "stable_filter_unverified_nodes", "gauge",
-		"Entries whose through-node check produced no evidence its classifier can read, counted per survivor label after the port fold in the last published cycle. Marker gates keep answered-but-inconclusive entries unverified; strict DeepL drops them. gemini_web also counts entries with no response here; the other gates leave those entries in neither coverage series. Zero means no counted entry was inconclusive. Absent without a measured API coverage account.")
+		"Entries whose through-node check produced no evidence its classifier can read, counted per survivor label after the port fold in the last published cycle. Marker gates keep answered-but-inconclusive entries unverified; strict DeepL drops them. A gate that got no response at all leaves that entry in neither coverage series. Zero means no counted entry was inconclusive. Absent without a measured API coverage account.")
 	for _, f := range filters {
 		if covered(f) {
 			sampleEsc(w, "stable_filter_unverified_nodes", labelFilter, f.Name, float64(f.Coverage.Unverified))

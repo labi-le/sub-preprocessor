@@ -335,18 +335,18 @@ func TestMetricsFilterStatesRenderApart(t *testing.T) {
 	}
 }
 
-// TestMetricsFilterFamilyRendersGeminiWeb pins that a new through-node gate
-// owes no new metric family: the gemini_web gate rides the shared
+// TestMetricsFilterFamilyRendersClaude pins that a new through-node gate
+// owes no new metric family: the claude gate rides the shared
 // stable_filter_* series, and the filter label value is the whole difference.
 // A missing render here would leave the gate invisible on the through-node
 // panels while looking healthy in the logs.
-func TestMetricsFilterFamilyRendersGeminiWeb(t *testing.T) {
+func TestMetricsFilterFamilyRendersClaude(t *testing.T) {
 	t.Parallel()
 
 	m := metrics.New()
 	m.Observe(stable.CycleReport{
 		Filters: []stable.FilterReport{{
-			Name: "gemini_web", In: 10, Kept: 9,
+			Name: "claude", In: 10, Kept: 9,
 			Dropped:  map[string]int{"blocked": 1, "unreachable": 0},
 			State:    stable.FilterRan,
 			Coverage: stable.FilterCoverage{Measured: true, Verified: 10},
@@ -355,13 +355,13 @@ func TestMetricsFilterFamilyRendersGeminiWeb(t *testing.T) {
 	out := render(t, m)
 
 	want := map[string]string{
-		"stable_filter_trusted":          `stable_filter_trusted{filter="gemini_web"} 1` + "\n",
-		"stable_filter_in_nodes":         `stable_filter_in_nodes{filter="gemini_web"} 10` + "\n",
-		"stable_filter_kept_nodes":       `stable_filter_kept_nodes{filter="gemini_web"} 9` + "\n",
-		"stable_filter_verified_nodes":   `stable_filter_verified_nodes{filter="gemini_web"} 10` + "\n",
-		"stable_filter_unverified_nodes": `stable_filter_unverified_nodes{filter="gemini_web"} 0` + "\n",
-		"stable_filter_dropped_nodes": `stable_filter_dropped_nodes{filter="gemini_web",reason="blocked"} 1` + "\n" +
-			`stable_filter_dropped_nodes{filter="gemini_web",reason="unreachable"} 0` + "\n",
+		"stable_filter_trusted":          `stable_filter_trusted{filter="claude"} 1` + "\n",
+		"stable_filter_in_nodes":         `stable_filter_in_nodes{filter="claude"} 10` + "\n",
+		"stable_filter_kept_nodes":       `stable_filter_kept_nodes{filter="claude"} 9` + "\n",
+		"stable_filter_verified_nodes":   `stable_filter_verified_nodes{filter="claude"} 10` + "\n",
+		"stable_filter_unverified_nodes": `stable_filter_unverified_nodes{filter="claude"} 0` + "\n",
+		"stable_filter_dropped_nodes": `stable_filter_dropped_nodes{filter="claude",reason="blocked"} 1` + "\n" +
+			`stable_filter_dropped_nodes{filter="claude",reason="unreachable"} 0` + "\n",
 	}
 	for family, want := range want {
 		if got := familyLines(out, family); got != want {

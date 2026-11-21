@@ -73,10 +73,6 @@ const (
 	defaultTidalEndpoint      = "https://api.tidal.com"
 	defaultTidalTimeout       = 15 * time.Second
 	defaultTidalConcurrency   = 8
-	// The gemini_web gate has no endpoint key on purpose: its URL is a
-	// compile-time constant in internal/stable, for the reason recorded there.
-	defaultGeminiWebTimeout     = 15 * time.Second
-	defaultGeminiWebConcurrency = 8
 	// Unlike its siblings this endpoint carries the whole probe path. The
 	// translator page is the surface a browser loads, and the region verdict is
 	// in the status: a refused egress gets 451, an accepted one 200 with a
@@ -100,7 +96,7 @@ const (
 
 // Unified filter types, provider names, and annotation tags. The single
 // filters list selects IP-stage (country/asn/cidr, run per-node in
-// preprocess) and through-node filters (gemini/gemini_web/claude/chatgpt/
+// preprocess) and through-node filters (gemini/claude/chatgpt/
 // tidal/deepl/bandwidth, run post-probe in stable); which physical stage a type
 // lands in is an implementation detail, not config.
 const (
@@ -108,7 +104,6 @@ const (
 	FilterASN       = "asn"
 	FilterCIDR      = "cidr"
 	FilterGemini    = "gemini"
-	FilterGeminiWeb = "gemini_web"
 	FilterClaude    = "claude"
 	FilterChatGPT   = "chatgpt"
 	FilterTidal     = "tidal"
@@ -117,7 +112,7 @@ const (
 
 	// numThroughNodeFilterTypes is how many singleton through-node filter
 	// types exist, so the seen-map in validateFilters can pre-size itself.
-	numThroughNodeFilterTypes = 7
+	numThroughNodeFilterTypes = 6
 
 	// ProviderCloudflare answers from Cloudflare's own geo-IP database, read
 	// through cdn-cgi/trace from the node itself (the stable worker runs it
@@ -194,14 +189,6 @@ var defaultRegistryURLs = []string{
 	"https://ftp.afrinic.net/stats/afrinic/delegated-afrinic-extended-latest",
 }
 
-// defaultGeminiWebBlockedRegions seeds the gate from Google's Gemini apps
-// availability page (read 2026-11-21); CN/HK/MO/MM stay out because a region
-// probe cannot tell a Workspace account from a consumer one, and the list is a
-// SEED: deployments override it.
-var defaultGeminiWebBlockedRegions = []string{
-	"RU", "BY", "IR", "KP", "CU", "SY", "AF",
-}
-
 type LogConfig struct {
 	Level string `yaml:"level"`
 }
@@ -271,23 +258,18 @@ func (g *GeoConfig) applyDefaults() {
 //   - asn:     DenyPatterns
 //   - cidr:    URLs, FileType, RefreshInterval
 //   - bandwidth: MinMbps, TestURL, Timeout, Concurrency
-//   - gemini/gemini_web/claude/chatgpt/tidal/deepl: selectors; prober params
-//     come from geoblock.{gemini,gemini_web,claude,chatgpt,tidal,deepl} and
+//   - gemini/claude/chatgpt/tidal/deepl: selectors; prober params
+//     come from geoblock.{gemini,claude,chatgpt,tidal,deepl} and
 //     may be overridden per-entry (Marker/Model/Endpoint/Key*/Timeout/
 //     Concurrency/RateLimit for gemini;
 //     Marker/Endpoint/Version/Timeout/Concurrency for claude;
 //     Marker/Endpoint/Timeout/Concurrency for chatgpt;
 //     Endpoint/Timeout/Concurrency for tidal;
-//     Endpoint/Timeout/Concurrency for deepl;
-//     Timeout/Concurrency/BlockedRegions for gemini_web, which has no endpoint
-//     key because its probe URL is a compile-time constant; a non-empty
-//     Endpoint on a gemini_web entry is refused at load, not ignored).
+//     Endpoint/Timeout/Concurrency for deepl).
 //
 // A field a type's merge does not read is silently ignored for that type: a
 // tidal entry honours only Endpoint/Timeout/Concurrency, so a Marker or Model
-// written beside it changes nothing. gemini_web's Endpoint is the one
-// exception: the constant shadows any override, so accepting one would read as
-// a working setting.
+// written beside it changes nothing.
 type FilterConfig struct {
 	Type string `yaml:"type"`
 
@@ -315,7 +297,7 @@ type FilterConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 	Concurrency int           `yaml:"concurrency"`
 
-	// gemini/claude/chatgpt/tidal/deepl/gemini_web overrides (fall back to the
+	// gemini/claude/chatgpt/tidal/deepl overrides (fall back to the
 	// geoblock sub-block).
 	Marker    string `yaml:"marker"`
 	Model     string `yaml:"model"`
@@ -325,9 +307,6 @@ type FilterConfig struct {
 	KeyVar    string `yaml:"key_var"`
 	RateLimit int    `yaml:"rate_limit"`
 	Version   string `yaml:"version"`
-	// BlockedRegions (gemini_web only) overrides geoblock.gemini_web's set for
-	// this entry; an empty list inherits it.
-	BlockedRegions []string `yaml:"blocked_regions"`
 }
 
 // AnnotateSpec is one entry in the ordered annotation tag list. GEO is the only
@@ -386,7 +365,6 @@ type NodeFilterSpec struct {
 	Type      string
 	Bandwidth BandwidthConfig
 	Gemini    GeminiConfig
-	GeminiWeb GeminiWebConfig
 	Claude    ClaudeConfig
 	ChatGPT   ChatGPTConfig
 	Tidal     TidalConfig
@@ -461,7 +439,7 @@ func (cfg *Config) AnnotateUsesProvider(name string) bool {
 	return false
 }
 
-// NodeFilterSpecs returns the through-node filters (gemini/gemini_web/claude/
+// NodeFilterSpecs returns the through-node filters (gemini/claude/
 // chatgpt/tidal/deepl/bandwidth) in config order.
 func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 	var specs []NodeFilterSpec
@@ -469,8 +447,6 @@ func (cfg *Config) NodeFilterSpecs() []NodeFilterSpec {
 		switch f.Type {
 		case FilterGemini:
 			specs = append(specs, NodeFilterSpec{Type: FilterGemini, Gemini: f.mergedGemini(cfg.GeoBlock.Gemini)})
-		case FilterGeminiWeb:
-			specs = append(specs, NodeFilterSpec{Type: FilterGeminiWeb, GeminiWeb: f.mergedGeminiWeb(cfg.GeoBlock.GeminiWeb)})
 		case FilterClaude:
 			specs = append(specs, NodeFilterSpec{Type: FilterClaude, Claude: f.mergedClaude(cfg.GeoBlock.Claude)})
 		case FilterChatGPT:
@@ -565,22 +541,6 @@ func (f FilterConfig) mergedTidal(base TidalConfig) TidalConfig {
 	return base
 }
 
-// mergedGeminiWeb has no endpoint arm: the probe URL is a compile-time
-// constant, so a written endpoint is not read here; validateFilter refuses
-// any non-empty endpoint on this type.
-func (f FilterConfig) mergedGeminiWeb(base GeminiWebConfig) GeminiWebConfig {
-	if f.Timeout != 0 {
-		base.Timeout = f.Timeout
-	}
-	if f.Concurrency != 0 {
-		base.Concurrency = f.Concurrency
-	}
-	if len(f.BlockedRegions) > 0 {
-		base.BlockedRegions = f.BlockedRegions
-	}
-	return base
-}
-
 func (f FilterConfig) mergedDeepl(base DeeplConfig) DeeplConfig {
 	if f.Endpoint != "" {
 		base.Endpoint = f.Endpoint
@@ -626,7 +586,7 @@ type SubscriptionsConfig struct {
 }
 
 // CheckConfig holds the probe params. The through-node filters
-// (gemini/gemini_web/claude/chatgpt/tidal/deepl/bandwidth) and their params
+// (gemini/claude/chatgpt/tidal/deepl/bandwidth) and their params
 // live in the top-level filters list, not here. Mostly URL-test params, with one
 // exception: Timeout also sets the reachability pre-check's dial budget
 // (halved per attempt), so lowering it widens the condemned set.
@@ -881,21 +841,18 @@ func (c *CloudflareConfig) validate() error {
 // so a transient CDN error or rate-limit would otherwise evict the host from
 // every endpoint for the store's whole TTL. DeepL writes to it: its refusal is
 // an explicit region page with a 451, as attributable to the egress as the AI
-// gates' markers. gemini_web lives here for the same uniformity and, like
-// tidal, never writes: a region-list guess (see GeminiWebConfig) is weaker
-// evidence than an explicit refusal and must not evict a host for the TTL.
+// gates' markers.
 // Every member here drops nodes; the cdn-cgi/trace probe used to sit alongside
 // them and does not, so it moved to geo.cloudflare with the other geo
 // databases.
 type GeoBlockConfig struct {
-	DBPath    string          `yaml:"db_path"`
-	TTL       time.Duration   `yaml:"ttl"`
-	Gemini    GeminiConfig    `yaml:"gemini"`
-	GeminiWeb GeminiWebConfig `yaml:"gemini_web"`
-	Claude    ClaudeConfig    `yaml:"claude"`
-	ChatGPT   ChatGPTConfig   `yaml:"chatgpt"`
-	Tidal     TidalConfig     `yaml:"tidal"`
-	Deepl     DeeplConfig     `yaml:"deepl"`
+	DBPath  string        `yaml:"db_path"`
+	TTL     time.Duration `yaml:"ttl"`
+	Gemini  GeminiConfig  `yaml:"gemini"`
+	Claude  ClaudeConfig  `yaml:"claude"`
+	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
+	Tidal   TidalConfig   `yaml:"tidal"`
+	Deepl   DeeplConfig   `yaml:"deepl"`
 }
 
 // DeadCacheConfig configures the in-memory short-TTL cache of nodes that failed
@@ -967,25 +924,6 @@ type ChatGPTConfig struct {
 	Concurrency int           `yaml:"concurrency"`
 }
 
-// GeminiWebConfig configures the keyless `gemini_web` gate. Its probe is a
-// region + allow-list check, NOT Google's per-request refusal: GET
-// youtube.com/sw.js_data through the node, read the egress region out of the
-// JSONP body, and drop the node when that region is in BlockedRegions.
-//
-// There is no endpoint key: the probe URL is a compile-time constant in
-// internal/stable, because the parser is bound to this vendor's body (see
-// geminiWebDataURL there), and a non-empty `endpoint:` on a filters entry is
-// refused at load rather than ignored. BlockedRegions defaults to the seven
-// countries Google's Gemini apps availability page omits; CN/HK/MO/MM are
-// supported and stay out because the probe cannot see the account type. An
-// explicit empty list is that default too, so "block nothing" is spelled by
-// removing the filter entry.
-type GeminiWebConfig struct {
-	Timeout        time.Duration `yaml:"timeout"`
-	Concurrency    int           `yaml:"concurrency"`
-	BlockedRegions []string      `yaml:"blocked_regions"`
-}
-
 // TidalConfig configures the through-node Tidal reachability check. It needs no
 // API key: GET /v1/country answers 200 {"countryCode":"XX"} for an egress Tidal
 // accepts, and from one it refuses the request never reaches the API at all --
@@ -1020,12 +958,11 @@ func (g *GeoBlockConfig) applyDefaults() {
 	applyClaudeDefaults(&g.Claude)
 	applyChatGPTDefaults(&g.ChatGPT)
 	applyTidalDefaults(&g.Tidal)
-	applyGeminiWebDefaults(&g.GeminiWeb)
 	applyDeeplDefaults(&g.Deepl)
 }
 
 // The per-block defaulting below is split by type rather than shared: the
-// blocks carry different knob sets, and a single function walking all six
+// blocks carry different knob sets, and a single function walking all five
 // reads as one long branch ladder whose complexity grows with every gate.
 
 func applyGeminiDefaults(gm *GeminiConfig) {
@@ -1106,20 +1043,6 @@ func applyDeeplDefaults(dl *DeeplConfig) {
 	}
 	if dl.Concurrency == 0 {
 		dl.Concurrency = defaultDeeplConcurrency
-	}
-}
-
-func applyGeminiWebDefaults(gw *GeminiWebConfig) {
-	if gw.Timeout == 0 {
-		gw.Timeout = defaultGeminiWebTimeout
-	}
-	if gw.Concurrency == 0 {
-		gw.Concurrency = defaultGeminiWebConcurrency
-	}
-	if len(gw.BlockedRegions) == 0 {
-		// Clone: the process-wide default must not be mutable through a
-		// loaded Config, and the reload tests compare whole configs.
-		gw.BlockedRegions = slices.Clone(defaultGeminiWebBlockedRegions)
 	}
 }
 
@@ -1492,7 +1415,7 @@ func (cfg *Config) validateFilters() error {
 			seenCIDR = true
 		}
 		switch f.Type {
-		case FilterGemini, FilterGeminiWeb, FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl, FilterBandwidth:
+		case FilterGemini, FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl, FilterBandwidth:
 			if seenThroughNode[f.Type] {
 				return fmt.Errorf("filters[%d]: only one %s filter is supported", i, f.Type)
 			}
@@ -1533,23 +1456,12 @@ func (cfg *Config) validateFilter(i int, f FilterConfig) error {
 		return nil
 	case FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl:
 		return validateAPIFilter(i, f)
-	case FilterGeminiWeb:
-		// The probe URL is a compile-time constant and mergedGeminiWeb has no
-		// endpoint arm, so an override here is dialled by nothing while reading
-		// as a working setting. Refuse it instead of validating it.
-		if f.Endpoint != "" {
-			return fmt.Errorf("filters[%d].endpoint is not supported on gemini_web: the probe URL is a compile-time constant", i)
-		}
-		if err := validateAPIFilter(i, f); err != nil {
-			return err
-		}
-		return validateCountryList(fmt.Sprintf("filters[%d].blocked_regions", i), f.BlockedRegions)
 	case FilterBandwidth:
 		return f.validateBandwidth(i)
 	default:
 		return fmt.Errorf("filters[%d]: unknown type %q (must be one of: %s)", i, f.Type,
 			strings.Join([]string{
-				FilterCountry, FilterASN, FilterCIDR, FilterGemini, FilterGeminiWeb,
+				FilterCountry, FilterASN, FilterCIDR, FilterGemini,
 				FilterClaude, FilterChatGPT, FilterTidal, FilterDeepl, FilterBandwidth,
 			}, ", "))
 	}
@@ -1683,8 +1595,7 @@ func validateProviderChain(i int, providers []string) error {
 // negative timeouts/TTLs bypass the ==0 default guards. The five endpoints are
 // checked too -- applyDefaults fills an empty one with a built-in, so a
 // non-empty value here is operator-written and must be dialable; the empty
-// guard keeps a code-built config valid without a defaults pass. gemini_web has
-// no endpoint (its URL is a compile-time constant), so there is none to check.
+// guard keeps a code-built config valid without a defaults pass.
 func (g *GeoBlockConfig) validate() error {
 	endpoint := func(name, raw string) error {
 		if raw == "" {
@@ -1707,9 +1618,6 @@ func (g *GeoBlockConfig) validate() error {
 		rejectNegativeDur("geoblock.tidal.timeout", &g.Tidal.Timeout),
 		rejectNegativeInt("geoblock.tidal.concurrency", &g.Tidal.Concurrency),
 		endpoint("geoblock.tidal.endpoint", g.Tidal.Endpoint),
-		rejectNegativeDur("geoblock.gemini_web.timeout", &g.GeminiWeb.Timeout),
-		rejectNegativeInt("geoblock.gemini_web.concurrency", &g.GeminiWeb.Concurrency),
-		validateCountryList("geoblock.gemini_web.blocked_regions", g.GeminiWeb.BlockedRegions),
 		rejectNegativeDur("geoblock.deepl.timeout", &g.Deepl.Timeout),
 		rejectNegativeInt("geoblock.deepl.concurrency", &g.Deepl.Concurrency),
 		endpoint("geoblock.deepl.endpoint", g.Deepl.Endpoint),
@@ -1950,7 +1858,7 @@ func cidrSpecs(cfg *Config) []IPFilterSpec {
 }
 
 // ProberChanged reports whether the through-node prober settings
-// (gemini/gemini_web/claude/chatgpt/tidal/deepl/cloudflare) differ; the stable
+// (gemini/claude/chatgpt/tidal/deepl/cloudflare) differ; the stable
 // worker must be re-applied when they do. The store-only geoblock fields
 // (db_path, ttl) are covered by StoresChanged instead.
 //
@@ -1964,7 +1872,6 @@ func cidrSpecs(cfg *Config) []IPFilterSpec {
 // worker. internal/reload/reload_coverage_test.go pins both halves.
 func ProberChanged(old, newCfg Config) bool {
 	return !reflect.DeepEqual(old.GeoBlock.Gemini, newCfg.GeoBlock.Gemini) ||
-		!reflect.DeepEqual(old.GeoBlock.GeminiWeb, newCfg.GeoBlock.GeminiWeb) ||
 		!reflect.DeepEqual(old.GeoBlock.Claude, newCfg.GeoBlock.Claude) ||
 		!reflect.DeepEqual(old.GeoBlock.ChatGPT, newCfg.GeoBlock.ChatGPT) ||
 		!reflect.DeepEqual(old.GeoBlock.Tidal, newCfg.GeoBlock.Tidal) ||

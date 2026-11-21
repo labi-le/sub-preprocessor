@@ -158,7 +158,7 @@ func (c *Controller) UseProcessor(p *preprocess.Processor) {
 // config order, whether the keyed gemini gate is armed, and the bandwidth
 // params (which come entirely from their filter entry).
 //
-// The gemini/gemini_web/claude/chatgpt/tidal/deepl params default to the
+// The gemini/claude/chatgpt/tidal/deepl params default to the
 // geoblock block and are overridden per-entry by the merged NodeFilterSpec.
 func foldNodeSpecs(specs []config.NodeFilterSpec, geo *config.GeoBlockConfig) ([]string, config.BandwidthConfig, bool) {
 	names := make([]string, 0, len(specs))
@@ -170,8 +170,6 @@ func foldNodeSpecs(specs []config.NodeFilterSpec, geo *config.GeoBlockConfig) ([
 		case config.FilterGemini:
 			geo.Gemini = spec.Gemini
 			geminiArmed = true
-		case config.FilterGeminiWeb:
-			geo.GeminiWeb = spec.GeminiWeb
 		case config.FilterClaude:
 			geo.Claude = spec.Claude
 		case config.FilterChatGPT:
